@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 49] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 50] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -140,11 +140,19 @@ const EVENT_FIXTURES: [EventFixture<'static>; 49] = [
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
+    (
+        "WorkspaceRewindStarted",
+        1,
+        REWIND_STARTED_V1,
+        REWIND_STARTED_V2,
+    ),
 ];
 const GOAL_STARTED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_STARTED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","include_paths":null,"workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_FINISHED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true}"#;
 const GOAL_FINISHED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true,"budget_refusal":null}"#;
+const REWIND_STARTED_V1: &str = r#"{"rewind_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","target":{"kind":"run","run_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa60","sequence":1},"head_sequence":2,"prefix_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"plan_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"file_count":1,"restored_bytes":0,"kept":[],"overwrite":[],"workspace_device":1,"workspace_inode":1,"policy_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"enforcement_digest":[4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4],"expires_at_ms":60000}"#;
+const REWIND_STARTED_V2: &str = r#"{"rewind_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","target":{"kind":"run","run_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa60","sequence":1},"head_sequence":2,"prefix_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"plan_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"file_count":1,"restored_bytes":0,"kept":[],"overwrite":[],"workspace_device":1,"workspace_inode":1,"policy_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"enforcement_digest":[4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]}"#;
 
 #[test]
 fn refusal_reclassification_preserves_evidence_and_rejects_new_causes_in_old_payloads() {
@@ -356,6 +364,15 @@ fn forked_history(path: &Path) -> History {
 // A source with a finished Run (optionally Goal-compacted), a rewind and a compaction over it,
 // `renames` idle renames, a child fork and a grandchild fork.
 fn history(path: &Path, goal_compacted: bool, renames: usize) -> History {
+    let (root, connection, source) = history_source(path, goal_compacted, renames);
+    fork_history(root, connection, source)
+}
+
+fn history_source(
+    path: &Path,
+    goal_compacted: bool,
+    renames: usize,
+) -> (StateRoot, Connection, SessionId) {
     let root = StateRoot::admit(path).unwrap();
     let fixture = crate::session::worker_compacted_fixture(goal_compacted);
     let source = fixture.session;
@@ -410,12 +427,48 @@ fn history(path: &Path, goal_compacted: bool, renames: usize) -> History {
             .unwrap();
     }
     transaction.commit().unwrap();
+    (root, connection, source)
+}
+
+fn fork_history(root: StateRoot, mut connection: Connection, source: SessionId) -> History {
     let child = fork_session(&mut connection, source, "Child".into()).unwrap();
     let grandchild = fork_session(&mut connection, child, "Grandchild".into()).unwrap();
     History {
         root,
         sessions: [source, child, grandchild],
     }
+}
+
+fn rewind_history(path: &Path) -> History {
+    let (root, mut connection, source) = history_source(path, false, 0);
+    let followup = crate::session::worker_compacted_fixture(false);
+    let mut hot = None;
+    for event in followup.events.iter().skip(1) {
+        append(&mut connection, &mut hot, source, event.clone()).unwrap();
+        if matches!(event, Event::AgentSpawned { agent_run_id, .. } if *agent_run_id == followup.primary)
+        {
+            break;
+        }
+    }
+    for event in [
+        Event::AgentFinished {
+            run_id: followup.run,
+            agent_run_id: followup.primary,
+            disposition: crate::session::AgentDisposition::Cancelled,
+            summary: None,
+            result: None,
+            worker: None,
+        },
+        Event::RunFinished {
+            run_id: followup.run,
+            disposition: crate::session::RunDisposition::Cancelled,
+            failure: None,
+            active_ms: 0,
+        },
+    ] {
+        append(&mut connection, &mut hot, source, event).unwrap();
+    }
+    fork_history(root, connection, source)
 }
 
 fn rows(connection: &Connection) -> Vec<RawRow> {
@@ -449,7 +502,11 @@ fn stored_prefix(row: &RawRow) -> PrefixRow<'_> {
 
 fn decode_row(row: &RawRow) -> Event {
     let run = row.run_id.as_deref().map(|id| id.parse::<RunId>().unwrap());
-    Event::decode(&row.kind, row.version, &row.payload, run, None).unwrap()
+    let agent_run = row
+        .agent_run_id
+        .as_deref()
+        .map(|id| id.parse::<AgentRunId>().unwrap());
+    Event::decode(&row.kind, row.version, &row.payload, run, agent_run).unwrap()
 }
 
 // Rewrites SessionStarted to the synthetic version 5 and re-pins every prefix reference over the
@@ -532,6 +589,74 @@ fn repin(connection: &Connection, rewrite: impl Fn(&mut RawRow)) {
             lane.digest(),
         );
     }
+}
+
+fn downgrade_rewind_started(connection: &Connection) {
+    let mut lanes = HashMap::<String, PrefixHasher>::new();
+    let mut points = HashMap::<(String, u64), [u8; 32]>::new();
+    for mut row in rows(connection) {
+        let lane = lanes.entry(row.session_id.clone()).or_default();
+        let mut event = decode_row(&row);
+        match &mut event {
+            Event::SessionForked {
+                source_session_id,
+                source_sequence,
+                prefix_digest,
+                ..
+            } => *prefix_digest = points[&(source_session_id.to_string(), *source_sequence)],
+            Event::ContextCompacted { record, .. } | Event::GoalContextCompacted { record, .. } => {
+                record.source_digest = points[&(row.session_id.clone(), record.covered_sequence)];
+            }
+            Event::WorkspaceRewindStarted { record } => record.prefix_digest = lane.digest(),
+            _ => {}
+        }
+        row.payload = event.payload().unwrap();
+        if row.kind == "WorkspaceRewindStarted" {
+            row.version = 1;
+            row.payload = rewind_v1_payload(&row.payload);
+        }
+        connection
+            .execute(
+                "UPDATE events SET event_version=?1, payload=?2 WHERE sequence=?3",
+                rusqlite::params![row.version, row.payload, row.sequence],
+            )
+            .unwrap();
+        lane.update_row(&stored_prefix(&row)).unwrap();
+        points.insert(
+            (row.session_id.clone(), u64::try_from(row.sequence).unwrap()),
+            lane.digest(),
+        );
+    }
+}
+
+fn rewind_v1_payload(current: &str) -> String {
+    format!(
+        "{},\"expires_at_ms\":60000}}",
+        current.trim_end_matches('}')
+    )
+}
+
+fn forge_rewind_v1_digest(connection: &Connection) {
+    let row = first_of(connection, "WorkspaceRewindStarted");
+    assert_eq!(row.version, 1);
+    let mut value: Value = serde_json::from_str(&row.payload).unwrap();
+    value["prefix_digest"][0] = serde_json::json!(value["prefix_digest"][0].as_u64().unwrap() ^ 1);
+    let current = crate::session::rewind_started_v1_to_v2(value).unwrap();
+    let event = Event::decode(
+        "WorkspaceRewindStarted",
+        2,
+        &current.to_string(),
+        None,
+        None,
+    )
+    .unwrap();
+    let payload = rewind_v1_payload(&event.payload().unwrap());
+    connection
+        .execute(
+            "UPDATE events SET payload=?1 WHERE sequence=?2",
+            rusqlite::params![payload, row.sequence],
+        )
+        .unwrap();
 }
 
 fn first_of(connection: &Connection, kind: &str) -> RawRow {
@@ -753,6 +878,86 @@ fn run_started_v19_migrates_without_reading_user_instructions() {
             .contains(r#""user_instruction_digest":null"#)
     );
     assert!(!started.payload.contains("canary"));
+}
+
+#[test]
+fn rewind_v1_file_migrates_and_cold_replays_all_bound_prefixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = rewind_history(&path);
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    let current_fork_digests = fork_digests(&connection);
+    downgrade_rewind_started(&connection);
+    let legacy_fork_digests = fork_digests(&connection);
+    let source_rows = stored_rows(&connection);
+    drop(connection);
+
+    assert!(
+        root.upgrade_or_archive_history(&REGISTRY)
+            .unwrap()
+            .is_none()
+    );
+    replays(&root, &sessions);
+
+    let upgraded =
+        Connection::open_with_flags(path.join(DATABASE_FILE), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let started = first_of(&upgraded, "WorkspaceRewindStarted");
+    assert_eq!(started.version, 2);
+    assert!(!started.payload.contains("expires_at_ms"));
+    assert!(source_rows.iter().any(|row| {
+        row.1 == "WorkspaceRewindStarted" && row.2 == 1 && row.3.contains("expires_at_ms")
+    }));
+    assert_eq!(
+        Event::decode(&started.kind, started.version, &started.payload, None, None)
+            .unwrap()
+            .kind(),
+        "WorkspaceRewindStarted"
+    );
+    let finished: Value =
+        serde_json::from_str(&first_of(&upgraded, "WorkspaceRewindFinished").payload).unwrap();
+    assert_eq!(finished["outcome"], "restored");
+    assert_eq!(fork_digests(&upgraded), current_fork_digests);
+    assert!(
+        legacy_fork_digests
+            .iter()
+            .zip(&current_fork_digests)
+            .all(|(legacy, current)| legacy != current)
+    );
+    drop(upgraded);
+    let cold = open_connection(&root, true).unwrap();
+    for session in sessions {
+        let (_, view) = resolve_view(&cold, session, 0, &mut 0).unwrap();
+        let view = view.unwrap();
+        assert_eq!(
+            view.rewinds.operations[0].outcome(),
+            crate::session::rewind::RewindOutcome::Restored
+        );
+        assert_eq!(view.runs.len(), 2);
+        assert_eq!(view.runs[1].status, crate::session::RunStatus::Cancelled);
+    }
+    drop(cold);
+}
+
+#[test]
+fn rewind_v1_forged_prefix_archives_history_intact() {
+    let temp = tempfile::tempdir().unwrap();
+    let forged_path = temp.path().join("forged");
+    let History { root: forged, .. } = rewind_history(&forged_path);
+    let connection = Connection::open(forged_path.join(DATABASE_FILE)).unwrap();
+    downgrade_rewind_started(&connection);
+    forge_rewind_v1_digest(&connection);
+    drop(connection);
+    let original = std::fs::read(forged_path.join(DATABASE_FILE)).unwrap();
+    let archived = forged
+        .upgrade_or_archive_history(&REGISTRY)
+        .unwrap()
+        .expect("forged historical prefix must archive");
+    assert_eq!(
+        std::fs::read(archived.path().join(DATABASE_FILE)).unwrap(),
+        original
+    );
+    archived.acknowledge().unwrap();
 }
 
 #[test]
@@ -1571,6 +1776,25 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
             "schema 6 -> 7 has no step and fixture",
         ]
     );
+}
+
+#[test]
+fn rewind_started_migration_removes_only_the_old_expiry() {
+    let step = REGISTRY
+        .event_step("WorkspaceRewindStarted", 1)
+        .expect("migration");
+    assert_eq!(
+        (step.canonical)(REWIND_STARTED_V1).as_deref(),
+        Some(REWIND_STARTED_V1)
+    );
+    assert_eq!(
+        (step.transform)(serde_json::from_str(REWIND_STARTED_V1).unwrap()),
+        Some(serde_json::from_str(REWIND_STARTED_V2).unwrap())
+    );
+    let mut zero_expiry: Value = serde_json::from_str(REWIND_STARTED_V1).unwrap();
+    zero_expiry["expires_at_ms"] = serde_json::json!(0);
+    assert!((step.transform)(zero_expiry).is_none());
+    assert!((step.canonical)(&REWIND_STARTED_V1.replace("60000", "0")).is_none());
 }
 
 #[test]

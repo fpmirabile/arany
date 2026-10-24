@@ -233,6 +233,19 @@ pub(crate) struct ResponseShape {
     pub(crate) done_finals: usize,
 }
 
+pub(crate) fn stream_limit(bytes: usize, events: usize) {
+    record_local(stream_limit_record(bytes, events));
+}
+
+fn stream_limit_record(bytes: usize, events: usize) -> BoundedRecord {
+    let mut record = BoundedRecord(String::new());
+    let _ = writeln!(
+        record,
+        "stream reason=StreamProtocol stage=StreamLimit bytes={bytes} events={events}"
+    );
+    record
+}
+
 pub(crate) fn subscription_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
     if !cfg!(debug_assertions) {
         return;
@@ -484,7 +497,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::GoalInputTooLarge => "GoalInputTooLarge",
         EngineError::Busy => "Busy",
         EngineError::RewindBlocked => "RewindBlocked",
-        EngineError::RewindPreviewExpired => "RewindPreviewExpired",
+        EngineError::RewindPreviewChanged => "RewindPreviewChanged",
         EngineError::RewindTooLarge => "RewindTooLarge",
         EngineError::GuardUnavailable => "GuardUnavailable",
         EngineError::SessionNotIdle => "SessionNotIdle",
@@ -600,6 +613,14 @@ impl Write for BoundedRecord {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn stream_limit_record_names_the_reason_stage_and_counts() {
+        assert_eq!(
+            stream_limit_record(1024, 12).0,
+            "stream reason=StreamProtocol stage=StreamLimit bytes=1024 events=12\n"
+        );
+    }
+
     use super::test_process::BoundedOutput;
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};

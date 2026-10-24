@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `Done`
 - Owner: Fernando Mirabile
-- Last updated: `2026-10-22`
-- Next action: implement R1 after [Tool approvals A1](../approvals-wait/README.md#vertical-slices).
+- Last updated: `2026-10-24`
+- Next action: owner-run native Linux/macOS rewind confirmation evidence is tracked in [NEXT_STEPS](../../NEXT_STEPS.md#account-recovery-and-native-guard-follow-ups).
 
 ## Outcome and scope
 

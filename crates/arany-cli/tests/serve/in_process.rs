@@ -138,6 +138,8 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
     arany::test_support::isolate_account_root();
     for case in [
         "success",
+        "late_code",
+        "late_both",
         "drift",
         "kept",
         "overwrite",
@@ -336,8 +338,13 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                 .unwrap();
             let preview = next(&mut output).await["result"].clone();
             assert_eq!(preview["files"].as_array().unwrap().len(), 2, "{case}");
-            let mut params =
-                json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"code"});
+            let restore = if case == "late_both" { "both" } else { "code" };
+            let mut params = json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":restore});
+            let clock = matches!(case, "late_code" | "late_both")
+                .then(|| arany::test_support::test_clock(arany::now_ms()));
+            if let Some(clock) = &clock {
+                clock.advance(61_000);
+            }
             if case == "kept" {
                 params["kept"] = json!(["src/a"]);
             }
@@ -411,6 +418,10 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                     result["result"]["rewind"]["outcome"], "restored",
                     "{case}: {result}"
                 );
+                if case == "late_both" {
+                    assert_eq!(result["result"]["conversation"]["threadId"], Value::Null);
+                    assert_eq!(result["result"]["conversation"]["prompt"], "Change files");
+                }
             }
             input.send(ClientMessage::Eof).await.unwrap();
         };
@@ -449,6 +460,9 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                 view.rewinds.operations.last().unwrap().outcome(),
                 arany::rewind::RewindOutcome::Restored
             );
+            if matches!(case, "late_code" | "late_both") {
+                assert_eq!(after.len(), before.len() + 2, "{case}");
+            }
         }
     }
     });
@@ -466,7 +480,7 @@ async fn closed_view(
 }
 
 #[tokio::test]
-async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replaying_effects() {
+async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
     let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
@@ -526,15 +540,19 @@ async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replayin
             .await
             .unwrap();
         let preview = next(&mut output).await["result"].clone();
+        assert!(preview.get("expiresAtMs").is_none());
         assert_eq!(preview["restore"], json!(["conversation"]));
         assert_eq!(preview["blockers"], json!(["noWriteGrant"]));
+        let source: arany::SessionId = serde_json::from_value(thread.clone()).unwrap();
+        let (before, _) = closed_view(&state, source).await;
+        let clock = arany::test_support::test_clock(arany::now_ms());
         input.send(request(12,"thread/start",json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","collaboration":"single"}))).await.unwrap();
         let foreign = next(&mut output).await["result"]["thread"]["id"].clone();
         next(&mut output).await;
         input.send(request(11,"thread/rewind",json!({"threadId":foreign,"previewToken":preview["previewToken"],"restore":"conversation"}))).await.unwrap();
         assert_eq!(
             next(&mut output).await["error"]["data"]["reason"],
-            "previewExpired"
+            "previewChanged"
         );
         input
             .send(request(
@@ -546,16 +564,23 @@ async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replayin
             .unwrap();
         assert_eq!(
             next(&mut output).await["error"]["data"]["reason"],
-            "previewExpired"
+            "previewChanged"
         );
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(61)).await;
+        clock.advance(61_000);
         tokio::time::resume();
         input.send(request(11,"thread/rewind",json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"conversation"}))).await.unwrap();
-        assert_eq!(
-            next(&mut output).await["error"]["data"]["reason"],
-            "previewExpired"
-        );
+        let restored = next(&mut output).await["result"].clone();
+        assert_eq!(restored["rewind"]["outcome"], "restored");
+        assert_eq!(next(&mut output).await["method"], "thread/started");
+        let (after, _) = closed_view(&state, source).await;
+        assert_eq!(after, before);
+        let fork: arany::SessionId =
+            serde_json::from_value(restored["thread"]["id"].clone()).unwrap();
+        let (_, fork_view) = closed_view(&state, fork).await;
+        assert_eq!(fork_view.runs.len(), 1);
+        assert_eq!(fork_view.runs[0].objective, "First prompt");
         input
             .send(request(
                 10,
@@ -565,7 +590,6 @@ async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replayin
             .await
             .unwrap();
         let token = next(&mut output).await["result"]["previewToken"].clone();
-        let source: arany::SessionId = serde_json::from_value(thread.clone()).unwrap();
         let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
         store
             .append(
@@ -587,7 +611,7 @@ async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replayin
             .unwrap();
         assert_eq!(
             next(&mut output).await["error"]["data"]["reason"],
-            "previewExpired"
+            "previewChanged"
         );
         input
             .send(request(
@@ -643,7 +667,7 @@ async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replayin
             .unwrap();
         assert_eq!(
             next(&mut output).await["error"]["data"]["reason"],
-            "previewExpired"
+            "previewChanged"
         );
         input
             .send(request(

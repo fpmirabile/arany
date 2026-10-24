@@ -40,9 +40,10 @@ impl<'a> MessageStream<'a> {
         secret: &'a str,
         model: &'a str,
         preview: crate::provider::ResponsePreview,
+        max_output_tokens: u32,
     ) -> Self {
         Self {
-            framer: crate::provider::streaming::SseFramer::new(),
+            framer: crate::provider::streaming::SseFramer::new(max_output_tokens),
             secret,
             model,
             preview,
