@@ -1,6 +1,7 @@
 use super::ToolError;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub(super) const CONTROL_BYTES: usize = 32 * 1024;
 pub(super) const CONTROL_TOTAL_BYTES: usize = 256 * 1024;
@@ -27,7 +28,7 @@ pub(super) struct Selector {
 }
 
 impl Selector {
-    pub(super) fn new(calls: u64, deadline: Instant) -> Self {
+    pub(super) fn new(calls: u64, deadline: std::time::Instant) -> Self {
         Self {
             controls: Vec::new(),
             bytes: 0,
@@ -35,16 +36,17 @@ impl Selector {
             expanded: 0,
             calls,
             max_calls: COMMAND_CALLS,
-            deadline: deadline.min(Instant::now() + PHASE_TIME),
+            deadline: Instant::from_std(deadline).min(Instant::now() + PHASE_TIME),
             #[cfg(test)]
             in_progress: None,
         }
     }
 
-    pub(super) fn discovery(deadline: Instant) -> Self {
+    pub(super) fn discovery(deadline: std::time::Instant) -> Self {
+        let deadline = Instant::from_std(deadline).min(Instant::now() + DISCOVERY_TIME);
         Self {
             max_calls: DISCOVERY_CALLS,
-            ..Self::new(0, deadline.min(Instant::now() + DISCOVERY_TIME))
+            ..Self::new(0, deadline.into_std())
         }
     }
 
@@ -164,7 +166,7 @@ mod tests {
     #[test]
     fn discovery_keeps_its_smaller_work_and_time_budgets() {
         let now = Instant::now();
-        let mut selector = Selector::discovery(now + PHASE_TIME);
+        let mut selector = Selector::discovery((now + PHASE_TIME).into_std());
         assert!(selector.deadline <= Instant::now() + DISCOVERY_TIME);
         selector.add("", b"ignored").unwrap();
         selector.calls = DISCOVERY_CALLS - 1;
@@ -173,7 +175,7 @@ mod tests {
             selector.excluded("visible", false),
             Err(ToolError::Limit)
         ));
-        let mut expired = Selector::discovery(now);
+        let mut expired = Selector::discovery(now.into_std());
         assert!(matches!(
             expired.add("", b"ignored"),
             Err(ToolError::Timeout(_))
@@ -184,10 +186,10 @@ mod tests {
     fn selection_uses_the_shorter_phase_or_action_deadline() {
         let now = Instant::now();
         let action = now + Duration::from_millis(25);
-        assert_eq!(Selector::new(0, action).deadline, action);
-        let bounded = Selector::new(0, now + Duration::from_secs(60));
+        assert_eq!(Selector::new(0, action.into_std()).deadline, action);
+        let bounded = Selector::new(0, (now + Duration::from_secs(60)).into_std());
         assert!(bounded.deadline <= Instant::now() + PHASE_TIME);
-        let mut expired = Selector::new(0, now);
+        let mut expired = Selector::new(0, now.into_std());
         assert!(matches!(
             expired.add("", b"ignored"),
             Err(ToolError::Timeout(_))
@@ -219,7 +221,7 @@ mod tests {
             ("x".repeat(1984), "x".repeat(1984), false),
         ];
         for (line, candidate, directory) in corpus {
-            let mut admitted = Selector::new(0, Instant::now() + PHASE_TIME);
+            let mut admitted = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
             admitted.add("", line.as_bytes()).unwrap();
             let matched = admitted.controls[0].1.matched(&candidate, directory);
             let actual = matched
@@ -238,12 +240,12 @@ mod tests {
 
     #[test]
     fn retained_matchers_and_all_admission_budgets_are_bounded() {
-        let mut rules = Selector::new(0, Instant::now() + PHASE_TIME);
+        let mut rules = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
         rules.add("", "x\n".repeat(504).as_bytes()).unwrap();
         assert_eq!(rules.rules, 504);
         assert!(matches!(rules.add("nested", b"x"), Err(ToolError::Limit)));
 
-        let mut selector = Selector::new(0, Instant::now() + PHASE_TIME);
+        let mut selector = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
         for index in 0..CONTROL_FILES {
             let directory = format!("branch{}/nested{}", index / 16, index % 16);
             selector.add(&directory, "x".repeat(64).as_bytes()).unwrap();
@@ -252,7 +254,7 @@ mod tests {
         assert!(!selector.excluded("branch0/nested0/visible", false).unwrap());
         assert!(matches!(selector.add("extra", b""), Err(ToolError::Limit)));
 
-        let mut bytes = Selector::new(0, Instant::now() + PHASE_TIME);
+        let mut bytes = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
         let comments = format!("#{}\n", "c".repeat(4094)).repeat(8);
         for index in 0..8 {
             bytes.add(&index.to_string(), comments.as_bytes()).unwrap();
@@ -260,14 +262,14 @@ mod tests {
         assert_eq!(bytes.bytes, CONTROL_TOTAL_BYTES);
         assert!(matches!(bytes.add("overflow", b"#"), Err(ToolError::Limit)));
 
-        let mut work = Selector::new(COMMAND_CALLS - 1, Instant::now() + PHASE_TIME);
+        let mut work = Selector::new(COMMAND_CALLS - 1, (Instant::now() + PHASE_TIME).into_std());
         work.add("", b"ignored").unwrap();
         assert!(work.excluded("ignored", false).unwrap());
         assert!(matches!(
             work.excluded("visible", false),
             Err(ToolError::Limit)
         ));
-        let mut elapsed = Selector::new(0, Instant::now() + PHASE_TIME);
+        let mut elapsed = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
         elapsed.deadline = Instant::now();
         assert!(matches!(
             elapsed.excluded("visible", false),

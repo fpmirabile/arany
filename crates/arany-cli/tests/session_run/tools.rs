@@ -3256,15 +3256,35 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     let home = temp.path().join("home");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::create_dir_all(workspace.join("cfg")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     host_git(GIT, &workspace, &home, &["init", "-q", "-b", "main"]);
     std::fs::write(workspace.join("src/a.txt"), "alpha\n").unwrap();
+    std::fs::write(workspace.join(".gitignore"), "cfg/private.json\n").unwrap();
+    std::fs::write(
+        workspace.join("cfg/private.json"),
+        "GIT_DISCLOSURE_CANARY=initial\n",
+    )
+    .unwrap();
     host_git(GIT, &workspace, &home, &["add", "-A"]);
+    host_git(GIT, &workspace, &home, &["add", "-f", "cfg/private.json"]);
     host_git(
         GIT,
         &workspace,
         &home,
         &["commit", "-q", "-m", "first commit"],
+    );
+    std::fs::write(
+        workspace.join("cfg/private.json"),
+        "GIT_DISCLOSURE_CANARY=committed\n",
+    )
+    .unwrap();
+    host_git(GIT, &workspace, &home, &["add", "-f", "cfg/private.json"]);
+    host_git(
+        GIT,
+        &workspace,
+        &home,
+        &["commit", "-q", "-m", "GIT_DISCLOSURE_CANARY history"],
     );
     std::fs::write(workspace.join("src/a.txt"), "bravo\n").unwrap();
     host_git(
@@ -3281,6 +3301,11 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         &home,
         &["commit", "-q", "-m", "BRANCH_DISCLOSURE_CANARY"],
     );
+    std::fs::write(
+        workspace.join("cfg/private.json"),
+        "GIT_DISCLOSURE_CANARY=working\n",
+    )
+    .unwrap();
     host_git(
         GIT,
         &workspace,
@@ -3459,6 +3484,22 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         entries.contains(&json!({"path": "src/new.txt", "state": "??"})),
         "guarded Git must neutralize host config settings from HOME and repository includes"
     );
+    assert!(
+        !outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("GIT_DISCLOSURE_CANARY")
+    );
+    assert!(
+        !outcome.run.tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("cfg/private.json")
+    );
     let diff = output(1);
     assert_eq!(
         diff["files"],
@@ -3466,6 +3507,22 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     );
     let patch = diff["patch"].as_str().unwrap();
     assert!(patch.contains("-bravo") && patch.contains("+delta"));
+    assert!(
+        !outcome.run.tools[1]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("GIT_DISCLOSURE_CANARY")
+    );
+    assert!(
+        !outcome.run.tools[1]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("cfg/private.json")
+    );
     let log = output(2);
     let subjects: Vec<&str> = log["commits"]
         .as_array()
@@ -3474,6 +3531,14 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         .map(|commit| commit["subject"].as_str().unwrap())
         .collect();
     assert_eq!(subjects, ["second commit", "first commit"]);
+    assert!(
+        !outcome.run.tools[2]
+            .observation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("GIT_DISCLOSURE_CANARY")
+    );
     let failed = outcome.run.tools[3].observation.as_ref().unwrap();
     assert_eq!(failed.disposition, ToolDisposition::Failed);
     assert!(failed.attestation.is_some());
@@ -3493,6 +3558,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
 
     let requests = requests.lock().unwrap().clone();
     assert!(!format!("{requests:?}").contains("BRANCH_DISCLOSURE_CANARY"));
+    assert!(!format!("{requests:?}").contains("GIT_DISCLOSURE_CANARY"));
     assert_eq!(
         requests[5]
             .input
