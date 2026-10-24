@@ -816,7 +816,7 @@ fn scan_events(
                 session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
          FROM events";
     if filter.is_empty() {
-        // Global validation precedes write admission; transaction reads must stay indexed.
+        // Cold or invalidated writes validate globally; unchanged cache hits defer detection and keep reads indexed.
         if !connection.is_autocommit() {
             return Err(StoreError::InvalidHistory);
         }
