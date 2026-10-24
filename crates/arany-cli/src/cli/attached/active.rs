@@ -16,6 +16,7 @@ use arany::{
     CompactionFailure, CompactionRecord, CompactionStatus, ProviderKind, RunOutcome, RunRequest,
     RunStatus, SessionView,
 };
+use std::future::Future;
 
 pub(super) enum CompactionOutcome {
     Notice(String),
@@ -661,48 +662,9 @@ pub(super) async fn compact_current(
     composer: &mut Composer,
     pinned: Option<(&arany::RunConfig, arany::RunId)>,
 ) -> Result<CompactionOutcome, String> {
-    let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
-        view.runs
-            .last()
-            .and_then(|run| run.config.as_ref())
-            .filter(|config| config.roster.is_some())
-    });
-    let (profile, model, effort, account_id) = if let Some(config) = pinned_config {
-        (
-            config.provider.as_str(),
-            config.model.as_str(),
-            config.effort,
-            config.saved_api_account_id.or_else(|| {
-                config
-                    .chatgpt_provenance
-                    .as_ref()
-                    .map(|provenance| provenance.account_id)
-            }),
-        )
-    } else {
-        let Some(profile) = view.defaults.provider.as_deref() else {
-            return Ok(CompactionOutcome::Unavailable(
-                "select /provider and /model before compacting".into(),
-            ));
-        };
-        let Some(model) = view.defaults.model.as_deref() else {
-            return Ok(CompactionOutcome::Unavailable(
-                "select /model before compacting".into(),
-            ));
-        };
-        (
-            profile,
-            model,
-            view.defaults.effort,
-            view.defaults.account_id,
-        )
-    };
-    let selection = Selection {
-        workspace: &admission.workspace,
-        profile,
-        model,
-        effort,
-        account_id,
+    let selection = match compaction_selection(admission, view, pinned) {
+        Ok(selection) => selection,
+        Err(outcome) => return Ok(outcome),
     };
     let progress_text = if pinned.is_some() {
         "Automatically compacting Session... Ctrl+C interrupts"
@@ -728,92 +690,216 @@ pub(super) async fn compact_current(
             .and_then(|run| run.config.as_ref())
             .filter(|config| config.roster.is_some()),
     );
+    drive_compaction(
+        future,
+        CompactionUi {
+            admission,
+            terminal,
+            view,
+            composer,
+            progress_text,
+        },
+    )
+    .await
+}
+
+fn compaction_selection<'a>(
+    admission: &'a Admission,
+    view: &'a SessionView,
+    pinned: Option<(&'a arany::RunConfig, arany::RunId)>,
+) -> Result<Selection<'a>, CompactionOutcome> {
+    let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
+        view.runs
+            .last()
+            .and_then(|run| run.config.as_ref())
+            .filter(|config| config.roster.is_some())
+    });
+    let (profile, model, effort, account_id) = if let Some(config) = pinned_config {
+        (
+            config.provider.as_str(),
+            config.model.as_str(),
+            config.effort,
+            config.saved_api_account_id.or_else(|| {
+                config
+                    .chatgpt_provenance
+                    .as_ref()
+                    .map(|provenance| provenance.account_id)
+            }),
+        )
+    } else {
+        let Some(profile) = view.defaults.provider.as_deref() else {
+            return Err(CompactionOutcome::Unavailable(
+                "select /provider and /model before compacting".into(),
+            ));
+        };
+        let Some(model) = view.defaults.model.as_deref() else {
+            return Err(CompactionOutcome::Unavailable(
+                "select /model before compacting".into(),
+            ));
+        };
+        (
+            profile,
+            model,
+            view.defaults.effort,
+            view.defaults.account_id,
+        )
+    };
+    Ok(Selection {
+        workspace: &admission.workspace,
+        profile,
+        model,
+        effort,
+        account_id,
+    })
+}
+
+struct CompactionUi<'a> {
+    admission: &'a Admission,
+    terminal: &'a mut AttachedTerminal,
+    view: &'a SessionView,
+    composer: &'a mut Composer,
+    progress_text: &'a str,
+}
+
+async fn drive_compaction<F>(
+    future: F,
+    mut ui: CompactionUi<'_>,
+) -> Result<CompactionOutcome, String>
+where
+    F: Future<Output = Result<Option<CompactionRecord>, String>>,
+{
     tokio::pin!(future);
     loop {
         tokio::select! {
             result = &mut future => return Ok(match result {
                 Ok(Some(record)) => CompactionOutcome::Notice(
-                    with_compaction_switches(&admission.state_dir, view, compaction_notice(&record)).await,
+                    with_compaction_switches(&ui.admission.state_dir, ui.view, compaction_notice(&record)).await,
                 ),
                 Ok(None) => CompactionOutcome::Notice(
                     "Automatic compaction skipped; Run boundary changed or already compacted".into(),
                 ),
                 Err(error) => CompactionOutcome::Unavailable(error),
             }),
-            input = terminal.next_chat_input() => {
+            input = ui.terminal.next_chat_input() => {
                 let input = input.map_err(|error| error.to_string())?;
-                composer.observe_input(input);
-                // The pager and a scrollback dump own their keys before the hidden composer.
-                if terminal.handle_transcript_input(input, view).map_err(|error| error.to_string())?
-                    || terminal.handle_history_input(input, view, composer, true).await
-                {
-                    terminal.draw_busy(view, composer, None)
-                        .map_err(|error| error.to_string())?;
-                    continue;
-                }
-                let input = composer.chat_input(input);
-                let notice = match input {
-                    TerminalInput::Submit if !terminal.is_linear() && composer.continue_line() => {
-                        terminal.draw_busy(view, composer, None).map_err(|error| error.to_string())?;
-                        None
-                    },
-                    TerminalInput::ClipboardPaste => Some(match terminal.request_clipboard_paste() {
-                        Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
-                        Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
-                    }),
-                    TerminalInput::Paste => match terminal.paste_into(composer) {
-                        Err(error) => Some(Feedback::History(format!("Error: {error}; draft unchanged"))),
-                        Ok(ComposerEdit::Changed) => {
-                            terminal.draw_busy(view, composer, None)
-                                .map_err(|error| error.to_string())?;
-                            None
-                        }
-                        Ok(_) => None,
-                    },
-                    TerminalInput::Interrupt => {
-                        return Ok(CompactionOutcome::Interrupted(
-                            "Compaction interrupted; check Session history".into(),
-                        ));
-                    }
-                    TerminalInput::Resize => {
-                        terminal.draw_busy(view, composer, None)
-                            .map_err(|error| error.to_string())?;
-                        None
-                    }
-                    TerminalInput::Suspend => {
-                        terminal.suspend_and_resume(composer.input_capacity())
-                            .map_err(|error| error.to_string())?;
-                        terminal.draw_busy(view, composer, None)
-                            .map_err(|error| error.to_string())?;
-                        None
-                    }
-                    TerminalInput::Shutdown(signal) => {
-                        return Ok(CompactionOutcome::Shutdown(signal));
-                    }
-                    TerminalInput::Submit | TerminalInput::EndOfInput => {
-                        terminal.restore_draft_input(composer.input_capacity())
-                            .map_err(|error| error.to_string())?;
-                        Some(Feedback::Transient("Draft retained; press Enter after compaction to submit".into()))
-                    }
-                    TerminalInput::LineRejected => Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into())),
-                    TerminalInput::LineContinued => Some(Feedback::History(format!(
-                        "Draft: {} characters; Enter retains until compaction ends",
-                        composer.character_count(),
-                    ))),
-                    TerminalInput::QuickActions => Some(Feedback::History("Quick actions are unavailable during compaction; draft retained".into())),
-                    input => match composer.apply(input) {
-                        ComposerEdit::AtCapacity => Some(Feedback::History("Error: message is too long; shorten it; draft unchanged".into())),
-                        ComposerEdit::Changed if !terminal.is_linear() => Some(Feedback::Transient(progress_text.into())),
-                        ComposerEdit::Changed | ComposerEdit::Unchanged => None,
-                    },
-                };
-                if let Some(notice) = notice {
-                    terminal.draw_busy_notice(view, composer, Some(notice.notice()))
-                        .map_err(|error| error.to_string())?;
+                if let Some(outcome) = handle_compaction_input(input, &mut ui).await? {
+                    return Ok(outcome);
                 }
             }
         }
     }
+}
+
+async fn handle_compaction_input(
+    input: TerminalInput,
+    ui: &mut CompactionUi<'_>,
+) -> Result<Option<CompactionOutcome>, String> {
+    ui.composer.observe_input(input);
+    // The pager and a scrollback dump own their keys before the hidden composer.
+    if ui
+        .terminal
+        .handle_transcript_input(input, ui.view)
+        .map_err(|error| error.to_string())?
+        || ui
+            .terminal
+            .handle_history_input(input, ui.view, ui.composer, true)
+            .await
+    {
+        ui.terminal
+            .draw_busy(ui.view, ui.composer, None)
+            .map_err(|error| error.to_string())?;
+        return Ok(None);
+    }
+    let input = ui.composer.chat_input(input);
+    let notice = match input {
+        TerminalInput::Submit if !ui.terminal.is_linear() && ui.composer.continue_line() => {
+            ui.terminal
+                .draw_busy(ui.view, ui.composer, None)
+                .map_err(|error| error.to_string())?;
+            None
+        }
+        TerminalInput::Interrupt => {
+            return Ok(Some(CompactionOutcome::Interrupted(
+                "Compaction interrupted; check Session history".into(),
+            )));
+        }
+        TerminalInput::Resize => {
+            ui.terminal
+                .draw_busy(ui.view, ui.composer, None)
+                .map_err(|error| error.to_string())?;
+            None
+        }
+        TerminalInput::Suspend => {
+            ui.terminal
+                .suspend_and_resume(ui.composer.input_capacity())
+                .map_err(|error| error.to_string())?;
+            ui.terminal
+                .draw_busy(ui.view, ui.composer, None)
+                .map_err(|error| error.to_string())?;
+            None
+        }
+        TerminalInput::Shutdown(signal) => {
+            return Ok(Some(CompactionOutcome::Shutdown(signal)));
+        }
+        TerminalInput::Submit | TerminalInput::EndOfInput => {
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|error| error.to_string())?;
+            Some(Feedback::Transient(
+                "Draft retained; press Enter after compaction to submit".into(),
+            ))
+        }
+        input => draft_compaction_notice(input, ui)?,
+    };
+    if let Some(notice) = notice {
+        ui.terminal
+            .draw_busy_notice(ui.view, ui.composer, Some(notice.notice()))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(None)
+}
+
+fn draft_compaction_notice(
+    input: TerminalInput,
+    ui: &mut CompactionUi<'_>,
+) -> Result<Option<Feedback>, String> {
+    Ok(match input {
+        TerminalInput::ClipboardPaste => Some(match ui.terminal.request_clipboard_paste() {
+            Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+            Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
+        }),
+        TerminalInput::Paste => match ui.terminal.paste_into(ui.composer) {
+            Err(error) => Some(Feedback::History(format!(
+                "Error: {error}; draft unchanged"
+            ))),
+            Ok(ComposerEdit::Changed) => {
+                ui.terminal
+                    .draw_busy(ui.view, ui.composer, None)
+                    .map_err(|error| error.to_string())?;
+                None
+            }
+            Ok(_) => None,
+        },
+        TerminalInput::LineRejected => Some(Feedback::History(
+            "Error: invalid or overlong terminal line; draft unchanged".into(),
+        )),
+        TerminalInput::LineContinued => Some(Feedback::History(format!(
+            "Draft: {} characters; Enter retains until compaction ends",
+            ui.composer.character_count(),
+        ))),
+        TerminalInput::QuickActions => Some(Feedback::History(
+            "Quick actions are unavailable during compaction; draft retained".into(),
+        )),
+        input => match ui.composer.apply(input) {
+            ComposerEdit::AtCapacity => Some(Feedback::History(
+                "Error: message is too long; shorten it; draft unchanged".into(),
+            )),
+            ComposerEdit::Changed if !ui.terminal.is_linear() => {
+                Some(Feedback::Transient(ui.progress_text.into()))
+            }
+            ComposerEdit::Changed | ComposerEdit::Unchanged => None,
+        },
+    })
 }
 
 fn compaction_switches(view: &SessionView) -> Vec<&arany::ProviderFallback> {
