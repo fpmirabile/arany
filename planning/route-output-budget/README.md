@@ -16,7 +16,7 @@ Routes in scope: the ChatGPT-plan route and the native OpenAI and Anthropic API 
 
 ### Live defect (2026-10-23)
 
-Asked to Read a 65,536-byte file and Write an identical copy on the ChatGPT route, the model declined twice ([NEXT_STEPS item 10](../../NEXT_STEPS.md)). The arithmetic confirms it could never succeed: 64 KiB of source is roughly 16,000 to 22,000 argument tokens, and Tool-call arguments count as visible output, so the call would end in `local_output_limit` ([ChatGPT Run limits](../../docs/specs/chatgpt.md#run-limits)). The native Anthropic route showed `output_token_cap: 16384` on `RunStarted`, which is borderline for the same Write; the Anthropic adapter counts thinking tokens inside `usage.output_tokens` against that cap (`crates/arany/src/provider/anthropic/wire.rs:750`).
+Asked to Read a 65,536-byte file and Write an identical copy on the ChatGPT route, the model declined twice ([NEXT_STEPS item 8](../../NEXT_STEPS.md#daily-use-first)). The arithmetic confirms it could never succeed: 64 KiB of source is roughly 16,000 to 22,000 argument tokens, and Tool-call arguments count as visible output, so the call would end in `local_output_limit` ([ChatGPT Run limits](../../docs/specs/chatgpt.md#run-limits)). The native Anthropic route showed `output_token_cap: 16384` on `RunStarted`, which is borderline for the same Write; the Anthropic adapter counts thinking tokens inside `usage.output_tokens` against that cap (`crates/arany/src/provider/anthropic/wire.rs:750`).
 
 ### Where the per-route output budget lives today (module map)
 
@@ -146,7 +146,7 @@ mkdir -p .lavish && head -c 65536 crates/arany/src/provider.rs > .lavish/src.txt
 
 Prompt: "Read `.lavish/src.txt` in full, paging with offset and limit until you reach the end, then Write an exact byte-for-byte copy to `.lavish/big.txt` in a single Write call. Do not abbreviate, summarize or reformat anything; the two files must be identical."
 
-Verify: `cmp .lavish/src.txt .lavish/big.txt && echo identical`; `arany show` lists one `ToolFinished` for the Write with 65,536 bytes and a `ProviderCallRecorded` whose visible output is below 32,768 and whose status is not `local_output_limit`. Failure path: repeat with `head -c 65537`; the Write must be refused with the 65,536-byte limit and the model must report the refusal rather than truncate. Then close [NEXT_STEPS item 10](../../NEXT_STEPS.md) and record the route evidence there.
+Verify: `cmp .lavish/src.txt .lavish/big.txt && echo identical`; `arany show` lists one `ToolFinished` for the Write with 65,536 bytes and a `ProviderCallRecorded` whose visible output is below 32,768 and whose status is not `local_output_limit`. Failure path: repeat with `head -c 65537`; the Write must be refused with the 65,536-byte limit and the model must report the refusal rather than truncate. Then close [NEXT_STEPS item 8](../../NEXT_STEPS.md#daily-use-first) and record the route evidence there.
 
 ## Exit criteria
 
