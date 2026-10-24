@@ -4,6 +4,64 @@ use crate::session::{
     SessionId, WorkspaceIdentity,
 };
 
+#[tokio::test(start_paused = true)]
+async fn active_deadline_pauses_idle_time_and_counts_overlapping_work_once() {
+    let clock = Arc::new(ActivityClock::new());
+    let deadline = ActiveDeadline {
+        started_at: clock.elapsed(),
+        clock: clock.clone(),
+        allowance_ms: 1_000,
+        cause: ActiveDeadlineCause::Delegation,
+    };
+
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert_eq!(deadline.remaining_ms(), 1_000);
+
+    let provider = clock.provider().start();
+    tokio::time::advance(Duration::from_millis(400)).await;
+    let effect = clock.effect();
+    tokio::time::advance(Duration::from_millis(300)).await;
+    drop(provider);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_eq!(deadline.remaining_ms(), 200);
+
+    drop(effect);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert_eq!(deadline.remaining_ms(), 200);
+    let provider = clock.provider().start();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    drop(provider);
+    tokio::time::advance(Duration::from_millis(60)).await;
+    let next_effect = clock.effect();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert!(deadline.reached());
+    drop(next_effect);
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_deadline_wakes_on_work_and_expires_after_its_allowance() {
+    let clock = Arc::new(ActivityClock::new());
+    let deadline = ActiveDeadline {
+        started_at: clock.elapsed(),
+        clock: clock.clone(),
+        allowance_ms: 250,
+        cause: ActiveDeadlineCause::Goal,
+    };
+    let waiter = tokio::spawn({
+        let deadline = deadline.clone();
+        async move { deadline.elapsed().await }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!waiter.is_finished());
+
+    let _work = clock.effect();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(250)).await;
+    waiter.await.unwrap();
+    assert!(deadline.reached());
+}
+
 fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
     GoalView {
         include_paths: Some(Vec::new()),
@@ -154,13 +212,37 @@ fn active_plan_narrowing_uses_settled_action_usage() {
 #[test]
 fn unlimited_goal_admits_a_finite_build_action_above_the_default_usage_ceiling() {
     let ledger = ledger(unlimited_time());
-    let Admission::Reserved((_, reserved_ms)) = ledger
+    let Admission::Reserved((_, reserved_ms, _)) = ledger
         .reserve_active(1_845_000, BudgetAction::Provider, None)
         .expect("maximum macOS Build action plus Store tail")
     else {
         panic!("expected active reservation")
     };
     assert_eq!(reserved_ms, 1_850_000);
+}
+
+#[test]
+fn active_reservation_records_which_budget_bound_it() {
+    let unlimited = ledger(unlimited_time());
+    let Admission::Reserved((_, _, limit)) = unlimited
+        .reserve_active(20_000, BudgetAction::Delegation, None)
+        .expect("unlimited Goal reservation")
+    else {
+        panic!("expected active reservation")
+    };
+    assert_eq!(limit, ActiveReservationLimit::ActionBound);
+
+    let constrained = ledger(GoalBudget {
+        max_active_ms: Some(20_000),
+        ..Default::default()
+    });
+    let Admission::Reserved((_, _, limit)) = constrained
+        .reserve_active(20_000, BudgetAction::Delegation, None)
+        .expect("Goal-limited reservation")
+    else {
+        panic!("expected active reservation")
+    };
+    assert_eq!(limit, ActiveReservationLimit::Goal);
 }
 
 #[tokio::test(start_paused = true)]
@@ -278,7 +360,7 @@ fn carried_time_joins_the_next_reservation_and_the_runs_active_time() {
     edit(&ledger, |_, in_flight| {
         in_flight.origin = Some(Instant::now() - Duration::from_secs(11));
     });
-    let Admission::Reserved((_, reserved_ms)) = ledger
+    let Admission::Reserved((_, reserved_ms, _)) = ledger
         .reserve_active(1_845_000, BudgetAction::Provider, None)
         .expect("Build action after carried time")
     else {
@@ -347,7 +429,7 @@ fn an_unrecorded_result_counts_toward_the_token_cap() {
 #[tokio::test(start_paused = true)]
 async fn child_idle_approval_is_excluded_once_from_the_shared_segment() {
     let ledger = ledger(unlimited_time());
-    let Admission::Reserved((started, _)) = ledger
+    let Admission::Reserved((started, _, _)) = ledger
         .reserve_active(10_000, BudgetAction::Provider, None)
         .unwrap()
     else {
@@ -361,7 +443,7 @@ async fn child_idle_approval_is_excluded_once_from_the_shared_segment() {
         .settle_active(duration_ms(started.elapsed()), None)
         .unwrap();
     assert_eq!(ledger.run_active_ms().unwrap(), 20);
-    let Admission::Reserved((started, _)) = ledger
+    let Admission::Reserved((started, _, _)) = ledger
         .reserve_active(10_000, BudgetAction::Provider, None)
         .unwrap()
     else {
@@ -396,7 +478,7 @@ fn open_delegation_reservation_does_not_exhaust_its_own_review() {
         max_active_ms: Some(600_000),
         ..GoalBudget::default()
     });
-    let Admission::Reserved((_started, reserved_ms)) = ledger
+    let Admission::Reserved((_started, reserved_ms, _)) = ledger
         .reserve_active(600_000, BudgetAction::Provider, None)
         .unwrap()
     else {
