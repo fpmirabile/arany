@@ -4322,7 +4322,7 @@ fn command_selection_rejects_unsafe_or_unbounded_controls_before_copy() {
 
 #[test]
 fn command_controls_cannot_exceed_the_grant_or_path_depth() {
-    for case in ["grant", "depth"] {
+    for case in ["grant", "depth-limit", "depth-overflow"] {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -4337,7 +4337,8 @@ fn command_controls_cannot_exceed_the_grant_or_path_depth() {
             std::fs::write(source.join("visible"), b"x").unwrap();
             config["workspace_paths"] = json!(["visible"]);
         } else {
-            let deep = source.join(vec!["nested"; 16].join("/"));
+            let depth = COMMAND_SNAPSHOT_DEPTH - usize::from(case == "depth-limit");
+            let deep = source.join(vec!["nested"; depth].join("/"));
             std::fs::create_dir_all(&deep).unwrap();
             std::fs::write(deep.join(".gitignore"), b"ignored").unwrap();
         }
@@ -4351,6 +4352,8 @@ fn command_controls_cannot_exceed_the_grant_or_path_depth() {
         );
         if case == "grant" {
             assert!(matches!(result, Err(super::ToolError::FilesystemDenied)));
+        } else if case == "depth-limit" {
+            assert!(result.is_ok());
         } else {
             assert!(matches!(result, Err(super::ToolError::Limit)));
         }

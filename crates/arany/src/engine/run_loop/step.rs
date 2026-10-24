@@ -26,8 +26,9 @@ mod review;
 
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
-    AfterAsk, Dispatch, DispatchFacts, DispatchSite, NotDispatched, Unguarded, UnguardedRefusal,
-    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, refuse, undispatched,
+    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
+    UnguardedRefusal, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, refuse,
+    undispatched,
 };
 use review::ToolReviewDecision;
 
@@ -1786,9 +1787,16 @@ impl RunLoop<'_> {
         if let Some(pause) = queue_pause.take() {
             self.settle_active_pause(pause, None)?;
         }
-        if active_time_exhausted && observation.disposition != ToolDisposition::Limit {
-            observation = not_dispatched(observation.intent, &NotDispatched::ActiveTime);
-        }
+        observation = match GuardCompletion::decide(
+            observation.disposition,
+            observation.attestation.is_some(),
+            active_time_exhausted,
+        ) {
+            GuardCompletion::Observed => observation,
+            GuardCompletion::ActiveTime => {
+                not_dispatched(observation.intent, &NotDispatched::ActiveTime)
+            }
+        };
         let reached_go = observation.attestation.is_some()
             || matches!(observation.disposition, ToolDisposition::Uncertain);
         if !reached_go {

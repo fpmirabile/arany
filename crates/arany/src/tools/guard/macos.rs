@@ -1258,7 +1258,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(MACOS_SELECTION_CONTRACT),
-            "cc40b0271747622b7e7a0e5ef6ae0f0ba8b5a29b736ad90c88ad9302708d254c"
+            "c9a73a9d3c9b713e75e126b87e2a86783fd4b2bbdabcdbb83aaf4ae779ec1d6b"
         );
         super::super::tests::assert_enforcement_prose(
             MACOS_SELECTION_CONTRACT,
