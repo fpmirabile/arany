@@ -166,14 +166,7 @@ pub(super) async fn input(
             ),
         );
     }
-    let invalid = || {
-        wire::error(
-            Some(id.clone()),
-            -32602,
-            "Invalid parameters",
-            "invalidParams",
-        )
-    };
+    let invalid = || invalid_params(&id);
     let refusal = {
         let state = state.lock().expect("translator state");
         if request.method == "initialize" && state.initialized {
@@ -235,154 +228,184 @@ pub(super) async fn input(
             )
             .await
         }
-        "session/close" => {
-            let Ok(params) = parse::<wire::Cancel>(request.params) else {
-                return immediate(output, invalid());
-            };
-            let shared = state;
-            let cancel = {
-                let mut state = state.lock().expect("translator state");
-                if !state.sessions.contains_key(&params.session_id) {
-                    return immediate(
-                        output,
-                        wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
-                    );
-                }
-                if !state.closing.insert(params.session_id) {
-                    return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
-                }
-                let cancel = match state
-                    .active
-                    .as_mut()
-                    .filter(|a| a.session == params.session_id)
-                {
-                    Some(active) => {
-                        active.close = Some(id.clone());
-                        active.close_task = Some(
-                            tokio::spawn(expire_close(
-                                shared.clone(),
-                                serve.clone(),
-                                output.clone(),
-                                active.generation,
-                            ))
-                            .abort_handle(),
-                        );
-                        let first = !active.cancelled;
-                        active.cancelled = true;
-                        Some(
-                            active
-                                .turn
-                                .filter(|_| first && active.completion.is_none())
-                                .map(|turn_id| TurnInterruptParams {
-                                    thread_id: active.session,
-                                    turn_id,
-                                }),
-                        )
-                    }
-                    None => None,
-                };
-                state.changed.notify_one();
-                cancel
-            };
-            match cancel {
-                Some(interrupt) => {
-                    if let Some(interrupt) = interrupt {
-                        send_request(
-                            state,
-                            serve,
-                            "turn/interrupt",
-                            interrupt,
-                            Pending::Interrupt,
-                        )
-                        .await?;
-                    }
-                    Ok(())
-                }
-                None => unload(state, serve, id, params.session_id).await,
-            }
-        }
-        "session/list" => {
-            let Ok(params) = parse::<wire::ListSessions>(request.params) else {
-                return immediate(output, invalid());
-            };
-            send_request(
-                state,
-                serve,
-                "thread/list",
-                ThreadListParams {
-                    cwd: params.cwd,
-                    cursor: params.cursor,
-                    limit: None,
-                },
-                Pending::List(id),
-            )
-            .await
-        }
-        "session/prompt" => {
-            let Ok(params) = parse::<wire::Prompt>(request.params) else {
-                return immediate(output, invalid());
-            };
-            let session_id = params.session_id;
-            let Ok(input) = params.input() else {
-                return immediate(output, invalid());
-            };
-            let refusal = {
-                let mut state = state.lock().expect("translator state");
-                if !state.authenticated {
-                    Some(wire::auth_required(id.clone()))
-                } else if !state.sessions.contains_key(&session_id) {
-                    Some(wire::error(
-                        Some(id.clone()),
-                        -32002,
-                        "Session not found",
-                        "resource_not_found",
-                    ))
-                } else if state.active.is_some() || state.closing.contains(&session_id) {
-                    Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
-                } else {
-                    state.next_generation += 1;
-                    let generation = state.next_generation;
-                    state.active = Some(Active {
-                        id: id.clone(),
-                        generation,
-                        session: session_id,
-                        turn: None,
-                        cancelled: false,
-                        answered: false,
-                        completion: None,
-                        resync: false,
-                        projected: BTreeSet::new(),
-                        uncertain: 0,
-                        incomplete: false,
-                        close: None,
-                        close_task: None,
-                        watch_plan: config.tools,
-                        plan: None,
-                    });
-                    None
-                }
-            };
-            if let Some(error) = refusal {
-                return immediate(output, error);
-            }
-            send_request(
-                state,
-                serve,
-                "turn/start",
-                TurnStartParams {
-                    thread_id: session_id,
-                    input,
-                    goal: None,
-                },
-                Pending::Start,
-            )
-            .await
-        }
+        "session/close" => close_input(id, request.params, &context).await,
+        "session/list" => list_input(id, request.params, &context).await,
+        "session/prompt" => prompt_input(id, request.params, &context).await,
         _ => immediate(
             output,
             wire::error(Some(id), -32601, "Method not found", "methodNotFound"),
         ),
     }
+}
+
+fn invalid_params(id: &RequestId) -> Value {
+    wire::error(
+        Some(id.clone()),
+        -32602,
+        "Invalid parameters",
+        "invalidParams",
+    )
+}
+
+async fn close_input(
+    id: RequestId,
+    value: Option<Value>,
+    context: &InputContext<'_>,
+) -> Result<(), String> {
+    let Ok(params) = parse::<wire::Cancel>(value) else {
+        return immediate(context.output, invalid_params(&id));
+    };
+    let shared = context.state;
+    let cancel = {
+        let mut state = context.state.lock().expect("translator state");
+        if !state.sessions.contains_key(&params.session_id) {
+            return immediate(
+                context.output,
+                wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
+            );
+        }
+        if !state.closing.insert(params.session_id) {
+            return immediate(
+                context.output,
+                wire::error(Some(id), -32600, "Server busy", "busy"),
+            );
+        }
+        let cancel = match state
+            .active
+            .as_mut()
+            .filter(|a| a.session == params.session_id)
+        {
+            Some(active) => {
+                active.close = Some(id.clone());
+                active.close_task = Some(
+                    tokio::spawn(expire_close(
+                        shared.clone(),
+                        context.serve.clone(),
+                        context.output.clone(),
+                        active.generation,
+                    ))
+                    .abort_handle(),
+                );
+                let first = !active.cancelled;
+                active.cancelled = true;
+                Some(
+                    active
+                        .turn
+                        .filter(|_| first && active.completion.is_none())
+                        .map(|turn_id| TurnInterruptParams {
+                            thread_id: active.session,
+                            turn_id,
+                        }),
+                )
+            }
+            None => None,
+        };
+        state.changed.notify_one();
+        cancel
+    };
+    match cancel {
+        Some(interrupt) => {
+            if let Some(interrupt) = interrupt {
+                send_request(
+                    context.state,
+                    context.serve,
+                    "turn/interrupt",
+                    interrupt,
+                    Pending::Interrupt,
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        None => unload(context.state, context.serve, id, params.session_id).await,
+    }
+}
+
+async fn list_input(
+    id: RequestId,
+    value: Option<Value>,
+    context: &InputContext<'_>,
+) -> Result<(), String> {
+    let Ok(params) = parse::<wire::ListSessions>(value) else {
+        return immediate(context.output, invalid_params(&id));
+    };
+    send_request(
+        context.state,
+        context.serve,
+        "thread/list",
+        ThreadListParams {
+            cwd: params.cwd,
+            cursor: params.cursor,
+            limit: None,
+        },
+        Pending::List(id),
+    )
+    .await
+}
+
+async fn prompt_input(
+    id: RequestId,
+    value: Option<Value>,
+    context: &InputContext<'_>,
+) -> Result<(), String> {
+    let Ok(params) = parse::<wire::Prompt>(value) else {
+        return immediate(context.output, invalid_params(&id));
+    };
+    let session_id = params.session_id;
+    let Ok(input) = params.input() else {
+        return immediate(context.output, invalid_params(&id));
+    };
+    let refusal = {
+        let mut state = context.state.lock().expect("translator state");
+        if !state.authenticated {
+            Some(wire::auth_required(id.clone()))
+        } else if !state.sessions.contains_key(&session_id) {
+            Some(wire::error(
+                Some(id.clone()),
+                -32002,
+                "Session not found",
+                "resource_not_found",
+            ))
+        } else if state.active.is_some() || state.closing.contains(&session_id) {
+            Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
+        } else {
+            state.next_generation += 1;
+            let generation = state.next_generation;
+            state.active = Some(Active {
+                id: id.clone(),
+                generation,
+                session: session_id,
+                turn: None,
+                cancelled: false,
+                answered: false,
+                completion: None,
+                resync: false,
+                projected: BTreeSet::new(),
+                uncertain: 0,
+                incomplete: false,
+                close: None,
+                close_task: None,
+                watch_plan: context.config.tools,
+                plan: None,
+            });
+            None
+        }
+    };
+    if let Some(error) = refusal {
+        return immediate(context.output, error);
+    }
+    send_request(
+        context.state,
+        context.serve,
+        "turn/start",
+        TurnStartParams {
+            thread_id: session_id,
+            input,
+            goal: None,
+        },
+        Pending::Start,
+    )
+    .await
 }
 
 async fn load_input(
