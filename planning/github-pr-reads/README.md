@@ -10,7 +10,7 @@
 
 ## Outcome and scope
 
-One feature: the primary can list GitHub PRs and inspect a selected PR's description, review decision, comments and checks to answer questions about open work. Reuse the user's existing `gh` authentication and S3 host class; no Guard network proxy, new API client, token setup or dependency. [Branch reads](../git-branch-reads/README.md) provides independent local comparisons; this feature requires no local checkout/fetch of a PR.
+One feature: the primary can list GitHub PRs and inspect a selected PR's description, review decision, comments and checks to answer questions about open work. Reuse the user's existing `gh` authentication and S3 host class; no Guard network proxy, new API client, token setup or dependency. [Typed Git reads](../../docs/specs/tools.md#typed-git-reads) provides independent local comparisons; this feature requires no local checkout/fetch of a PR.
 
 No PR mutation, checkout, diff download, arbitrary `gh api`, browser launch, watch loop or child-agent capability. GitHub text and URLs remain untrusted data, never instructions, authorization or automatically followed links.
 
