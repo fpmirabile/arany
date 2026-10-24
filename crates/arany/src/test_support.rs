@@ -26,6 +26,13 @@ pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }
 
+pub fn tool_continuation_reserve(max_output_tokens: u32, feedback: usize) -> usize {
+    crate::tools::ToolRuntime::continuation_reserve(
+        crate::provider::max_turn_bytes(max_output_tokens),
+        feedback,
+    )
+}
+
 pub fn history_tool_block(run: &crate::RunView) -> String {
     crate::provider::history_tool_block(run)
 }

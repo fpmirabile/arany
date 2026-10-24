@@ -8768,7 +8768,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     uncleared.steps[0].cleared = false;
     let used = arany::test_support::tool_context_bytes(&uncleared);
     assert!((48 * 1024..=60 * 1024).contains(&used));
-    let reserve = 64 * 1024 + 96 * 1024 + 512 + 64 * 1024 + 128 * 6 + 512;
+    let reserve = arany::test_support::tool_continuation_reserve(requests[4].max_output_tokens, 0);
     let margin = 2 * 1024;
     assert!(used + reserve > allowance as usize + margin);
     assert!(
