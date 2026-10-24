@@ -428,30 +428,15 @@ pub(super) async fn read_streamed_reply(
     max_output_tokens: u32,
 ) -> Result<wire::MessageReply, ProviderError> {
     let status = response.status().as_u16();
-    if let Err(error) = super::streaming::validate_stream_response(response, max_output_tokens) {
-        let stage = if response
-            .content_length()
-            .is_some_and(|length| length > super::max_stream_bytes(max_output_tokens) as u64)
-        {
-            crate::diagnostics::SubscriptionFailureStage::ContentLength
-        } else if response
-            .headers()
-            .get_all(reqwest::header::CONTENT_ENCODING)
-            .iter()
-            .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
-            crate::diagnostics::SubscriptionFailureStage::ContentEncoding
-        } else {
-            crate::diagnostics::SubscriptionFailureStage::ResponseContent
-        };
+    if let Err(failure) = super::streaming::validate_stream_response(response, max_output_tokens) {
         crate::diagnostics::messages_failure(
-            stage,
+            failure.stage,
             crate::diagnostics::StreamCounts {
                 http_status: Some(status),
                 ..Default::default()
             },
         );
-        return Err(error);
+        return Err(failure.error);
     }
     let (private_preview, _observed) = super::ResponsePreview::new();
     let mut decoder = wire::MessageStream::new(

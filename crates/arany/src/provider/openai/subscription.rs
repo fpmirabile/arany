@@ -634,7 +634,8 @@ pub(super) async fn read_completed_response(
     preview: Option<ResponsePreview>,
     max_output_tokens: u32,
 ) -> Result<Vec<u8>, ProviderError> {
-    crate::provider::streaming::validate_stream_response(response, max_output_tokens)?;
+    crate::provider::streaming::validate_stream_response(response, max_output_tokens)
+        .map_err(|failure| failure.error)?;
     let mut decoder = StreamDecoder::with_preview(key, model, preview, max_output_tokens);
     while let Some(chunk) = response
         .chunk()
