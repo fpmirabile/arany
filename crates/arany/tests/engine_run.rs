@@ -4612,6 +4612,9 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             ProviderOutcome::Answer(Answer {
                 text: "bounded".into(),
             }),
+            ProviderOutcome::Answer(Answer {
+                text: "bounded".into(),
+            }),
         ]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
@@ -4918,7 +4921,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             first.session_id
         );
         store.close().await.unwrap();
-        for bytes in [8 * 1024, 8 * 1024 + 1] {
+        for bytes in [8 * 1024, 8 * 1024 + 1, 64 * 1024] {
             let prompt = "x".repeat(bytes);
             let bounded = run_to_end(&engine, &provider, request(&workspace, &prompt))
                 .await
@@ -4928,10 +4931,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                 .await
                 .unwrap();
             assert!(unsaved.session_id.is_none());
-            assert_eq!(
-                unsaved.prompt.as_deref(),
-                (bytes <= 8 * 1024).then_some(prompt.as_str())
-            );
+            assert_eq!(unsaved.prompt.as_deref(), Some(prompt.as_str()));
         }
         engine.close().await.expect("engine shutdown");
 

@@ -45,7 +45,8 @@ pub use commands::{
     parse_submission, skill_invocation, transcript_agents,
 };
 pub use composer::{
-    CompletionLayout, Composer, ComposerDraft, ComposerEdit, MAX_DRAFT_BYTES, NewlineShortcut,
+    CompletionLayout, Composer, ComposerDraft, ComposerEdit, MAX_DRAFT_BYTES,
+    MAX_PRIMARY_DRAFT_BYTES, NewlineShortcut,
 };
 use history::History;
 use input::TerminalReader;
@@ -813,7 +814,7 @@ impl AttachedTerminal {
             agent_panel: None,
             agent_chat: None,
             child_drafts: Vec::new(),
-            primary_input_capacity: crate::terminal::MAX_DRAFT_BYTES,
+            primary_input_capacity: crate::terminal::MAX_PRIMARY_DRAFT_BYTES,
             help_selected: None,
             usage_panel: None,
             clipboard: None,
@@ -877,7 +878,7 @@ impl AttachedTerminal {
 
     async fn read_input(&mut self, chat: bool) -> Result<TerminalInput, TerminalError> {
         if let Some(input) = &mut self.input {
-            input.set_chat_input(chat, self.agent_chat.is_some());
+            input.set_chat_input(chat, self.agent_chat.is_some(), self.primary_input_capacity);
         }
         self.clipboard_paste = None;
         if let Some(input) = self.deferred_input.take() {
