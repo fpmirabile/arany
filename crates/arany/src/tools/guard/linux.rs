@@ -2409,7 +2409,10 @@ mod tests {
         if process_namespace_ids(host_pid)? != before {
             return Err("fixture process namespace identity changed during pidfd binding".into());
         }
-        tokio::io::unix::AsyncFd::new(pidfd).map_err(|error| error.to_string())
+        // SAFETY: The OwnedFd moves into the AsyncFd, so its descriptor stays open and unchanged until the AsyncFd drops.
+        #[allow(unsafe_code)]
+        let registered = unsafe { tokio::io::unix::AsyncFd::register(pidfd) };
+        registered.map_err(|error| error.to_string())
     }
 
     fn bind_host_pidfd(pid: u32) -> Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>, String> {
