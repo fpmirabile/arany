@@ -4702,7 +4702,14 @@ async fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
                 .zip(["facts.txt", "facts.txt", "visible.txt"])
         {
             let observation = tool.observation.as_ref().unwrap();
-            assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+            assert_eq!(
+                observation.disposition,
+                arany::ToolDisposition::Succeeded,
+                "whole={whole}; call={:?}; limit={:?}; enforcement={:?}",
+                observation.intent.call,
+                observation.limit_cause,
+                observation.enforcement_cause,
+            );
             assert!(matches!(
                 observation.attestation,
                 Some(arany::Attestation::Guard(_))

@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `In progress`; slice 1 implements typed discovery and local suggestions pending CI/native evidence; next is slice 2 (Git disclosure).
+- Status: `In progress`; slice 1 implements typed discovery and local suggestions pending CI/native evidence; slice 2 implements typed Git disclosure pending CI/native evidence.
 - Owner: Arany maintainer.
 - Last updated: 2026-10-24.
 - Delivery: Research → Plan → Implement; two vertical slices.
