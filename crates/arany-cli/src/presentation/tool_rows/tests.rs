@@ -342,7 +342,11 @@ mod peer_row_tests {
                 refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
             });
             let lines = tool_approval_lines(&tool.intent).join("\n");
-            assert!(!lines.ends_with("\n\nAllow once for this exact action"));
+            assert!(
+                !lines
+                    .lines()
+                    .any(|line| line == "Allow once for this exact action")
+            );
             assert!(lines.contains("host · one human-approved remote operation"));
             if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
                 assert!(lines.contains(&"1".repeat(40)) && lines.contains("refs/heads/topic"));
