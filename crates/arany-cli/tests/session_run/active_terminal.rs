@@ -16,6 +16,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+const DRAFT_SEGMENT_BYTES: usize = 3000;
+const RETAINED_DRAFT_BYTES: usize = 2 * DRAFT_SEGMENT_BYTES;
+const DRAFT_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
+const ACTIVE_PTY_OUTPUT_BYTES: usize = arany::MAX_USER_MESSAGE_BYTES + 64 * 1024;
+
 #[derive(Clone, Copy)]
 enum ActiveExit {
     Signal(Signal, &'static str),
@@ -222,7 +227,18 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     );
     let (request_sender, request_ready) = mpsc::channel();
     let (closed_sender, socket_closed) = mpsc::channel();
-    let (failure_sender, failure_ready) = mpsc::channel();
+    let (release_sender, release_ready) = mpsc::channel();
+    let expect_resume = matches!(exit, ActiveExit::SuspendThenSignal) && !inline;
+    let continued_draft_counts: Vec<_> = (RETAINED_DRAFT_BYTES + DRAFT_SEGMENT_BYTES
+        ..arany::MAX_USER_MESSAGE_BYTES)
+        .step_by(DRAFT_SEGMENT_BYTES)
+        .collect();
+    let overflow_stage = 4 + continued_draft_counts.len();
+    let peer_gate_timeout = if expect_resume {
+        DRAFT_STAGE_TIMEOUT * u32::try_from(overflow_stage + 3).expect("bounded draft stages")
+    } else {
+        DRAFT_STAGE_TIMEOUT
+    };
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
         for index in 0..4 {
@@ -256,10 +272,12 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             if index == 3 {
                 assert_eq!(input["objective"], "cancel");
                 request_sender.send(()).expect("active request gate");
+                if expect_resume || matches!(exit, ActiveExit::ProviderFailure) {
+                    release_ready
+                        .recv_timeout(peer_gate_timeout)
+                        .expect("release held Provider call");
+                }
                 if matches!(exit, ActiveExit::ProviderFailure) {
-                    failure_ready
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("release synthetic failure");
                     // A Retry-After past the action deadline ends the call without a same-route retry.
                     stream
                         .write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntest-key")
@@ -349,7 +367,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let expect_help = matches!(exit, ActiveExit::HelpThenCtrlC);
     let expect_typo = matches!(exit, ActiveExit::TypoThenCtrlC);
     let expect_second_ctrl_c = matches!(exit, ActiveExit::SecondCtrlC);
-    let expect_resume = matches!(exit, ActiveExit::SuspendThenSignal) && !inline;
+    let continued_draft_patterns: Vec<_> = continued_draft_counts
+        .iter()
+        .map(|count| format!("Draft: {count} characters; Enter offers it as a steering note"))
+        .collect();
     // Classic returns to chat with a native notice instead of a shell receipt.
     let classic_idle = inline && expect_idle;
     let classic_label = if expect_failure {
@@ -363,6 +384,12 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         let mut keyboard_answered = 0;
         let mut bytes = Vec::new();
         let mut paste_sender = expect_draft.then_some(paste_sender);
+        let retained_draft_pattern =
+            format!("Draft: {RETAINED_DRAFT_BYTES} characters; Enter offers it as a steering note");
+        let full_draft_pattern = format!(
+            "Draft: {} characters; Enter offers it as a steering note",
+            arany::MAX_USER_MESSAGE_BYTES
+        );
         let mut patterns: Vec<&[u8]> = vec![
             b"SHELL_PID:",
             if inline {
@@ -375,10 +402,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(b"pX");
         }
         if expect_resume {
-            patterns.push(b"Draft: 6000 characters; Enter offers it as a steering note");
+            patterns.push(retained_draft_pattern.as_bytes());
             patterns.push(b"Presentation: screen-reader");
+            patterns.extend(continued_draft_patterns.iter().map(String::as_bytes));
             patterns.push(b"Notice: Error: invalid or overlong terminal line; draft unchanged\r\n");
-            patterns.push(b"Draft: 8192 characters; Enter offers it as a steering note");
+            patterns.push(full_draft_pattern.as_bytes());
         }
         if expect_second_ctrl_c {
             patterns.push(b"Cancelling Run...");
@@ -438,7 +466,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             if count == 0 {
                 break;
             }
-            assert!(bytes.len() + count <= 64 * 1024, "bounded PTY output");
+            assert!(
+                bytes.len() + count <= ACTIVE_PTY_OUTPUT_BYTES,
+                "bounded PTY output"
+            );
             bytes.extend_from_slice(&chunk[..count]);
             crate::process::decline_workspace_consent(
                 &mut *reader_input.lock().expect("fixture input"),
@@ -532,7 +563,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     }
     match exit {
         ActiveExit::ProviderFailure => {
-            failure_sender
+            release_sender
                 .send(())
                 .expect("release failed Provider call");
         }
@@ -656,11 +687,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             kill_process(product_pid, Signal::TERM).expect("terminate resumed inline Run");
         }
         ActiveExit::SuspendThenSignal => {
-            continue_draft(&input, b'a', 3000);
-            continue_draft(&input, b'b', 3000);
+            continue_draft(&input, b'a', DRAFT_SEGMENT_BYTES);
+            continue_draft(&input, b'b', DRAFT_SEGMENT_BYTES);
             assert_eq!(
                 stages
-                    .recv_timeout(Duration::from_secs(10))
+                    .recv_timeout(DRAFT_STAGE_TIMEOUT)
                     .expect("retained draft stage")
                     .0,
                 2
@@ -675,7 +706,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             kill_process(product_pid, Signal::CONT).expect("resume active Run");
             assert_eq!(
                 stages
-                    .recv_timeout(Duration::from_secs(10))
+                    .recv_timeout(DRAFT_STAGE_TIMEOUT)
                     .expect("resumed presentation stage")
                     .0,
                 3
@@ -684,22 +715,40 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 reader_nonblocking(product_pid),
                 "reader reacquired after resume"
             );
-            continue_draft(&input, b'c', 2193);
+            for index in 0..continued_draft_counts.len() {
+                continue_draft(&input, b'c', DRAFT_SEGMENT_BYTES);
+                assert_eq!(
+                    stages
+                        .recv_timeout(DRAFT_STAGE_TIMEOUT)
+                        .expect("continued retained draft stage")
+                        .0,
+                    4 + index
+                );
+            }
+            let remaining = arany::MAX_USER_MESSAGE_BYTES
+                - continued_draft_counts
+                    .last()
+                    .copied()
+                    .unwrap_or(RETAINED_DRAFT_BYTES);
+            continue_draft(&input, b'c', remaining + 1);
             assert_eq!(
                 stages
-                    .recv_timeout(Duration::from_secs(10))
+                    .recv_timeout(DRAFT_STAGE_TIMEOUT)
                     .expect("retained draft overflow stage")
                     .0,
-                4
+                overflow_stage
             );
-            continue_draft(&input, b'd', 2192);
+            continue_draft(&input, b'd', remaining);
             assert_eq!(
                 stages
-                    .recv_timeout(Duration::from_secs(10))
+                    .recv_timeout(DRAFT_STAGE_TIMEOUT)
                     .expect("full retained draft stage")
                     .0,
-                5
+                overflow_stage + 1
             );
+            release_sender
+                .send(())
+                .expect("release resumed Provider call");
             kill_process(product_pid, Signal::TERM).expect("terminate resumed Run");
         }
         ActiveExit::PtyLoss => {
@@ -783,7 +832,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             .0,
         usize::from(expect_draft)
             + if expect_resume {
-                6
+                overflow_stage + 2
             } else if expect_second_ctrl_c {
                 3
             } else if expect_typo {
@@ -884,7 +933,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         usize::from(expect_feedback)
             + 5 * usize::from(expect_draft)
             + if expect_resume {
-                7
+                overflow_stage + 3
             } else if expect_typo {
                 11
             } else if expect_help {
