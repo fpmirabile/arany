@@ -3,6 +3,7 @@ pub use corpus::{CorpusError, export_corpus};
 
 use crate::session::worker::{WorkerBaseVersion, WorkerDataFacts, WorkerDataPurpose};
 use crate::session::{AgentRunId, Event, EventEnvelope, ReplayError, RunId, RunView, SessionView};
+use crate::tools::permissions::{HookEvent, HookResult};
 use crate::tools::types::CommandResult;
 use crate::tools::{Attestation, ToolCall, ToolDisposition};
 use serde::{Deserialize, Serialize};
@@ -265,15 +266,12 @@ struct Step {
     edits: Vec<([u8; 32], [u8; 32])>,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SupervisorState {
-    declared_roots: u16,
-    windows: Vec<(AgentRunId, VecDeque<Step>)>,
-    verdicts: u16,
-    pending: Option<(RunId, AgentRunId, SupervisorVerdict)>,
+pub struct SupervisorVerdicts {
+    subject: Option<(u64, AgentRunId, Site)>,
     last_verdict: Option<(u64, u64)>,
     recorded: Vec<(AgentRunId, SupervisorVerdict)>,
 }
-impl SupervisorState {
+impl SupervisorVerdicts {
     pub fn verdicts(&self) -> &[(AgentRunId, SupervisorVerdict)] {
         &self.recorded
     }
@@ -283,64 +281,83 @@ impl SupervisorState {
         assert!(recorded.len() <= usize::from(MAX_VERDICTS));
         assert!(recorded.iter().all(|(_, verdict)| verdict.valid()));
         Self {
-            verdicts: u16::try_from(recorded.len()).expect("bounded verdict count"),
             recorded,
             ..Self::default()
         }
     }
 
-    pub(crate) fn pending_event(&self) -> Option<Event> {
-        self.pending
-            .as_ref()
-            .map(
-                |(run_id, agent_run_id, verdict)| Event::SupervisorVerdictRecorded {
-                    run_id: *run_id,
-                    agent_run_id: *agent_run_id,
-                    verdict: verdict.clone(),
-                },
-            )
-    }
     pub(crate) fn previous_subject(&self, sequence: u64) -> u64 {
         self.last_verdict
             .filter(|(n, _)| *n == sequence)
             .map_or(sequence, |(_, subject)| subject)
     }
-    pub(crate) fn before(
+    pub(crate) fn record(
         view: &mut SessionView,
         envelope: &EventEnvelope,
-    ) -> Result<bool, ReplayError> {
-        let Some(run) = view.runs.last_mut() else {
-            return Ok(false);
-        };
-        if let Event::SupervisorVerdictRecorded {
+    ) -> Result<(), ReplayError> {
+        let Event::SupervisorVerdictRecorded {
             run_id,
             agent_run_id,
             verdict,
         } = &envelope.event
+        else {
+            return Err(ReplayError::InvalidTransition);
+        };
+        let run = view.runs.last_mut().ok_or(ReplayError::InvalidTransition)?;
+        let recorded = &mut run.supervisor;
+        if run.id != *run_id
+            || run.config.as_ref().is_none_or(|c| c.supervisor.is_none())
+            || recorded.subject != Some((verdict.subject_sequence, *agent_run_id, verdict.site))
+            || verdict.subject_sequence.checked_add(1) != Some(envelope.sequence)
+            || view.last_sequence != verdict.subject_sequence
+            || recorded.recorded.len() >= usize::from(MAX_VERDICTS)
+            || verdict.capped != (recorded.recorded.len() + 1 == usize::from(MAX_VERDICTS))
         {
-            if run.supervisor.pending.as_ref() != Some(&(*run_id, *agent_run_id, verdict.clone()))
-                || verdict.subject_sequence.checked_add(1) != Some(envelope.sequence)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            run.supervisor.pending = None;
-            run.supervisor
-                .recorded
-                .push((*agent_run_id, verdict.clone()));
-            run.supervisor.verdicts += 1;
-            run.supervisor.last_verdict = Some((envelope.sequence, verdict.subject_sequence));
-            return Ok(true);
+            return Err(ReplayError::InvalidTransition);
         }
-        if run.supervisor.pending.is_some() {
-            if envelope.run_id == Some(run.id) {
-                return Err(ReplayError::InvalidTransition);
-            }
-            run.supervisor.pending = None;
-        }
-        Ok(false)
+        recorded.subject = None;
+        recorded.recorded.push((*agent_run_id, verdict.clone()));
+        recorded.last_verdict = Some((envelope.sequence, verdict.subject_sequence));
+        Ok(())
     }
-    pub(crate) fn after(view: &mut SessionView, envelope: &EventEnvelope) {
+
+    pub(crate) fn place(view: &mut SessionView, envelope: &EventEnvelope) {
+        let Some(run) = view.runs.last_mut() else {
+            return;
+        };
+        run.supervisor.subject = envelope.agent_run_id.and_then(|actor| {
+            (envelope.run_id == Some(run.id)
+                && run.config.as_ref().is_some_and(|c| c.supervisor.is_some())
+                && run.agents.iter().any(|a| a.id == actor))
+            .then(|| subject_site(run, envelope).map(|site| (envelope.sequence, actor, site)))
+            .flatten()
+        });
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SupervisorState {
+    declared_roots: u16,
+    windows: Vec<(AgentRunId, VecDeque<Step>)>,
+    verdicts: u16,
+    pending: Option<(RunId, AgentRunId, SupervisorVerdict)>,
+}
+impl SupervisorState {
+    pub(crate) fn pending_event(&self) -> Option<Event> {
+        let (run_id, agent_run_id, verdict) = self.pending.as_ref()?;
+        Some(Event::SupervisorVerdictRecorded {
+            run_id: *run_id,
+            agent_run_id: *agent_run_id,
+            verdict: verdict.clone(),
+        })
+    }
+    pub(crate) fn after(&mut self, view: &SessionView, envelope: &EventEnvelope) {
+        if matches!(envelope.event, Event::RunStarted { .. }) {
+            *self = Self::default();
+        }
+        self.pending = None;
         let Some(run) = view.runs.last() else { return };
+        self.verdicts = count(run.supervisor.verdicts().len());
         if run.config.as_ref().is_none_or(|c| c.supervisor.is_none()) {
             return;
         }
@@ -355,9 +372,7 @@ impl SupervisorState {
                 .find(|goal| goal.run_ids.contains(&run_id))
                 .and_then(|goal| goal.plan_contract.as_ref())
                 .map_or(1, |plan| plan.paths.len().max(1));
-            if let Some(run) = view.runs.last_mut() {
-                run.supervisor.declared_roots = count(roots);
-            }
+            self.declared_roots = count(roots);
             return;
         }
         if envelope.run_id != Some(run.id) {
@@ -366,14 +381,14 @@ impl SupervisorState {
         let Some(actor) = envelope.agent_run_id else {
             return;
         };
-        let Some((site, step, footprint)) = subject(run, actor, envelope) else {
+        let Some((site, step, footprint)) = subject(run, actor, envelope, self.declared_roots)
+        else {
             return;
         };
-        let run = view.runs.last_mut().expect("subject Run");
         let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.clone()) else {
             return;
         };
-        run.supervisor.observe(
+        self.observe(
             run.id,
             actor,
             envelope.sequence,
@@ -383,6 +398,7 @@ impl SupervisorState {
     }
 
     pub(crate) fn tool_verdict_follows(
+        &self,
         view: &SessionView,
         sequence: u64,
         observation: &crate::tools::ToolObservation,
@@ -405,10 +421,11 @@ impl SupervisorState {
                 checkpoint: None,
             },
         };
-        let Some((site, step, footprint)) = subject(run, actor, &envelope) else {
+        let Some((site, step, footprint)) = subject(run, actor, &envelope, self.declared_roots)
+        else {
             return false;
         };
-        let mut state = run.supervisor.clone();
+        let mut state = self.clone();
         state.observe(run.id, actor, sequence, (site, step, footprint), policy);
         state.pending.is_some()
     }
@@ -721,11 +738,54 @@ fn call_key(call: &ToolCall) -> [u8; 32] {
     }
     hash(&serde_json::to_vec(&("arany.supervisor.call.v1", value)).expect("typed call"))
 }
+fn subject_site(run: &RunView, envelope: &EventEnvelope) -> Option<Site> {
+    match &envelope.event {
+        Event::ToolFinished { observation, .. }
+            if !observation.intent.call.is_internal()
+                && !matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) =>
+        {
+            let capture =
+                command_result(observation).is_some_and(|c| !c.changeset.files.is_empty());
+            Some(if capture {
+                Site::CommandCapture
+            } else {
+                Site::ToolOutcome
+            })
+        }
+        Event::WorkerDataSealed { record, .. }
+            if record.data.purpose == WorkerDataPurpose::Mutation =>
+        {
+            Some(Site::WorkerCapture)
+        }
+        Event::WorkerHandoverRecorded { .. } => Some(Site::Handover),
+        Event::ProviderCallRecorded { record, .. }
+            if record.disposition == crate::session::ProviderCallDisposition::InvalidResponse
+                || record.refusal.is_some() =>
+        {
+            Some(Site::Stall)
+        }
+        Event::HookFinished { outcome, .. }
+            if matches!(outcome.result, HookResult::Blocked { .. })
+                && run.lifecycle_hooks.last().is_some_and(|h| {
+                    matches!(
+                        h.invocation.event,
+                        HookEvent::Stop | HookEvent::SubagentStop
+                    )
+                }) =>
+        {
+            Some(Site::Stall)
+        }
+        _ => None,
+    }
+}
+
 fn subject(
     run: &RunView,
     actor: AgentRunId,
     envelope: &EventEnvelope,
+    roots: u16,
 ) -> Option<(Site, Step, Option<DisproportionFeatures>)> {
+    let site = subject_site(run, envelope)?;
     let mut step = Step {
         sequence: envelope.sequence,
         call: [0; 32],
@@ -738,105 +798,11 @@ fn subject(
         edits: Vec::new(),
     };
     let mut footprint = None;
-    let site = match &envelope.event {
-        Event::ToolFinished { observation: o, .. }
-            if !o.intent.call.is_internal()
-                && !matches!(o.intent.call, ToolCall::ApplyChangeset { .. }) =>
-        {
-            step.call = call_key(&o.intent.call);
-            let mut projection = crate::tools::types::model_observation(o);
-            let object = projection.as_object_mut().expect("typed result");
-            object.remove("call");
-            object.remove("target");
-            if let Some(data) = object
-                .get_mut("output")
-                .and_then(|output| output.pointer_mut("/private_capture/data"))
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                data.remove("first_sequence");
-                data.remove("seal_sequence");
-            }
-            let command = matches!(
-                o.intent.call,
-                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
-            )
-            .then(|| {
-                serde_json::from_str::<CommandResult>(&o.output)
-                    .ok()
-                    .filter(CommandResult::valid)
-            })
-            .flatten();
-            let exit_code = command.as_ref().map(|c| c.exit_code).or_else(|| {
-                crate::worker::WorkerCommandResult::parse(&o.output)
-                    .filter(crate::worker::WorkerCommandResult::valid)
-                    .map(|c| c.exit_code)
-            });
-            let exit_class = exit_code.map(|code| match code {
-                Some(0) => 0,
-                Some(_) => 1,
-                None => 2,
-            });
-            step.outcome = hash(
-                &serde_json::to_vec(&(
-                    o.disposition,
-                    o.enforcement_cause,
-                    exit_class,
-                    hash(&serde_json::to_vec(&projection).expect("typed projection")),
-                ))
-                .expect("typed outcome"),
-            );
-            step.observation = true;
-            step.succeeded = o.disposition == ToolDisposition::Succeeded;
-            step.denied = o.disposition == ToolDisposition::Denied || o.enforcement_cause.is_some();
-            step.alias =
-                o.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied);
-            if step.succeeded {
-                if let Some(Attestation::WorkerMutation { .. }) = o.attestation {
-                    // The preceding seal already supplies the private edit facts.
-                } else if let ToolCall::Write { path, content, .. } = &o.intent.call {
-                    step.edits.push((
-                        hash(path.as_bytes()),
-                        hash(crate::validate::hex_digest(content.as_bytes()).as_bytes()),
-                    ));
-                } else if let ToolCall::Edit { path, .. }
-                | ToolCall::MultiEdit {
-                    file_path: path, ..
-                } = &o.intent.call
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&o.output)
-                    && let Some(digest) = value.get("sha256").and_then(|v| v.as_str())
-                {
-                    step.edits
-                        .push((hash(path.as_bytes()), hash(digest.as_bytes())));
-                }
-            }
-            if let Some(command) = command.filter(|c| !c.changeset.files.is_empty()) {
-                let facts: Vec<_> = command
-                    .changeset
-                    .files
-                    .iter()
-                    .map(|f| {
-                        let version = |v: &crate::tools::FileVersion| WorkerBaseVersion::File {
-                            sha256: v.sha256.clone(),
-                            bytes: v.bytes().expect("validated command version").len() as u32,
-                            executable: v.executable,
-                        };
-                        crate::session::worker::WorkerFileFact {
-                            path: f.path.clone(),
-                            before: f.before.as_ref().map_or(WorkerBaseVersion::Absent, version),
-                            after: f.after.as_ref().map_or(WorkerBaseVersion::Absent, version),
-                        }
-                    })
-                    .collect();
-                footprint = Some(capture_features(run, actor, &facts));
-                capture_edits(&mut step, &facts);
-                Site::CommandCapture
-            } else {
-                Site::ToolOutcome
-            }
+    match &envelope.event {
+        Event::ToolFinished { observation, .. } => {
+            footprint = tool_step(run, actor, observation, roots, &mut step);
         }
-        Event::WorkerDataSealed { record, .. }
-            if record.data.purpose == WorkerDataPurpose::Mutation =>
-        {
+        Event::WorkerDataSealed { record, .. } => {
             let data = run
                 .workers
                 .data
@@ -845,9 +811,8 @@ fn subject(
             let WorkerDataFacts::Changes(facts) = &data.facts else {
                 return None;
             };
-            footprint = Some(capture_features(run, actor, facts));
+            footprint = Some(capture_features(run, actor, facts, roots));
             capture_edits(&mut step, facts);
-            Site::WorkerCapture
         }
         Event::WorkerHandoverRecorded { record, .. } => {
             let data = run
@@ -858,37 +823,121 @@ fn subject(
             let WorkerDataFacts::Changes(facts) = &data.facts else {
                 return None;
             };
-            footprint = Some(capture_features(run, record.assignment_id, facts));
-            Site::Handover
+            footprint = Some(capture_features(run, record.assignment_id, facts, roots));
         }
-        Event::ProviderCallRecorded { record, .. }
-            if matches!(
-                record.disposition,
-                crate::session::ProviderCallDisposition::InvalidResponse
-            ) || record.refusal.is_some() =>
-        {
+        Event::ProviderCallRecorded { .. } | Event::HookFinished { .. } => {
             step.stall = true;
-            Site::Stall
-        }
-        Event::HookFinished { outcome, .. }
-            if matches!(
-                outcome.result,
-                crate::tools::permissions::HookResult::Blocked { .. }
-            ) && run.lifecycle_hooks.last().is_some_and(|h| {
-                matches!(
-                    h.invocation.event,
-                    crate::tools::permissions::HookEvent::Stop
-                        | crate::tools::permissions::HookEvent::SubagentStop
-                )
-            }) =>
-        {
-            step.stall = true;
-            Site::Stall
         }
         _ => return None,
-    };
+    }
     Some((site, step, footprint))
 }
+
+fn outcome_key(o: &crate::tools::ToolObservation, command: Option<&CommandResult>) -> [u8; 32] {
+    let mut projection = crate::tools::types::model_observation(o);
+    let object = projection.as_object_mut().expect("typed result");
+    object.remove("call");
+    object.remove("target");
+    if let Some(data) = object
+        .get_mut("output")
+        .and_then(|output| output.pointer_mut("/private_capture/data"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        data.remove("first_sequence");
+        data.remove("seal_sequence");
+    }
+    let exit_code = command.map(|c| c.exit_code).or_else(|| {
+        crate::worker::WorkerCommandResult::parse(&o.output)
+            .filter(crate::worker::WorkerCommandResult::valid)
+            .map(|c| c.exit_code)
+    });
+    let exit_class = exit_code.map(|code| match code {
+        Some(0) => 0,
+        Some(_) => 1,
+        None => 2,
+    });
+    hash(
+        &serde_json::to_vec(&(
+            o.disposition,
+            o.enforcement_cause,
+            exit_class,
+            hash(&serde_json::to_vec(&projection).expect("typed projection")),
+        ))
+        .expect("typed outcome"),
+    )
+}
+
+fn command_result(o: &crate::tools::ToolObservation) -> Option<CommandResult> {
+    matches!(
+        o.intent.call,
+        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+    )
+    .then(|| {
+        serde_json::from_str::<CommandResult>(&o.output)
+            .ok()
+            .filter(CommandResult::valid)
+    })
+    .flatten()
+}
+
+fn tool_step(
+    run: &RunView,
+    actor: AgentRunId,
+    o: &crate::tools::ToolObservation,
+    roots: u16,
+    step: &mut Step,
+) -> Option<DisproportionFeatures> {
+    let command = command_result(o);
+    step.call = call_key(&o.intent.call);
+    step.outcome = outcome_key(o, command.as_ref());
+    step.observation = true;
+    step.succeeded = o.disposition == ToolDisposition::Succeeded;
+    step.denied = o.disposition == ToolDisposition::Denied || o.enforcement_cause.is_some();
+    step.alias = o.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied);
+    if step.succeeded {
+        if let Some(Attestation::WorkerMutation { .. }) = o.attestation {
+            // The preceding seal already supplies the private edit facts.
+        } else if let ToolCall::Write { path, content, .. } = &o.intent.call {
+            step.edits.push((
+                hash(path.as_bytes()),
+                hash(crate::validate::hex_digest(content.as_bytes()).as_bytes()),
+            ));
+        } else if let ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } = &o.intent.call
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&o.output)
+            && let Some(digest) = value.get("sha256").and_then(|v| v.as_str())
+        {
+            step.edits
+                .push((hash(path.as_bytes()), hash(digest.as_bytes())));
+        }
+    }
+    let command = command.filter(|c| !c.changeset.files.is_empty())?;
+    let facts: Vec<_> = command
+        .changeset
+        .files
+        .iter()
+        .map(|f| {
+            let version = |v: &crate::tools::FileVersion| WorkerBaseVersion::File {
+                sha256: v.sha256.clone(),
+                bytes: v
+                    .bytes()
+                    .and_then(|bytes| u32::try_from(bytes.len()).ok())
+                    .expect("validated command version"),
+                executable: v.executable,
+            };
+            crate::session::worker::WorkerFileFact {
+                path: f.path.clone(),
+                before: f.before.as_ref().map_or(WorkerBaseVersion::Absent, version),
+                after: f.after.as_ref().map_or(WorkerBaseVersion::Absent, version),
+            }
+        })
+        .collect();
+    capture_edits(step, &facts);
+    Some(capture_features(run, actor, &facts, roots))
+}
+
 fn capture_edits(step: &mut Step, facts: &[crate::session::worker::WorkerFileFact]) {
     for f in facts {
         if let WorkerBaseVersion::File { sha256, .. } = &f.after {
@@ -901,6 +950,7 @@ fn capture_features(
     run: &RunView,
     actor: AgentRunId,
     facts: &[crate::session::worker::WorkerFileFact],
+    declared_roots: u16,
 ) -> DisproportionFeatures {
     let bytes = |version: &WorkerBaseVersion| match version {
         WorkerBaseVersion::File { bytes, .. } => u64::from(*bytes),
@@ -920,9 +970,7 @@ fn capture_features(
         .find(|a| a.id == actor)
         .and_then(|a| a.assignment.as_ref());
     let roots = worker
-        .map_or(usize::from(run.supervisor.declared_roots), |w| {
-            w.pins.request.lease.len()
-        })
+        .map_or(usize::from(declared_roots), |w| w.pins.request.lease.len())
         .max(1);
     let base = worker
         .and_then(|w| run.workers.data.iter().find(|d| d.reference == w.pins.base))

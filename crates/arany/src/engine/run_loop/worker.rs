@@ -760,13 +760,7 @@ impl RunLoop<'_> {
                         .ok_or(EngineError::InvalidHistory)?,
                 )?;
                 let observation = candidate.observation(&data)?;
-                let verdict = self.ledger().view(|v| {
-                    crate::supervisor::SupervisorState::tool_verdict_follows(
-                        v,
-                        v.last_sequence + 1,
-                        &observation,
-                    )
-                })?;
+                let verdict = self.ledger().tool_verdict_follows(&observation)?;
                 if verdict {
                     data.first_sequence = data
                         .first_sequence
