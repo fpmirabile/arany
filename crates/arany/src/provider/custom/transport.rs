@@ -94,7 +94,8 @@ impl CustomTransport {
         .map_err(|_| TransportError::Rejected)?;
         let bytes = if stream {
             body["stream"] = Value::Bool(true);
-            self.send_streamed(body, &request.model, preview).await?
+            self.send_streamed(body, &request.model, preview, request.max_output_tokens)
+                .await?
         } else {
             self.send(body).await?
         };
@@ -212,6 +213,7 @@ impl CustomTransport {
         request: Value,
         model: &str,
         preview: Option<crate::provider::ResponsePreview>,
+        max_output_tokens: u32,
     ) -> Result<Vec<u8>, TransportError> {
         let mut response = self
             .request(&request)?
@@ -231,6 +233,7 @@ impl CustomTransport {
                     &self.key,
                     model,
                     preview,
+                    max_output_tokens,
                 )
                 .await
             }
@@ -240,6 +243,7 @@ impl CustomTransport {
                     &self.key,
                     model,
                     preview,
+                    max_output_tokens,
                 )
                 .await
             }

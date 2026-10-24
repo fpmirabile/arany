@@ -49,6 +49,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [Architecture homogenization](./architecture-homogenization/README.md) | `Ready`: 54 behavior-preserving implementation slices in 16 tracks plus one terminal lifecycle research slice (55 slices / 17 tracks); bounded flows, complete runtime/decoder ownership and live-worktree gates, four independent owner decisions |
 | [Approvals wait for the human](./approvals-wait/README.md) | `In progress`: A1 non-host primary approvals; A2 transition-driven child wait accounting; A3 host expiry after #279 |
 | [Tool failure continuation](./failure-feedback/README.md) | `Ready`: C1 same-Run primary failure/decline results and sanitized continuation after approvals A1; C2 delegated feedback; prior-Run cause reinjection is owned by the Session contract |
 | [Arany-owned storage report](./arany-storage/README.md) | `In progress`: S2 recorded native Guard storage remains; S1 local StateRoot/cache report uses the metadata-only lead default, with no automatic model disclosure |
@@ -66,7 +67,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Per-agent route recovery](./agent-route-recovery/README.md) | Deferred exhausted-route pause, dependency blocking and user retry/switch |
 | [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
-| [Git branch reads](./git-branch-reads/README.md) | In progress; S2 bounded range history and endpoint diffs remains on branch discovery S1 |
+| [Git branch reads](./git-branch-reads/README.md) | In progress; guarded S2 range/diff evidence added, full test suite and CI remain |
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Primary host commands](./primary-host-commands/README.md) | `Ready`: guarantee wording and H1 approved; S1 primary escalation, session approval and privilege-tool refusal, S2 user-owned host prefixes, S3 serve/ACP/exec |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Ready: three command slices; `ignore` 0.4.33 approved behind the dependency review gate |

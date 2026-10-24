@@ -2154,13 +2154,15 @@ mod tests {
             .build()
             .unwrap()
             .block_on(crate::tools::git::execute(
-                Path::new("/workspace"),
-                Path::new("/scratch"),
-                &git,
-                &ToolCall::GitStatus { path: ".".into() },
-                &Default::default(),
-                16 * 1024,
-                Duration::from_secs(20),
+                crate::tools::git::GitReadRequest {
+                    workspace: Path::new("/workspace"),
+                    scratch: Path::new("/scratch"),
+                    git: &git,
+                    call: &ToolCall::GitStatus { path: ".".into() },
+                    hidden: &Default::default(),
+                    max_bytes: 16 * 1024,
+                    runtime: Duration::from_secs(20),
+                },
             ))
             .unwrap();
         let output: serde_json::Value = serde_json::from_str(&output).unwrap();

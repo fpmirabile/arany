@@ -229,6 +229,7 @@ impl Provider for OpenAiProvider {
             &self.key,
             &self.identity.model,
             Some(preview),
+            request.max_output_tokens,
         )
         .await?;
         let decoded = wire::decode_streamed_run(
@@ -264,8 +265,9 @@ pub(crate) async fn read_streamed_reply(
     key: &str,
     model: &str,
     preview: Option<super::ResponsePreview>,
+    max_output_tokens: u32,
 ) -> Result<Vec<u8>, ProviderError> {
-    subscription::read_completed_response(response, key, model, preview).await
+    subscription::read_completed_response(response, key, model, preview, max_output_tokens).await
 }
 
 #[cfg(test)]
