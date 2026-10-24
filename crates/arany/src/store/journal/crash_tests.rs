@@ -175,7 +175,12 @@ fn crash_append_child() {
                 serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             if let Some(id) = value.get("check_id") {
                 let id = serde_json::from_value(id.clone()).unwrap();
-                let op = if let Some(record) = value.get("record") {
+                let op = if let Some(digest) = value.get("evidence_digest") {
+                    crate::journal::check::CheckOp::PublishChatgpt {
+                        id,
+                        digest: serde_json::from_value(digest.clone()).unwrap(),
+                    }
+                } else if let Some(record) = value.get("record") {
                     crate::journal::check::CheckOp::PublishProvider {
                         id,
                         record: serde_json::from_value(record.clone()).unwrap(),
@@ -624,6 +629,7 @@ fn provider_check_process_death_never_completes_unconfirmed_publication() {
             runtime().block_on(async {
                 store
                     .check(CheckOp::Start {
+                        retained: None,
                         id,
                         start: start_fixture(),
                     })
@@ -679,6 +685,87 @@ fn provider_check_process_death_never_completes_unconfirmed_publication() {
                 assert_eq!(next.view().completed_calls, 0);
                 next.close().await.unwrap();
             });
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore)]
+fn chatgpt_check_process_death_never_acknowledges_an_unfinished_external_publication() {
+    use crate::journal::check::{
+        CheckDisposition, CheckEvent, CheckJournal, CheckOp, tests::chatgpt_fixture,
+    };
+    for index in [1, 2, 3, 4, 10, 11] {
+        for stage in ["before", "after"] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = temp.path().join("state");
+            let marker = temp.path().join("stage");
+            let packet_path = temp.path().join("check.json");
+            let (id, events) = chatgpt_fixture();
+            let CheckEvent::ProviderCheckStarted { start } = events[0].clone() else {
+                unreachable!()
+            };
+            let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                store
+                    .check(CheckOp::Start {
+                        id,
+                        start: start.clone(),
+                        retained: Some(Vec::new()),
+                    })
+                    .await
+                    .unwrap();
+                for event in &events[1..index] {
+                    store
+                        .check(CheckOp::Append {
+                            id,
+                            event: event.clone(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                store.close().await.unwrap();
+            });
+            let packet = if index == events.len() - 1 {
+                serde_json::json!({"check_id":id,"evidence_digest":vec![3; 32]})
+            } else {
+                serde_json::json!({"check_id":id,"event":events[index]})
+            };
+            std::fs::write(&packet_path, serde_json::to_vec(&packet).unwrap()).unwrap();
+            kill_at_append(
+                &state,
+                SessionId::new(),
+                RunId::new(),
+                &marker,
+                stage,
+                Some(&packet_path),
+            );
+            let root = StateRoot::open_existing(&state).unwrap();
+            let success = index == events.len() - 1 && stage == "after";
+            assert_eq!(
+                root.check_evidence_valid(id, [1; 32], [3; 32]).unwrap(),
+                success
+            );
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                let view = store.load_check(id).await.unwrap().unwrap();
+                assert_eq!(view.events, index + usize::from(stage == "after"));
+                assert_eq!(
+                    view.replay_disposition(),
+                    if success {
+                        CheckDisposition::Succeeded
+                    } else {
+                        CheckDisposition::Uncertain
+                    }
+                );
+                store.close().await.unwrap();
+                let next = CheckJournal::start(StateRoot::open_existing(&state).unwrap(), start)
+                    .await
+                    .unwrap();
+                assert_eq!(next.view().completed_calls, 0);
+                next.close().await.unwrap();
+            });
+            assert!(!root.check_evidence_valid(id, [1; 32], [3; 32]).unwrap());
         }
     }
 }

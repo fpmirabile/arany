@@ -680,11 +680,44 @@ pub(super) fn accept_check_and_run(
         .expect("explicit optional synthetic diagnostic after the first real Run");
     assert!(diagnostic.status.success());
     assert!(diagnostic.stderr.is_empty());
-    assert!(String::from_utf8_lossy(&diagnostic.stdout).contains("Context window: 272k tokens\n"));
-    assert!(
-        String::from_utf8_lossy(&diagnostic.stdout)
-            .contains("optional diagnostic, not Run authorization")
+    let prefix = crate::check_output(
+        &diagnostic.stdout,
+        root.path(),
+        arany::CheckDisposition::Succeeded,
     );
+    assert_eq!(prefix, format!("Provider: chatgpt\nAccount: {}\nModel: gpt-6.1-sol\nEffort: medium\nContext window: 272k tokens\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n", index["selected"].as_str().unwrap()).as_bytes());
+    let database = rusqlite::Connection::open_with_flags(
+        root.path().join("events.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(database);
+    let journal = std::fs::read(root.path().join("events.sqlite3")).unwrap();
+    for secret in [ACCESS, REFRESH, signed, OBJECTIVE, FAILURE_BODY_CANARY] {
+        assert!(
+            !journal
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes()),
+            "diagnostic journal disclosed private input"
+        );
+    }
+    let checked: serde_json::Value = serde_json::from_slice(
+        &root
+            .record(RecordKind::ChatgptAccounts)
+            .read()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checked["schema"], 2);
+    assert!(checked["model_checks"][0]["check_id"].as_str().is_some());
     for effort in ["high", "low", "medium"] {
         let select_at = transcript.len();
         input

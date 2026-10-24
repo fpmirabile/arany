@@ -48,7 +48,7 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "selected": account_id,
         "accounts": [{
             "id": account_id,

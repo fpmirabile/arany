@@ -6,7 +6,7 @@ use crate::journal::check::{
 use crate::provider::evidence::{NativeEvidenceRecord, ProviderEvidenceRecord};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn apply(
     connection: &mut Connection,
@@ -55,18 +55,32 @@ pub(super) fn apply(
             }
             None
         }
-        CheckOp::Start { id, start } => {
+        CheckOp::Start {
+            id,
+            start,
+            retained,
+        } => {
             let existing = views(&transaction)?;
             if existing.values().any(|view| view.disposition.is_none()) {
                 return Err(StoreError::ProviderCheckBusy);
             }
             if existing.len() >= MAX_CHECKS {
-                let oldest: Option<String> = transaction.query_row(
+                let protected = protected_checks(&transaction, &existing, retained.as_deref())?;
+                let mut candidates = transaction.prepare(
                     "SELECT check_id FROM provider_check_events AS checks
                      WHERE kind='ProviderCheckFinished'
                      AND NOT EXISTS (SELECT 1 FROM provider_evidence WHERE check_id=checks.check_id)
                      AND NOT EXISTS (SELECT 1 FROM native_provider_evidence WHERE check_id=checks.check_id)
-                     ORDER BY sequence LIMIT 1", [], |row| row.get(0)).optional()?;
+                     ORDER BY sequence")?;
+                let mut oldest = None;
+                for candidate in candidates.query_map([], |row| row.get::<_, String>(0))? {
+                    let candidate = candidate?;
+                    let id: CheckId = candidate.parse()?;
+                    if !protected.contains(&id) {
+                        oldest = Some(candidate);
+                        break;
+                    }
+                }
                 let oldest = oldest.ok_or(StoreError::StorageFull)?;
                 transaction.execute(
                     "DELETE FROM provider_check_events WHERE check_id=?1",
@@ -117,6 +131,22 @@ pub(super) fn apply(
             }
             Some(append(&transaction, id, event)?)
         }
+        CheckOp::PublishChatgpt { id, digest } => {
+            let view = load(&transaction, id)?.ok_or(StoreError::InvalidHistory)?;
+            if !matches!(view.start.target, CheckTarget::Chatgpt { .. })
+                || view.publication != Some(digest)
+            {
+                return Err(StoreError::InvalidHistory);
+            }
+            Some(append(
+                &transaction,
+                id,
+                CheckEvent::ProviderCheckFinished {
+                    disposition: CheckDisposition::Succeeded,
+                    evidence: Some(digest),
+                },
+            )?)
+        }
         CheckOp::PublishProvider { id, record } => {
             let view = load(&transaction, id)?.ok_or(StoreError::InvalidHistory)?;
             if view.start.target
@@ -161,6 +191,31 @@ pub(super) fn apply(
     super::journal::crash_tests::before_commit();
     transaction.commit()?;
     Ok(result)
+}
+
+fn protected_checks(
+    connection: &Connection,
+    views: &HashMap<CheckId, CheckView>,
+    retained: Option<&[CheckId]>,
+) -> Result<HashSet<CheckId>, StoreError> {
+    let mut protected = HashSet::new();
+    for view in views.values().filter(|view| {
+        retained.map_or_else(
+            || {
+                matches!(view.start.target, CheckTarget::Chatgpt { .. })
+                    && view.disposition == Some(CheckDisposition::Succeeded)
+            },
+            |ids| ids.contains(&view.id),
+        )
+    }) {
+        protected.insert(view.id);
+        let latest: String = connection.query_row(
+            "SELECT check_id FROM provider_check_events WHERE target_key=?1 ORDER BY sequence DESC LIMIT 1",
+            [view.start.target.key()?.as_slice()], |row| row.get(0),
+        )?;
+        protected.insert(latest.parse()?);
+    }
+    Ok(protected)
 }
 
 fn footprint(events: usize, page_size: i64) -> i64 {
@@ -300,10 +355,26 @@ pub(super) fn evidence_valid(
     fingerprint: [u8; 32],
     digest: [u8; 32],
 ) -> Result<bool, StoreError> {
+    evidence_matches(
+        connection,
+        id,
+        fingerprint,
+        digest,
+        Some(CheckDisposition::Succeeded),
+    )
+}
+
+fn evidence_matches(
+    connection: &Connection,
+    id: &str,
+    fingerprint: [u8; 32],
+    digest: [u8; 32],
+    disposition: Option<CheckDisposition>,
+) -> Result<bool, StoreError> {
     let Some(view) = load(connection, id.parse()?)? else {
         return Ok(false);
     };
-    if view.disposition != Some(CheckDisposition::Succeeded)
+    if view.disposition != disposition
         || view.start.fingerprint != fingerprint
         || view.publication != Some(digest)
     {
@@ -427,4 +498,103 @@ fn seed(
             evidence: Some(digest),
         },
     )
+}
+
+impl crate::store::StateRoot {
+    pub fn check_evidence_valid(
+        &self,
+        id: CheckId,
+        fingerprint: [u8; 32],
+        digest: [u8; 32],
+    ) -> Result<bool, StoreError> {
+        self.check_evidence_state(id, fingerprint, digest, Some(CheckDisposition::Succeeded))
+    }
+
+    pub fn check_publication_pending(
+        &self,
+        id: CheckId,
+        fingerprint: [u8; 32],
+        digest: [u8; 32],
+    ) -> Result<bool, StoreError> {
+        self.check_evidence_state(id, fingerprint, digest, None)
+    }
+
+    fn check_evidence_state(
+        &self,
+        id: CheckId,
+        fingerprint: [u8; 32],
+        digest: [u8; 32],
+        disposition: Option<CheckDisposition>,
+    ) -> Result<bool, StoreError> {
+        let _lease = super::migrate::lease_after_recovery(self, false)?;
+        let mut connection = super::journal::open_connection(self, true)?;
+        let transaction = connection.transaction()?;
+        evidence_matches(
+            &transaction,
+            &id.to_string(),
+            fingerprint,
+            digest,
+            disposition,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::check::tests::{chatgpt_fixture, start_fixture};
+
+    #[test]
+    fn retention_keeps_external_proof_and_the_attempt_that_suppresses_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+        let mut connection = super::super::journal::open_connection(&root, false).unwrap();
+        let (proof, events) = chatgpt_fixture();
+        let transaction = connection.transaction().unwrap();
+        for event in &events {
+            append(&transaction, proof, event.clone()).unwrap();
+        }
+        let latest = CheckId::new();
+        append(&transaction, latest, events[0].clone()).unwrap();
+        let stop = CheckEvent::ProviderCheckFinished {
+            disposition: CheckDisposition::Failed,
+            evidence: None,
+        };
+        append(&transaction, latest, stop.clone()).unwrap();
+        let mut first_unlinked = None;
+        for _ in 2..MAX_CHECKS {
+            let id = CheckId::new();
+            first_unlinked.get_or_insert(id);
+            append(
+                &transaction,
+                id,
+                CheckEvent::ProviderCheckStarted {
+                    start: start_fixture(),
+                },
+            )
+            .unwrap();
+            append(&transaction, id, stop.clone()).unwrap();
+        }
+        transaction.commit().unwrap();
+        let id = CheckId::new();
+        apply(
+            &mut connection,
+            false,
+            CheckOp::Start {
+                id,
+                start: start_fixture(),
+                retained: Some(vec![proof]),
+            },
+        )
+        .unwrap();
+        assert!(load(&connection, proof).unwrap().is_some());
+        assert!(load(&connection, latest).unwrap().is_some());
+        assert!(
+            load(&connection, first_unlinked.unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!evidence_valid(&connection, &proof.to_string(), [1; 32], [3; 32]).unwrap());
+        assert_eq!(views(&connection).unwrap().len(), MAX_CHECKS);
+    }
 }
