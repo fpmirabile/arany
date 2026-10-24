@@ -337,16 +337,22 @@ fn cached_forks_defer_unrelated_corruption_but_validate_the_source() {
         Err(StoreError::InvalidHistory)
     ));
     let child = fork_at(&mut connection, hot.as_ref(), boundary, "Cached".into()).unwrap();
-    assert!(
-        resolve_view(&connection, child, 0, &mut 0)
-            .unwrap()
-            .1
-            .is_some()
-    );
+    assert!(matches!(
+        resolve_view(&connection, child, 0, &mut 0),
+        Err(StoreError::InvalidHistory)
+    ));
     assert!(matches!(
         prepare_fork(&mut connection, hot.as_ref(), fixture.session, None),
         Err(StoreError::InvalidHistory)
     ));
+    connection
+        .execute(
+            "UPDATE events SET kind='SessionStarted' WHERE session_id=?1",
+            [other.to_string()],
+        )
+        .unwrap();
+    let (_, view) = resolve_view(&connection, child, 0, &mut 0).unwrap();
+    assert_eq!(view.unwrap().lineage, Some(boundary));
 }
 
 #[test]
