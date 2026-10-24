@@ -16,7 +16,6 @@ const RETRY_GOAL_ACTIVE_MS: u64 = 60_000;
 const RETRY_EXHAUSTION_ADVANCE_SECS: u64 = 61;
 const REVIEW_EXHAUSTION_GOAL_ACTIVE_MS: u64 = 120_000;
 const DELEGATION_DEADLINE_MARGIN: Duration = Duration::from_secs(1);
-const DELEGATION_PROVIDER_HEADROOM: Duration = Duration::from_secs(60);
 
 pub struct TeamObservation {
     pub directory: tempfile::TempDir,
@@ -846,8 +845,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let mut identity = ProviderIdentity::new("scripted", "test-model", Provenance::native());
     identity.limits.concurrency = 8;
     if matches!(case, "delegation_deadline" | "primary_delegation_deadline") {
-        identity.limits.deadline =
-            crate::MAX_DELEGATION_DEADLINE.saturating_add(DELEGATION_PROVIDER_HEADROOM);
+        identity.limits.deadline = crate::MAX_DELEGATION_DEADLINE;
     }
     let provider = Arc::new(TeamProvider {
         identity,
