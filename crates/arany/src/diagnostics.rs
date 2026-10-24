@@ -132,6 +132,27 @@ impl fmt::Debug for ToolArgumentShape {
 }
 
 impl ToolArgumentShape {
+    pub(crate) fn from_serialized(operation: &'static str, serialized_bytes: usize) -> Self {
+        Self {
+            operation,
+            serialized_bytes,
+            path_bytes: None,
+            path_valid: None,
+            digest_chars: None,
+            digest_valid: None,
+            read_offset: None,
+            read_limit: None,
+            old_bytes: None,
+            new_bytes: None,
+            text_bytes: None,
+            program_chars: None,
+            program_valid: None,
+            args_count: None,
+            largest_arg_bytes: None,
+            nul_args_count: None,
+        }
+    }
+
     pub(crate) fn from_call(call: &crate::tools::ToolCall) -> Self {
         use crate::tools::ToolCall;
         use crate::validate::{valid_digest, valid_name, valid_relative};
@@ -255,11 +276,35 @@ pub(crate) fn subscription_failure(stage: SubscriptionFailureStage, counts: Stre
     write_failure(&root, stage, counts);
 }
 
+pub(crate) fn messages_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(root) = ROOT.get() else { return };
+    let Ok(root) = root.try_lock() else { return };
+    write_record(&root, BoundedRecord(messages_failure_record(stage, counts)));
+}
+
+pub(crate) fn messages_failure_record(
+    stage: SubscriptionFailureStage,
+    counts: StreamCounts,
+) -> String {
+    failure_record("messages", stage, counts).0
+}
+
 fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: StreamCounts) {
+    write_record(root, failure_record("subscription", stage, counts));
+}
+
+fn failure_record(
+    site: &str,
+    stage: SubscriptionFailureStage,
+    counts: StreamCounts,
+) -> BoundedRecord {
     let mut record = BoundedRecord(String::new());
     let _ = writeln!(
         record,
-        "subscription stage={stage:?} bytes={} events={} http_status={:?}",
+        "{site} stage={stage:?} bytes={} events={} http_status={:?}",
         counts.bytes, counts.events, counts.http_status
     );
     if let Some(shape) = counts.response_shape {
@@ -277,7 +322,7 @@ fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: Stre
     if let Some(shape) = counts.tool_arguments {
         let _ = writeln!(record, "tool_arguments {shape:?}");
     }
-    write_record(root, record);
+    record
 }
 
 pub(crate) fn tool_context_full(
@@ -618,6 +663,24 @@ mod tests {
         assert_eq!(
             stream_limit_record(1024, 12).0,
             "stream reason=StreamProtocol stage=StreamLimit bytes=1024 events=12\n"
+        );
+    }
+
+    #[test]
+    fn failure_record_names_site_stage_and_observed_status() {
+        assert_eq!(
+            failure_record(
+                "messages",
+                SubscriptionFailureStage::OutcomeToolArguments,
+                StreamCounts {
+                    bytes: 2048,
+                    events: 9,
+                    http_status: Some(200),
+                    ..Default::default()
+                },
+            )
+            .0,
+            "messages stage=OutcomeToolArguments bytes=2048 events=9 http_status=Some(200)\n"
         );
     }
 

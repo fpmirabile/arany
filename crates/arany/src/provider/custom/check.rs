@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const CUSTOM_CHECK_VERSION: &str =
-    "custom-protocol-text-compaction-conformance-effort-stream-journal-v39";
+    "custom-protocol-text-compaction-conformance-effort-stream-journal-v40";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -519,6 +519,8 @@ mod tests {
         ChunkedOversize,
         EncodedBody,
         EncodedBodyAfterIdentity,
+        Disconnect,
+        MalformedJson,
         EscapedCredential,
         MissingUsage,
         InputAtLimit,
@@ -555,7 +557,8 @@ mod tests {
         listener: TcpListener,
         reply: ProbeReply,
         messages: Option<MessagesCase>,
-    ) -> TcpListener {
+    ) -> (TcpListener, Option<(usize, usize)>) {
+        let mut response_shape = None;
         let count = if let ProbeReply::EmptySummary(index) = reply {
             index + 1
         } else if matches!(
@@ -704,6 +707,9 @@ mod tests {
                 continue;
             }
 
+            if matches!(reply, ProbeReply::Disconnect) {
+                continue;
+            }
             let (status, response_body) = match reply {
                 ProbeReply::Redirect => ("302 Found", String::new()),
                 ProbeReply::Unauthorized => ("401 Unauthorized", String::new()),
@@ -713,6 +719,8 @@ mod tests {
                     json!({"error":{"type":"insufficient_quota"}}).to_string(),
                 ),
                 ProbeReply::Oversize => ("200 OK", String::new()),
+                ProbeReply::MalformedJson => ("200 OK", "{".to_owned()),
+                ProbeReply::Disconnect => unreachable!(),
                 ProbeReply::EncodedBody | ProbeReply::EncodedBodyAfterIdentity => unreachable!(),
                 ProbeReply::Valid
                 | ProbeReply::CompactionRejected
@@ -835,7 +843,7 @@ mod tests {
                 start["usage"]["output_tokens"] = json!(0);
                 start["usage"]["first_extra"] = json!(vec![0; 132_000]);
                 let events = [
-                    json!({"type":"message_start","message":start}),
+                    json!({"type":"message_start","message":start.clone()}),
                     json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
                     json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
                     json!({"type":"content_block_stop","index":0}),
@@ -852,6 +860,12 @@ mod tests {
                     })
                     .collect();
                 assert!(body.len() < CONTRACT_RESPONSE_BYTES);
+                let mut assembled = start;
+                assembled["content"] = json!([{"type":"text","text":"ok"}]);
+                assembled["stop_reason"] = json!("end_turn");
+                assembled["usage"]["output_tokens"] = json!(10);
+                assembled["usage"]["second_extra"] = json!(vec![0; 132_000]);
+                response_shape = Some((body.len(), serde_json::to_vec(&assembled).unwrap().len()));
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
                 continue;
             }
@@ -906,7 +920,7 @@ mod tests {
                 .await
                 .expect("probe response");
         }
-        listener
+        (listener, response_shape)
     }
 
     async fn run_case(reply: ProbeReply) -> Result<ProviderEvidenceRecord, CustomProfileError> {
@@ -970,7 +984,7 @@ mod tests {
         )
         .await
         .expect("bounded probe");
-        let listener = server.await.expect("server completed");
+        let (listener, _) = server.await.expect("server completed");
         assert!(
             listener
                 .poll_accept(&mut std::task::Context::from_waker(std::task::Waker::noop()))
@@ -986,6 +1000,20 @@ mod tests {
         messages: bool,
         streaming: bool,
     ) -> Result<(), super::super::transport::TransportError> {
+        run_transport_case_observed(reply, compaction, messages, streaming)
+            .await
+            .0
+    }
+
+    async fn run_transport_case_observed(
+        reply: ProbeReply,
+        compaction: bool,
+        messages: bool,
+        streaming: bool,
+    ) -> (
+        Result<(), super::super::transport::TransportError>,
+        Option<(usize, usize)>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("loopback listener");
@@ -1018,21 +1046,7 @@ mod tests {
         ));
         let transport =
             CustomTransport::new(&profile, &destination, "test-key".into()).expect("transport");
-        let request = ProviderRequest {
-            session_id: crate::session::SessionId::new(),
-            run_id: RunId::new(),
-            agent_run_id: AgentRunId::new(),
-            phase: AgentPhase::RootPlan,
-            collaboration: crate::session::CollaborationPolicy::Single,
-            model: "model-1".into(),
-            max_output_tokens: 4096,
-            input: RunInput {
-                ..RunInput::new(
-                    PromptRole::ReadOnly,
-                    "Synthetic conformance check: finish directly".into(),
-                )
-            },
-        };
+        let request = transport_request();
         let result = if compaction {
             let request = CompactionRequest {
                 session_id: SessionId::new(),
@@ -1063,8 +1077,115 @@ mod tests {
                 .expect("transport rejection deadline")
                 .map(|_| ())
         };
-        server.await.expect("server completed");
-        result
+        let (_, response_body_bytes) = server.await.expect("server completed");
+        (result, response_body_bytes)
+    }
+
+    fn transport_request() -> ProviderRequest {
+        ProviderRequest {
+            session_id: crate::session::SessionId::new(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            phase: AgentPhase::RootPlan,
+            collaboration: crate::session::CollaborationPolicy::Single,
+            model: "model-1".into(),
+            max_output_tokens: 4096,
+            input: RunInput {
+                ..RunInput::new(
+                    PromptRole::ReadOnly,
+                    "Synthetic conformance check: finish directly".into(),
+                )
+            },
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(debug_assertions)]
+    async fn custom_messages_transport_rejections_are_logged_with_observed_shape() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("diagnostic state");
+        let root = StateRoot::admit(&temp.path().join("state")).expect("private state root");
+        crate::diagnostics::enable_development_diagnostics(&root);
+        let path = root.path().join("development.log");
+
+        let transport = run_transport_case(ProbeReply::Disconnect, false, true, false).await;
+        assert!(matches!(
+            transport,
+            Err(super::super::transport::TransportError::Transport)
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("messages stage=RequestTransport bytes=0 events=0 http_status=None")
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("route listener");
+        let port = listener.local_addr().expect("route address").port();
+        let base_url = format!("http://127.0.0.1:{port}/anthropic");
+        let profile = CustomProfile {
+            name: "local".into(),
+            endpoint: format!("{base_url}/v1/messages"),
+            protocol: super::super::Protocol::AnthropicMessages {
+                base_url: base_url.clone(),
+                auth: super::super::MessagesAuth::ApiKey,
+            },
+            model: "model-1".into(),
+            credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
+            capability_evidence_version: 2,
+            efforts: Vec::new(),
+        };
+        let pinned = profile.resolve_destination().await.expect("pinned route");
+        let transport =
+            CustomTransport::new(&profile, &pinned, "test-key".into()).expect("transport");
+        let destination = transport
+            .admit_stream_destination(&format!("{base_url}/redirected"), reqwest::StatusCode::OK);
+        assert!(matches!(
+            destination,
+            Err(super::super::transport::TransportError::Rejected)
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("messages stage=Destination bytes=0 events=0 http_status=Some(200)")
+        );
+
+        let http = run_transport_case(ProbeReply::Unauthorized, false, true, false).await;
+        assert!(matches!(
+            http,
+            Err(super::super::transport::TransportError::Rejected)
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("messages stage=HttpStatus bytes=0 events=0 http_status=Some(401)")
+        );
+
+        let malformed = run_transport_case(ProbeReply::MalformedJson, false, true, false).await;
+        assert!(matches!(
+            malformed,
+            Err(super::super::transport::TransportError::InvalidOutcome)
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("messages stage=ResponseEnvelope bytes=1 events=0 http_status=Some(200)")
+        );
+
+        let (aggregate, wire_bytes) =
+            run_transport_case_observed(ProbeReply::AggregateJsonNodes, false, true, true).await;
+        assert!(matches!(
+            aggregate,
+            Err(super::super::transport::TransportError::InvalidOutcome)
+        ));
+        let (wire_bytes, reconstructed_bytes) = wire_bytes.expect("aggregate stream bytes");
+        assert_ne!(wire_bytes, reconstructed_bytes);
+        assert!(std::fs::read_to_string(path).unwrap().contains(&format!(
+            "messages stage=ResponseEnvelope bytes={wire_bytes} events=6 http_status=Some(200)"
+        )));
     }
 
     #[tokio::test]
@@ -1159,7 +1280,7 @@ mod tests {
         };
         for version in [
             "custom-protocol-schema-challenge-conformance-effort-stream-v34",
-            "custom-protocol-text-compaction-conformance-effort-stream-journal-v38",
+            "custom-protocol-text-compaction-conformance-effort-stream-journal-v39",
         ] {
             let mut legacy = Sha256::new();
             for field in [
