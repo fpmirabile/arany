@@ -921,7 +921,10 @@ fn tool_step(
         .map(|f| {
             let version = |v: &crate::tools::FileVersion| WorkerBaseVersion::File {
                 sha256: v.sha256.clone(),
-                bytes: v.bytes().expect("validated command version").len() as u32,
+                bytes: v
+                    .bytes()
+                    .and_then(|bytes| u32::try_from(bytes.len()).ok())
+                    .expect("validated command version"),
                 executable: v.executable,
             };
             crate::session::worker::WorkerFileFact {

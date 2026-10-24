@@ -203,7 +203,7 @@ Hook evidence owners below are in the [permission unit corpus](../../crates/aran
 
 ### Supervisor adapter
 
-**Implementation status:** Engine-owned evaluation and recorded-verdict replay below are accepted, awaiting [V2–V3](../../planning/architecture-homogenization/README.md#v-supervisor-ownership-serial-docs-first). The current reducer still reevaluates verdicts; this contract change adds no runtime or payload-format change by itself.
+**Implementation status:** The Engine owns evaluation state, and the reducer validates recorded verdicts without reevaluating them. The ledger currently appends verdicts automatically; explicit RunLoop verdict decisions await [V3](../../planning/architecture-homogenization/README.md#v-supervisor-ownership-serial-docs-first). The payload format is unchanged.
 
 The Engine owns the bounded Supervisor evaluation state and calls one pure, deterministic evaluator over committed reducer facts. The RunLoop applies a closed decision to journal a verdict or continue without one; the reducer only projects recorded verdicts and validates their shape and placement. Tool-enabled Runs pin `config.supervisor = {evaluator: 1, window: 32, floors, candidates, digest}` in `RunStarted`; Runs without Tools pin null. The field is required. The SHA-256 digest binds the domain `arany.supervisor.policy.v1`, evaluator, window and both closed threshold structs. There is no configuration file, model call, clock, I/O, network, Guard task or journal subscriber. Repository text, model output and hooks cannot select thresholds. Shadow mode is always on in production and never changes permissions, catalogs, approvals, continuation, integration, Run outcomes or model input.
 
