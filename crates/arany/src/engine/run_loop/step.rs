@@ -31,10 +31,9 @@ mod review;
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
-    UnguardedRefusal, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, refuse,
-    undispatched,
+    UnguardedRefusal, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
 };
-use permission::{Permission, RuleSave, effective_permission_mode};
+use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
 
 use hooks::{HookFold, HookStop};
@@ -969,90 +968,6 @@ impl RunLoop<'_> {
         }
     }
 
-    fn plan_allows(&self, call: &ToolCall) -> Result<bool, EngineError> {
-        Ok(self.primary_lease_allows(call)?.is_ok()
-            && (matches!(
-                call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            ) || self.ledger().allows_tool(call)))
-    }
-
-    pub(super) fn primary_lease_allows(
-        &self,
-        call: &ToolCall,
-    ) -> Result<Result<(), super::ProposalRefusalCause>, EngineError> {
-        let allowed = self.ledger().view(|v| {
-            v.runs.last().is_some_and(|r| {
-                let leases = r
-                    .agents
-                    .iter()
-                    .filter_map(|a| a.assignment.as_ref())
-                    .filter(|w| w.released.is_none())
-                    .flat_map(|w| &w.pins.request.lease)
-                    .collect::<Vec<_>>();
-                match call {
-                    ToolCall::ApplyChangeset {
-                        source: crate::worker::ChangesetSource::WorkerHandover { .. },
-                    } => true,
-                    ToolCall::Write { path, .. }
-                    | ToolCall::Edit { path, .. }
-                    | ToolCall::MultiEdit {
-                        file_path: path, ..
-                    }
-                    | ToolCall::Mkdir { path } => {
-                        !leases.iter().any(|l| crate::worker::overlaps(l, path))
-                    }
-                    ToolCall::ParseAgentDefinition { .. }
-                    | ToolCall::List { .. }
-                    | ToolCall::Read { .. }
-                    | ToolCall::Search { .. }
-                    | ToolCall::Command { .. }
-                    | ToolCall::CommandUnguarded { .. }
-                    | ToolCall::ApplyChangeset { .. }
-                    | ToolCall::PrepareWorker { .. }
-                    | ToolCall::McpList { .. }
-                    | ToolCall::McpCall { .. }
-                    | ToolCall::GitStatus { .. }
-                    | ToolCall::GitDiff { .. }
-                    | ToolCall::GitLog { .. }
-                    | ToolCall::GitCommit { .. }
-                    | ToolCall::GitBranch { .. }
-                    | ToolCall::GitSwitch { .. }
-                    | ToolCall::GitPush { .. }
-                    | ToolCall::GhPrCreate { .. }
-                    | ToolCall::Glob { .. }
-                    | ToolCall::Skill { .. } => !call.is_process() || leases.is_empty(),
-                }
-            })
-        })?;
-        Ok(if allowed {
-            Ok(())
-        } else {
-            Err(super::ProposalRefusalCause::LeaseOverlap)
-        })
-    }
-
-    fn review_will_run(
-        &self,
-        runtime: &ToolRuntime,
-        call: &ToolCall,
-        review_allowed: bool,
-        permission: Permission,
-    ) -> Result<bool, EngineError> {
-        Ok(self.ledger().command_timeout_limit(call)?.is_none()
-            && self.plan_allows(call)?
-            && runtime.allows(call)
-            && permission
-                .narrow_terminal(self.terminal_mode(), call)
-                .approval
-                == Some(ApprovalMode::Auto)
-            && self.ledger().can_start_provider_call()
-            && review_allowed
-            && self.ledger().admits(Action::Review))
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "keep hook narrowing, human approval and journal-before-dispatch ordering together"
@@ -1241,76 +1156,6 @@ impl RunLoop<'_> {
         }
         self.save_remembered_rule(runtime, site, verdict, save)
             .map(Admission::Reserved)
-    }
-
-    // The rule is saved only after the human verdict is committed; a failed save refuses dispatch.
-    fn save_remembered_rule(
-        &self,
-        runtime: &ToolRuntime,
-        site: DispatchSite,
-        verdict: Verdict,
-        save: Option<RuleSave>,
-    ) -> Result<Verdict, EngineError> {
-        Ok(match (verdict, save) {
-            (
-                Verdict::Dispatch {
-                    intent,
-                    queue_pause,
-                },
-                Some(save),
-            ) => {
-                let saved = match save {
-                    RuleSave::Prefix(prefix) => {
-                        let expected = self
-                            .controls
-                            .host_settings
-                            .lock()
-                            .expect("host permissions lock")
-                            .as_ref()
-                            .filter(|settings| !settings.changed)
-                            .map(|settings| settings.digest);
-                        expected
-                            .ok_or(ToolError::ChangedInput)
-                            .and_then(|expected| {
-                                runtime
-                                    .record_typed_prefix_rule(prefix, expected)
-                                    .map(|digest| {
-                                        let mut pinned = self
-                                            .controls
-                                            .host_settings
-                                            .lock()
-                                            .expect("host permissions lock");
-                                        if let Some(settings) = pinned.as_mut()
-                                            && !settings.changed
-                                            && settings.digest == expected
-                                        {
-                                            settings.digest = Some(digest);
-                                        }
-                                    })
-                            })
-                    }
-                    RuleSave::Session => Ok(()),
-                };
-                if saved.is_ok() {
-                    Verdict::Dispatch {
-                        intent,
-                        queue_pause,
-                    }
-                } else {
-                    if let Some(pause) = queue_pause {
-                        self.settle_active_pause(pause, None)?;
-                    }
-                    // The rule may already be installed, so the outcome is unknown and the Run stops.
-                    let refusal = if matches!(saved, Err(crate::tools::ToolError::Uncertain)) {
-                        refuse(NotDispatched::SaveUnconfirmed, Some(StopCause::Uncertain))
-                    } else {
-                        refuse(NotDispatched::UnsavedRule, None)
-                    };
-                    self.refused(site, intent, refusal)
-                }
-            }
-            (verdict, _) => verdict,
-        })
     }
 
     async fn ask(
@@ -1971,28 +1816,6 @@ pub(super) enum HookDenial {
     Requested,
     Narrowed(String),
     Denied(String),
-}
-
-// A typed allow takes effect only in `default`; the other modes ignore it or never ask.
-fn typed_allow_takes_effect(mode: Option<crate::tools::permissions::PermissionMode>) -> bool {
-    mode == Some(crate::tools::permissions::PermissionMode::Default)
-}
-
-fn remember_candidate(
-    grant: &Grant<'_>,
-    mode: Option<crate::tools::permissions::PermissionMode>,
-    permission: Permission,
-    hooks: &HookFold,
-    call: &ToolCall,
-) -> Option<crate::tools::permissions::TypedGitPrefix> {
-    (matches!(grant, Grant::Primary { .. })
-        && !call.is_host()
-        && typed_allow_takes_effect(mode)
-        && permission.decision == Decision::Ask
-        && permission.basis == PermissionSource::Mode
-        && hooks.restriction.is_none())
-    .then(|| crate::tools::permissions::TypedGitPrefix::of_call(call))
-    .flatten()
 }
 
 async fn unguarded_gate(
@@ -2785,6 +2608,7 @@ mod tests {
 
     #[test]
     fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
+        use super::permission::typed_allow_takes_effect;
         use crate::tools::permissions::PermissionMode as M;
         assert!(typed_allow_takes_effect(Some(M::Default)));
         for mode in [
