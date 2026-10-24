@@ -140,11 +140,14 @@ impl Provider for ChatGptProvider {
             return Err(ProviderError::Rejected);
         }
         compact_at_observed(
-            &self.client,
-            Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint"),
-            &self.access_token,
+            RunCall {
+                client: &self.client,
+                endpoint: Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint"),
+                access_token: &self.access_token,
+                effort: self.effort,
+                max_output_tokens: request.max_output_tokens,
+            },
             &request,
-            self.effort,
             limits,
         )
         .await
@@ -290,27 +293,22 @@ async fn invoke_at_observed(
     max_request_bytes: usize,
     observations: (Option<ResponsePreview>, RateLimitSlot),
 ) -> Result<ProviderResponse, ProviderError> {
-    let RunCall {
-        client,
-        endpoint,
-        access_token,
-        effort,
-        max_output_tokens,
-    } = call;
-    if !(1..=max_output_tokens).contains(&request.max_output_tokens) {
+    let access_token = call.access_token;
+    if !(1..=call.max_output_tokens).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
     let (preview, limits) = observations;
     let conversation = render::conversation(request)?;
-    let body = subscription_body(request, &conversation, effort, max_request_bytes)?;
+    let body = subscription_body(request, &conversation, call.effort, max_request_bytes)?;
     let CompletedStream {
         body: completed,
         counts,
         reasoning_tokens,
     } = completed_at_with_preview(
-        client,
-        endpoint,
-        access_token,
+        RunCall {
+            max_output_tokens: request.max_output_tokens,
+            ..call
+        },
         body,
         preview.map(|preview| (preview, request.model.as_str())),
         limits,
@@ -352,33 +350,34 @@ async fn compact_at(
     effort: Effort,
 ) -> Result<CompactionResponse, ProviderError> {
     compact_at_observed(
-        client,
-        endpoint,
-        access_token,
+        RunCall {
+            client,
+            endpoint,
+            access_token,
+            effort,
+            max_output_tokens: request.max_output_tokens,
+        },
         request,
-        effort,
         RateLimitSlot::default(),
     )
     .await
 }
 
 async fn compact_at_observed(
-    client: &Client,
-    endpoint: Url,
-    access_token: &str,
+    call: RunCall<'_>,
     request: &CompactionRequest,
-    effort: Effort,
     limits: RateLimitSlot,
 ) -> Result<CompactionResponse, ProviderError> {
     if !(1..=MAX_COMPACTION_OUTPUT_TOKENS).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
-    let body = subscription_compaction_body(request, effort)?;
+    let body = subscription_compaction_body(request, call.effort)?;
+    let access_token = call.access_token;
     let CompletedStream {
         body: completed,
         counts,
         reasoning_tokens,
-    } = completed_at_with_preview(client, endpoint, access_token, body, None, limits).await?;
+    } = completed_at_with_preview(call, body, None, limits).await?;
     let result = wire::decode_streamed_compaction(&completed, &request.model)
         .map_err(|error| response_failure(error, counts))?;
     accept_result(
@@ -440,69 +439,98 @@ struct CompletedStream {
 }
 
 async fn completed_at_with_preview(
-    client: &Client,
-    endpoint: Url,
-    access_token: &str,
+    call: RunCall<'_>,
     body: Vec<u8>,
     preview: Option<(ResponsePreview, &str)>,
     limits: RateLimitSlot,
 ) -> Result<CompletedStream, ProviderError> {
+    let mut response = send_stream_request(&call, body).await?;
+    let counts = StreamCounts {
+        http_status: Some(response.status().as_u16()),
+        ..StreamCounts::default()
+    };
+    admit_stream_headers(&mut response, &call, &limits, counts).await?;
+    let mut decoder = match preview {
+        Some((preview, model)) => StreamDecoder::with_preview(
+            call.access_token,
+            model,
+            Some(preview),
+            call.max_output_tokens,
+        ),
+        None => StreamDecoder::new(call.access_token, call.max_output_tokens),
+    };
+    decoder.limits = limits;
+    let body = read_events(&mut decoder, &mut response).await?;
+    Ok(CompletedStream {
+        body,
+        counts: decoder.counts(),
+        reasoning_tokens: reasoning_tokens(decoder.output_tokens_details.as_ref())
+            .map_err(|error| failure(Stage::UsageContract, error, decoder.counts()))?,
+    })
+}
+
+async fn send_stream_request(
+    call: &RunCall<'_>,
+    body: Vec<u8>,
+) -> Result<reqwest::Response, ProviderError> {
+    let access_token = call.access_token;
     if access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
         || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
     {
         return Err(ProviderError::Rejected);
     }
-    let send = client
-        .post(endpoint.clone())
+    let send = call
+        .client
+        .post(call.endpoint.clone())
         .bearer_auth(access_token)
         .header(header::ACCEPT, "text/event-stream")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT_ENCODING, "identity")
         .body(body)
         .send();
-    let mut response = match timeout(STREAM_IDLE, send).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            return Err(failure(
-                if error.is_timeout() {
-                    Stage::Deadline
-                } else {
-                    Stage::RequestTransport
-                },
-                crate::provider::send_failure(&error),
-                StreamCounts::default(),
-            ));
-        }
+    match timeout(STREAM_IDLE, send).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(failure(
+            if error.is_timeout() {
+                Stage::Deadline
+            } else {
+                Stage::RequestTransport
+            },
+            crate::provider::send_failure(&error),
+            StreamCounts::default(),
+        )),
         // An unanswered request is a send timeout, which never retries.
-        Err(_) => {
-            return Err(failure(
-                Stage::Deadline,
-                ProviderError::Unavailable,
-                StreamCounts::default(),
-            ));
-        }
-    };
-    let counts = StreamCounts {
-        http_status: Some(response.status().as_u16()),
-        ..StreamCounts::default()
-    };
-    if response.url() != &endpoint {
+        Err(_) => Err(failure(
+            Stage::Deadline,
+            ProviderError::Unavailable,
+            StreamCounts::default(),
+        )),
+    }
+}
+
+async fn admit_stream_headers(
+    response: &mut reqwest::Response,
+    call: &RunCall<'_>,
+    limits: &RateLimitSlot,
+    counts: StreamCounts,
+) -> Result<(), ProviderError> {
+    if response.url() != &call.endpoint {
         return Err(failure(
             Stage::Destination,
             ProviderError::InvalidStream,
             counts,
         ));
     }
-    limits::headers(response.headers(), access_token, &limits)?;
+    limits::headers(response.headers(), call.access_token, limits)?;
     let status = response.status();
     if status != reqwest::StatusCode::OK {
         let error = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            crate::provider::rate_limit_failure(&mut response).await
+            crate::provider::rate_limit_failure(response).await
         } else if status.is_server_error() {
             ProviderError::RemoteServerError(
                 status.as_u16(),
-                crate::provider::server_retry_after(&response),
+                crate::provider::server_retry_after(response),
             )
         } else {
             ProviderError::RemoteHttp(status.as_u16())
@@ -521,28 +549,17 @@ async fn completed_at_with_preview(
             counts,
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
+    if response.content_length().is_some_and(|length| {
+        length > crate::provider::max_stream_bytes(call.max_output_tokens) as u64
+    }) {
+        crate::diagnostics::stream_limit(0, 0);
         return Err(failure(
             Stage::ContentLength,
             ProviderError::InvalidStream,
             counts,
         ));
     }
-    let mut decoder = match preview {
-        Some((preview, model)) => StreamDecoder::with_preview(access_token, model, Some(preview)),
-        None => StreamDecoder::new(access_token),
-    };
-    decoder.limits = limits;
-    let body = read_events(&mut decoder, &mut response).await?;
-    Ok(CompletedStream {
-        body,
-        counts: decoder.counts(),
-        reasoning_tokens: reasoning_tokens(decoder.output_tokens_details.as_ref())
-            .map_err(|error| failure(Stage::UsageContract, error, decoder.counts()))?,
-    })
+    Ok(())
 }
 
 // Only a framed event restarts the window, so comments or a trickled partial frame cannot keep a
@@ -615,9 +632,10 @@ pub(super) async fn read_completed_response(
     key: &str,
     model: &str,
     preview: Option<ResponsePreview>,
+    max_output_tokens: u32,
 ) -> Result<Vec<u8>, ProviderError> {
-    crate::provider::streaming::validate_stream_response(response)?;
-    let mut decoder = StreamDecoder::with_preview(key, model, preview);
+    crate::provider::streaming::validate_stream_response(response, max_output_tokens)?;
+    let mut decoder = StreamDecoder::with_preview(key, model, preview, max_output_tokens);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -744,10 +762,10 @@ struct DoneEvent {
 }
 
 impl<'a> StreamDecoder<'a> {
-    fn new(token: &'a str) -> Self {
+    fn new(token: &'a str, max_output_tokens: u32) -> Self {
         Self {
             token,
-            framer: SseFramer::new(),
+            framer: SseFramer::new(max_output_tokens),
             limits: RateLimitSlot::default(),
             preview: None,
             stage: Stage::EventFraming,
@@ -758,8 +776,13 @@ impl<'a> StreamDecoder<'a> {
         }
     }
 
-    fn with_preview(token: &'a str, model: &'a str, preview: Option<ResponsePreview>) -> Self {
-        let mut decoder = Self::new(token);
+    fn with_preview(
+        token: &'a str,
+        model: &'a str,
+        preview: Option<ResponsePreview>,
+        max_output_tokens: u32,
+    ) -> Self {
+        let mut decoder = Self::new(token, max_output_tokens);
         decoder.preview = preview.map(|preview| ResponsesPreview::new(token, model, preview));
         decoder
     }

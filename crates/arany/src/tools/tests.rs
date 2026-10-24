@@ -3,7 +3,7 @@ use super::config::Config;
 use super::skills::parse_json;
 use super::types::*;
 use crate::session::WorkspaceIdentity;
-use crate::validate::{digest, hex_digest, valid_revision};
+use crate::validate::{MAX_REVISION_BYTES, digest, hex_digest, valid_revision};
 use serde_json::{Value, json};
 
 fn config_value() -> Value {
@@ -2151,6 +2151,11 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
             revision: Some("main".into()),
             max_count: 50,
         },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some("release..feature/topic".into()),
+            max_count: 50,
+        },
     ];
     for call in &valid {
         assert!(call.valid(), "{call:?}");
@@ -2197,6 +2202,35 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
             path: ".".into(),
             revision: None,
             max_count: 51,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some("..HEAD".into()),
+            max_count: 5,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some("HEAD..".into()),
+            max_count: 5,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some("HEAD...main".into()),
+            max_count: 5,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some("main..topic..other".into()),
+            max_count: 5,
+        },
+        ToolCall::GitLog {
+            path: ".".into(),
+            revision: Some(format!(
+                "{}..{}",
+                "a".repeat(MAX_REVISION_BYTES),
+                "b".repeat(MAX_REVISION_BYTES) + "b"
+            )),
+            max_count: 5,
         },
     ];
     for call in &invalid {

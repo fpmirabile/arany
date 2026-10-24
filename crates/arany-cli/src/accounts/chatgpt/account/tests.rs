@@ -1047,6 +1047,7 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
     let fingerprint = model_check_fingerprint(&selected, "model-one", Effort::High).unwrap();
     assert_ne!(admitted, fingerprint);
     assert!(model_check_valid(&index, id, fingerprint, now));
+    assert_superseded_account_versions(&selected, admitted, &index, now);
     for (model, effort, window) in [
         ("model-one", Effort::High, Some(272_000)),
         ("model-two", Effort::High, None),
@@ -1211,6 +1212,46 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         id
     );
     assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
+}
+
+fn assert_superseded_account_versions(
+    selected: &SelectedAccount,
+    admitted: [u8; 32],
+    index: &AccountIndex,
+    now: u64,
+) {
+    let previous_admission = account_fingerprint(
+        selected,
+        "model-one",
+        Effort::High,
+        "chatgpt-consented-account-admission-v36",
+        "no-preflight-inference;strict-stream-outcomes;local-output-bound",
+    )
+    .unwrap();
+    assert_ne!(admitted, previous_admission);
+    assert!(
+        selected
+            .consent
+            .matches(&selected.credentials, selected.storage)
+    );
+    let previous_check = account_fingerprint(
+        selected,
+        "model-one",
+        Effort::High,
+        "chatgpt-goal-contract-strict-stream-conformance-v34",
+        "three-probes-1024-local-output-tokens",
+    )
+    .unwrap();
+    let current = model_check_fingerprint(selected, "model-one", Effort::High).unwrap();
+    assert_ne!(current, previous_check);
+    let mut superseded = AccountIndex::decode(&serde_json::to_vec(index).unwrap()).unwrap();
+    assert_eq!(superseded.model_checks.len(), 1);
+    superseded.model_checks[0].fingerprint = previous_check;
+    assert!(!model_check_valid(&superseded, selected.id, current, now));
+    assert_eq!(
+        checked_model_window(&superseded, selected, "model-one", now).unwrap(),
+        None
+    );
 }
 
 #[test]

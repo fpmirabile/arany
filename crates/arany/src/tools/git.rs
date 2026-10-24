@@ -9,7 +9,10 @@ use super::executable::{EXECUTABLES, git_root, has_magic};
 use super::guard::GuardContext;
 use super::permissions::HiddenPaths;
 use super::types::{MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall};
-use crate::validate::{FORBIDDEN_NAMES, forbidden, hex_digest, valid_relative, valid_revision};
+use crate::validate::{
+    FORBIDDEN_NAMES, MAX_REVISION_BYTES, MAX_REVISION_RANGE_BYTES, forbidden, hex_digest,
+    valid_relative, valid_revision,
+};
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 use serde_json::{Value, json};
@@ -42,7 +45,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             max_count,
         } => {
             valid_relative(path, true)
-                && revision.as_deref().is_none_or(valid_revision)
+                && revision.as_deref().is_none_or(valid_log_revision)
                 && (1..=MAX_GIT_LOG_COMMITS).contains(max_count)
         }
         ToolCall::GitCommit {
@@ -115,7 +118,8 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "path",
         json!({"type":"string", "description":"Workspace-relative path that limits the result; \".\" for the whole repository."}),
     );
-    let revision = json!({"type":["string","null"], "description":"null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes."});
+    let revision = json!({"type":["string","null"], "description":format!("null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':', '@{{' or options. At most {MAX_REVISION_BYTES} bytes.")});
+    let log_revision = json!({"type":["string","null"], "description":format!("null, one revision, or one base..head range. A range lists commits reachable from head but not base; its result includes the captured endpoint revisions and commit OIDs. Each endpoint is HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999), at most {MAX_REVISION_BYTES} bytes each; the range is at most {MAX_REVISION_RANGE_BYTES} bytes. Ranges have no open endpoints, three-dot form, revision sets, ':', '@{{' or options.")});
     Some(match operation {
         "git_status" => vec![path],
         "git_diff" => vec![
@@ -124,12 +128,12 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ("head", revision),
             (
                 "staged",
-                json!({"type":"boolean", "description":"true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares base with head."}),
+                json!({"type":"boolean", "description":"true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares the two endpoint trees using Git's two-dot semantics, not a merge-base comparison."}),
             ),
         ],
         "git_log" => vec![
             path,
-            ("revision", revision),
+            ("revision", log_revision),
             (
                 "max_count",
                 json!({"type":"integer", "description":"Number of commits: integer 1 through 50 inclusive."}),
@@ -207,6 +211,27 @@ const LINKED: [(&str, bool, bool); 4] = [
 const NO_REPOSITORY: &str = "The Workspace root has no .git directory; typed Git reads need a repository rooted at the Workspace.";
 const UNSUPPORTED_LAYOUT: &str = "The Workspace .git is not a plain repository directory (linked worktree, submodule checkout, gitfile, symlink or missing data); typed Git reads do not support it.";
 const UNSUPPORTED_FORMAT: &str = "The repository uses Git extensions (such as SHA-256 objects, reftable refs or partial clone) that typed Git reads do not support.";
+
+enum LogRevision<'a> {
+    Single,
+    Range { base: &'a str, head: &'a str },
+}
+
+fn log_revision(revision: &str) -> Option<LogRevision<'_>> {
+    if let Some((base, head)) = revision.split_once("..") {
+        (revision.len() <= MAX_REVISION_RANGE_BYTES
+            && !head.contains("..")
+            && valid_revision(base)
+            && valid_revision(head))
+        .then_some(LogRevision::Range { base, head })
+    } else {
+        valid_revision(revision).then_some(LogRevision::Single)
+    }
+}
+
+fn valid_log_revision(revision: &str) -> bool {
+    log_revision(revision).is_some()
+}
 
 fn executable_bytes(executable: &str) -> Result<Vec<u8>, ToolError> {
     use std::os::unix::fs::MetadataExt;
@@ -678,6 +703,280 @@ fn invocations(call: &ToolCall, filtered: bool) -> Result<Vec<Vec<String>>, Tool
     Ok(runs)
 }
 
+fn comparison_revisions(call: &ToolCall) -> Option<(&str, &str)> {
+    match call {
+        ToolCall::GitDiff {
+            base: Some(base),
+            head: Some(head),
+            ..
+        } => Some((base, head)),
+        ToolCall::GitLog {
+            revision: Some(revision),
+            ..
+        } => match log_revision(revision)? {
+            LogRevision::Single => None,
+            LogRevision::Range { base, head } => Some((base, head)),
+        },
+        _ => None,
+    }
+}
+
+async fn resolve_revision(
+    git: &Path,
+    env: &[(&'static str, OsString)],
+    workspace: &Path,
+    revision: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Captured, ToolError> {
+    let expression = format!("{revision}^{{commit}}");
+    spawn_git(
+        git,
+        &owned(&[
+            "--no-pager",
+            "--no-optional-locks",
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &expression,
+        ]),
+        env,
+        workspace,
+        deadline,
+    )
+    .await
+}
+
+struct Comparison {
+    base_revision: String,
+    head_revision: String,
+    base_oid: String,
+    head_oid: String,
+}
+
+enum ComparisonResolution {
+    NotApplicable,
+    Resolved(Comparison),
+    Failed(String),
+}
+
+enum CapturedOutputs {
+    Ready(Vec<Captured>),
+    Failed(String),
+}
+
+struct ComparisonContext<'a> {
+    git: &'a Path,
+    env: &'a [(&'static str, OsString)],
+    workspace: &'a Path,
+    deadline: tokio::time::Instant,
+    max_bytes: usize,
+    hidden: &'a HiddenPaths,
+}
+
+impl ComparisonContext<'_> {
+    async fn resolve(&self, call: &ToolCall) -> Result<ComparisonResolution, ToolError> {
+        let Some((base, head)) = comparison_revisions(call) else {
+            return Ok(ComparisonResolution::NotApplicable);
+        };
+        let mut oids = Vec::with_capacity(2);
+        for revision in [base, head] {
+            let capture =
+                resolve_revision(self.git, self.env, self.workspace, revision, self.deadline)
+                    .await?;
+            if capture.overflow {
+                return Ok(ComparisonResolution::Failed(failure(
+                    "git revision output exceeded its capture bound",
+                    &capture.stderr,
+                    self.max_bytes,
+                    self.hidden,
+                )));
+            }
+            if let Some(failed) = capture_failure(&capture, self.max_bytes, self.hidden) {
+                return Ok(ComparisonResolution::Failed(failed));
+            }
+            if !capture.stderr.is_empty() {
+                return Ok(ComparisonResolution::Failed(failure(
+                    "git revision resolution was ambiguous or unsupported",
+                    b"",
+                    self.max_bytes,
+                    self.hidden,
+                )));
+            }
+            let bytes = capture
+                .stdout
+                .strip_suffix(b"\n")
+                .unwrap_or(&capture.stdout);
+            oids.push(object_id(bytes)?.to_owned());
+        }
+        Ok(ComparisonResolution::Resolved(Comparison {
+            base_revision: base.to_owned(),
+            head_revision: head.to_owned(),
+            base_oid: oids[0].clone(),
+            head_oid: oids[1].clone(),
+        }))
+    }
+}
+
+struct PreparedGitRead<'a> {
+    workspace: &'a Path,
+    git: &'a Program,
+    call: &'a ToolCall,
+    hidden: &'a HiddenPaths,
+    max_bytes: usize,
+    deadline: tokio::time::Instant,
+    env: Vec<(&'static str, OsString)>,
+}
+
+impl PreparedGitRead<'_> {
+    async fn run(self, repository: &Repository) -> Result<String, ToolError> {
+        let budget = self
+            .max_bytes
+            .checked_sub(ENVELOPE_BYTES)
+            .ok_or(ToolError::Limit)?;
+        let comparison = match (ComparisonContext {
+            git: Path::new(&self.git.executable),
+            env: &self.env,
+            workspace: self.workspace,
+            deadline: self.deadline,
+            max_bytes: self.max_bytes,
+            hidden: self.hidden,
+        })
+        .resolve(self.call)
+        .await?
+        {
+            ComparisonResolution::NotApplicable => None,
+            ComparisonResolution::Resolved(comparison) => Some(comparison),
+            ComparisonResolution::Failed(output) => return Ok(output),
+        };
+        let call = comparison.as_ref().map_or_else(
+            || self.call.clone(),
+            |comparison| with_comparison_oids(self.call, comparison),
+        );
+        let outputs = match self.capture_outputs(&call, repository).await? {
+            CapturedOutputs::Ready(outputs) => outputs,
+            CapturedOutputs::Failed(output) => return Ok(output),
+        };
+        let mut value = self.render(&call, &outputs, repository, budget).await?;
+        if let Some(comparison) = &comparison
+            && let Value::Object(fields) = &mut value
+        {
+            fields.insert("comparison".into(), comparison.output());
+        }
+        let text = value.to_string();
+        if text.len() > self.max_bytes {
+            return Err(ToolError::Limit);
+        }
+        Ok(text)
+    }
+
+    async fn capture_outputs(
+        &self,
+        call: &ToolCall,
+        repository: &Repository,
+    ) -> Result<CapturedOutputs, ToolError> {
+        let branch_read = matches!(call, ToolCall::GitBranch { name: None, .. });
+        let mut outputs = Vec::new();
+        for argv in invocations(call, !self.hidden.is_empty())? {
+            let capture = match spawn_git(
+                Path::new(&self.git.executable),
+                &argv,
+                &self.env,
+                self.workspace,
+                self.deadline,
+            )
+            .await
+            {
+                Err(ToolError::Timeout(_)) if branch_read => {
+                    return Ok(CapturedOutputs::Failed(
+                        branch_result(repository, Vec::new(), None, true, true).to_string(),
+                    ));
+                }
+                result => result?,
+            };
+            if let Some(failed) = capture_failure(&capture, self.max_bytes, self.hidden) {
+                return Ok(CapturedOutputs::Failed(failed));
+            }
+            outputs.push(capture);
+        }
+        Ok(CapturedOutputs::Ready(outputs))
+    }
+
+    async fn render(
+        &self,
+        call: &ToolCall,
+        outputs: &[Captured],
+        repository: &Repository,
+        budget: usize,
+    ) -> Result<Value, ToolError> {
+        match (call, outputs) {
+            (ToolCall::GitStatus { .. }, [status]) => {
+                status_output(&status.stdout, status.overflow, budget, self.hidden)
+            }
+            (ToolCall::GitDiff { .. }, [numstat, patch]) => {
+                diff_output(numstat, patch, budget, self.hidden)
+            }
+            (ToolCall::GitLog { max_count, .. }, [log]) => {
+                log_output(&log.stdout, log.overflow, budget, *max_count, self.hidden)
+            }
+            (
+                ToolCall::GitBranch {
+                    base, max_count, ..
+                },
+                [list],
+            ) => {
+                BranchRead {
+                    git: Path::new(&self.git.executable),
+                    env: &self.env,
+                    workspace: self.workspace,
+                    deadline: self.deadline,
+                    hidden: self.hidden,
+                    repository,
+                    budget,
+                }
+                .output(list, max_count.unwrap_or(MAX_ROWS as u32), base.as_deref())
+                .await
+            }
+            _ => Err(ToolError::Configuration),
+        }
+    }
+}
+
+impl Comparison {
+    fn output(&self) -> Value {
+        json!({
+            "base": {"revision": self.base_revision, "oid": self.base_oid},
+            "head": {"revision": self.head_revision, "oid": self.head_oid},
+        })
+    }
+}
+
+fn with_comparison_oids(call: &ToolCall, comparison: &Comparison) -> ToolCall {
+    let mut call = call.clone();
+    match &mut call {
+        ToolCall::GitDiff { base, head, .. } => {
+            *base = Some(comparison.base_oid.clone());
+            *head = Some(comparison.head_oid.clone());
+        }
+        ToolCall::GitLog { revision, .. } => {
+            *revision = Some(format!("{}..{}", comparison.base_oid, comparison.head_oid));
+        }
+        _ => {}
+    }
+    call
+}
+
+fn capture_failure(capture: &Captured, max_bytes: usize, hidden: &HiddenPaths) -> Option<String> {
+    if !capture.overflow && capture.status != Some(0) {
+        let message = capture.status.map_or_else(
+            || "git terminated by a signal".to_owned(),
+            |code| format!("git exited with status {code}"),
+        );
+        Some(failure(&message, &capture.stderr, max_bytes, hidden))
+    } else {
+        None
+    }
+}
+
 fn environment(view: &Path, workspace: &Path, scratch: &Path) -> Vec<(&'static str, OsString)> {
     vec![
         ("GIT_DIR", view.into()),
@@ -867,15 +1166,15 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         )
         .await
     } else {
-        execute(
-            site.workspace,
+        execute(GitReadRequest {
+            workspace: site.workspace,
             scratch,
             git,
-            &site.intent.call,
-            site.hidden,
+            call: &site.intent.call,
+            hidden: site.hidden,
             max_bytes,
-            site.remaining_runtime(),
-        )
+            runtime: site.remaining_runtime(),
+        })
         .await
     };
     #[cfg(target_os = "linux")]
@@ -883,15 +1182,26 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     output
 }
 
-pub(super) async fn execute(
-    workspace: &Path,
-    scratch: &Path,
-    git: &Program,
-    call: &ToolCall,
-    hidden: &HiddenPaths,
-    max_bytes: usize,
-    runtime: Duration,
-) -> Result<String, ToolError> {
+pub(super) struct GitReadRequest<'a> {
+    pub(super) workspace: &'a Path,
+    pub(super) scratch: &'a Path,
+    pub(super) git: &'a Program,
+    pub(super) call: &'a ToolCall,
+    pub(super) hidden: &'a HiddenPaths,
+    pub(super) max_bytes: usize,
+    pub(super) runtime: Duration,
+}
+
+pub(super) async fn execute(request: GitReadRequest<'_>) -> Result<String, ToolError> {
+    let GitReadRequest {
+        workspace,
+        scratch,
+        git,
+        call,
+        hidden,
+        max_bytes,
+        runtime,
+    } = request;
     let branch_read = matches!(call, ToolCall::GitBranch { name: None, .. });
     let runtime = runtime.min(MAX_GIT_RUNTIME);
     let work_runtime = if branch_read {
@@ -907,62 +1217,17 @@ pub(super) async fn execute(
         Prepared::Unsupported(message) => return Ok(failure(message, &[], max_bytes, hidden)),
     };
     let env = environment(&view, workspace, scratch);
-    let budget = max_bytes
-        .checked_sub(ENVELOPE_BYTES)
-        .ok_or(ToolError::Limit)?;
-    let mut outputs = Vec::new();
-    for argv in invocations(call, !hidden.is_empty())? {
-        let captured =
-            match spawn_git(Path::new(&git.executable), &argv, &env, workspace, deadline).await {
-                Err(ToolError::Timeout(_)) if branch_read => {
-                    return Ok(branch_result(&repository, Vec::new(), None, true, true).to_string());
-                }
-                result => result?,
-            };
-        if !captured.overflow && captured.status != Some(0) {
-            let message = captured.status.map_or_else(
-                || "git terminated by a signal".to_owned(),
-                |code| format!("git exited with status {code}"),
-            );
-            return Ok(failure(&message, &captured.stderr, max_bytes, hidden));
-        }
-        outputs.push(captured);
+    PreparedGitRead {
+        workspace,
+        git,
+        call,
+        hidden,
+        max_bytes,
+        deadline,
+        env,
     }
-    let value = match (call, outputs.as_slice()) {
-        (ToolCall::GitStatus { .. }, [status]) => {
-            status_output(&status.stdout, status.overflow, budget, hidden)?
-        }
-        (ToolCall::GitDiff { .. }, [numstat, patch]) => {
-            diff_output(numstat, patch, budget, hidden)?
-        }
-        (ToolCall::GitLog { max_count, .. }, [log]) => {
-            log_output(&log.stdout, log.overflow, budget, *max_count, hidden)?
-        }
-        (
-            ToolCall::GitBranch {
-                base, max_count, ..
-            },
-            [list],
-        ) => {
-            BranchRead {
-                git: Path::new(&git.executable),
-                env: &env,
-                workspace,
-                deadline,
-                hidden,
-                repository: &repository,
-                budget,
-            }
-            .output(list, max_count.unwrap_or(MAX_ROWS as u32), base.as_deref())
-            .await?
-        }
-        _ => return Err(ToolError::Configuration),
-    };
-    let text = value.to_string();
-    if text.len() > max_bytes {
-        return Err(ToolError::Limit);
-    }
-    Ok(text)
+    .run(&repository)
+    .await
 }
 
 // Diagnostics cannot be matched against path rules, so a filtered read keeps only its message.
@@ -2081,15 +2346,15 @@ pub(super) mod tests {
             .build()
             .unwrap();
         let output = runtime
-            .block_on(execute(
+            .block_on(execute(GitReadRequest {
                 workspace,
                 scratch,
-                &git,
+                git: &git,
                 call,
                 hidden,
-                16 * 1024,
-                Duration::from_secs(30),
-            ))
+                max_bytes: 16 * 1024,
+                runtime: Duration::from_secs(30),
+            }))
             .expect("typed Git read");
         serde_json::from_str(&output).unwrap()
     }
@@ -2542,15 +2807,15 @@ pub(super) mod tests {
         let workspace = fixture(temp.path());
         let git = discover().unwrap();
         let hidden = none();
-        let first = execute(
-            &workspace,
-            &scratch(temp.path(), 510),
-            &git,
-            &branches(None, None, Some(1)),
-            &hidden,
-            16 * 1024,
-            MAX_GIT_RUNTIME,
-        )
+        let first = execute(GitReadRequest {
+            workspace: &workspace,
+            scratch: &scratch(temp.path(), 510),
+            git: &git,
+            call: &branches(None, None, Some(1)),
+            hidden: &hidden,
+            max_bytes: 16 * 1024,
+            runtime: MAX_GIT_RUNTIME,
+        })
         .await
         .unwrap();
         let first: Value = serde_json::from_str(&first).unwrap();
@@ -2575,15 +2840,15 @@ pub(super) mod tests {
         assert_eq!(result["branches"], first["branches"]);
         assert_eq!(result["timed_out"], true);
         assert_eq!(result["truncated"], true);
-        let expired = execute(
-            &workspace,
-            &scratch(temp.path(), 511),
-            &git,
-            &branches(None, None, None),
-            &hidden,
-            16 * 1024,
-            Duration::ZERO,
-        )
+        let expired = execute(GitReadRequest {
+            workspace: &workspace,
+            scratch: &scratch(temp.path(), 511),
+            git: &git,
+            call: &branches(None, None, None),
+            hidden: &hidden,
+            max_bytes: 16 * 1024,
+            runtime: Duration::ZERO,
+        })
         .await
         .unwrap();
         let expired: Value = serde_json::from_str(&expired).unwrap();
@@ -3132,6 +3397,175 @@ pub(super) mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn log_revision_accepts_only_bounded_two_dot_ranges() {
+        assert!(matches!(
+            log_revision("base..head"),
+            Some(LogRevision::Range {
+                base: "base",
+                head: "head"
+            })
+        ));
+        assert!(matches!(log_revision("main"), Some(LogRevision::Single)));
+        assert!(
+            log_revision(&format!(
+                "{}..{}",
+                "a".repeat(MAX_REVISION_BYTES),
+                "b".repeat(MAX_REVISION_BYTES)
+            ))
+            .is_some()
+        );
+        for revision in [
+            "..head",
+            "base..",
+            "base...head",
+            "base..head..other",
+            "-p..head",
+        ] {
+            assert!(log_revision(revision).is_none(), "{revision}");
+        }
+        assert!(
+            log_revision(&format!(
+                "{}..{}",
+                "a".repeat(MAX_REVISION_BYTES),
+                "b".repeat(MAX_REVISION_BYTES + 1)
+            ))
+            .is_none()
+        );
+    }
+
+    fn divergent_range_fixture(root: &Path) -> (PathBuf, PathBuf, String, String) {
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let git = |args: &[&str]| host_git(&workspace, &home, args);
+        let oid = |revision: &str| {
+            let output = host_git_output(&workspace, &home, &["rev-parse", revision]);
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(workspace.join("common.txt"), "base\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "common"]);
+        git(&["checkout", "-q", "-b", "base-only"]);
+        std::fs::write(workspace.join("base.txt"), "base only\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base-only tip"]);
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(workspace.join("head.txt"), "head only\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "head tip"]);
+        let base_oid = oid("base-only");
+        let head_oid = oid("HEAD");
+        (workspace, home, base_oid, head_oid)
+    }
+
+    #[test]
+    fn range_log_and_endpoint_diff_capture_oids_and_use_git_two_dot_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let (workspace, home, base_oid, head_oid) = divergent_range_fixture(temp.path());
+        let log = run_call(
+            &workspace,
+            &scratch(temp.path(), 1),
+            &ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("base-only..HEAD".into()),
+                max_count: 50,
+            },
+        );
+        assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+        assert_eq!(log["commits"][0]["subject"], "head tip");
+        assert_eq!(
+            log["comparison"],
+            json!({
+                "base": {"revision": "base-only", "oid": base_oid},
+                "head": {"revision": "HEAD", "oid": head_oid},
+            })
+        );
+        let empty = run_call(
+            &workspace,
+            &scratch(temp.path(), 2),
+            &ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("HEAD..HEAD".into()),
+                max_count: 50,
+            },
+        );
+        assert_eq!(empty["commits"], json!([]));
+        assert_eq!(empty["truncated"], false);
+        let diff = run_call(
+            &workspace,
+            &scratch(temp.path(), 3),
+            &ToolCall::GitDiff {
+                path: ".".into(),
+                base: Some("base-only".into()),
+                head: Some("HEAD".into()),
+                staged: false,
+            },
+        );
+        assert_eq!(diff["comparison"]["base"]["oid"], base_oid);
+        assert_eq!(diff["comparison"]["head"]["oid"], head_oid);
+        assert_eq!(diff["files"].as_array().unwrap().len(), 2);
+        assert!(diff["patch"].as_str().unwrap().contains("base only"));
+        assert!(diff["patch"].as_str().unwrap().contains("head only"));
+        let three_dot = host_git_output(&workspace, &home, &["diff", "base-only...HEAD"]);
+        assert!(three_dot.status.success());
+        assert!(!String::from_utf8_lossy(&three_dot.stdout).contains("base only"));
+        let missing = run_call(
+            &workspace,
+            &scratch(temp.path(), 4),
+            &ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("missing..HEAD".into()),
+                max_count: 50,
+            },
+        );
+        assert!(missing.get("failed").is_some());
+    }
+
+    #[test]
+    fn ambiguous_branch_and_tag_endpoints_fail_for_ranges_and_diffs() {
+        let temp = tempfile::tempdir().unwrap();
+        let (workspace, home, _, _) = divergent_range_fixture(temp.path());
+        host_git(&workspace, &home, &["tag", "base-only", "HEAD"]);
+        let ambiguous = host_git_output(
+            &workspace,
+            &home,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                "base-only^{commit}",
+            ],
+        );
+        assert!(ambiguous.status.success());
+        assert!(!ambiguous.stderr.is_empty());
+        for (index, call) in [
+            ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("base-only..HEAD".into()),
+                max_count: 50,
+            },
+            ToolCall::GitDiff {
+                path: ".".into(),
+                base: Some("base-only".into()),
+                head: Some("HEAD".into()),
+                staged: false,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let value = run_call(&workspace, &scratch(temp.path(), index + 5), &call);
+            assert_eq!(
+                value,
+                json!({"failed": "git revision resolution was ambiguous or unsupported"})
+            );
+        }
     }
 
     #[test]

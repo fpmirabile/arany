@@ -1795,13 +1795,15 @@ mod tests {
             .unwrap();
         let output = runtime
             .block_on(crate::tools::git::execute(
-                &workspace,
-                &root,
-                &git,
-                &call,
-                &Default::default(),
-                16 * 1024,
-                Duration::from_secs(20),
+                crate::tools::git::GitReadRequest {
+                    workspace: &workspace,
+                    scratch: &root,
+                    git: &git,
+                    call: &call,
+                    hidden: &Default::default(),
+                    max_bytes: 16 * 1024,
+                    runtime: Duration::from_secs(20),
+                },
             ))
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -1820,13 +1822,15 @@ mod tests {
         };
         let output = runtime
             .block_on(crate::tools::git::execute(
-                &workspace,
-                &root,
-                &git,
-                &log,
-                &Default::default(),
-                16 * 1024,
-                Duration::from_secs(20),
+                crate::tools::git::GitReadRequest {
+                    workspace: &workspace,
+                    scratch: &root,
+                    git: &git,
+                    call: &log,
+                    hidden: &Default::default(),
+                    max_bytes: 16 * 1024,
+                    runtime: Duration::from_secs(20),
+                },
             ))
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();

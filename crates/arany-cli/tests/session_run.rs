@@ -6,14 +6,94 @@ use arany::{
     set_session_defaults,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn assert_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
+fn assert_git_range_outputs(
+    run: &arany::RunView,
+    workspace: &std::path::Path,
+    home: &std::path::Path,
+    git: &str,
+) {
+    let output = |index: usize| {
+        serde_json::from_str::<serde_json::Value>(
+            &run.tools[index].observation.as_ref().unwrap().output,
+        )
+        .unwrap()
+    };
+    let oid = |revision: &str| {
+        let result = std::process::Command::new(git)
+            .args(["rev-parse", revision])
+            .current_dir(workspace)
+            .env_clear()
+            .env("HOME", home)
+            .env("LC_ALL", "C")
+            .bounded_output_for(std::time::Duration::from_secs(20), 16 * 1024)
+            .unwrap();
+        assert!(result.status.success());
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    let range = output(5);
+    assert_eq!(
+        range["comparison"],
+        serde_json::json!({
+            "base": {"revision": "HEAD~1", "oid": oid("HEAD~1")},
+            "head": {"revision": "protected", "oid": oid("protected")}
+        })
+    );
+    assert_eq!(
+        range["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|commit| commit["subject"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["second commit"]
+    );
+    assert!(!range.to_string().contains("BRANCH_DISCLOSURE_CANARY"));
+    assert!(!range.to_string().contains("private fixture"));
+    let diff = output(6);
+    assert_eq!(
+        diff["comparison"],
+        serde_json::json!({
+            "base": {"revision": "HEAD~1", "oid": oid("HEAD~1")},
+            "head": {"revision": "HEAD", "oid": oid("HEAD")}
+        })
+    );
+    assert!(diff["patch"].as_str().unwrap().contains("+bravo"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::ProviderRequest]) {
+    for (request_index, tool_index) in [(6, 5), (7, 6), (8, 7), (9, 8)] {
+        assert_eq!(
+            requests[request_index]
+                .input
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations()
+                .last()
+                .unwrap()
+                .output,
+            run.tools[tool_index].observation.as_ref().unwrap().output
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
+    for index in [5, 6, 7, 8] {
+        assert_eq!(
+            replay.tools[index].observation,
+            run.tools[index].observation
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
     let timed_out = branches["timed_out"].as_bool().unwrap();
     let rows = branches["branches"].as_array().unwrap();
     assert_eq!(branches["history_complete"], true);
-    assert_eq!(
-        branches["truncated"],
-        timed_out || rows.iter().any(|row| row["counts_capped"] == true)
-    );
+    assert_eq!(branches["truncated"], timed_out);
     if branches["comparison_base"].is_null() {
         assert!(timed_out && rows.is_empty());
         return;
@@ -36,24 +116,11 @@ fn assert_git_branch_journey(branches: &serde_json::Value, workspace: &std::path
         assert_eq!(row["kind"], if index == 2 { "remote" } else { "local" });
         assert_eq!(row["current"], index == 0);
         assert!(row["symbolic_target"].is_null());
-        let capped = row["counts_capped"].as_bool().unwrap();
-        assert_eq!(row["counts_withheld"], capped);
-        if capped {
-            assert!(row["ahead"].is_null() && row["behind"].is_null());
-        } else {
-            assert_eq!(row["ahead"], if index == 1 { 2 } else { 1 });
-            assert_eq!(row["behind"], 0);
-        }
-        if row["subject_withheld"].as_bool().unwrap() {
-            assert!(row["subject"].is_null());
-            assert!(index == 1 || capped);
-        } else {
-            assert_ne!(index, 1);
-            assert_eq!(row["subject"], "second commit");
-        }
-        if index == 1 {
-            assert_eq!(row["subject_withheld"], true);
-        }
+        assert!(row["ahead"].is_null() && row["behind"].is_null());
+        assert_eq!(row["counts_withheld"], true);
+        assert_eq!(row["counts_capped"], false);
+        assert!(row["subject"].is_null());
+        assert_eq!(row["subject_withheld"], true);
     }
 }
 
