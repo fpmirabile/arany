@@ -67,7 +67,10 @@ fn validate_permission_verdict(
         if verdict.approved
             && !(unguarded
                 && mode == PermissionMode::DontAsk
-                && verdict.source == PermissionSource::SessionApproval)
+                && matches!(
+                    verdict.source,
+                    PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
+                ))
             && (restriction == crate::tools::permissions::Decision::Deny
                 || restriction == crate::tools::permissions::Decision::Ask
                     && !matches!(
