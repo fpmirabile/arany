@@ -12,6 +12,18 @@ use crate::session::{
     WorkspaceIdentity,
 };
 
+fn call_budget_exhausted(goal: &GoalView) -> bool {
+    let budget = goal.effective_budget();
+    budget
+        .max_provider_calls
+        .is_some_and(|limit| goal.provider_calls >= limit)
+        || budget.max_tokens.is_some_and(|limit| {
+            goal.token_usage_unknown
+                || goal.known_tokens >= limit
+                || !goal.unobserved_provider_calls.is_empty()
+        })
+}
+
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
     #[expect(
@@ -279,20 +291,12 @@ impl SessionView {
             }
         }
         let goal = current_goal_mut(self, *goal_id)?;
-        let budget = goal.effective_budget();
         if goal.status != GoalStatus::Running
             || goal.active_run != Some(*run_id)
             || !agent_active
             || goal.unobserved_provider_calls.contains(agent_run_id)
             || goal.compaction_call_reserved.is_some()
-            || budget
-                .max_provider_calls
-                .is_some_and(|limit| goal.provider_calls >= limit)
-            || budget.max_tokens.is_some_and(|limit| {
-                goal.token_usage_unknown
-                    || goal.known_tokens >= limit
-                    || !goal.unobserved_provider_calls.is_empty()
-            })
+            || call_budget_exhausted(goal)
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -437,21 +441,13 @@ impl SessionView {
                 });
         let primary_id = run.primary().ok_or(ReplayError::InvalidTransition)?.id;
         let goal = current_goal_mut(self, *goal_id)?;
-        let budget = goal.effective_budget();
         if goal.status != GoalStatus::Running
             || !(goal.active_run.is_none() && run_status.is_terminal()
                 || goal.active_run == Some(*run_id) && active_run_ready)
             || goal.run_ids.last() != Some(run_id)
             || goal.unobserved_provider_calls.contains(&primary_id)
             || goal.compaction_call_reserved.is_some()
-            || budget
-                .max_provider_calls
-                .is_some_and(|limit| goal.provider_calls >= limit)
-            || budget.max_tokens.is_some_and(|limit| {
-                goal.token_usage_unknown
-                    || goal.known_tokens >= limit
-                    || !goal.unobserved_provider_calls.is_empty()
-            })
+            || call_budget_exhausted(goal)
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -575,7 +571,7 @@ impl SessionView {
         }
         let (limit, final_used, floor) = match refusal.dimension {
             GoalLimit::Calls => (
-                budget.max_provider_calls.map(u64::from),
+                budget.limit_for(GoalLimit::Calls),
                 u64::from(usage.provider_calls),
                 u64::from(goal.run_start_usage.provider_calls),
             ),
