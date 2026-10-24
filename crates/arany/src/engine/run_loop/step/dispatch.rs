@@ -925,7 +925,8 @@ mod tests {
             // A researcher after its Ask, or where it would have been.
             (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
-            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::ApprovalUnavailable, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Blocked], None), None, no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::DelegationDeadline, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::Paused, Some(StopCause::Paused)), ask_, S::Human),
         ];
