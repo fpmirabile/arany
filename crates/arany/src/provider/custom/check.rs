@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const CUSTOM_CHECK_VERSION: &str =
-    "custom-protocol-text-compaction-conformance-effort-stream-journal-v38";
+    "custom-protocol-text-compaction-conformance-effort-stream-journal-v39";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -1112,6 +1112,74 @@ mod tests {
         }
     }
 
+    async fn reject_superseded_protocol_evidence(
+        root: &StateRoot,
+        profile: &CustomProfile,
+        evidence: &ProviderEvidenceRecord,
+    ) {
+        let (protocol, base, encoding, auth) = match &profile.protocol {
+            super::super::Protocol::OpenaiResponses => {
+                ("openai-responses", "", "json_schema", "bearer")
+            }
+            super::super::Protocol::AnthropicMessages { base_url, auth } => (
+                "anthropic-messages",
+                base_url.as_str(),
+                "native_tools",
+                match auth {
+                    super::super::MessagesAuth::Bearer => "bearer",
+                    super::super::MessagesAuth::ApiKey => "x-api-key",
+                },
+            ),
+        };
+        for version in [
+            "custom-protocol-schema-challenge-conformance-effort-stream-v34",
+            "custom-protocol-text-compaction-conformance-effort-stream-journal-v38",
+        ] {
+            let mut legacy = Sha256::new();
+            for field in [
+                env!("CARGO_PKG_VERSION"),
+                version,
+                profile.name(),
+                profile.endpoint(),
+                profile.model(),
+                profile.credential_env(),
+                "2",
+                protocol,
+                base,
+                encoding,
+                auth,
+                "user_authorized",
+                "4096",
+            ] {
+                legacy.update((field.len() as u64).to_be_bytes());
+                legacy.update(field.as_bytes());
+            }
+            legacy.update(2_u32.to_be_bytes());
+            let store = Store::open(root.try_clone().unwrap()).unwrap();
+            store
+                .record_provider_evidence(ProviderEvidenceRecord {
+                    digest: legacy.finalize().into(),
+                    ..evidence.clone()
+                })
+                .await
+                .unwrap();
+            store.close().await.unwrap();
+            assert!(
+                matches!(
+                    super::super::CustomProvider::admit(
+                        root,
+                        profile.name(),
+                        profile.model(),
+                        None
+                    )
+                    .await,
+                    Err(CustomProfileError::EvidenceUnavailable)
+                ),
+                "superseded custom check: {version}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn messages_evidence_binds_protocol_base_and_auth() {
         let temp = tempfile::tempdir().unwrap();
@@ -1156,39 +1224,7 @@ mod tests {
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
             Err(CustomProfileError::CredentialUnavailable)
         ));
-        let mut legacy = Sha256::new();
-        for field in [
-            env!("CARGO_PKG_VERSION"),
-            "custom-protocol-schema-challenge-conformance-effort-stream-v34",
-            profile.name(),
-            profile.endpoint(),
-            profile.model(),
-            profile.credential_env(),
-            "2",
-            "anthropic-messages",
-            "http://127.0.0.1:9321/anthropic",
-            "native_tools",
-            "x-api-key",
-            "user_authorized",
-            "4096",
-        ] {
-            legacy.update(u64::try_from(field.len()).unwrap().to_be_bytes());
-            legacy.update(field.as_bytes());
-        }
-        legacy.update(2_u32.to_be_bytes());
-        let store = Store::open(root.try_clone().unwrap()).unwrap();
-        store
-            .record_provider_evidence(ProviderEvidenceRecord {
-                digest: legacy.finalize().into(),
-                ..evidence.clone()
-            })
-            .await
-            .unwrap();
-        store.close().await.unwrap();
-        assert!(matches!(
-            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
-            Err(CustomProfileError::EvidenceUnavailable)
-        ));
+        reject_superseded_protocol_evidence(&root, &profile, &evidence).await;
         let store = Store::open(root.try_clone().unwrap()).unwrap();
         store
             .record_provider_evidence(evidence.clone())
@@ -1229,6 +1265,7 @@ mod tests {
             Err(CustomProfileError::EvidenceUnavailable)
         ));
         let responses_profile = CustomProfile::load_named(&root, "local").unwrap();
+        reject_superseded_protocol_evidence(&root, &responses_profile, &evidence).await;
         for fields in [
             vec![
                 env!("CARGO_PKG_VERSION"),

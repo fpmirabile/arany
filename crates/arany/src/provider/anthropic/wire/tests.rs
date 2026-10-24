@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 use crate::provider::test_support::{
     catalog, goal_plan_contract, observed_step, primary_request, read_only_request,
     researcher_request, tool_context,
@@ -1148,7 +1149,7 @@ fn run_stream_for(
     model: &str,
     preview: crate::provider::ResponsePreview,
 ) -> Result<Option<Vec<u8>>, ProviderError> {
-    let mut decoder = MessageStream::new(KEY, model, preview);
+    let mut decoder = MessageStream::new(KEY, model, preview, DEFAULT_OUTPUT_TOKEN_CAP);
     let mut completed = None;
     for byte in wire.bytes() {
         if let Some(response) = decoder.feed(&[byte])? {
@@ -1174,7 +1175,7 @@ fn a_clean_end_after_a_framed_event_is_a_retryable_cut_and_a_non_stream_is_not()
         ),
     ] {
         let (preview, _) = crate::provider::ResponsePreview::new();
-        let mut decoder = MessageStream::new(KEY, "model-1", preview);
+        let mut decoder = MessageStream::new(KEY, "model-1", preview, DEFAULT_OUTPUT_TOKEN_CAP);
         assert!(decoder.feed(wire.as_bytes()).unwrap().is_none(), "{label}");
         let error = decoder.end_error();
         assert_eq!(
@@ -1278,7 +1279,7 @@ fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
         json!({"type":"message_stop"}),
     ] {
         let (publisher, _) = ResponsePreview::new();
-        let mut decoder = MessageStream::new("key", "model-1", publisher);
+        let mut decoder = MessageStream::new("key", "model-1", publisher, DEFAULT_OUTPUT_TOKEN_CAP);
         let wire = format!("data: {invalid}\n\n");
         assert!(decoder.feed(wire.as_bytes()).is_err());
     }
@@ -2183,7 +2184,7 @@ fn answer_text_streams_and_is_withdrawn_when_a_call_follows() {
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hola "}}),
         ];
         let (publisher, observed) = ResponsePreview::new();
-        let mut decoder = MessageStream::new(KEY, "model-1", publisher);
+        let mut decoder = MessageStream::new(KEY, "model-1", publisher, DEFAULT_OUTPUT_TOKEN_CAP);
         decoder.feed(sse(&events).as_bytes()).unwrap();
         assert_eq!(observed.borrow().answer, "Hola ");
         assert!(observed.borrow().tentative);
@@ -2200,5 +2201,89 @@ fn answer_text_streams_and_is_withdrawn_when_a_call_follows() {
         decoder.feed(sse(&events).as_bytes()).unwrap();
         assert_eq!(observed.borrow().answer, answer);
         assert_eq!(observed.borrow().commentary, commentary);
+    }
+}
+
+#[test]
+fn token_sized_write_deltas_cover_the_content_ceiling_at_the_real_cap() {
+    let cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+    let content = "x".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES);
+    let arguments =
+        json!({"path":"src/new.rs","expected_digest":null,"content":content}).to_string();
+    let mut events = vec![
+        message_start(),
+        json!({"type":"content_block_start","index":0,"content_block":{
+            "type":"tool_use","id":"tool_write","name":"arany_write","input":{}}}),
+    ];
+    events.extend(arguments.as_bytes().chunks(4).map(|fragment| {
+        json!({"type":"content_block_delta","index":0,"delta":{
+            "type":"input_json_delta","partial_json":std::str::from_utf8(fragment).unwrap()}})
+    }));
+    events.extend([
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},
+            "usage":{"output_tokens":arguments.len().div_ceil(4)}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let (publisher, observed) = crate::provider::ResponsePreview::new();
+    let mut decoder = MessageStream::new(KEY, "model-1", publisher, cap);
+    let mut completed = None;
+    for event in events {
+        completed = decoder.feed(sse(&[event]).as_bytes()).unwrap();
+    }
+    assert!(observed.borrow().answer.is_empty());
+    let decoded = decode_streamed_tool(&completed.unwrap(), cap).unwrap();
+    let ProviderOutcome::Tools(calls) = decoded.outcome else {
+        panic!("one Write call");
+    };
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(&calls[0].call,
+        crate::tools::ToolCall::Write { content: actual, .. } if *actual == content));
+}
+
+#[test]
+fn declared_stream_bounds_fail_closed_at_the_framing_limit_stage() {
+    for cap in [
+        crate::provider::PROBE_OUTPUT_CAP,
+        crate::provider::MAX_OUTPUT_TOKEN_CAP,
+    ] {
+        let (publisher, _) = crate::provider::ResponsePreview::new();
+        let mut decoder = MessageStream::new(KEY, "model-1", publisher.clone(), cap);
+        let frame = b"data: {\"type\":\"ping\"}\n\n";
+        for _ in 0..crate::provider::max_stream_events(cap) {
+            assert!(decoder.feed(frame).unwrap().is_none());
+        }
+        let error = decoder.feed(frame).unwrap_err();
+        assert_eq!(
+            decoder.framer.stage,
+            crate::provider::streaming::FramingStage::Limit
+        );
+        assert_eq!(
+            error.failure_reason(),
+            Some(crate::ProviderFailureReason::StreamProtocol)
+        );
+        assert!(error.retry_cause().is_none());
+        let mut decoder = MessageStream::new(KEY, "model-1", publisher, cap);
+        let comment = format!(":{}\n", " ".repeat(MAX_RESPONSE_BYTES - 2));
+        let bound = crate::provider::max_stream_bytes(cap);
+        for _ in 0..bound / comment.len() {
+            assert!(decoder.feed(comment.as_bytes()).unwrap().is_none());
+        }
+        assert!(
+            decoder
+                .feed(&comment.as_bytes()[..bound % comment.len()])
+                .unwrap()
+                .is_none()
+        );
+        let error = decoder.feed(b":").unwrap_err();
+        assert_eq!(
+            decoder.framer.stage,
+            crate::provider::streaming::FramingStage::Limit
+        );
+        assert_eq!(
+            error.failure_reason(),
+            Some(crate::ProviderFailureReason::StreamProtocol)
+        );
+        assert!(error.retry_cause().is_none());
     }
 }

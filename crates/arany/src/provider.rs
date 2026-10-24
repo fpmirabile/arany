@@ -232,6 +232,18 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
 pub(crate) const MAX_REPORTED_OUTPUT_TOKENS: u32 = 1_000_000;
 pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 32_768;
+const MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN: usize = 2;
+const MAX_STREAM_FIXED_EVENTS: usize = 2048;
+const MAX_STREAM_ENVELOPE_BYTES_PER_EVENT: usize = 512;
+
+fn max_stream_events(max_output_tokens: u32) -> usize {
+    MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN * max_output_tokens.min(MAX_OUTPUT_TOKEN_CAP) as usize
+        + MAX_STREAM_FIXED_EVENTS
+}
+
+fn max_stream_bytes(max_output_tokens: u32) -> usize {
+    MAX_STREAM_ENVELOPE_BYTES_PER_EVENT * max_stream_events(max_output_tokens)
+}
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 pub(crate) const PROBE_TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 pub(crate) const PROBE_OUTPUT_CAP: u32 = 1024;
@@ -1335,6 +1347,36 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
 mod tests {
     use super::*;
     use crate::session::AgentRunId;
+
+    #[test]
+    fn stream_bounds_follow_the_declared_output_cap() {
+        for cap in [
+            1,
+            PROBE_OUTPUT_CAP,
+            DEFAULT_OUTPUT_TOKEN_CAP,
+            MAX_OUTPUT_TOKEN_CAP,
+        ] {
+            let events =
+                MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN * cap as usize + MAX_STREAM_FIXED_EVENTS;
+            assert_eq!(max_stream_events(cap), events);
+            assert_eq!(
+                max_stream_bytes(cap),
+                MAX_STREAM_ENVELOPE_BYTES_PER_EVENT * events
+            );
+        }
+        assert!(max_stream_bytes(PROBE_OUTPUT_CAP) < max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP));
+        assert!(
+            max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP) < max_stream_bytes(MAX_OUTPUT_TOKEN_CAP)
+        );
+        assert_eq!(
+            max_stream_events(u32::MAX),
+            max_stream_events(MAX_OUTPUT_TOKEN_CAP)
+        );
+        assert_eq!(
+            max_stream_bytes(u32::MAX),
+            max_stream_bytes(MAX_OUTPUT_TOKEN_CAP)
+        );
+    }
 
     #[test]
     fn output_cap_covers_tool_content_and_answer_headroom() {

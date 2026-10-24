@@ -101,7 +101,7 @@ impl TextDecoder {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FramingStage {
     Limit,
     Framing,
@@ -118,6 +118,8 @@ pub(super) struct SseEvent {
 pub(super) struct SseFramer {
     pub(super) bytes: usize,
     pub(super) events: usize,
+    max_bytes: usize,
+    max_events: usize,
     line: Vec<u8>,
     data: Vec<u8>,
     event: Option<String>,
@@ -136,8 +138,10 @@ impl SseFramer {
         }
     }
 
-    pub(super) fn new() -> Self {
+    pub(super) fn new(max_output_tokens: u32) -> Self {
         Self {
+            max_bytes: super::max_stream_bytes(max_output_tokens),
+            max_events: super::max_stream_events(max_output_tokens),
             bytes: 0,
             events: 0,
             line: Vec::new(),
@@ -153,9 +157,14 @@ impl SseFramer {
         self.bytes = self
             .bytes
             .checked_add(bytes)
-            .filter(|size| *size <= MAX_RESPONSE_BYTES)
-            .ok_or(ProviderError::InvalidStream)?;
+            .filter(|size| *size <= self.max_bytes)
+            .ok_or_else(|| self.limit_error())?;
         Ok(())
+    }
+
+    fn limit_error(&self) -> ProviderError {
+        crate::diagnostics::stream_limit(self.bytes, self.events);
+        ProviderError::InvalidStream
     }
 
     pub(super) fn byte(
@@ -171,81 +180,96 @@ impl SseFramer {
         }
         if matches!(byte, b'\r' | b'\n') {
             self.after_cr = byte == b'\r';
-            let line = std::mem::take(&mut self.line);
-            if !line.is_empty() {
-                self.stage = FramingStage::Framing;
-                if line.contains(&0) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                if line.starts_with(b":") {
-                    return Ok(None);
-                }
-                let Some(colon) = line.iter().position(|byte| *byte == b':') else {
-                    return Ok(None);
-                };
-                let (field, value) = (&line[..colon], &line[colon + 1..]);
-                let value = value.strip_prefix(b" ").unwrap_or(value);
-                match field {
-                    b"data" => {
-                        if !self.data.is_empty() {
-                            self.data.push(b'\n');
-                        }
-                        self.data.extend_from_slice(value);
-                    }
-                    b"event" if self.event.is_none() => {
-                        let name =
-                            std::str::from_utf8(value).map_err(|_| ProviderError::InvalidStream)?;
-                        if !is_event_type(name) {
-                            return Err(ProviderError::InvalidStream);
-                        }
-                        self.event = Some(name.to_owned());
-                    }
-                    b"event" => return Err(ProviderError::InvalidStream),
-                    _ => {}
-                }
-                return Ok(None);
-            }
-            if self.data.is_empty() && self.event.is_none() {
-                return Ok(None);
-            }
-            self.events += 1;
-            self.stage = FramingStage::Limit;
-            if self.events > 8192 || self.data.is_empty() {
-                return Err(ProviderError::InvalidStream);
-            }
-            let data = std::mem::take(&mut self.data);
-            let event = self.event.take();
-            self.stage = FramingStage::Credential;
-            if !secret.is_empty()
-                && data
-                    .windows(secret.len())
-                    .any(|part| part == secret.as_bytes())
-            {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            self.stage = FramingStage::Json;
-            let value =
-                super::parse_response_json(&data).map_err(|_| ProviderError::InvalidStream)?;
-            self.stage = FramingStage::Credential;
-            if reflects_secret(&value, secret) {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            self.stage = FramingStage::Type;
-            let kind = value
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or(ProviderError::InvalidStream)?;
-            if !is_event_type(kind) || event.as_deref().is_some_and(|event| event != kind) {
-                return Err(ProviderError::InvalidStream);
-            }
-            return Ok(Some(SseEvent { value, data }));
+            return self.end_line(secret);
         }
         self.stage = FramingStage::Limit;
         if self.line.len() == MAX_RESPONSE_BYTES {
-            return Err(ProviderError::InvalidStream);
+            return Err(self.limit_error());
         }
         self.line.push(byte);
         Ok(None)
+    }
+
+    fn end_line(&mut self, secret: &str) -> Result<Option<SseEvent>, ProviderError> {
+        let line = std::mem::take(&mut self.line);
+        if !line.is_empty() {
+            self.field(&line)?;
+            return Ok(None);
+        }
+        if self.data.is_empty() && self.event.is_none() {
+            return Ok(None);
+        }
+        self.events += 1;
+        self.stage = FramingStage::Limit;
+        if self.events > self.max_events {
+            return Err(self.limit_error());
+        }
+        if self.data.is_empty() {
+            return Err(ProviderError::InvalidStream);
+        }
+        let data = std::mem::take(&mut self.data);
+        let event = self.event.take();
+        self.stage = FramingStage::Credential;
+        if !secret.is_empty()
+            && data
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes())
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        self.stage = FramingStage::Json;
+        let value = super::parse_response_json(&data).map_err(|_| ProviderError::InvalidStream)?;
+        self.stage = FramingStage::Credential;
+        if reflects_secret(&value, secret) {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        self.stage = FramingStage::Type;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::InvalidStream)?;
+        if !is_event_type(kind) || event.as_deref().is_some_and(|event| event != kind) {
+            return Err(ProviderError::InvalidStream);
+        }
+        Ok(Some(SseEvent { value, data }))
+    }
+
+    fn field(&mut self, line: &[u8]) -> Result<(), ProviderError> {
+        self.stage = FramingStage::Framing;
+        if line.contains(&0) {
+            return Err(ProviderError::InvalidStream);
+        }
+        if line.starts_with(b":") {
+            return Ok(());
+        }
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            return Ok(());
+        };
+        let (field, value) = (&line[..colon], &line[colon + 1..]);
+        let value = value.strip_prefix(b" ").unwrap_or(value);
+        match field {
+            b"data" => {
+                self.stage = FramingStage::Limit;
+                let separator = usize::from(!self.data.is_empty());
+                if self.data.len() + separator + value.len() > MAX_RESPONSE_BYTES {
+                    return Err(self.limit_error());
+                }
+                if separator > 0 {
+                    self.data.push(b'\n');
+                }
+                self.data.extend_from_slice(value);
+            }
+            b"event" if self.event.is_none() => {
+                let name = std::str::from_utf8(value).map_err(|_| ProviderError::InvalidStream)?;
+                if !is_event_type(name) {
+                    return Err(ProviderError::InvalidStream);
+                }
+                self.event = Some(name.to_owned());
+            }
+            b"event" => return Err(ProviderError::InvalidStream),
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -444,16 +468,23 @@ impl<'a> ResponsesPreview<'a> {
     }
 }
 
-pub(super) fn validate_stream_response(response: &reqwest::Response) -> Result<(), ProviderError> {
+pub(super) fn validate_stream_response(
+    response: &reqwest::Response,
+    max_output_tokens: u32,
+) -> Result<(), ProviderError> {
     use reqwest::header;
+    if response
+        .content_length()
+        .is_some_and(|length| length > super::max_stream_bytes(max_output_tokens) as u64)
+    {
+        crate::diagnostics::stream_limit(0, 0);
+        return Err(ProviderError::InvalidStream);
+    }
     if response
         .headers()
         .get_all(header::CONTENT_ENCODING)
         .iter()
         .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        || response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
         || response
             .headers()
             .get_all(header::CONTENT_TYPE)
@@ -497,6 +528,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn larger_streams_keep_single_line_and_multiline_event_bounds() {
+        let cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+        let mut framer = SseFramer::new(cap);
+        let oversized_line = vec![b' '; MAX_RESPONSE_BYTES + 1];
+        framer.admit(oversized_line.len()).unwrap();
+        assert!(
+            oversized_line
+                .into_iter()
+                .try_for_each(|byte| { framer.byte(byte, "").map(|_| ()) })
+                .is_err()
+        );
+        assert_eq!(framer.stage, FramingStage::Limit);
+        let mut framer = SseFramer::new(cap);
+        let line = format!("data: {}\n", " ".repeat(MAX_RESPONSE_BYTES / 2));
+        framer.admit(line.len()).unwrap();
+        for byte in line.bytes() {
+            assert!(framer.byte(byte, "").unwrap().is_none());
+        }
+        framer.admit(line.len()).unwrap();
+        assert!(
+            line.bytes()
+                .try_for_each(|byte| { framer.byte(byte, "").map(|_| ()) })
+                .is_err()
+        );
+        assert_eq!(framer.stage, FramingStage::Limit);
+    }
+
+    #[test]
     fn text_fragments_hold_selected_credential_prefixes() {
         let mut decoder = TextDecoder::new();
         assert_eq!(
@@ -522,7 +581,7 @@ mod tests {
             r#"{"type":"response.created","text":"\u0073ynthetic-key"}"#,
         ] {
             let wire = format!("data: {data}\n\n");
-            let mut framer = SseFramer::new();
+            let mut framer = SseFramer::new(crate::provider::DEFAULT_OUTPUT_TOKEN_CAP);
             framer.admit(wire.len()).unwrap();
             assert!(
                 wire.bytes()
@@ -530,7 +589,7 @@ mod tests {
                     .is_err()
             );
         }
-        let mut framer = SseFramer::new();
+        let mut framer = SseFramer::new(crate::provider::DEFAULT_OUTPUT_TOKEN_CAP);
         let mut events = Vec::new();
         let wire = b": heartbeat\r\ndata: {\r\ndata: \"type\":\"ping\"}\r\n\r\n";
         framer.admit(wire.len()).unwrap();
