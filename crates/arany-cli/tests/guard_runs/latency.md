@@ -107,7 +107,7 @@ private `arany-tool-latency-*` directory beneath the evidence root. Retain its d
 the binary identity, revision/toolchain, invocation summary and closed-journal audit
 in the owner's run artifact. Perform three separate invocations and report each
 p95; do not pool them or keep only the fastest. Record target misses and diagnosis
-ownership. [NEXT_STEPS item 10](../../../../NEXT_STEPS.md#daily-use-first) owns the
+ownership. [NEXT_STEPS item 9](../../../../NEXT_STEPS.md#daily-use-first) owns the
 accepted host, objectives and remaining native evidence.
 
 The existing dispatch-only measurement remains separate and unchanged:
