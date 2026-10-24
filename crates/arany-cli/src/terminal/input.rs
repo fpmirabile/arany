@@ -141,7 +141,7 @@ impl TerminalReader {
         }
     }
 
-    pub(super) fn set_chat_input(&mut self, chat: bool, child: bool) {
+    pub(super) fn set_chat_input(&mut self, chat: bool, child: bool, primary_capacity: usize) {
         #[cfg(unix)]
         if let Self::Lines(reader) = self {
             let leaving_child = reader.child && !child;
@@ -150,11 +150,11 @@ impl TerminalReader {
             if child {
                 reader.remaining_bytes = reader.remaining_bytes.min(MAX_DRAFT_BYTES);
             } else if leaving_child {
-                reader.remaining_bytes = MAX_PRIMARY_DRAFT_BYTES;
+                reader.remaining_bytes = primary_capacity;
             }
         }
         #[cfg(not(unix))]
-        let _ = (chat, child);
+        let _ = (chat, child, primary_capacity);
     }
 
     pub(super) fn cursor_query(&self) -> Option<TerminalQueries> {
@@ -1029,6 +1029,39 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn leaving_child_chat_restores_saved_primary_capacity() {
+        let (_, receiver) = mpsc::channel(1);
+        let mut reader = TerminalReader::Lines(LineReader {
+            receiver,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            pending: VecDeque::new(),
+            remaining_bytes: MAX_DRAFT_BYTES,
+            chat: true,
+            child: true,
+            epoch: 0,
+            admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
+        });
+
+        reader.set_chat_input(false, false, 7);
+
+        let TerminalReader::Lines(mut reader) = reader else {
+            unreachable!("Unix line reader")
+        };
+        assert_eq!(reader.remaining_bytes, 7);
+        assert_eq!(
+            reader.accept_segment(b"12345678".to_vec(), true).unwrap(),
+            TerminalInput::LineRejected
+        );
+        assert_eq!(
+            reader.accept_segment(b"1234567".to_vec(), true).unwrap(),
+            TerminalInput::Character('1')
+        );
+        assert_eq!(reader.pending.back(), Some(&TerminalInput::Submit));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
