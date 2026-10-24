@@ -20,8 +20,9 @@ pub async fn probe_chatgpt_model(
     access_token: &str,
     model: &str,
     effort: Effort,
-) -> Result<(), ProviderError> {
-    subscription::probe_model(access_token, model, effort).await
+    check: &mut crate::ChatGptCheck,
+) -> Result<(), crate::ChatGptCheckError> {
+    subscription::probe_model(access_token, model, effort, check).await
 }
 
 pub struct OpenAiProvider {

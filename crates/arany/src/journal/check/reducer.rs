@@ -86,11 +86,16 @@ impl CheckReducer {
                 let valid_usage = usage.is_none_or(|usage| {
                     usage.input_tokens <= crate::provider::MAX_REPORTED_INPUT_TOKENS
                         && usage.output_tokens
-                            <= view
-                                .start
-                                .probes
-                                .get(view.probes)
-                                .map_or(0, |p| p.output_tokens)
+                            <= match view.start.target {
+                                CheckTarget::Chatgpt { .. } => {
+                                    crate::provider::MAX_REPORTED_OUTPUT_TOKENS
+                                }
+                                _ => view
+                                    .start
+                                    .probes
+                                    .get(view.probes)
+                                    .map_or(0, |p| p.output_tokens),
+                            }
                 });
                 let valid = pending == *ordinal
                     && valid_usage

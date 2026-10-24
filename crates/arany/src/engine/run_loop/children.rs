@@ -5,14 +5,15 @@ use super::{
     PrimaryDecision, PrimarySite, RunLoop, call_record, decide_primary_call, primary_admitted,
     valid_answer, wave_deferred,
 };
+use crate::engine::EngineError;
 use crate::engine::ledger::{
     ActiveDeadline, ActiveDeadlineCause, ActiveReservationLimit, duration_ms,
 };
 use crate::engine::routing::{CallScope, decide_attempt};
-use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
-    AgentPhase, Answer, ChildAssignment, ChildResult, PromptRole, ProviderFailureReason,
-    ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn, RunInput,
+    AgentPhase, Answer, ChildAssignment, ChildResult, DEFAULT_OUTPUT_TOKEN_CAP,
+    MAX_OUTPUT_TOKEN_CAP, PromptRole, ProviderFailureReason, ProviderOutcome, ProviderRequest,
+    ProviderResponse, ProviderTurn, RunInput,
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
@@ -2765,7 +2766,11 @@ impl RunLoop<'_> {
             phase: AgentPhase::ChildWork,
             collaboration: CollaborationPolicy::Single,
             model: String::new(),
-            max_output_tokens: CHILD_OUTPUT_TOKEN_CAP,
+            max_output_tokens: if child.editor {
+                MAX_OUTPUT_TOKEN_CAP
+            } else {
+                DEFAULT_OUTPUT_TOKEN_CAP
+            },
             input: RunInput {
                 images: root
                     .images

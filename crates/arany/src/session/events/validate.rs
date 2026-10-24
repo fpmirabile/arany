@@ -1,6 +1,8 @@
 use super::*;
 
+mod agent;
 mod goal;
+mod run;
 mod session;
 
 impl Event {
@@ -45,118 +47,6 @@ impl Event {
             | Self::AgentSteeringNoteRecorded { .. }
             | Self::GoalFinished { .. }
             | Self::GoalProviderCallReserved { .. } => Event::validate_goal(self),
-            Self::RunStarted {
-                config,
-                active_deadline_ms,
-                ..
-            } => {
-                if active_deadline_ms.is_some_and(|ms| ms == 0 || ms > MAX_GOAL_ACTIVE_MS) {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                config.validate()
-            }
-            Self::AgentSpawned {
-                role,
-                ordinal,
-                objective,
-                grant,
-                definition,
-                profile,
-                assignment,
-                ..
-            } => {
-                if !profile
-                    .as_deref()
-                    .is_none_or(crate::provider::valid_profile_name)
-                    || !serde_json::to_vec(&SpawnPayload {
-                        role: *role,
-                        ordinal: *ordinal,
-                        objective: objective.clone(),
-                        grant: *grant,
-                        definition: definition.clone(),
-                        profile: profile.clone(),
-                        assignment: assignment.clone(),
-                    })
-                    .is_ok_and(|b| b.len() <= crate::store::MAX_EVENT_BYTES)
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                match (role, grant) {
-                    (AgentRole::Primary, None)
-                        if *ordinal == 0
-                            && objective.is_none()
-                            && definition.is_none()
-                            && assignment.is_none() =>
-                    {
-                        Ok(())
-                    }
-                    (AgentRole::Child, Some(_))
-                        if (1..=8).contains(ordinal)
-                            && definition.as_ref().is_none_or(|name| {
-                                name.len() <= 64 && crate::validate::valid_name(name)
-                            }) =>
-                    {
-                        if (matches!(*grant, Some(ChildGrant::EditOnly { .. })))
-                            != assignment.is_some()
-                        {
-                            return Err(ReplayError::InvalidPayload);
-                        }
-                        if let Some(p) = assignment
-                            && (!(ChildAssignment::Editor {
-                                assignment: Box::new(p.request.clone()),
-                            })
-                            .valid()
-                                || !p.grant.valid()
-                                || !p.base.valid()
-                                || p.policy_digest == [0; 32]
-                                || p.permissions_digest == Some([0; 32])
-                                || p.cache_generation == Some([0; 32])
-                                || p.data_bytes == 0
-                                || p.data_bytes as usize > WORKER_DATA_BYTES)
-                        {
-                            return Err(ReplayError::InvalidPayload);
-                        }
-                        bounded(
-                            objective.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                            2 * 1024,
-                        )
-                    }
-                    _ => Err(ReplayError::InvalidPayload),
-                }
-            }
-            Self::ProviderFallbackUsed { fallback, .. } => {
-                if fallback
-                    .rate_limits
-                    .as_ref()
-                    .is_none_or(|limits| limits.valid())
-                    && fallback.from.valid()
-                    && fallback.to.valid()
-                    && fallback.from != fallback.to
-                    && fallback.failure == ProviderCallDisposition::Unavailable
-                {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
-            Self::ProviderRetryScheduled { retry, .. } => {
-                use crate::provider::{MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS};
-                let backoff = crate::provider::ProviderRetry::backoff(retry.attempt).as_millis();
-                if retry
-                    .rate_limits
-                    .as_ref()
-                    .is_none_or(|limits| limits.valid())
-                    && (1..=MAX_PROVIDER_RETRIES).contains(&retry.attempt)
-                    && (backoff..=u128::from(MAX_PROVIDER_RETRY_DELAY_MS))
-                        .contains(&u128::from(retry.delay_ms))
-                {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
-            Self::ProviderCallRecorded { record, .. } => record.validate(),
-            Self::AssistantDisplayRecorded { chunk, .. } => chunk.validate(),
             Self::ToolStarted {
                 run_id,
                 agent_run_id,
@@ -299,37 +189,13 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
-            Self::AgentFinished {
-                disposition,
-                summary,
-                result,
-                worker,
-                ..
-            } => {
-                if worker.as_ref().is_some_and(|o| !o.valid()) {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                match disposition {
-                    AgentDisposition::Finished => {
-                        bounded(
-                            summary.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                            2 * 1024,
-                        )?;
-                        bounded(
-                            result.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                            super::MAX_ASSISTANT_MESSAGE_BYTES,
-                        )
-                    }
-                    AgentDisposition::Failed
-                    | AgentDisposition::Cancelled
-                    | AgentDisposition::StoppedByHook
-                        if summary.is_none() && result.is_none() =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(ReplayError::InvalidPayload),
-                }
-            }
+            Self::AgentSpawned { .. } => Event::validate_agent(self),
+            Self::RunStarted { .. }
+            | Self::ProviderFallbackUsed { .. }
+            | Self::ProviderRetryScheduled { .. }
+            | Self::ProviderCallRecorded { .. }
+            | Self::AssistantDisplayRecorded { .. } => Event::validate_run(self),
+            Self::AgentFinished { .. } | Self::RunFinished { .. } => Event::validate_agent(self),
             Self::WorkerDataChunk { record, .. } => {
                 if record.decoded().is_some() {
                     Ok(())
@@ -394,17 +260,6 @@ impl Event {
                     && record.evidence.iter().all(|s| *s > 0)
                     && record.evidence.windows(2).all(|s| s[0] < s[1])
                 {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
-            Self::RunFinished {
-                disposition,
-                failure,
-                ..
-            } => {
-                if (*disposition == super::RunDisposition::Failed) == failure.is_some() {
                     Ok(())
                 } else {
                     Err(ReplayError::InvalidPayload)
