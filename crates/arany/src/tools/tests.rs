@@ -1673,17 +1673,22 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         serde_json::to_value(decoded(custom.clone())).unwrap(),
         custom
     );
-    for (index, key) in [
-        (1, "offset"),
-        (1, "limit"),
-        (4, "expected_digest"),
-        (7, "resource"),
-    ] {
+    for keys in [vec!["offset"], vec!["limit"], vec!["offset", "limit"]] {
+        let mut missing = rows[1].clone();
+        for key in keys {
+            missing.as_object_mut().unwrap().remove(key);
+        }
+        assert!(!schema.is_valid(&missing));
+        let call = decoded(missing);
+        assert!(call.valid());
+        assert_eq!(serde_json::to_value(call).unwrap(), rows[1]);
+    }
+    for (index, key) in [(1, "path"), (4, "expected_digest"), (7, "resource")] {
         let mut missing = rows[index].clone();
         missing.as_object_mut().unwrap().remove(key);
         assert!(
             serde_json::from_value::<ToolCall>(missing).is_err(),
-            "nullable fields are still required"
+            "fields without defaults are required"
         );
     }
     for call in [

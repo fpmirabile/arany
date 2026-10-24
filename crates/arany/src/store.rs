@@ -17,7 +17,7 @@ mod journal;
 mod migrate;
 mod replay;
 mod state;
-use journal::{HotSession, append, fork_session, open_connection};
+use journal::{HotSession, append, open_connection};
 pub use migrate::{RECORD_FORMATS, RecordFormat, RecordStep};
 use replay::{
     latest_session_id, list_session_page, load_session, resolve_open_view, resolve_view,
@@ -392,10 +392,13 @@ impl Store {
                             } else {
                                 journal::admit(
                                     &mut connection,
-                                    session_id,
-                                    event_slots,
-                                    tool_observations,
-                                    kind,
+                                    hot_session.as_ref(),
+                                    journal::Admission {
+                                        session_id,
+                                        event_slots,
+                                        tool_observations,
+                                        kind,
+                                    },
                                 )
                             };
                             let _ = reply.send(result);
@@ -486,12 +489,12 @@ impl Store {
                             let _ = reply.send(replay::list_all_sessions(&connection, workspace_identity));
                         }
                         Request::PrepareFork { source_session_id, source_sequence, reply } => {
-                            let _ = reply.send(journal::prepare_fork(&mut connection, source_session_id, source_sequence));
+                            let _ = reply.send(journal::prepare_fork(&mut connection, hot_session.as_ref(), source_session_id, source_sequence));
                         }
                         Request::ForkAt { boundary, title, reply } => {
-                            hot_session = None;
+                            let cached = hot_session.take();
                             let result = if read_only { Err(StoreError::ReadOnly) } else {
-                                journal::fork_at(&mut connection, boundary, title)
+                                journal::fork_at(&mut connection, cached.as_ref(), boundary, title)
                             };
                             let _ = reply.send(result);
                         }
@@ -500,11 +503,12 @@ impl Store {
                             title,
                             reply,
                         } => {
-                            hot_session = None;
+                            let cached = hot_session.take();
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else {
-                                fork_session(&mut connection, source_session_id, title)
+                                journal::prepare_fork(&mut connection, cached.as_ref(), source_session_id, None)
+                                    .and_then(|boundary| journal::fork_at(&mut connection, cached.as_ref(), boundary, title))
                             };
                             let _ = reply.send(result);
                         }

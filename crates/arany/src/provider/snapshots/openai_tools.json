@@ -84,7 +84,7 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
@@ -1198,7 +1198,7 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
@@ -1539,7 +1539,7 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,

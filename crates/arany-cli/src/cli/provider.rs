@@ -55,193 +55,122 @@ enum ProviderAction {
     },
 }
 
+struct CheckArgs {
+    state_dir: Option<PathBuf>,
+    profile: String,
+    model: Option<String>,
+    effort: Option<Effort>,
+    accept_cost: bool,
+    saved_account: bool,
+}
+
+enum CheckTarget {
+    Native { model: String, effort: Effort },
+    Custom,
+}
+
 pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
     match args.action {
-        ProviderAction::Logout { profile } => {
-            if ProviderKind::parse(&profile) != Some(ProviderKind::ChatGpt) {
-                return Err("logout is available only for the selected ChatGPT account".into());
-            }
-            let workspace = std::env::current_dir()
-                .and_then(std::fs::canonicalize)
-                .map_err(|_| "Workspace unavailable".to_owned())?;
-            let outcome = chatgpt::sign_out_selected(workspace)
-                .await
-                .map_err(|error| error.to_string())?;
-            let mut stderr = String::new();
-            if !outcome.remote_confirmed {
-                stderr.push_str("warning: remote revocation was not confirmed; disconnect Arany in ChatGPT Settings\n");
-            }
-            if !outcome.local_cleared {
-                stderr.push_str("warning: the ChatGPT token may remain in the OS credential store; unlock it and retry arany provider logout chatgpt\n");
-            }
-            Ok(CommandOutput {
-                stdout: if outcome.local_cleared {
-                    "ChatGPT account disconnected locally\n".into()
-                } else {
-                    "ChatGPT account blocked locally\n".into()
-                },
-                stderr,
-                success: outcome.local_cleared && outcome.remote_confirmed,
-            })
-        }
+        ProviderAction::Logout { profile } => logout(profile).await,
         ProviderAction::Models {
-            state_dir: selected_state_dir,
+            state_dir,
             saved_account,
             profile,
-        } => {
-            if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
-                if saved_account || selected_state_dir.is_some() {
-                    return Err(
-                        "ChatGPT models use the selected user account; omit --saved-account and --state-dir"
-                            .into(),
-                    );
-                }
-                let workspace = std::env::current_dir()
-                    .and_then(std::fs::canonicalize)
-                    .map_err(|_| "Workspace unavailable".to_owned())?;
-                let (account_id, models) = chatgpt::selected_models(workspace, None)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                return Ok(CommandOutput {
-                    stdout: render_chatgpt_models(account_id, &models),
-                    stderr: String::new(),
-                    success: true,
-                });
-            }
-            let (models, exact_custom) = match ProviderKind::parse(&profile) {
-                Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
-                    let key = if saved_account {
-                        let account = credentials::load()
-                            .await
-                            .map_err(|error| error.to_string())?
-                            .ok_or("no saved native API account")?;
-                        if account.provider != profile {
-                            return Err("saved API account belongs to a different Provider".into());
-                        }
-                        account
-                            .into_credentials()
-                            .map_err(|error| error.to_string())?
-                    } else {
-                        NativeApiCredentials::from_env(&profile)
-                            .map_err(|error| error.to_string())?
-                    };
-                    let models = list_native_models_with_credentials(&profile, &key)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    (models, false)
-                }
-                Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
-                    if saved_account {
-                        return Err("--saved-account requires a native Provider".into());
-                    }
-                    let Some(name) = profile.strip_prefix("custom:") else {
-                        return Err(
-                            "Provider must be openai, anthropic, chatgpt, or custom:NAME".into(),
-                        );
-                    };
-                    let state_dir = state_dir(selected_state_dir).map_err(str::to_owned)?;
-                    let workspace = std::env::current_dir()
-                        .and_then(std::fs::canonicalize)
-                        .map_err(|_| "Workspace unavailable".to_owned())?;
-                    if state_dir.starts_with(&workspace) {
-                        return Err("state directory overlaps the Workspace".into());
-                    }
-                    let root = StateRoot::open_existing(&state_dir)
-                        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-                    let custom = CustomProfile::load_named(&root, name)
-                        .map_err(|error| error.to_string())?;
-                    let mut entry = ModelEntry::exact_custom(custom.model().to_owned());
-                    entry.efforts = custom.efforts().to_vec();
-                    (vec![entry], true)
-                }
-            };
-            Ok(CommandOutput {
-                stdout: render_models(&profile, &models, exact_custom),
-                stderr: String::new(),
-                success: true,
-            })
-        }
+        } => models(state_dir, saved_account, profile).await,
         ProviderAction::Check {
-            state_dir: selected_state_dir,
+            state_dir,
             profile,
             model,
             effort,
             accept_cost,
             saved_account,
         } => {
-            if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
-                if saved_account || selected_state_dir.is_some() {
-                    return Err(
-                        "ChatGPT checks use the selected user account; omit --saved-account and --state-dir"
+            check(CheckArgs {
+                state_dir,
+                profile,
+                model,
+                effort,
+                accept_cost,
+                saved_account,
+            })
+            .await
+        }
+    }
+}
+
+async fn logout(profile: String) -> Result<CommandOutput, String> {
+    if ProviderKind::parse(&profile) != Some(ProviderKind::ChatGpt) {
+        return Err("logout is available only for the selected ChatGPT account".into());
+    }
+    let workspace = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| "Workspace unavailable".to_owned())?;
+    let outcome = chatgpt::sign_out_selected(workspace)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut stderr = String::new();
+    if !outcome.remote_confirmed {
+        stderr.push_str(
+            "warning: remote revocation was not confirmed; disconnect Arany in ChatGPT Settings\n",
+        );
+    }
+    if !outcome.local_cleared {
+        stderr.push_str("warning: the ChatGPT token may remain in the OS credential store; unlock it and retry arany provider logout chatgpt\n");
+    }
+    Ok(CommandOutput {
+        stdout: if outcome.local_cleared {
+            "ChatGPT account disconnected locally\n".into()
+        } else {
+            "ChatGPT account blocked locally\n".into()
+        },
+        stderr,
+        success: outcome.local_cleared && outcome.remote_confirmed,
+    })
+}
+
+async fn models(
+    selected_state_dir: Option<PathBuf>,
+    saved_account: bool,
+    profile: String,
+) -> Result<CommandOutput, String> {
+    if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
+        if saved_account || selected_state_dir.is_some() {
+            return Err(
+                        "ChatGPT models use the selected user account; omit --saved-account and --state-dir"
                             .into(),
                     );
-                }
-                let model = model.ok_or("ChatGPT checks require MODEL and --effort LEVEL")?;
-                let effort = effort.ok_or("ChatGPT checks require MODEL and --effort LEVEL")?;
-                validate_native_model_id(&model).map_err(|_| "ChatGPT model is invalid")?;
-                if !accept_cost {
-                    return Err("ChatGPT checks may consume plan usage in three synthetic calls. Each has a 1,024-token local acceptance cap, but no remote output-token cap; rerun with --accept-cost".into());
-                }
-                let workspace = std::env::current_dir()
-                    .and_then(std::fs::canonicalize)
-                    .map_err(|_| "Workspace unavailable".to_owned())?;
-                let cancellation = RunCancellation::new();
-                let report = match check_signalled(
-                    chatgpt::check_selected_model(
-                        workspace,
-                        None,
-                        model.clone(),
-                        effort,
-                        cancellation.clone(),
-                    ),
-                    cancellation,
-                )
-                .await?
-                {
-                    Ok(report) => report,
-                    Err(chatgpt::ModelCheckError::Admission(error)) => {
-                        return Err(error.to_string());
-                    }
-                    Err(chatgpt::ModelCheckError::Journal(error)) => {
-                        return failed_check_journal(error);
-                    }
-                    Err(chatgpt::ModelCheckError::Check { source, receipt }) => {
-                        return failed_check(source, Some(receipt));
-                    }
-                };
-                return Ok(CommandOutput {
-                    stdout: format!(
-                        "{}Check: {}\nDisposition: {}\n",
-                        render_chatgpt_check(
-                            report.account,
-                            &model,
-                            effort,
-                            report.context_window_tokens
-                        ),
-                        report.view.id,
-                        report.view.replay_disposition()
-                    ),
-                    stderr: String::new(),
-                    success: true,
-                });
+        }
+        let workspace = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .map_err(|_| "Workspace unavailable".to_owned())?;
+        let (account_id, models) = chatgpt::selected_models(workspace, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(CommandOutput {
+            stdout: render_chatgpt_models(account_id, &models),
+            stderr: String::new(),
+            success: true,
+        });
+    }
+    let (models, exact_custom) = match ProviderKind::parse(&profile) {
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
+            let key = if saved_account {
+                saved_native_credentials(&profile).await?.0
+            } else {
+                NativeApiCredentials::from_env(&profile).map_err(|error| error.to_string())?
+            };
+            let models = list_native_models_with_credentials(&profile, &key)
+                .await
+                .map_err(|error| error.to_string())?;
+            (models, false)
+        }
+        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
+            if saved_account {
+                return Err("--saved-account requires a native Provider".into());
             }
-            let native = ProviderKind::parse(&profile).is_some_and(ProviderKind::is_native_api);
-            if native && !accept_cost {
-                return Err("native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost".into());
-            }
-            if native && (model.is_none() || effort.is_none()) {
-                return Err("native checks require MODEL and --effort LEVEL".into());
-            }
-            if native
-                && model
-                    .as_deref()
-                    .is_some_and(|model| validate_native_model_id(model).is_err())
-            {
-                return Err("native Provider, model, or effort is invalid".into());
-            }
-            if !native && (model.is_some() || effort.is_some() || accept_cost || saved_account) {
-                return Err("custom checks accept only PROFILE and --state-dir".into());
-            }
+            let Some(name) = ProviderKind::custom_name(&profile) else {
+                return Err("Provider must be openai, anthropic, chatgpt, or custom:NAME".into());
+            };
             let state_dir = state_dir(selected_state_dir).map_err(str::to_owned)?;
             let workspace = std::env::current_dir()
                 .and_then(std::fs::canonicalize)
@@ -249,125 +178,271 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             if state_dir.starts_with(&workspace) {
                 return Err("state directory overlaps the Workspace".into());
             }
-            if native {
-                let root = StateRoot::admit(&state_dir)
-                    .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-                let model = model.expect("native model checked above");
-                let effort = effort.expect("native effort checked above");
-                let (key, account_id) = if saved_account {
-                    let account = credentials::load()
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .ok_or("no saved native API account")?;
-                    if account.provider != profile {
-                        return Err("saved API account belongs to a different Provider".into());
-                    }
-                    let id = account.id;
-                    (
-                        account
-                            .into_credentials()
-                            .map_err(|error| error.to_string())?,
-                        Some(id),
-                    )
-                } else {
-                    (
-                        NativeApiCredentials::from_env(&profile)
-                            .map_err(|_| NativeCheckError::CredentialUnavailable.to_string())?,
-                        None,
-                    )
-                };
-                let revalidate = async {
-                    if let Some(id) = account_id {
-                        let account = credentials::load()
-                            .await
-                            .map_err(|_| NativeCheckError::CredentialUnavailable)?
-                            .ok_or(NativeCheckError::CredentialUnavailable)?;
-                        if account.id != id || account.provider != profile {
-                            return Err(NativeCheckError::EvidenceUnavailable);
-                        }
-                        account
-                            .into_credentials()
-                            .map_err(|_| NativeCheckError::CredentialUnavailable)
-                    } else {
-                        NativeApiCredentials::from_env(&profile)
-                            .map_err(|_| NativeCheckError::CredentialUnavailable)
-                    }
-                };
-                let cancellation = RunCancellation::new();
-                let view = match check_signalled(
-                    check_native_model(
-                        root,
-                        NativeCheckRequest {
-                            profile: profile.clone(),
-                            model: model.clone(),
-                            effort,
-                            credentials: key,
-                            account_id,
-                        },
-                        cancellation.clone(),
-                        revalidate,
-                    ),
-                    cancellation,
-                )
-                .await?
-                {
-                    Ok(view) => view,
-                    Err(NativeCheckError::Check { source, receipt }) => {
-                        return failed_check(*source, Some(receipt));
-                    }
-                    Err(NativeCheckError::Journal(error)) => {
-                        return failed_check_journal(*error);
-                    }
-                    Err(error) => return Err(error.to_string()),
-                };
-                return Ok(CommandOutput {
-                    stdout: format!(
-                        "Provider: {profile}\nModel: {model}\nEffort: {effort}\nCredential: {}\nStatus: native synthetic conformance passed\nCheck: {}\nDisposition: {}\n",
-                        if saved_account {
-                            "saved API account"
-                        } else {
-                            "environment API key"
-                        },
-                        view.id,
-                        view.replay_disposition()
-                    ),
-                    stderr: String::new(),
-                    success: true,
-                });
-            }
             let root = StateRoot::open_existing(&state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let cancellation = RunCancellation::new();
-            let report = match check_signalled(
-                check_custom_profile_with_cancellation(
-                    root,
-                    profile.strip_prefix("custom:").unwrap_or(&profile),
-                    cancellation.clone(),
-                ),
-                cancellation,
-            )
-            .await?
-            {
-                Ok(report) => report,
-                Err(CustomProfileError::Check { source, receipt }) => {
-                    return failed_check(*source, Some(receipt));
-                }
-                Err(CustomProfileError::Journal(error)) => {
-                    return failed_check_journal(*error);
-                }
-                Err(error) => return Err(error.to_string()),
+            let custom =
+                CustomProfile::load_named(&root, name).map_err(|error| error.to_string())?;
+            let mut entry = ModelEntry::exact_custom(custom.model().to_owned());
+            entry.efforts = custom.efforts().to_vec();
+            (vec![entry], true)
+        }
+    };
+    Ok(CommandOutput {
+        stdout: render_models(&profile, &models, exact_custom),
+        stderr: String::new(),
+        success: true,
+    })
+}
+
+async fn check(args: CheckArgs) -> Result<CommandOutput, String> {
+    let CheckArgs {
+        state_dir: selected_state_dir,
+        profile,
+        model,
+        effort,
+        accept_cost,
+        saved_account,
+    } = args;
+    let kind = ProviderKind::parse(&profile);
+    if kind == Some(ProviderKind::ChatGpt) {
+        return check_chatgpt(
+            selected_state_dir,
+            model,
+            effort,
+            accept_cost,
+            saved_account,
+        )
+        .await;
+    }
+    let target = validate_check_options(kind, model, effort, accept_cost, saved_account)?;
+    let state_dir = state_dir(selected_state_dir).map_err(str::to_owned)?;
+    let workspace = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| "Workspace unavailable".to_owned())?;
+    if state_dir.starts_with(&workspace) {
+        return Err("state directory overlaps the Workspace".into());
+    }
+    match target {
+        CheckTarget::Native { model, effort } => {
+            check_native(state_dir, &profile, model, effort, saved_account).await
+        }
+        CheckTarget::Custom => check_custom(state_dir, &profile).await,
+    }
+}
+
+fn validate_check_options(
+    kind: Option<ProviderKind>,
+    model: Option<String>,
+    effort: Option<Effort>,
+    accept_cost: bool,
+    saved_account: bool,
+) -> Result<CheckTarget, String> {
+    match kind {
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
+            if !accept_cost {
+                return Err("native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost".into());
+            }
+            let (Some(model), Some(effort)) = (model, effort) else {
+                return Err("native checks require MODEL and --effort LEVEL".into());
             };
-            Ok(CommandOutput {
-                stdout: format!(
-                    "Provider: {}\nStatus: custom verified\n{}\n",
-                    report.profile_name(),
-                    report.receipt()
-                ),
-                stderr: String::new(),
-                success: true,
-            })
+            validate_native_model_id(&model)
+                .map_err(|_| "native Provider, model, or effort is invalid".to_owned())?;
+            Ok(CheckTarget::Native { model, effort })
+        }
+        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
+            if model.is_some() || effort.is_some() || accept_cost || saved_account {
+                return Err("custom checks accept only PROFILE and --state-dir".into());
+            }
+            Ok(CheckTarget::Custom)
         }
     }
+}
+
+async fn check_chatgpt(
+    selected_state_dir: Option<PathBuf>,
+    model: Option<String>,
+    effort: Option<Effort>,
+    accept_cost: bool,
+    saved_account: bool,
+) -> Result<CommandOutput, String> {
+    if saved_account || selected_state_dir.is_some() {
+        return Err(
+            "ChatGPT checks use the selected user account; omit --saved-account and --state-dir"
+                .into(),
+        );
+    }
+    let model = model.ok_or("ChatGPT checks require MODEL and --effort LEVEL")?;
+    let effort = effort.ok_or("ChatGPT checks require MODEL and --effort LEVEL")?;
+    validate_native_model_id(&model).map_err(|_| "ChatGPT model is invalid")?;
+    if !accept_cost {
+        return Err("ChatGPT checks may consume plan usage in three synthetic calls. Each has a 1,024-token local acceptance cap, but no remote output-token cap; rerun with --accept-cost".into());
+    }
+    let workspace = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| "Workspace unavailable".to_owned())?;
+    let cancellation = RunCancellation::new();
+    let report = match check_signalled(
+        chatgpt::check_selected_model(workspace, None, model.clone(), effort, cancellation.clone()),
+        cancellation,
+    )
+    .await?
+    {
+        Ok(report) => report,
+        Err(chatgpt::ModelCheckError::Admission(error)) => {
+            return Err(error.to_string());
+        }
+        Err(chatgpt::ModelCheckError::Journal(error)) => {
+            return failed_check_journal(error);
+        }
+        Err(chatgpt::ModelCheckError::Check { source, receipt }) => {
+            return failed_check(source, Some(receipt));
+        }
+    };
+    Ok(CommandOutput {
+        stdout: format!(
+            "{}Check: {}\nDisposition: {}\n",
+            render_chatgpt_check(report.account, &model, effort, report.context_window_tokens),
+            report.view.id,
+            report.view.replay_disposition()
+        ),
+        stderr: String::new(),
+        success: true,
+    })
+}
+
+async fn check_native(
+    state_dir: PathBuf,
+    profile: &str,
+    model: String,
+    effort: Effort,
+    saved_account: bool,
+) -> Result<CommandOutput, String> {
+    let root = StateRoot::admit(&state_dir)
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let (key, account_id) = native_credentials(profile, saved_account).await?;
+    let cancellation = RunCancellation::new();
+    let view = match check_signalled(
+        check_native_model(
+            root,
+            NativeCheckRequest {
+                profile: profile.to_owned(),
+                model: model.clone(),
+                effort,
+                credentials: key,
+                account_id,
+            },
+            cancellation.clone(),
+            revalidate_native_credentials(profile.to_owned(), account_id),
+        ),
+        cancellation,
+    )
+    .await?
+    {
+        Ok(view) => view,
+        Err(NativeCheckError::Check { source, receipt }) => {
+            return failed_check(*source, Some(receipt));
+        }
+        Err(NativeCheckError::Journal(error)) => return failed_check_journal(*error),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(CommandOutput {
+        stdout: format!(
+            "Provider: {profile}\nModel: {model}\nEffort: {effort}\nCredential: {}\nStatus: native synthetic conformance passed\nCheck: {}\nDisposition: {}\n",
+            if saved_account {
+                "saved API account"
+            } else {
+                "environment API key"
+            },
+            view.id,
+            view.replay_disposition()
+        ),
+        stderr: String::new(),
+        success: true,
+    })
+}
+
+async fn native_credentials(
+    profile: &str,
+    saved_account: bool,
+) -> Result<(NativeApiCredentials, Option<uuid::Uuid>), String> {
+    if !saved_account {
+        return NativeApiCredentials::from_env(profile)
+            .map(|credentials| (credentials, None))
+            .map_err(|_| NativeCheckError::CredentialUnavailable.to_string());
+    }
+    saved_native_credentials(profile)
+        .await
+        .map(|(credentials, id)| (credentials, Some(id)))
+}
+
+async fn saved_native_credentials(
+    profile: &str,
+) -> Result<(NativeApiCredentials, uuid::Uuid), String> {
+    let account = credentials::load()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("no saved native API account")?;
+    if account.provider != profile {
+        return Err("saved API account belongs to a different Provider".into());
+    }
+    let id = account.id;
+    let credentials = account
+        .into_credentials()
+        .map_err(|error| error.to_string())?;
+    Ok((credentials, id))
+}
+
+async fn revalidate_native_credentials(
+    profile: String,
+    account_id: Option<uuid::Uuid>,
+) -> Result<NativeApiCredentials, NativeCheckError> {
+    if let Some(id) = account_id {
+        let account = credentials::load()
+            .await
+            .map_err(|_| NativeCheckError::CredentialUnavailable)?
+            .ok_or(NativeCheckError::CredentialUnavailable)?;
+        if account.id != id || account.provider != profile {
+            return Err(NativeCheckError::EvidenceUnavailable);
+        }
+        account
+            .into_credentials()
+            .map_err(|_| NativeCheckError::CredentialUnavailable)
+    } else {
+        NativeApiCredentials::from_env(&profile)
+            .map_err(|_| NativeCheckError::CredentialUnavailable)
+    }
+}
+
+async fn check_custom(state_dir: PathBuf, profile: &str) -> Result<CommandOutput, String> {
+    let root = StateRoot::open_existing(&state_dir)
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let cancellation = RunCancellation::new();
+    let report = match check_signalled(
+        check_custom_profile_with_cancellation(
+            root,
+            ProviderKind::custom_name(profile).unwrap_or(profile),
+            cancellation.clone(),
+        ),
+        cancellation,
+    )
+    .await?
+    {
+        Ok(report) => report,
+        Err(CustomProfileError::Check { source, receipt }) => {
+            return failed_check(*source, Some(receipt));
+        }
+        Err(CustomProfileError::Journal(error)) => return failed_check_journal(*error),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(CommandOutput {
+        stdout: format!(
+            "Provider: {}\nStatus: custom verified\n{}\n",
+            report.profile_name(),
+            report.receipt()
+        ),
+        stderr: String::new(),
+        success: true,
+    })
 }
 
 async fn check_signalled<T, E>(
