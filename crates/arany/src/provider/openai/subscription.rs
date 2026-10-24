@@ -1,9 +1,8 @@
+use super::limits;
 use super::{OPENAI_ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
-use crate::provider::{RateLimitSlot, ResponsePreview};
-mod limits;
 use crate::provider::conversation::Conversation;
 use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{
@@ -13,6 +12,7 @@ use crate::provider::{
     ProviderError, ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput,
     Usage, catalog::valid_model_id, render,
 };
+use crate::provider::{RateLimitSlot, ResponsePreview};
 use crate::session::{AgentRunId, MAX_COMPACTION_OUTPUT_TOKENS, RunId, SessionId};
 #[cfg(test)]
 use reqwest::redirect::Policy;
