@@ -2441,6 +2441,18 @@ fn facts_digest(text: &str) -> String {
         .collect()
 }
 
+fn assert_successful_in_process_reads(run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 2);
+    for tool in &run.tools {
+        let observed = tool.observation.as_ref().expect("Read receipt");
+        assert_eq!(observed.disposition, arany::ToolDisposition::Succeeded);
+        assert!(matches!(
+            observed.attestation,
+            Some(arany::Attestation::InProcess { .. })
+        ));
+    }
+}
+
 fn facts_read() -> arany::ToolCall {
     arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
@@ -4317,8 +4329,14 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
     .expect("context-full Run");
     let recovery = Arc::new(ScriptedProvider::new(vec![
         crate::tool_outcome(facts_read()),
-        crate::tool_outcome(arany::ToolCall::List {
-            path: "notes".into(),
+        crate::tool_outcome(arany::ToolCall::Search {
+            path: "notes/facts.txt".into(),
+            query: "missing".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: arany::MAX_SEARCH_ROWS,
         }),
         finish_with("The next message works"),
     ]));
@@ -4385,7 +4403,7 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
         view.runs[1].assistant_message.as_deref(),
         Some("The next message works")
     );
-    assert_eq!(view.runs[1].tools.len(), 2);
+    assert_successful_in_process_reads(&view.runs[1]);
 }
 
 #[tokio::test]
@@ -8497,10 +8515,6 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
             temp.path(),
             &format!("{}\n", "fact ".repeat(line_repeats)).repeat(83),
         );
-        for index in 0..24 {
-            std::fs::write(workspace.join(format!("notes/file-{index}.txt")), "entry")
-                .expect("entry");
-        }
         let state_path = temp.path().join("state");
         let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
         let seed = Arc::new(ScriptedProvider::new(vec![
@@ -8523,10 +8537,16 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         let compaction_expected = window == Some(32_768) && line_repeats == 96;
         let mut provider = ScriptedProvider::new(vec![
             crate::tool_outcome(facts_read()),
-            crate::tool_outcome(arany::ToolCall::List {
-                path: "notes".into(),
+            crate::tool_outcome(arany::ToolCall::Search {
+                path: "notes/facts.txt".into(),
+                query: "missing".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: arany::MAX_SEARCH_ROWS,
             }),
-            finish_with("Read 83 lines and listed 25 entries"),
+            finish_with("Read 83 lines and searched for a missing fact"),
         ])
         .with_chatgpt_account(Uuid::now_v7(), [7; 32])
         .with_profile("chatgpt", "gpt-6-luna")
@@ -8548,7 +8568,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
             })]);
         }
         let provider = Arc::new(provider);
-        let mut input = request(&workspace, "Inspect the directory and answer");
+        let mut input = request(&workspace, "Inspect the facts and answer");
         input.session_id = session;
         input.title = None;
         input.include_paths.clear();
@@ -8592,7 +8612,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
                 },
             "optional history cannot consume continuation room: {allowance}"
         );
-        assert_eq!(run.tools.len(), 2);
+        assert_successful_in_process_reads(run);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
         assert_eq!(
             provider.compact_requests.lock().expect("compactions").len(),

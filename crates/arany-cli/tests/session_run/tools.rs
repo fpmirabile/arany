@@ -887,7 +887,7 @@ impl Provider for InProcessReads {
             .observation_count();
         let outcome = match step % 4 {
             _ if step == IN_PROCESS_READS => ProviderOutcome::Answer(Answer {
-                text: "Read, listed, searched and globbed in process.".into(),
+                text: "Read files and discovered paths.".into(),
             }),
             0 => crate::tool_outcome(ToolCall::Read {
                 path: "src/main.c".into(),
@@ -925,6 +925,45 @@ impl Provider for InProcessReads {
 
     async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
         Err(ProviderError::InvalidOutcome)
+    }
+}
+
+fn assert_read_observations(run: &arany::RunView) {
+    assert_eq!(run.tools.len(), IN_PROCESS_READS);
+    for tool in &run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        if matches!(tool.intent.call, ToolCall::Read { .. }) {
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::InProcess { .. })
+            ));
+        } else {
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Guard(_))
+            ));
+        }
+        assert!(!observation.output.contains("secret-canary"));
+        assert!(!observation.output.contains(".env"));
+        if matches!(tool.intent.call, ToolCall::Search { .. }) {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&observation.output).unwrap(),
+                serde_json::json!({"entries":[{"path":"src/main.c","line":1,"text":"int main(void) { return 0; }"}],"limit":2,"may_be_truncated":false,"next_offset":null})
+            );
+        }
+    }
+    let globbed: Vec<_> = run
+        .tools
+        .iter()
+        .filter(|tool| matches!(tool.intent.call, ToolCall::Glob { .. }))
+        .collect();
+    assert_eq!(globbed.len(), IN_PROCESS_READS / 4);
+    for tool in globbed {
+        assert_eq!(
+            tool.observation.as_ref().unwrap().output,
+            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false}"#
+        );
     }
 }
 
@@ -971,36 +1010,7 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         "{}",
         crate::safe_run_diagnostics(&outcome.run)
     );
-    assert_eq!(outcome.run.tools.len(), IN_PROCESS_READS);
-    for tool in &outcome.run.tools {
-        let observation = tool.observation.as_ref().unwrap();
-        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert!(matches!(
-            observation.attestation,
-            Some(arany::Attestation::InProcess { .. })
-        ));
-        assert!(!observation.output.contains("secret-canary"));
-        assert!(!observation.output.contains(".env"));
-        if matches!(tool.intent.call, ToolCall::Search { .. }) {
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&observation.output).unwrap(),
-                serde_json::json!({"entries":[{"path":"src/main.c","line":1,"text":"int main(void) { return 0; }"}],"limit":2,"may_be_truncated":false,"next_offset":null})
-            );
-        }
-    }
-    let globbed: Vec<_> = outcome
-        .run
-        .tools
-        .iter()
-        .filter(|tool| matches!(tool.intent.call, ToolCall::Glob { .. }))
-        .collect();
-    assert_eq!(globbed.len(), IN_PROCESS_READS / 4);
-    for tool in globbed {
-        assert_eq!(
-            tool.observation.as_ref().unwrap().output,
-            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false}"#
-        );
-    }
+    assert_read_observations(&outcome.run);
 
     // A fresh read-only Store stands in for the next process.
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();

@@ -3082,7 +3082,7 @@ mod delegation_bound_tests {
             .unwrap();
             let mut runtime = ToolRuntime::admit(
                 config,
-                ToolRuntime::load_permissions(&engine.state).unwrap(),
+                crate::tools::load_permissions(&engine.state).unwrap(),
                 None,
                 &workspace,
                 &engine.state,

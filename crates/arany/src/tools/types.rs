@@ -972,7 +972,11 @@ impl Attestation {
                     && intent.call.is_child_research()
                     && *intent_digest == intent.digest()
                     && match intent.call.facts().site {
-                        Site::InProcess => guard.is_none(),
+                        Site::InProcess => {
+                            guard.is_none()
+                                || super::discovery::possible(&intent.call)
+                                    && guard.as_ref().is_some_and(|r| r.valid_for(intent))
+                        }
                         Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
                         Site::Unguarded | Site::Host => false,
                     }
@@ -1012,6 +1016,7 @@ impl Attestation {
             } => {
                 intent.target == EffectTarget::Workspace
                     && intent.call.facts().site == Site::InProcess
+                    && !matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
                     && *policy_digest == intent.policy_digest
                     && *workspace_device == intent.workspace_device
                     && *workspace_inode == intent.workspace_inode
@@ -1019,7 +1024,8 @@ impl Attestation {
             Self::Guard(receipt) => {
                 intent.target == EffectTarget::Workspace
                     && !matches!(intent.call, ToolCall::PrepareWorker { .. })
-                    && intent.call.facts().site == Site::Guard
+                    && (intent.call.facts().site == Site::Guard
+                        || super::discovery::possible(&intent.call))
                     && receipt.valid_for(intent)
             }
             Self::Host(receipt) => {
@@ -1042,7 +1048,12 @@ impl Attestation {
 
     #[cfg(test)]
     pub(crate) fn for_site(intent: &EffectIntent) -> Self {
-        match intent.call.facts().site {
+        let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. }) {
+            Site::Guard
+        } else {
+            intent.call.facts().site
+        };
+        match site {
             Site::InProcess => Self::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -1316,7 +1327,8 @@ impl ToolObservation {
                 Some(EnforcementCause::GuardBootstrap) => {
                     self.disposition == ToolDisposition::Failed
                         && self.attestation.is_none()
-                        && self.intent.call.facts().site == super::catalog::Site::Guard
+                        && (self.intent.call.facts().site == super::catalog::Site::Guard
+                            || super::discovery::possible(&self.intent.call))
                 }
             }
             && (!self.intent.call.is_host()

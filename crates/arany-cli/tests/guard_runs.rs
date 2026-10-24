@@ -3275,6 +3275,119 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
 }
 
 #[test]
+#[cfg_attr(not(arany_ci), ignore = "native discovery Guard on Linux and macOS")]
+fn missing_skill_path_is_attested_failed_and_the_run_continues() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(missing_skill_path_recovery());
+}
+
+async fn missing_skill_path_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join(".agents/skills/ponytail")).unwrap();
+    std::fs::write(
+        workspace.join(".agents/skills/ponytail/SKILL.md"),
+        "Use existing code",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = state.join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let read = |path: &str| {
+        tool_outcome(arany::ToolCall::Read {
+            path: path.into(),
+            offset: None,
+            limit: None,
+        })
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        read("agents/skills/ponytail/SKILL.md"),
+        tool_outcome(arany::ToolCall::List { path: ".".into() }),
+        read(".agents/skills/ponytail/SKILL.md"),
+        arany::test_support::goals::finish_with("Found and read the Skill"),
+    ]));
+    let mut input = request(&workspace, "Read Ponytail guidance");
+    input.include_paths.clear();
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        let observed = requests[1].input.tools.as_ref().unwrap().observations();
+        assert_eq!(observed[0].disposition, arany::ToolDisposition::Failed);
+        assert_eq!(
+            observed[0].output,
+            "File or directory not found; List the parent directory to check the path"
+        );
+    }
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.runs[0], result.run);
+    assert_missing_skill_recovery(&view.runs[0]);
+    store.close().await.unwrap();
+}
+
+fn assert_missing_skill_recovery(run: &arany::RunView) {
+    let missing = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(missing.disposition, arany::ToolDisposition::Failed);
+    assert_eq!(
+        missing.output,
+        "File or directory not found; List the parent directory to check the path"
+    );
+    assert!(matches!(
+        missing.attestation,
+        Some(arany::Attestation::InProcess { .. })
+    ));
+    assert_eq!(
+        run.tools[2].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    let listed = run.tools[1].observation.as_ref().unwrap();
+    assert_eq!(
+        listed.disposition,
+        arany::ToolDisposition::Succeeded,
+        "{}",
+        tool_report(Some(listed))
+    );
+    assert!(matches!(
+        listed.attestation,
+        Some(arany::Attestation::Guard { .. })
+    ));
+    assert!(listed.output.contains(".agents"));
+}
+
+#[test]
 #[cfg_attr(not(arany_ci), ignore = "native Skill Guard read on Linux and macOS")]
 fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
     let _gate = process::NATIVE_GATE

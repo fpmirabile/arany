@@ -1,22 +1,18 @@
 use super::ToolError;
-use super::config::Config;
-use super::fs::{Keep, identity, ignored_directory, open_file};
 use super::types::{MAX_SNAPSHOT_FILES, ToolCall};
-use crate::validate::{forbidden, valid_relative};
-use cap_std::fs::Dir;
+use crate::validate::valid_relative;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 const MAX_GLOB_ENTRIES: u32 = 100;
 const MAX_PATTERN_BYTES: usize = 512;
 const MAX_ALTERNATIVES: usize = 16;
 const MAX_TRANSLATION_BYTES: usize = 8 * 1024;
-const MAX_SCANNED_ENTRIES: usize = MAX_SNAPSHOT_FILES * 4;
-const MAX_GLOB_CANDIDATES: usize = MAX_SNAPSHOT_FILES;
-const MAX_DEPTH: usize = 16;
+pub(super) const MAX_SCANNED_ENTRIES: usize = MAX_SNAPSHOT_FILES * 4;
+pub(super) const MAX_GLOB_CANDIDATES: usize = MAX_SNAPSHOT_FILES;
+pub(super) const MAX_DEPTH: usize = 16;
 
 pub(super) fn default_path() -> String {
     ".".into()
@@ -188,220 +184,8 @@ pub(super) fn schema() -> Vec<(&'static str, Value)> {
     ]
 }
 
-pub(super) fn inspect(
-    root: &Dir,
-    call: &ToolCall,
-    config: &Config,
-    hidden: Keep,
-    result_bytes: usize,
-) -> Result<String, ToolError> {
-    let ToolCall::Glob {
-        pattern,
-        path,
-        limit,
-    } = call
-    else {
-        return Err(ToolError::Operation);
-    };
-    let matcher = matcher(pattern).map_err(|_| ToolError::Operation)?;
-    let path = if path == "." { "" } else { path.as_str() };
-    let mut walk = Walk {
-        root,
-        device: identity(root)?.0,
-        matcher: &matcher,
-        hidden,
-        base: path,
-        max_depth: (!pattern.split('/').any(|part| part == "**"))
-            .then(|| pattern.split('/').count()),
-        scanned: 0,
-        matches: BTreeMap::new(),
-    };
-    for selected in &config.workspace_paths {
-        if selected == "." {
-            walk.start(path, true, true)?;
-        } else if path.is_empty() || Path::new(selected).starts_with(path) {
-            walk.start(selected, false, false)?;
-        } else if Path::new(path).starts_with(selected) {
-            walk.start(path, true, false)?;
-        }
-    }
-    render(walk.matches, *limit, result_bytes)
-}
-
-pub(super) fn inspect_files<'a>(
-    files: impl Iterator<Item = (&'a str, usize)>,
-    call: &ToolCall,
-    result_bytes: usize,
-) -> Result<String, ToolError> {
-    let ToolCall::Glob {
-        pattern,
-        path,
-        limit,
-    } = call
-    else {
-        return Err(ToolError::Operation);
-    };
-    let matcher = matcher(pattern).map_err(|_| ToolError::Operation)?;
-    let mut matches = BTreeMap::new();
-    for (name, bytes) in files {
-        let relative = if path == "." {
-            Some(name)
-        } else {
-            name.strip_prefix(path.as_str())
-                .and_then(|rest| rest.strip_prefix('/'))
-        };
-        if relative.is_some_and(|relative| matcher.is_match(relative)) {
-            matches.insert(name.to_owned(), bytes as u64);
-            if matches.len() > MAX_GLOB_CANDIDATES {
-                return Err(ToolError::Limit);
-            }
-        }
-    }
-    render(matches, *limit, result_bytes)
-}
-
-struct Walk<'a> {
-    root: &'a Dir,
-    device: u64,
-    matcher: &'a Regex,
-    hidden: Keep<'a>,
-    base: &'a str,
-    max_depth: Option<usize>,
-    scanned: usize,
-    matches: BTreeMap<String, u64>,
-}
-
-impl Walk<'_> {
-    fn start(&mut self, path: &str, requested: bool, whole_project: bool) -> Result<(), ToolError> {
-        if path.is_empty() {
-            let directory = self.root.try_clone().map_err(|_| ToolError::Path)?;
-            return self.visit(&directory, "", whole_project);
-        }
-        if (self.hidden)(path) {
-            return Ok(());
-        }
-        let file = open_file(self.root, path)?;
-        let metadata = cap_std::fs::Metadata::from_file(&file).map_err(|_| ToolError::Path)?;
-        if metadata.is_dir() {
-            return self.visit(&Dir::from_std_file(file), path, whole_project);
-        }
-        if requested && metadata.is_file() {
-            return Err(ToolError::Operation);
-        }
-        // A selected root that names a file is itself a candidate.
-        if !metadata.is_file() || !admitted(&metadata, self.device) {
-            return Err(ToolError::Path);
-        }
-        self.candidate(path, metadata.len())
-    }
-
-    fn visit(&mut self, directory: &Dir, path: &str, whole_project: bool) -> Result<(), ToolError> {
-        let mut children = Vec::new();
-        for entry in directory.entries().map_err(|_| ToolError::Path)? {
-            self.scanned += 1;
-            if self.scanned > MAX_SCANNED_ENTRIES {
-                return Err(ToolError::Limit);
-            }
-            let Ok(name) = entry
-                .map_err(|_| ToolError::Path)?
-                .file_name()
-                .into_string()
-            else {
-                continue;
-            };
-            if forbidden(&name) || whole_project && ignored_directory(&name) {
-                continue;
-            }
-            let relative = if path.is_empty() {
-                name.clone()
-            } else {
-                format!("{path}/{name}")
-            };
-            if relative.split('/').count() > MAX_DEPTH {
-                return Err(ToolError::Limit);
-            }
-            if !valid_relative(&relative, false) {
-                if relative.len() > 512 {
-                    return Err(ToolError::Limit);
-                }
-                continue;
-            }
-            if (self.hidden)(&relative) {
-                continue;
-            }
-            let metadata = directory
-                .symlink_metadata(&name)
-                .map_err(|_| ToolError::Path)?;
-            if metadata.is_symlink() || !admitted(&metadata, self.device) {
-                continue;
-            }
-            if metadata.is_dir() {
-                if self
-                    .max_depth
-                    .is_none_or(|depth| self.depth(&relative) < depth)
-                {
-                    children.push(name);
-                }
-            } else if metadata.is_file() {
-                self.candidate(&relative, metadata.len())?;
-            }
-        }
-        children.sort_unstable();
-        for name in children {
-            let relative = if path.is_empty() {
-                name.clone()
-            } else {
-                format!("{path}/{name}")
-            };
-            let child = Dir::from_std_file(open_file(self.root, &relative)?);
-            self.visit(&child, &relative, whole_project)?;
-        }
-        Ok(())
-    }
-
-    fn depth(&self, relative: &str) -> usize {
-        self.relative(relative)
-            .map_or(0, |rest| rest.split('/').count())
-    }
-
-    fn relative<'p>(&self, path: &'p str) -> Option<&'p str> {
-        if self.base.is_empty() {
-            Some(path)
-        } else {
-            path.strip_prefix(self.base)?.strip_prefix('/')
-        }
-    }
-
-    fn candidate(&mut self, path: &str, bytes: u64) -> Result<(), ToolError> {
-        if self
-            .relative(path)
-            .is_some_and(|relative| self.matcher.is_match(relative))
-        {
-            self.matches.insert(path.to_owned(), bytes);
-            if self.matches.len() > MAX_GLOB_CANDIDATES {
-                return Err(ToolError::Limit);
-            }
-        }
-        Ok(())
-    }
-}
-
-// Hard links and other mounts are outside the admitted regular-file boundary; skip, never follow.
-fn admitted(metadata: &cap_std::fs::Metadata, device: u64) -> bool {
-    #[cfg(unix)]
-    {
-        use cap_std::fs::MetadataExt;
-        metadata.dev() == device && (!metadata.is_file() || metadata.nlink() == 1)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (metadata, device);
-        false
-    }
-}
-
 // Keeps a Limit, not an empty success, when matches exist but none fits.
-fn render(
+pub(super) fn render(
     matches: BTreeMap<String, u64>,
     limit: u32,
     result_bytes: usize,

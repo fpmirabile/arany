@@ -621,8 +621,7 @@ impl RunLoop<'_> {
                     }
                 };
                 let deadline = grant.deadline().unwrap_or(*deadline);
-                let Some(mut intent) =
-                    self.researcher_intent(runtime, child.agent_run_id, call, deadline)
+                let Some(mut intent) = self.researcher_intent(runtime, child, call, deadline)
                 else {
                     return Ok(Err(deadline_refusal));
                 };
@@ -685,7 +684,7 @@ impl RunLoop<'_> {
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .saturating_sub(
-                runtime.reservation_overhead(&intent.call)
+                runtime.intent_reservation_overhead(intent)
                     + TOOL_CLEANUP_OVERHEAD
                     + STORE_ACTION_OVERHEAD,
             );
@@ -817,7 +816,7 @@ impl RunLoop<'_> {
         }
         let fixed_overhead_ms = duration_ms(
             runtime
-                .reservation_overhead(&intent.call)
+                .intent_reservation_overhead(&intent)
                 .saturating_add(TOOL_CLEANUP_OVERHEAD)
                 .saturating_add(STORE_ACTION_OVERHEAD),
         );
@@ -865,18 +864,19 @@ impl RunLoop<'_> {
     pub(super) fn researcher_intent(
         &self,
         runtime: &ToolRuntime,
-        agent_run_id: crate::session::AgentRunId,
+        child: &ChildWork,
         call: ToolCall,
         deadline: Instant,
     ) -> Option<EffectIntent> {
-        let mut intent = runtime.intent(self.run_id, agent_run_id, call);
+        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        let overhead = if child.editor {
+            runtime.worker_reservation_overhead(&intent.call)
+        } else {
+            runtime.reservation_overhead(&intent.call)
+        };
         let available = deadline
             .saturating_duration_since(Instant::now())
-            .saturating_sub(
-                runtime.reservation_overhead(&intent.call)
-                    + TOOL_CLEANUP_OVERHEAD
-                    + STORE_ACTION_OVERHEAD,
-            );
+            .saturating_sub(overhead + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD);
         let available = available.saturating_sub(self.hook_time(runtime, &intent.call, available));
         // Half for the post-approval Guard capacity wait, half for the run itself.
         let runtime_ms = intent
@@ -2182,7 +2182,7 @@ impl RunLoop<'_> {
 
 fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
     runtime
-        .reservation_overhead(&intent.call)
+        .intent_reservation_overhead(intent)
         .saturating_add(
             Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
                 .saturating_add(crate::tools::worker::transfer_time(intent))
