@@ -1166,27 +1166,28 @@ mod tests {
                 offset: None,
                 limit: None,
             },
-            "Action denied or approval expired",
+            "Action denied.",
         )];
         for (cause, expected) in [
-            (arany::ApprovalCause::Cancelled, "Run cancelled."),
-            (arany::ApprovalCause::Paused, "Goal paused."),
+            (Some(arany::ApprovalCause::Cancelled), "Run cancelled."),
+            (Some(arany::ApprovalCause::Paused), "Goal paused."),
             (
-                arany::ApprovalCause::ChannelUnavailable,
+                Some(arany::ApprovalCause::ChannelUnavailable),
                 "Approval channel unavailable.",
             ),
-            (arany::ApprovalCause::Declined, "Action denied."),
+            (Some(arany::ApprovalCause::Declined), "Action denied."),
             (
-                arany::ApprovalCause::ChildTimeout,
+                Some(arany::ApprovalCause::ChildTimeout),
                 "Child approval wait timed out.",
             ),
+            (None, "Action denied."),
         ] {
             let observation = run.tools[0].observation.as_mut().unwrap();
             observation.disposition = arany::ToolDisposition::Denied;
             observation.attestation = None;
-            observation.approval_cause = Some(cause);
+            observation.approval_cause = cause;
             let feedback = run_feedback(run).unwrap();
-            if cause == arany::ApprovalCause::ChannelUnavailable {
+            if cause == Some(arany::ApprovalCause::ChannelUnavailable) {
                 assert_eq!(
                     feedback,
                     "Approval channel unavailable. No further action ran; earlier completed actions remain. Start a new request from an interactive approval channel."
@@ -1201,7 +1202,7 @@ mod tests {
             }
             if matches!(
                 cause,
-                arany::ApprovalCause::Cancelled | arany::ApprovalCause::Paused
+                Some(arany::ApprovalCause::Cancelled | arany::ApprovalCause::Paused)
             ) {
                 run.status = RunStatus::Cancelled;
                 assert_eq!(

@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `In progress`
+- Status: `In progress` (A1 and A2 delivered; A3 pending)
 - Owner: Fernando Mirabile
-- Last updated: `2026-10-22`
-- Next action: validate and land non-host A1, then implement A2; host A3 follows A1 once [Git S3, PR #279](https://github.com/fpmirabile/arany/pull/279) merges.
+- Last updated: `2026-10-24`
+- Next action: reconcile and implement host A3 after [Git S3, PR #279](https://github.com/fpmirabile/arany/pull/279) merges.
 
 ## Outcome and scope
 
@@ -110,7 +110,7 @@ One pending Tool per Run, the one-slot approval inbox, one pending protocol perm
 ## Vertical slices
 
 1. **A1 — Non-host primary Tool approvals wait for the attached human through terminal, serve and ACP.** One PR crosses reply adapters → shared Engine step → intent/verdict format → Guard queue/dispatch → receipt/presentation → specs and existing scenario owners. Include ordinary, hook Ask and unguarded approvals; replace approval Escape-as-denial with cancel, distinguish unsent/unavailable delivery, and remove generic approval-expired copy. No dependency on #279. Update shared intent constructors/schema/version fixtures without removing rewind's own preview checks. **Child approvals retain their existing Engine timer until A2**, even though protocol expiry plumbing is removed: retain the child's issue-time deadline as bounded live scheduling state, not a second stored intent format. Thus A1 fixes the owner's primary-approval symptom but only partially delivers the feature. Test late primary allow, child timer withdrawal, cancel, drift, headless refusal, output backpressure and replay.
-2. **A2 — Child approvals survive idle waits and withdraw when active sibling work exhausts their allowance.** One PR crosses researcher/editor ask → transition-driven coordinator/Goal accounting → verdict/withdrawal and worker cleanup journal → private Guard dispatch or non-dispatch → parent/client projections, specs and worker/ledger/protocol tests. Remove the remaining child issue-time timer; implement the lifecycle/scenarios above. Preserve child/primary final-call headroom, finite cleanup and private-uncertainty rules.
+2. **A2 — Child approvals survive idle waits and withdraw when active sibling work exhausts their allowance (implemented).** One PR crosses researcher/editor ask → transition-driven coordinator/Goal accounting → verdict/withdrawal and worker cleanup journal → private Guard dispatch or non-dispatch → parent/client projections, specs and worker/ledger/protocol tests. Remove the remaining child issue-time timer; implement the lifecycle/scenarios above. Preserve child/primary final-call headroom, finite cleanup and private-uncertainty rules.
 3. **A3 — Host approvals wait without stale pre-spawn expiry after Git S3 merges.** Depends on A1 and merged #279, not on A2. One PR crosses typed push/PR proposal → human-only prompt → committed verdict → host pin revalidation/supervision → receipt/client feedback → host contract/corpus. Reconcile #279's intent shape against A1 on integration; remove its remaining clock-only check rather than restoring a shared approval TTL. Verify late allow, changed OID/destination/executable, missing human, cancel and unknown remote outcome. No new host authority is introduced.
 
 ## Exit criteria
