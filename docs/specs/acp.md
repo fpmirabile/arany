@@ -211,7 +211,7 @@ permission and queue `$/cancel_request` for its ACP ID if it was sent. Serve
 owns withdrawal independently of outbound capacity. A primary permission has no
 wall-clock expiry once enqueued; a still-connected slow client remains
 answerable. A client may receive an already withdrawn request or delayed withdrawal, and cannot
-authorize it. Child requests retain their temporary Engine timer. An oversized
+authorize it. Child requests remain answerable through idle waits and withdraw when active sibling work exhausts the shared delegation or Goal allowance; the cancellation notification follows the committed withdrawal. An oversized
 permission or a full/closed ACP output queue records unavailable approval
 without sending or truncating its intent
 or approval lines. Enqueue is attempted once, with no retry, and its ID is

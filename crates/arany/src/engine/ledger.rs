@@ -6,9 +6,160 @@ use crate::session::{
     GoalId, GoalLimit, GoalPlanContract, GoalUsage, GoalView, MAX_CHILD_TOOL_CALLS,
     MAX_DISPLAY_CHUNKS, SessionId, SessionView,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ActiveDeadlineCause {
+    Delegation,
+    Goal,
+}
+
+#[derive(Clone)]
+pub(super) struct ActiveDeadline {
+    clock: Arc<ActivityClock>,
+    started_at: Duration,
+    allowance_ms: u64,
+    pub(super) cause: ActiveDeadlineCause,
+}
+
+impl ActiveDeadline {
+    pub(super) fn remaining_ms(&self) -> u64 {
+        self.allowance_ms.saturating_sub(duration_ms(
+            self.clock.elapsed().saturating_sub(self.started_at),
+        ))
+    }
+
+    pub(super) fn reached(&self) -> bool {
+        self.remaining_ms() == 0
+    }
+
+    pub(super) fn wall_deadline(&self) -> Instant {
+        Instant::now() + Duration::from_millis(self.remaining_ms())
+    }
+
+    pub(super) async fn elapsed(&self) {
+        let mut changes = self.clock.changes.subscribe();
+        loop {
+            let remaining = self.remaining_ms();
+            if remaining == 0 {
+                return;
+            }
+            if self.clock.active() {
+                tokio::select! {
+                    () = sleep(Duration::from_millis(remaining)) => {}
+                    result = changes.changed() => if result.is_err() { return; },
+                }
+            } else if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActivityState {
+    providers: usize,
+    effects: u16,
+    elapsed: Duration,
+    started: Option<Instant>,
+}
+
+struct ActivityClock {
+    state: Mutex<ActivityState>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+impl ActivityClock {
+    fn new() -> Self {
+        let (changes, _) = tokio::sync::watch::channel(0);
+        Self {
+            state: Mutex::new(ActivityState::default()),
+            changes,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.state.lock().map_or(Duration::MAX, |state| {
+            state.elapsed.saturating_add(
+                state
+                    .started
+                    .map_or(Duration::ZERO, |started| started.elapsed()),
+            )
+        })
+    }
+
+    fn active(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.providers > 0 || state.effects > 0)
+    }
+
+    fn update(&self, update: impl FnOnce(&mut ActivityState)) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let was_active = state.providers > 0 || state.effects > 0;
+        update(&mut state);
+        let is_active = state.providers > 0 || state.effects > 0;
+        match (was_active, is_active) {
+            (false, true) => state.started = Some(Instant::now()),
+            (true, false) => {
+                state.elapsed = state.elapsed.saturating_add(
+                    state
+                        .started
+                        .take()
+                        .map_or(Duration::ZERO, |started| started.elapsed()),
+                );
+            }
+            _ => {}
+        }
+        self.changes
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    fn effect(self: &Arc<Self>) -> ActiveWork {
+        self.update(|state| state.effects = state.effects.saturating_add(1));
+        ActiveWork(self.clone())
+    }
+
+    fn provider_completed(&self) {
+        self.update(|state| state.providers = state.providers.saturating_sub(1));
+    }
+
+    fn provider(self: &Arc<Self>) -> ProviderActivity {
+        ProviderActivity(self.clone())
+    }
+}
+
+pub(super) struct ActiveWork(Arc<ActivityClock>);
+
+impl Drop for ActiveWork {
+    fn drop(&mut self) {
+        self.0
+            .update(|state| state.effects = state.effects.saturating_sub(1));
+    }
+}
+
+pub(super) struct ProviderWork(Arc<ActivityClock>);
+
+#[derive(Clone)]
+pub(super) struct ProviderActivity(Arc<ActivityClock>);
+
+impl ProviderActivity {
+    pub(super) fn start(&self) -> ProviderWork {
+        self.0
+            .update(|state| state.providers = state.providers.saturating_add(1));
+        ProviderWork(self.0.clone())
+    }
+}
+
+impl Drop for ProviderWork {
+    fn drop(&mut self) {
+        self.0.provider_completed();
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -17,6 +168,12 @@ mod tests;
 pub(super) enum Admission<T> {
     Reserved(T),
     Exhausted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActiveReservationLimit {
+    Goal,
+    ActionBound,
 }
 
 impl<T> Admission<T> {
@@ -200,6 +357,7 @@ pub(super) struct GoalLedger {
     goal_id: Option<GoalId>,
     state: Mutex<State>,
     admission: tokio::sync::Mutex<()>,
+    activity: Arc<ActivityClock>,
 }
 
 struct State {
@@ -271,6 +429,7 @@ impl GoalLedger {
                 in_flight: InFlight::default(),
             }),
             admission: tokio::sync::Mutex::new(()),
+            activity: Arc::new(ActivityClock::new()),
         }
     }
 
@@ -343,6 +502,31 @@ impl GoalLedger {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn active_work(&self) -> ActiveWork {
+        self.activity.effect()
+    }
+
+    pub(super) fn provider_activity(&self) -> ProviderActivity {
+        self.activity.provider()
+    }
+
+    pub(super) fn active_elapsed(&self) -> Duration {
+        self.activity.elapsed()
+    }
+
+    pub(super) fn active_deadline(
+        &self,
+        allowance_ms: u64,
+        cause: ActiveDeadlineCause,
+    ) -> ActiveDeadline {
+        ActiveDeadline {
+            started_at: self.activity.elapsed(),
+            clock: self.activity.clone(),
+            allowance_ms,
+            cause,
+        }
     }
 
     fn read<T>(&self, read: impl FnOnce(&GoalView, &InFlight) -> T) -> Result<T, EngineError> {
@@ -589,7 +773,7 @@ impl GoalLedger {
         action_ms: u64,
         action: BudgetAction,
         actor: Option<AgentRunId>,
-    ) -> Result<Admission<(Instant, u64)>, EngineError> {
+    ) -> Result<Admission<(Instant, u64, ActiveReservationLimit)>, EngineError> {
         self.update(|goal, in_flight| {
             let now = Instant::now();
             let started = in_flight.origin.unwrap_or(now);
@@ -607,6 +791,11 @@ impl GoalLedger {
                             .saturating_sub(in_flight.run_active_ms),
                     )
                 });
+            let limit = if reservation < requested_ms {
+                ActiveReservationLimit::Goal
+            } else {
+                ActiveReservationLimit::ActionBound
+            };
             let minimum_reservation = carried_ms.saturating_add(if action_ms == 0 {
                 0
             } else {
@@ -627,7 +816,7 @@ impl GoalLedger {
             }
             in_flight.reserved_ms = Some(reservation);
             in_flight.origin = None;
-            Ok(Admission::Reserved((started, reservation)))
+            Ok(Admission::Reserved((started, reservation, limit)))
         })?
     }
 
@@ -646,19 +835,11 @@ impl GoalLedger {
     }
 
     pub(super) fn exclude_idle_approval(&self, elapsed: Duration) -> Result<(), EngineError> {
-        if self.providers_active() {
-            return Ok(());
-        }
         self.in_flight(|in_flight| {
             in_flight.idle_approval_ms = in_flight
                 .idle_approval_ms
                 .saturating_add(duration_ms(elapsed));
         })
-    }
-
-    pub(super) fn providers_active(&self) -> bool {
-        self.read(|goal, _| !goal.unobserved_provider_calls.is_empty())
-            .unwrap_or(true)
     }
 
     pub(super) fn active_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {

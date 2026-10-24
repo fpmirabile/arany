@@ -31,6 +31,7 @@ mod tests;
 
 use crate::session::{AgentRunId, RunId, WorkspaceIdentity};
 use crate::store::StateRoot;
+pub(crate) use approval::ApprovalWithdrawal;
 pub use approval::{
     ApprovalInbox, ApprovalMode, ApprovalReply, ToolApproval, ToolApprovals, UnguardedPrompt,
 };

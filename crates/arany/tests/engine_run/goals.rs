@@ -5793,6 +5793,67 @@ fn child_tool_starts(events: &[arany::EventEnvelope], child: arany::AgentRunId) 
 }
 
 #[tokio::test]
+async fn child_tool_sizing_keeps_the_goal_active_time_cause() {
+    const GOAL_ACTIVE_MS: u64 = 120_000;
+    const ACTIVE_MS_PER_CALL: u64 = 50_000;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                editor: None,
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
+        }),
+        crate::tool_outcome(facts_read()),
+        finish_with("unexpected continuation"),
+    ])
+    .with_active_time_per_call(Duration::from_millis(ACTIVE_MS_PER_CALL));
+    let requests = provider.requests.clone();
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    input.goal.budget = Some(arany::GoalBudget {
+        max_active_ms: Some(GOAL_ACTIVE_MS),
+        ..arany::GoalBudget::default()
+    });
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("bounded child Run");
+    assert_eq!(
+        outcome.run.failure,
+        Some(arany::RunFailure::BudgetExhausted)
+    );
+    engine.close().await.expect("engine shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::ToolStarted { .. }))
+    );
+    assert_eq!(
+        view.runs[0].failure,
+        Some(arany::RunFailure::BudgetExhausted)
+    );
+}
+
+#[tokio::test]
 async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

@@ -30,7 +30,7 @@ A primary outcome-contract failure is committed as `ProviderCallRecorded` with `
 
 ## Researcher children
 
-One delegation active-time segment covers child calls and child Tools, including their shared Guard capacity waits. Pause also takes effect before each child step.
+One delegation active-time segment covers child calls and child Tools, including their shared Guard capacity waits. Transition-driven accounting charges overlapping Provider, effect, preparation and cleanup work once. A pending child Ask pauses this allowance while idle; sibling activity continues to consume it. Exhaustion withdraws the Ask before dispatch with its delegation or Goal cause. Pause also takes effect before each child step.
 
 Read-only research steps of child AgentRuns keep Child Tool facts in the child's own agent view; the primary's run view and its plan rules are unchanged.
 
@@ -40,8 +40,8 @@ Read-only research steps of child AgentRuns keep Child Tool facts in the child's
 | Child objective / report | 2 KiB objective; 16 KiB result, 2 KiB summary | invalid response, child Failed |
 | Child Tool calls | `min(16, ((remaining calls − children − 1) / 2) / children)`, 16 if calls are unlimited; replay cap 16 | catalog `tool_calls_remaining: 0`, only answer offered; a further Tool is an invalid response |
 | Child Tool result | `min([Tool result ceiling](tools.md#limits-and-failure-behavior), (context limit − context − intent − 512) / 6)`; Tools offered only while at least 4.6 KiB fits | only answer offered; safety net stops the child |
-| Delegation time | one active segment, at most 20 min and at most the remaining Goal active time | calls time out, child Failed, Run fails |
-| Child Tool time | runtime at most half of (deadline − preparation − cleanup − Store overhead); the Guard capacity wait ends at queue-entry time + runtime (Guard returns `Limit` before dispatch, Linux and macOS) | insufficient runtime: journal a non-dispatched `Limit` observation (`Delegation deadline reached`); no hook or Tool executes |
+| Delegation time | one active segment, at most 20 min and at most the remaining Goal active time | pending asks withdraw before dispatch with a delegation or Goal stop; a delegation limit stops the Run without closing the Goal as exhausted |
+| Child Tool time | runtime at most half of (remaining active allowance − preparation − cleanup − Store overhead); the Guard capacity wait ends at queue-entry time + runtime (Guard returns `Limit` before dispatch, Linux and macOS) | insufficient runtime: journal a non-dispatched `Limit` observation (`Delegation deadline reached`); no hook or Tool executes |
 | Events per delegation | child Events at most 1,064 (8 × (8 × 16 + 5), including one possible steering Event for each of the 17 ChildWork calls per child), admitted with an 8-Event tail plus, for every child, review and synthesis call, its route switches and three same-route retry facts before the first spawn | Store admission refusal before `AgentSpawned` |
 | Concurrency | Provider concurrency for calls; child Tools one at a time per Run | queued |
 
