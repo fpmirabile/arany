@@ -85,7 +85,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             path,
             (
                 "offset",
-                json!({"type":["integer", "null"], "description":"1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line."}),
+                json!({"type":["integer", "null"], "description":format!("1-based start line, 1 through {}; null starts at line 1. Continue using next_line.", u32::MAX)}),
             ),
             (
                 "limit",

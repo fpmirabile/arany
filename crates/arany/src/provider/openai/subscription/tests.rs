@@ -1265,6 +1265,68 @@ async fn compaction_stream_requires_complete_bounded_summary() {
 }
 
 #[tokio::test]
+#[cfg(debug_assertions)]
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+async fn completed_response_header_rejections_log_the_validation_stage() {
+    if crate::test_process::isolate_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("diagnostic state");
+    let root =
+        crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
+    crate::diagnostics::enable_development_diagnostics(&root);
+    let path = root.path().join("development.log");
+    for (headers, stage) in [
+        (
+            "Content-Type: text/event-stream\r\nContent-Encoding: gzip\r\n".to_owned(),
+            Stage::ContentEncoding,
+        ),
+        (
+            "Content-Type: application/json\r\n".to_owned(),
+            Stage::ResponseContent,
+        ),
+        (
+            format!(
+                "Content-Type: text/event-stream\r\nContent-Length: {}\r\n",
+                crate::provider::max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP) + 1
+            ),
+            Stage::ContentLength,
+        ),
+    ] {
+        let reply = format!("HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n");
+        let (endpoint, server) = serve(reply.into_bytes()).await;
+        let mut response = client()
+            .post(endpoint)
+            .body("{}")
+            .send()
+            .await
+            .expect("synthetic response headers");
+        let error = read_completed_response(
+            &mut response,
+            TOKEN,
+            "model-a",
+            None,
+            DEFAULT_OUTPUT_TOKEN_CAP,
+        )
+        .await
+        .expect_err("rejected headers");
+        assert!(matches!(error, ProviderError::InvalidStream));
+        assert!(error.retry_cause().is_none());
+        server.await.expect("server");
+        let log = std::fs::read_to_string(&path).expect("header diagnostics");
+        let record = format!("subscription stage={stage:?} bytes=0 events=0 http_status=Some(200)");
+        assert_eq!(log.matches(&record).count(), 1, "{stage:?}");
+        assert!(!log.contains(TOKEN));
+    }
+    let log = std::fs::read_to_string(path).expect("length diagnostics");
+    assert_eq!(
+        log.matches("stream reason=StreamProtocol stage=StreamLimit bytes=0 events=0")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 // Skipped in the Guard: local test IPC capability is missing.
 #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn transport_rejects_non_event_and_encoded_replies() {

@@ -342,7 +342,7 @@ done
             assert!(catalog.get("git").is_none());
             assert_eq!(
                 catalog["file_tools"],
-                "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)"
+                "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)"
             );
             assert_eq!(catalog["skills"][0]["name"], "synthetic");
             assert_eq!(

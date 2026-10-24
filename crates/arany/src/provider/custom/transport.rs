@@ -18,6 +18,11 @@ pub(super) struct CustomTransport {
     protocol: Protocol,
 }
 
+struct TransportResponse {
+    bytes: Vec<u8>,
+    counts: crate::diagnostics::StreamCounts,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum TransportError {
     Unavailable,
@@ -92,7 +97,7 @@ impl CustomTransport {
             }
         }
         .map_err(|_| TransportError::Rejected)?;
-        let bytes = if stream {
+        let received = if stream {
             body["stream"] = Value::Bool(true);
             self.send_streamed(body, &request.model, preview, request.max_output_tokens)
                 .await?
@@ -103,10 +108,10 @@ impl CustomTransport {
             Protocol::OpenaiResponses => {
                 let scope = wire::RunScope::new(request, &conversation, &self.key);
                 if stream {
-                    wire::decode_streamed_run(&bytes, &scope)
+                    wire::decode_streamed_run(&received.bytes, &scope)
                         .map_err(|_| ProviderError::InvalidOutcome)
                 } else {
-                    wire::decode_run(&bytes, &scope)
+                    wire::decode_run(&received.bytes, &scope)
                 }
             }
             Protocol::AnthropicMessages { .. } => {
@@ -119,8 +124,8 @@ impl CustomTransport {
                         &conversation.outcome,
                     ))
                     .collect();
-                messages::decode_run(
-                    &bytes,
+                messages::decode_run_with_counts(
+                    &received.bytes,
                     &messages::RunScope {
                         model: &request.model,
                         output_cap: request.max_output_tokens,
@@ -128,14 +133,23 @@ impl CustomTransport {
                         offered: &offered,
                         review: request.input.role == crate::provider::PromptRole::ToolReview,
                     },
+                    received.counts,
                 )
             }
         }
         .map_err(|_| TransportError::InvalidOutcome)?;
         if !valid_usage(response.usage, request.max_output_tokens) {
+            self.log_messages_failure(
+                crate::diagnostics::SubscriptionFailureStage::UsageContract,
+                received.counts,
+            );
             return Err(TransportError::InvalidOutcome);
         }
         if response.reflects_secret(&self.key) {
+            self.log_messages_failure(
+                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                received.counts,
+            );
             return Err(TransportError::InvalidOutcome);
         }
         Ok(response)
@@ -158,21 +172,42 @@ impl CustomTransport {
                 messages::compaction_body_with_optional_effort(request, effort)
             }
         };
-        let bytes = self.send(body).await?;
+        let received = self.send(body).await?;
         let response = match &self.protocol {
-            Protocol::OpenaiResponses => wire::decode_compaction(&bytes, &request.model),
-            Protocol::AnthropicMessages { .. } => {
-                messages::decode_compaction(&bytes, &request.model, request.max_output_tokens)
-            }
+            Protocol::OpenaiResponses => wire::decode_compaction(&received.bytes, &request.model),
+            Protocol::AnthropicMessages { .. } => messages::decode_compaction_with_counts(
+                &received.bytes,
+                &request.model,
+                request.max_output_tokens,
+                received.counts,
+            ),
         }
         .map_err(|_| TransportError::InvalidOutcome)?;
         if !valid_usage(response.usage, request.max_output_tokens) {
+            self.log_messages_failure(
+                crate::diagnostics::SubscriptionFailureStage::UsageContract,
+                received.counts,
+            );
             return Err(TransportError::InvalidOutcome);
         }
         if response.reflects_secret(&self.key) {
+            self.log_messages_failure(
+                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                received.counts,
+            );
             return Err(TransportError::InvalidOutcome);
         }
         Ok(response)
+    }
+
+    fn log_messages_failure(
+        &self,
+        stage: crate::diagnostics::SubscriptionFailureStage,
+        counts: crate::diagnostics::StreamCounts,
+    ) {
+        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+            crate::diagnostics::messages_failure(stage, counts);
+        }
     }
 
     fn request(&self, request: &Value) -> Result<reqwest::RequestBuilder, TransportError> {
@@ -214,75 +249,211 @@ impl CustomTransport {
         model: &str,
         preview: Option<crate::provider::ResponsePreview>,
         max_output_tokens: u32,
-    ) -> Result<Vec<u8>, TransportError> {
-        let mut response = self
-            .request(&request)?
-            .header(header::ACCEPT, "text/event-stream")
-            .send()
+    ) -> Result<TransportResponse, TransportError> {
+        let mut response = self.stream_response(&request).await?;
+        let received = match &self.protocol {
+            Protocol::OpenaiResponses => crate::provider::openai::read_streamed_reply(
+                &mut response,
+                &self.key,
+                model,
+                preview,
+                max_output_tokens,
+            )
             .await
-            .map_err(|error| send_failure(&error))?;
-        let destination_matches = response.url().as_str() == self.endpoint;
-        if destination_matches && !response.status().is_success() {
-            return Err(status_failure(&mut response).await);
-        }
-        streaming_admission(response.status(), destination_matches)?;
-        let bytes = match &self.protocol {
-            Protocol::OpenaiResponses => {
-                crate::provider::openai::read_streamed_reply(
-                    &mut response,
-                    &self.key,
-                    model,
-                    preview,
-                    max_output_tokens,
-                )
-                .await
-            }
-            Protocol::AnthropicMessages { .. } => {
-                crate::provider::anthropic::read_streamed_reply(
-                    &mut response,
-                    &self.key,
-                    model,
-                    preview,
-                    max_output_tokens,
-                )
-                .await
-            }
+            .map(|bytes| TransportResponse {
+                counts: crate::diagnostics::StreamCounts {
+                    bytes: bytes.len(),
+                    http_status: Some(response.status().as_u16()),
+                    ..Default::default()
+                },
+                bytes,
+            }),
+            Protocol::AnthropicMessages { .. } => crate::provider::anthropic::read_streamed_reply(
+                &mut response,
+                &self.key,
+                model,
+                preview,
+                max_output_tokens,
+            )
+            .await
+            .map(|reply| TransportResponse {
+                bytes: reply.bytes,
+                counts: reply.counts,
+            }),
         }
         .map_err(stream_failure)?;
-        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
-            crate::provider::parse_response_json(&bytes)
-                .map_err(|_| TransportError::InvalidOutcome)?;
-        }
-        Ok(bytes)
+        self.validate_streamed_messages(&received)?;
+        Ok(received)
     }
 
-    async fn send(&self, request: Value) -> Result<Vec<u8>, TransportError> {
+    async fn stream_response(&self, request: &Value) -> Result<reqwest::Response, TransportError> {
         let mut response = self
-            .request(&request)?
-            .send()
-            .await
-            .map_err(|error| send_failure(&error))?;
-        if response.url().as_str() != self.endpoint {
-            return Err(TransportError::InvalidOutcome);
-        }
-        if !response.status().is_success() {
+            .dispatch(
+                self.request(request)?
+                    .header(header::ACCEPT, "text/event-stream"),
+            )
+            .await?;
+        let status = response.status();
+        self.admit_stream_destination(response.url().as_str(), status)?;
+        if let Some(stage) = response_failure_stage(true, status) {
+            self.log_messages_failure(stage, response_counts(status));
             return Err(status_failure(&mut response).await);
         }
-        let bytes = super::super::read_identity_body(&mut response, MAX_RESPONSE_BYTES)
-            .await
-            .map_err(|error| match error {
-                ProviderError::Unavailable => TransportError::Unavailable,
-                ProviderError::PartialTransport => TransportError::PartialTransport,
-                _ => TransportError::InvalidOutcome,
-            })?;
-        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
-            crate::provider::parse_response_json(&bytes)
-                .map_err(|_| TransportError::InvalidOutcome)?;
+        streaming_admission(status, true)?;
+        Ok(response)
+    }
+
+    pub(super) fn admit_stream_destination(
+        &self,
+        response_url: &str,
+        status: reqwest::StatusCode,
+    ) -> Result<(), TransportError> {
+        if response_url == self.endpoint {
+            return Ok(());
         }
-        if raw_reflects_secret(&bytes, &self.key) {
+        self.log_messages_failure(
+            crate::diagnostics::SubscriptionFailureStage::Destination,
+            response_counts(status),
+        );
+        streaming_admission(status, false)
+    }
+
+    fn validate_streamed_messages(
+        &self,
+        received: &TransportResponse,
+    ) -> Result<(), TransportError> {
+        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+            crate::provider::parse_response_json(&received.bytes).map_err(|_| {
+                self.log_messages_failure(
+                    crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
+                    received.counts,
+                );
+                TransportError::InvalidOutcome
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn send(&self, request: Value) -> Result<TransportResponse, TransportError> {
+        let mut response = self.dispatch(self.request(&request)?).await?;
+        self.read_response(&mut response).await
+    }
+
+    async fn dispatch(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, TransportError> {
+        request.send().await.map_err(|error| {
+            self.log_messages_failure(
+                if error.is_timeout() {
+                    crate::diagnostics::SubscriptionFailureStage::Deadline
+                } else {
+                    crate::diagnostics::SubscriptionFailureStage::RequestTransport
+                },
+                crate::diagnostics::StreamCounts::default(),
+            );
+            send_failure(&error)
+        })
+    }
+
+    async fn read_response(
+        &self,
+        response: &mut reqwest::Response,
+    ) -> Result<TransportResponse, TransportError> {
+        if response.url().as_str() != self.endpoint {
+            self.log_messages_failure(
+                crate::diagnostics::SubscriptionFailureStage::Destination,
+                crate::diagnostics::StreamCounts {
+                    http_status: Some(response.status().as_u16()),
+                    ..Default::default()
+                },
+            );
             return Err(TransportError::InvalidOutcome);
         }
-        Ok(bytes)
+        if let Some(stage) = response_failure_stage(true, response.status()) {
+            self.log_messages_failure(
+                stage,
+                crate::diagnostics::StreamCounts {
+                    http_status: Some(response.status().as_u16()),
+                    ..Default::default()
+                },
+            );
+            return Err(status_failure(response).await);
+        }
+        let status = response.status().as_u16();
+        let bytes = super::super::read_identity_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|error| {
+                self.log_messages_failure(
+                    if matches!(error, ProviderError::PartialTransport) {
+                        crate::diagnostics::SubscriptionFailureStage::ReadTransport
+                    } else {
+                        crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope
+                    },
+                    crate::diagnostics::StreamCounts {
+                        http_status: Some(status),
+                        ..Default::default()
+                    },
+                );
+                match error {
+                    ProviderError::Unavailable => TransportError::Unavailable,
+                    ProviderError::PartialTransport => TransportError::PartialTransport,
+                    _ => TransportError::InvalidOutcome,
+                }
+            })?;
+        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+            crate::provider::parse_response_json(&bytes).map_err(|_| {
+                self.log_messages_failure(
+                    crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
+                    crate::diagnostics::StreamCounts {
+                        bytes: bytes.len(),
+                        http_status: Some(status),
+                        ..Default::default()
+                    },
+                );
+                TransportError::InvalidOutcome
+            })?;
+        }
+        if raw_reflects_secret(&bytes, &self.key) {
+            self.log_messages_failure(
+                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::diagnostics::StreamCounts {
+                    bytes: bytes.len(),
+                    http_status: Some(status),
+                    ..Default::default()
+                },
+            );
+            return Err(TransportError::InvalidOutcome);
+        }
+        Ok(TransportResponse {
+            counts: crate::diagnostics::StreamCounts {
+                bytes: bytes.len(),
+                http_status: Some(status),
+                ..Default::default()
+            },
+            bytes,
+        })
+    }
+}
+
+fn response_failure_stage(
+    destination_matches: bool,
+    status: reqwest::StatusCode,
+) -> Option<crate::diagnostics::SubscriptionFailureStage> {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    if !destination_matches {
+        Some(Stage::Destination)
+    } else if !status.is_success() {
+        Some(Stage::HttpStatus)
+    } else {
+        None
+    }
+}
+
+fn response_counts(status: reqwest::StatusCode) -> crate::diagnostics::StreamCounts {
+    crate::diagnostics::StreamCounts {
+        http_status: Some(status.as_u16()),
+        ..Default::default()
     }
 }
 
