@@ -1,6 +1,92 @@
+use super::hooks::HookFold;
 use super::{Grant, RunLoop};
+use crate::engine::EngineError;
 use crate::tools::permissions::{Decision, PermissionSource};
 use crate::tools::{ApprovalMode, EffectIntent, ToolCall, ToolRuntime};
+
+pub(super) struct HostPermission {
+    pub(super) permission: Permission,
+    epoch: Option<uuid::Uuid>,
+    source: Option<[u8; 32]>,
+    pub(super) remember: bool,
+}
+
+impl HostPermission {
+    pub(super) fn verdict(
+        &self,
+        approved: bool,
+        host: bool,
+        save: Option<RuleSave>,
+    ) -> Option<crate::tools::permissions::HostApproval> {
+        (host && (approved || self.source.is_some()))
+            .then_some(self.epoch)
+            .flatten()
+            .map(|epoch| crate::tools::permissions::HostApproval {
+                epoch,
+                session: approved && matches!(save, Some(RuleSave::Session)),
+                source_intent: self.source,
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct HostReuseFacts {
+    pub(super) host: bool,
+    pub(super) settings_admitted: bool,
+    pub(super) mode: Option<crate::tools::permissions::PermissionMode>,
+    pub(super) terminal_mode: Option<ApprovalMode>,
+    pub(super) session_scope: bool,
+    pub(super) permission: Permission,
+    pub(super) hook_restriction: Option<Decision>,
+    pub(super) state_target: Option<bool>,
+    pub(super) epoch: Option<uuid::Uuid>,
+    pub(super) source: Option<[u8; 32]>,
+    pub(super) grants: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum HostReuse {
+    OnceOnly,
+    OfferSession,
+    Reuse([u8; 32]),
+}
+
+pub(super) fn decide_host_reuse(facts: &HostReuseFacts) -> HostReuse {
+    use crate::tools::permissions::PermissionMode;
+    if !facts.host
+        || !facts.settings_admitted
+        || !matches!(
+            facts.mode,
+            None | Some(PermissionMode::Default | PermissionMode::DontAsk)
+        )
+        || facts.terminal_mode != Some(ApprovalMode::Request)
+        || !facts.session_scope
+        || facts.permission.basis == PermissionSource::Rule
+        || facts.hook_restriction.is_some()
+        || facts.state_target != Some(false)
+        || facts.epoch.is_none()
+        || facts.permission.decision == Decision::Deny
+            && !(facts.permission.basis == PermissionSource::Mode
+                && facts.mode == Some(PermissionMode::DontAsk))
+    {
+        return HostReuse::OnceOnly;
+    }
+    match facts.source {
+        Some(source) => HostReuse::Reuse(source),
+        None if facts.grants < crate::session::MAX_HOST_SESSION_GRANTS
+            && matches!(facts.mode, None | Some(PermissionMode::Default)) =>
+        {
+            HostReuse::OfferSession
+        }
+        None => HostReuse::OnceOnly,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RuleSave {
+    Prefix(crate::tools::permissions::TypedGitPrefix),
+    Session,
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Permission {
@@ -122,6 +208,66 @@ impl Permission {
 impl RunLoop<'_> {
     pub(super) fn terminal_mode(&self) -> Option<ApprovalMode> {
         self.controls.approvals.map(|approvals| approvals.mode())
+    }
+
+    pub(super) fn host_permission(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        permission: Permission,
+        hooks: &HookFold,
+    ) -> Result<HostPermission, EngineError> {
+        let (epoch, source, grants) = self.ledger().view(|view| {
+            let epoch = view
+                .runs
+                .last()
+                .and_then(|run| run.config.as_ref())
+                .and_then(|config| config.tool_policy.as_ref())
+                .and_then(|policy| policy.host_epoch);
+            (
+                epoch,
+                epoch.and_then(|epoch| view.host_approval(intent, epoch)),
+                epoch.map_or(0, |epoch| view.host_grants(epoch).count()),
+            )
+        })?;
+        let facts = HostReuseFacts {
+            host: intent.call.is_unguarded(),
+            settings_admitted: runtime.host_settings_admitted,
+            mode: runtime.permissions().map(|config| config.mode()),
+            terminal_mode: self.terminal_mode(),
+            session_scope: self
+                .controls
+                .approvals
+                .is_some_and(|approvals| approvals.admits_session_scope()),
+            permission,
+            hook_restriction: hooks.restriction,
+            state_target: intent
+                .host_command
+                .as_ref()
+                .map(|pin| crate::tools::unguarded::state_target(&intent.call, pin)),
+            epoch,
+            source,
+            grants,
+        };
+        let (permission, source, remember) = match decide_host_reuse(&facts) {
+            HostReuse::OnceOnly => (permission, None, false),
+            HostReuse::OfferSession => (permission, None, true),
+            HostReuse::Reuse(source) => (
+                Permission {
+                    decision: Decision::Allow,
+                    basis: PermissionSource::SessionApproval,
+                    approval: None,
+                },
+                Some(source),
+                false,
+            ),
+        };
+        Ok(HostPermission {
+            permission,
+            epoch,
+            source,
+            remember,
+        })
     }
 
     pub(super) fn permission(
