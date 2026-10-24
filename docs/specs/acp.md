@@ -186,6 +186,12 @@ reconciliation never replaces a terminal status with pending. Tool output is
 escaped and placed inside a code fence longer than every backtick run in it.
 There are no client terminals and no diff contents.
 
+A recoverable primary denial or known Tool failure completes its Tool update as
+failed and reaches the requesting model once as the correlated result. The
+prompt may continue under ordinary Goal admission; its final stop reason comes
+from the committed Engine outcome. Hook and permission-rule prose is excluded
+from the result text.
+
 A serve approval request becomes `session/request_permission` with the Session
 ID, a self-contained pending `toolCall` update, its exact committed EffectIntent
 in `rawInput`, escaped and fenced approval lines, and exactly these ordered options:

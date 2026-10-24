@@ -4,6 +4,9 @@ use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+pub(crate) const COMPACTION_COMPILER_VERSION: u16 = 4;
+pub(crate) const MIN_RECORDED_COMPACTION_COMPILER_VERSION: u16 = 3;
+
 pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = (crate::provider::MAX_PROVIDER_REQUEST_BYTES
     - crate::provider::COMPACTION_REQUEST_ENVELOPE_BYTES)
     / crate::provider::COMPACTION_INPUT_EXPANSION;
@@ -46,14 +49,19 @@ pub(crate) struct PreparedCompaction {
 impl PreparedCompaction {
     pub(crate) fn prepare(view: &SessionView) -> Result<Self, CompactionInputError> {
         let prior = view.compactions.iter().rev().find_map(|compaction| {
-            if let CompactionStatus::Succeeded { summary, .. } = &compaction.record.status {
+            if compaction.record.compiler_version == COMPACTION_COMPILER_VERSION
+                && let CompactionStatus::Succeeded { summary, .. } = &compaction.record.status
+            {
                 Some((compaction.record.covered_sequence, summary.clone()))
             } else {
                 None
             }
         });
         let covered = prior.as_ref().map_or(0, |(sequence, _)| *sequence);
-        let mut used = prior.as_ref().map_or(0, |(_, summary)| summary.len() + 64);
+        let previous_summary = prior.map(|(_, summary)| summary);
+        let mut used = previous_summary
+            .as_ref()
+            .map_or(0, |summary| summary.len() + 64);
         let mut items = Vec::new();
         for run in &view.runs {
             if run.accepted_sequence <= covered {
@@ -127,9 +135,9 @@ impl PreparedCompaction {
             return Err(CompactionInputError::Empty);
         }
         Ok(Self {
-            previous_summary: prior.map(|(_, summary)| summary),
+            previous_summary,
             items,
-            compiler_version: 3,
+            compiler_version: COMPACTION_COMPILER_VERSION,
         })
     }
 }

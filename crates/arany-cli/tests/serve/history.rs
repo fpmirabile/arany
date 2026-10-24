@@ -39,6 +39,50 @@ async fn finish_turn(
     goal
 }
 
+async fn reject_oversized_rewind_before_fork(
+    input: &mpsc::Sender<ClientMessage>,
+    output: &mut mpsc::Receiver<Message>,
+    thread: SessionId,
+) {
+    let prompt = "\u{1}".repeat(arany::MAX_USER_MESSAGE_BYTES);
+    input
+        .send(request(
+            3,
+            "turn/start",
+            json!({"threadId":thread,"input":[{"type":"text","text":prompt}]}),
+        ))
+        .await
+        .unwrap();
+    let started = next(output).await;
+    let turn = started["result"]["turn"]["id"].clone();
+    while next(output).await["method"] != "turn/completed" {}
+    input
+        .send(request(
+            10,
+            "thread/rewind/preview",
+            json!({"threadId":thread,"turnId":turn}),
+        ))
+        .await
+        .unwrap();
+    let preview = next(output).await["result"]["previewToken"].clone();
+    let oversized = Message::Request(Request {
+        jsonrpc: Default::default(),
+        id: RequestId::String("r".repeat(700 * 1024)),
+        method: "thread/rewind".into(),
+        params: Some(json!({
+            "threadId":thread,
+            "previewToken":preview,
+            "restore":"conversation"
+        })),
+    });
+    assert!(encode_line(&oversized).unwrap().len() <= MAX_RPC_LINE_BYTES);
+    input.send(ClientMessage::Message(oversized)).await.unwrap();
+    assert_eq!(
+        next(output).await["error"]["data"]["reason"],
+        "contextTooLarge"
+    );
+}
+
 #[tokio::test]
 async fn events_subscribe_pages_strictly_after_since_and_streams_live_commits_in_order() {
     let _deadline = deadline();
@@ -701,17 +745,29 @@ async fn events_subscribe_during_a_running_turn_joins_replay_and_live_without_ga
 }
 
 #[tokio::test]
-async fn thread_fork_checks_the_reply_size_before_persisting_a_fork() {
+async fn thread_fork_and_rewind_check_reply_size_before_persisting_forks() {
     let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = root.path().join("state");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Hello".into(),
+            }),
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Hello".into(),
+            }),
+        ])
+        .with_profile("openai", "gpt-5.4"),
+    );
     let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
     let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
     let client = async {
         let thread = start_thread(&input, &mut output, &workspace).await;
         finish_turn(&input, &mut output, thread, "Hi").await;
+        reject_oversized_rewind_before_fork(&input, &mut output, thread).await;
         let oversized = Message::Request(Request {
             jsonrpc: Default::default(),
             id: RequestId::String("i".repeat(MAX_RPC_LINE_BYTES - 256)),
@@ -734,7 +790,7 @@ async fn thread_fork_checks_the_reply_size_before_persisting_a_fork() {
             inbound,
             outbound,
             threads::Threads {
-                provider: Some(scripted()),
+                provider: Some(provider),
                 ..Default::default()
             }
         ),

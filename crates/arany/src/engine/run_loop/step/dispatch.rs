@@ -4,6 +4,7 @@ use crate::engine::ledger::ActiveDeadlineCause;
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
+use crate::tools::types::DenialFeedback;
 use crate::tools::{
     ApprovalMode, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation,
     UnguardedPrompt,
@@ -293,7 +294,7 @@ impl<'a> DispatchFacts<'a> {
         if self.human_only_unavailable {
             return Err(refuse(
                 NotDispatched::HumanOnlyUnavailable,
-                Some(StopCause::ToolStopped),
+                (self.site == DispatchSite::Researcher).then_some(StopCause::ToolStopped),
             ));
         }
         if let Some(unguarded) = &self.unguarded
@@ -385,10 +386,12 @@ pub(super) fn decide_dispatch<'a>(
         source = PermissionSource::UnavailableApproval;
     }
     let refused = |reason| {
-        Err(refuse(
-            reason,
-            Some(refusal_cause(after.paused, after.cancelled, after.deadline)),
-        ))
+        let stop = if facts.site == DispatchSite::Primary && recoverable_primary_refusal(&reason) {
+            None
+        } else {
+            Some(refusal_cause(after.paused, after.cancelled, after.deadline))
+        };
+        Err(refuse(reason, stop))
     };
     let outcome = match facts.site {
         _ if after.cancelled => refused(if after.paused {
@@ -462,6 +465,30 @@ pub(super) fn decide_queue_pause(reserved: bool, paused: bool) -> Result<(), Ref
     }
 }
 
+fn recoverable_primary_refusal(reason: &NotDispatched) -> bool {
+    match reason {
+        NotDispatched::ApprovalRefused
+        | NotDispatched::ApprovalUnavailable
+        | NotDispatched::UnguardedNeedsHuman => true,
+        NotDispatched::TimeoutLimit { .. }
+        | NotDispatched::HookDenied(_)
+        | NotDispatched::DelegationDeadline
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
+        | NotDispatched::ModeDenied
+        | NotDispatched::HumanOnlyUnavailable
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::Paused
+        | NotDispatched::Cancelled
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::SaveUnconfirmed => false,
+    }
+}
+
 fn refusal_cause(
     paused: bool,
     cancelled: bool,
@@ -514,14 +541,14 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
             ToolDisposition::Limit,
             "Goal token budget exhausted; no operation was dispatched".into(),
         ),
-        NotDispatched::HookDenied(denial) => hook_denial(&intent, denial),
+        NotDispatched::HookDenied(denial) => hook_denial(denial),
         NotDispatched::SaveUnconfirmed => (
             ToolDisposition::Uncertain,
             "rule save not confirmed; no operation was dispatched".into(),
         ),
         NotDispatched::DenyRule => (
             ToolDisposition::Denied,
-            "Permission deny rule blocked this Tool".into(),
+            DenialFeedback::RuleDenied.output().into(),
         ),
         NotDispatched::OutsideGrant => (
             ToolDisposition::Denied,
@@ -533,11 +560,11 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::ModeDenied => (
             ToolDisposition::Denied,
-            "Permission mode denied this Tool".into(),
+            DenialFeedback::ModeDenied.output().into(),
         ),
         NotDispatched::HumanOnlyUnavailable => (
             ToolDisposition::Denied,
-            "Human-only approval is unavailable on this channel; no operation was dispatched".into(),
+            DenialFeedback::ChannelUnavailable.output().into(),
         ),
         NotDispatched::UnguardedNotOffered(UnguardedRefusal::SettingsChanged) => (
             ToolDisposition::Denied,
@@ -564,11 +591,11 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::Cancelled => (
             ToolDisposition::Denied,
-            "Run cancelled before this operation; no operation was dispatched".into(),
+            DenialFeedback::Cancelled.output().into(),
         ),
         NotDispatched::Paused => (
             ToolDisposition::Denied,
-            "Goal paused before this operation; no operation was dispatched".into(),
+            DenialFeedback::Paused.output().into(),
         ),
         NotDispatched::UnsavedRule => (
             ToolDisposition::Denied,
@@ -576,15 +603,15 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::UnguardedNeedsHuman => (
             ToolDisposition::Denied,
-            "Host command needs fresh human approval on this channel; previous exact project approvals are inactive; no operation was dispatched".into(),
+            DenialFeedback::ChannelUnavailable.output().into(),
         ),
         NotDispatched::ApprovalUnavailable => (
             ToolDisposition::Denied,
-            "Approval channel unavailable; no operation was dispatched".into(),
+            DenialFeedback::ChannelUnavailable.output().into(),
         ),
         NotDispatched::ApprovalRefused => (
             ToolDisposition::Denied,
-            "Approval was not granted; no operation was dispatched".into(),
+            DenialFeedback::UserDeclined.output().into(),
         ),
     };
     let mut observation = undispatched(intent, disposition, output);
@@ -621,7 +648,7 @@ const DELEGATION_DEADLINE: &str = "Delegation deadline reached; no operation was
 const ACTIVE_TIME_EXHAUSTED: &str =
     "Goal active-time budget exhausted; no operation was dispatched";
 
-fn hook_denial(intent: &EffectIntent, denial: &HookDenial) -> (ToolDisposition, String) {
+fn hook_denial(denial: &HookDenial) -> (ToolDisposition, String) {
     let output = match denial {
         HookDenial::ActiveTime => return (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
         HookDenial::DelegationDeadline => {
@@ -630,21 +657,7 @@ fn hook_denial(intent: &EffectIntent, denial: &HookDenial) -> (ToolDisposition, 
         HookDenial::Uncertain => "Hook outcome uncertain; no operation was dispatched".into(),
         HookDenial::Requested => "Hook stopped this Run; no operation was dispatched".into(),
         HookDenial::Narrowed(name) => format!("Hook narrowed this Tool to: {name}"),
-        HookDenial::Denied(reason) => {
-            let room = (intent.limits.result_bytes as usize).saturating_sub(32);
-            let reason: String = reason
-                .chars()
-                .scan(0, |bytes, ch| {
-                    *bytes += ch.len_utf8();
-                    (*bytes <= room).then_some(ch)
-                })
-                .collect();
-            if reason.is_empty() {
-                "Hook denied this Tool".to_owned()
-            } else {
-                format!("Hook denied this Tool: {reason}")
-            }
-        }
+        HookDenial::Denied(_) => DenialFeedback::HookDenied.output().to_owned(),
     };
     (ToolDisposition::Denied, output)
 }
@@ -998,7 +1011,7 @@ mod tests {
             (decide(Researcher, deny(S::Hook), &uncertain, &[], None), None, no(N::HookDenied(HookDenial::Uncertain), Some(StopCause::Uncertain)), deny_, S::Hook),
             (decide(Primary, asks(Request), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Rule), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::DelegationDeadline), Some(StopCause::DelegationDeadline)), allow_, S::Rule),
-            (decide(Primary, asks(Request), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Rule), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[NotOffered], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::GuardAlias), None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Auto), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), ask_, S::UnavailableApproval),
@@ -1013,13 +1026,15 @@ mod tests {
             (decide(Primary, asks(Request), &none, &[TokensSpent], None), None, no(N::TokenBudget, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Auto), &none, &[TokensSpentAfterAsk], ok(true, S::AiReview)), Some(Auto), no(N::TokenBudget, None), ask_, S::AiReview),
             (decide(Primary, asks(Request), &none, &[Paused], exhausted_ask), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
-            (decide(Primary, asks(Request), &none, &[Offered, Batch], ok(false, S::UnavailableApproval)), Some(Request), no(N::UnguardedNeedsHuman, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[Offered, Batch], ok(false, S::UnavailableApproval)), Some(Request), no(N::UnguardedNeedsHuman, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Offered, Cancelled], ok(false, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
-            (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, None), ask_, S::Human),
+            (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Cancelled], ok(true, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
             // A researcher after its Ask, or where it would have been.
             (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
+            (decide(Researcher, asks(Request), &none, &[], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::ToolStopped)), ask_, S::Human),
             (decide(Researcher, asks(Request), &none, &[Blocked], None), None, no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::DelegationDeadline, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Blocked, GoalDeadline], None), None, no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::UnavailableApproval),
@@ -1053,5 +1068,88 @@ mod tests {
             );
         }
         assert_eq!(decide_queue_pause(true, false), Ok(()));
+    }
+
+    fn read_intent() -> EffectIntent {
+        EffectIntent {
+            host: None,
+            host_command: None,
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Read {
+                path: "file".into(),
+                offset: None,
+                limit: Some(1),
+            },
+            limits: crate::tools::ToolLimits::default(),
+            use_count: 1,
+        }
+    }
+
+    #[test]
+    fn hook_denial_feedback_omits_untrusted_reason() {
+        let canary = "untrusted hook reason";
+        let observation = not_dispatched(
+            read_intent(),
+            &NotDispatched::HookDenied(HookDenial::Denied(canary.into())),
+        );
+        assert_eq!(
+            observation.output,
+            "hook_denied: no operation was dispatched"
+        );
+        assert!(observation.valid());
+        assert!(!observation.output.contains(canary));
+    }
+
+    #[test]
+    fn approval_denial_history_preserves_dispatch_output_without_redaction() {
+        let mut historical_timeout = undispatched(
+            read_intent(),
+            ToolDisposition::Denied,
+            DenialFeedback::ChildTimeout.output(),
+        );
+        historical_timeout.approval_cause = Some(crate::tools::ApprovalCause::ChildTimeout);
+        for (observation, expected) in [
+            (
+                not_dispatched(read_intent(), &NotDispatched::Cancelled),
+                "Run cancelled before this operation; no operation was dispatched",
+            ),
+            (
+                not_dispatched(read_intent(), &NotDispatched::Paused),
+                "Goal paused before this operation; no operation was dispatched",
+            ),
+            (
+                historical_timeout,
+                "Child approval wait timed out; no operation was dispatched",
+            ),
+            (
+                not_dispatched(read_intent(), &NotDispatched::ApprovalRefused),
+                "user_declined: no operation was dispatched",
+            ),
+            (
+                not_dispatched(read_intent(), &NotDispatched::ApprovalUnavailable),
+                "channel_unavailable: no operation was dispatched",
+            ),
+        ] {
+            assert_eq!(observation.output, expected);
+            let tool = crate::session::ToolView {
+                checkpoint: None,
+                intent: observation.intent.clone(),
+                observation: Some(observation),
+                review_call_index: None,
+                permission_verdict: None,
+                hooks: Vec::new(),
+                hook_sequence: None,
+                finished_sequence: None,
+            };
+            assert_eq!(tool.model_denial_output(), Some(expected));
+            assert!(!tool.denial_needs_redaction());
+        }
     }
 }

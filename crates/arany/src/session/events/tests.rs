@@ -1089,7 +1089,7 @@ mod subscription_compaction_tests {
             model: "gpt-5.4".into(),
             prompt_version: 1,
             schema_version: 1,
-            compiler_version: 3,
+            compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
             source_bytes: 4,
             source_tokens_estimate: 1,
             input_tokens: None,
@@ -1120,14 +1120,25 @@ mod subscription_compaction_tests {
         for (field, current) in [
             ("prompt_version", 1),
             ("schema_version", 1),
-            ("compiler_version", 3),
+            (
+                "compiler_version",
+                crate::session::COMPACTION_COMPILER_VERSION,
+            ),
         ] {
             assert_eq!(encoded[field], current);
-            for version in (0..=4).filter(|version| *version != current) {
+            for version in (0..=crate::session::COMPACTION_COMPILER_VERSION + 1)
+                .filter(|version| *version != current)
+            {
                 let mut invalid = encoded.clone();
                 invalid[field] = serde_json::json!(version);
                 let invalid: CompactionRecord = serde_json::from_value(invalid).unwrap();
-                assert!(invalid.validate().is_err(), "{field}={version}");
+                let historical_compiler = field == "compiler_version"
+                    && version == crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION;
+                assert_eq!(
+                    invalid.validate().is_ok(),
+                    historical_compiler,
+                    "{field}={version}"
+                );
             }
         }
         record.provider = "chatgpt".into();

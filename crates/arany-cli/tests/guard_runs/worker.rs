@@ -1034,7 +1034,7 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
 }
 
 #[tokio::test]
-async fn primary_tool_denial_cancels_drained_workers_like_a_primary_failure() {
+async fn primary_tool_denial_continues_while_workers_finish_and_integrate() {
     tokio::time::timeout(
         Duration::from_secs(180),
         arany::test_support::worker_teams::run_case(

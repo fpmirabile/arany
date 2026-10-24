@@ -7,7 +7,7 @@ use super::{
 };
 use crate::session::RunView;
 use crate::tools::types::{
-    MAX_TOOL_CATALOG_BYTES, cleared_model_result, model_call, model_observation, model_result,
+    MAX_TOOL_CATALOG_BYTES, cleared_model_result, model_call, model_observation,
 };
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
 use regex::Regex;
@@ -432,22 +432,39 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
     if run.model_tools().is_empty() && run.tool_compaction_summary.is_none() && workers.is_empty() {
         return String::new();
     }
+    let covered =
+        (run.tool_compaction_covered_count as usize).saturating_sub(run.initial_tool_count());
+    let unsafe_summary = run.tool_compaction_summary.is_some()
+        && run
+            .model_tools()
+            .iter()
+            .take(covered)
+            .any(|tool| tool.denial_needs_redaction());
     let records: Vec<_> = run
         .model_tools()
         .iter()
-        .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.initial_tool_count()))
+        .skip(covered)
         .enumerate()
         .filter(|(_, tool)| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
         .map(|(index, tool)| match &tool.observation {
             Some(observation) if index + (run.tool_compaction_covered_count.max(run.initial_tool_count() as u32) as usize) < run.tool_results_cleared_count as usize => cleared_model_result(observation),
-            Some(observation) => model_result(observation, &tool.hook_feedback()),
+            Some(observation) => crate::tools::types::model_result_with_output(
+                observation,
+                &tool.hook_feedback(),
+                tool.model_denial_output().unwrap_or(&observation.output),
+            ),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
         .collect();
+    let summary = if unsafe_summary {
+        Some("Earlier Tool summary omitted because it may contain denial text.")
+    } else {
+        run.tool_compaction_summary.as_deref()
+    };
     let mut block = json!({
         "scope": "historical Run; no pending Tool in the current Run; never replay calls or approvals; fresh inspection may establish present state",
         "run_status": format!("{:?}", run.status),
-        "summary_untrusted": run.tool_compaction_summary,
+        "summary_untrusted": summary,
         "tool_records": records,
     });
     if !workers.is_empty() {

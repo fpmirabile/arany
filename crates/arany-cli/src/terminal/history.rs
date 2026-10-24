@@ -1423,10 +1423,10 @@ fn display_row(
     }
 }
 
-// A message's text as a bounded head and a borrowed tail; only selected bytes are ever joined.
+// A message's text as a bounded head and a projected tail; only selected bytes are joined.
 struct SourceText<'a> {
     head: Cow<'a, str>,
-    tail: &'a str,
+    tail: Cow<'a, str>,
 }
 
 impl SourceText<'_> {
@@ -1436,7 +1436,7 @@ impl SourceText<'_> {
 
     fn floor(&self, byte: usize) -> usize {
         match byte.checked_sub(self.head.len()) {
-            Some(tail) if tail > 0 => self.head.len() + floor_boundary(self.tail, tail),
+            Some(tail) if tail > 0 => self.head.len() + floor_boundary(&self.tail, tail),
             _ => floor_boundary(&self.head, byte),
         }
     }
@@ -1472,7 +1472,7 @@ fn message_source<'a>(
     }
     SourceText {
         head: message_text(view, message, notices),
-        tail: "",
+        tail: Cow::Borrowed(""),
     }
 }
 

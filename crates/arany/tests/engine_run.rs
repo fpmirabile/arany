@@ -631,7 +631,11 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        for fault in ["source_digest", "content_digest", "compiler_version"] {
+        for fault in [
+            CompactionFault::SourceDigest,
+            CompactionFault::ContentDigest,
+            CompactionFault::CompilerVersion,
+        ] {
             let temp = tempfile::tempdir().expect("temporary root");
             let workspace = temp.path().join("workspace");
             std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
@@ -681,20 +685,7 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
             let mut payload: serde_json::Value =
                 serde_json::from_str(&payload).expect("valid snapshot JSON");
             let document = &mut payload["record"];
-            match fault {
-                "source_digest" => {
-                    let value = document["source_digest"][0].as_u64().expect("digest byte");
-                    document["source_digest"][0] = (value ^ 1).into();
-                }
-                "content_digest" => {
-                    let value = document["status"]["content_digest"][0]
-                        .as_u64()
-                        .expect("digest byte");
-                    document["status"]["content_digest"][0] = (value ^ 1).into();
-                }
-                "compiler_version" => document["compiler_version"] = 4.into(),
-                _ => unreachable!("fixed corpus"),
-            }
+            corrupt_compaction_document(document, fault);
             connection
                 .execute(
                     "UPDATE events SET payload=?1 WHERE session_id=?2 AND kind='ContextCompacted'",
@@ -710,7 +701,7 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
                     store.load_session(first.session_id).await,
                     Err(arany::StoreError::InvalidSnapshot)
                 ),
-                "fault: {fault}"
+                "fault: {fault:?}"
             );
             store.close().await.expect("store shutdown");
 
@@ -730,12 +721,40 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
                     run_to_end(&engine, &provider, rejected).await,
                     Err(EngineError::Store(arany::StoreError::InvalidSnapshot))
                 ),
-                "fault: {fault}"
+                "fault: {fault:?}"
             );
             assert!(calls.lock().expect("request lock").is_empty());
             engine.close().await.expect("engine shutdown after fault");
         }
     });
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompactionFault {
+    SourceDigest,
+    ContentDigest,
+    CompilerVersion,
+}
+
+fn corrupt_compaction_document(document: &mut serde_json::Value, fault: CompactionFault) {
+    match fault {
+        CompactionFault::SourceDigest => {
+            let value = document["source_digest"][0].as_u64().expect("digest byte");
+            document["source_digest"][0] = (value ^ 1).into();
+        }
+        CompactionFault::ContentDigest => {
+            let value = document["status"]["content_digest"][0]
+                .as_u64()
+                .expect("digest byte");
+            document["status"]["content_digest"][0] = (value ^ 1).into();
+        }
+        CompactionFault::CompilerVersion => {
+            let version = document["compiler_version"]
+                .as_u64()
+                .expect("compiler version");
+            document["compiler_version"] = (version + 1).into();
+        }
+    }
 }
 
 #[test]
@@ -4612,6 +4631,9 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             ProviderOutcome::Answer(Answer {
                 text: "bounded".into(),
             }),
+            ProviderOutcome::Answer(Answer {
+                text: "bounded".into(),
+            }),
         ]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
@@ -4918,7 +4940,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             first.session_id
         );
         store.close().await.unwrap();
-        for bytes in [8 * 1024, 8 * 1024 + 1] {
+        for bytes in [8 * 1024, 8 * 1024 + 1, 64 * 1024] {
             let prompt = "x".repeat(bytes);
             let bounded = run_to_end(&engine, &provider, request(&workspace, &prompt))
                 .await
@@ -4928,10 +4950,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                 .await
                 .unwrap();
             assert!(unsaved.session_id.is_none());
-            assert_eq!(
-                unsaved.prompt.as_deref(),
-                (bytes <= 8 * 1024).then_some(prompt.as_str())
-            );
+            assert_eq!(unsaved.prompt.as_deref(), Some(prompt.as_str()));
         }
         engine.close().await.expect("engine shutdown");
 

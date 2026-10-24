@@ -469,6 +469,90 @@ pub struct HookView {
 }
 
 impl ToolView {
+    pub fn model_denial_label(&self) -> Option<&'static str> {
+        self.denial_feedback()
+            .map(crate::tools::types::DenialFeedback::label)
+    }
+
+    pub fn model_denial_output(&self) -> Option<&'static str> {
+        self.denial_feedback()
+            .map(crate::tools::types::DenialFeedback::output)
+    }
+
+    fn denial_feedback(&self) -> Option<crate::tools::types::DenialFeedback> {
+        use crate::tools::{
+            ToolDisposition,
+            permissions::{Decision, PermissionSource},
+            types::DenialFeedback,
+        };
+        let observation = self.observation.as_ref()?;
+        if observation.disposition != ToolDisposition::Denied {
+            return None;
+        }
+        if observation.attestation.is_some()
+            || self
+                .permission_verdict
+                .as_ref()
+                .is_some_and(|verdict| verdict.approved)
+        {
+            return None;
+        }
+        match observation.approval_cause {
+            Some(cause) => Some(cause.denial_feedback()),
+            None => {
+                let verdict = self.permission_verdict.as_ref()?;
+                if verdict.decision != Decision::Deny
+                    || verdict.narrowed
+                    || self.privilege_handoff()
+                    || self.hooks.iter().any(|hook| {
+                        hook.outcome.as_ref().is_none_or(|outcome| {
+                            outcome.observation.stops_run()
+                                || matches!(
+                                    outcome.result,
+                                    crate::tools::permissions::HookResult::Stopped { .. }
+                                )
+                        })
+                    })
+                {
+                    return None;
+                }
+                match verdict.source {
+                    PermissionSource::Hook => Some(DenialFeedback::HookDenied),
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
+                        Some(DenialFeedback::RuleDenied)
+                    }
+                    PermissionSource::Mode => Some(DenialFeedback::ModeDenied),
+                    PermissionSource::Human
+                    | PermissionSource::UnavailableApproval
+                    | PermissionSource::AiReview
+                    | PermissionSource::PinnedGrant
+                    | PermissionSource::SessionApproval => None,
+                }
+            }
+        }
+    }
+
+    fn privilege_handoff(&self) -> bool {
+        let crate::tools::ToolCall::CommandUnguarded { program, args, .. } = &self.intent.call
+        else {
+            return false;
+        };
+        crate::tools::unguarded::prohibited(program, args)
+            || self
+                .intent
+                .host_command
+                .as_ref()
+                .is_some_and(|pin| crate::tools::unguarded::prohibited(&pin.executable, args))
+    }
+
+    pub(crate) fn denial_needs_redaction(&self) -> bool {
+        self.model_denial_output().is_some_and(|output| {
+            self.observation
+                .as_ref()
+                .is_some_and(|observation| observation.output != output)
+        })
+    }
+
     // Model-facing PostToolUse lines, derived from the journaled hook results alone.
     pub fn hook_feedback(&self) -> Vec<String> {
         crate::tools::permissions::feedback_lines(

@@ -1179,7 +1179,6 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             | "delegation_deadline"
             | "primary_delegation_deadline"
             | "review_exhaustion"
-            | "primary_denial"
             | "turn_limit"
             | "resume_unknown"
     );
@@ -1204,24 +1203,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 && a.assignment.as_ref().is_none_or(|w| w.released.is_some()))
     );
     if case == "primary_denial" {
-        assert_eq!(run.agents.len(), 3, "primary and two in-flight editors");
-        assert_eq!(run.failure, Some(RunFailure::ToolStopped));
-        for editor in run.agents.iter().skip(1) {
-            let outcome = &editor
-                .assignment
-                .as_ref()
-                .unwrap()
-                .outcome
-                .as_ref()
-                .unwrap()
-                .1;
-            assert_eq!(
-                outcome.disposition,
-                crate::worker::WorkerDisposition::Cancelled
-            );
-            assert_eq!(outcome.cause, crate::worker::WorkerCause::Cancelled);
-            assert!(editor.assignment.as_ref().unwrap().integration.is_none());
-        }
+        assert_primary_denial_preserves_workers(run, &workspace);
     }
     if case == "hook_sibling_stop" {
         let researcher = run.agents.last().unwrap();
@@ -1390,6 +1372,38 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         session,
         events,
         view,
+    }
+}
+
+fn assert_primary_denial_preserves_workers(run: &RunView, workspace: &Path) {
+    assert_eq!(run.agents.len(), 3, "primary and two in-flight editors");
+    assert_eq!(run.failure, None);
+    let denied: Vec<_> = run.tools.iter().filter(|tool| {
+        matches!(&tool.intent.call, ToolCall::Write { path, .. } if path == "notes/free")
+    }).collect();
+    assert_eq!(denied.len(), 1, "the declined write is never retried");
+    let observation = denied[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Denied);
+    assert_eq!(observation.approval_cause, Some(ApprovalCause::Declined));
+    assert!(observation.attestation.is_none());
+    assert_eq!(
+        denied[0].model_denial_output(),
+        Some("user_declined: no operation was dispatched")
+    );
+    assert!(!workspace.join("notes/free").exists());
+    for (index, editor) in run.agents.iter().skip(1).enumerate() {
+        let worker = editor.assignment.as_ref().unwrap();
+        let outcome = &worker.outcome.as_ref().unwrap().1;
+        assert_eq!(outcome.disposition, crate::worker::WorkerDisposition::Ready);
+        assert_eq!(outcome.cause, crate::worker::WorkerCause::Finished);
+        assert_eq!(
+            worker.integration.as_ref().unwrap().1.outcome,
+            WorkerIntegrationOutcome::Integrated
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(format!("notes/{index}"))).unwrap(),
+            format!("edited {index}")
+        );
     }
 }
 

@@ -408,7 +408,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(compacted.compiler_version, 3);
+    assert_eq!(compacted.compiler_version, 4);
     engine.close().await.unwrap();
     assert_eq!(
         outcome.run.status,
@@ -2853,7 +2853,7 @@ impl Provider for ApprovalJourney {
                     (true, "ask") => ProviderOutcome::Review(arany::ReviewVerdict::Ask),
                     (true, _) => ProviderOutcome::Review(arany::ReviewVerdict::Approve),
                     (false, _) => ProviderOutcome::Answer(Answer {
-                        text: "Action completed".into(),
+                        text: "Action result observed".into(),
                     }),
                 }
             },
@@ -2886,6 +2886,13 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         ("request-allow", ApprovalMode::Request, "", "allow", false),
         ("request-deny", ApprovalMode::Request, "", "deny", false),
         ("request-drop", ApprovalMode::Request, "", "drop", false),
+        (
+            "request-headless",
+            ApprovalMode::Request,
+            "",
+            "headless",
+            false,
+        ),
         ("request-cancel", ApprovalMode::Request, "", "cancel", false),
         ("auto-edit", ApprovalMode::AutoEdits, "", "none", false),
         ("auto-command", ApprovalMode::AutoEdits, "", "allow", true),
@@ -2940,7 +2947,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         let cancellation = RunCancellation::new();
         let pending = cancellation.clone();
         let approve = async {
-            if decision == "none" {
+            if matches!(decision, "none" | "headless") {
                 return;
             }
             let action = inbox.next().await.expect("one exact pending intent");
@@ -2968,7 +2975,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                     proposal_request(&workspace),
                     RunControls {
                         tools: ToolGrant::Configured,
-                        approvals: Some(approvals.clone()),
+                        approvals: (decision != "headless").then(|| approvals.clone()),
                         cancellation,
                         hints: Some(RunHints::new()),
                         ..Default::default()
@@ -2986,10 +2993,8 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             outcome.run.status,
             if decision == "cancel" {
                 RunStatus::Cancelled
-            } else if allowed {
-                RunStatus::Finished
             } else {
-                RunStatus::Failed
+                RunStatus::Finished
             },
             "{name}: {:?}",
             outcome.run
@@ -3019,7 +3024,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         let review_count = usize::from(mode == ApprovalMode::Auto);
         assert_eq!(
             observed.len(),
-            1 + review_count + usize::from(allowed),
+            1 + review_count + usize::from(decision != "cancel"),
             "{name}"
         );
         assert_eq!(observed[0].phase, AgentPhase::RootPlan);
@@ -3077,7 +3082,10 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         assert_eq!(replay.runs[0].status, outcome.run.status);
         assert_eq!(replay.runs[0].tools, outcome.run.tools);
         let calls = &replay.runs[0].agents[0].provider_calls;
-        assert_eq!(calls.len(), 1 + review_count + usize::from(allowed));
+        assert_eq!(
+            calls.len(),
+            1 + review_count + usize::from(decision != "cancel")
+        );
         if review_count == 1 {
             assert_eq!(calls[1].phase, AgentPhase::ToolReview);
             assert_eq!(
@@ -3097,23 +3105,9 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         }
         assert_eq!(
             replay.runs[0].assistant_message.as_deref(),
-            allowed.then_some("Action completed")
+            (decision != "cancel").then_some("Action result observed")
         );
-        if outcome.run.status == RunStatus::Failed {
-            let feedback = arany_cli::presentation::run_feedback(&replay.runs[0]).unwrap();
-            if decision == "drop" {
-                assert_eq!(
-                    feedback,
-                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Start a new request from an interactive approval channel.",
-                    "{name}: closed replay preserves approval channel recovery"
-                );
-            } else {
-                assert!(
-                    feedback.contains("Action denied"),
-                    "{name}: a failed optional review must not hide the approval outcome"
-                );
-            }
-        }
+        assert_native_approval_refusal(decision, &replay.runs[0], &observed);
         assert!(
             replay.runs[0].tools[0]
                 .observation
@@ -3124,6 +3118,33 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 == allowed
         );
     }
+}
+
+fn assert_native_approval_refusal(
+    decision: &str,
+    run: &arany::RunView,
+    requests: &[ProviderRequest],
+) {
+    let label = match decision {
+        "deny" => "user_declined",
+        "drop" | "headless" => "channel_unavailable",
+        _ => return,
+    };
+    assert!(run.failure.is_none());
+    assert_eq!(run.tools.len(), 1, "{decision}: no automatic retry");
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Denied);
+    assert_eq!(
+        observation.output,
+        format!("{label}: no operation was dispatched")
+    );
+    assert!(observation.attestation.is_none());
+    let continuation = requests.last().unwrap();
+    assert_eq!(continuation.phase, AgentPhase::RootPlan);
+    assert_eq!(
+        continuation.input.tools.as_ref().unwrap().observations(),
+        vec![observation]
+    );
 }
 
 struct GitJourney {

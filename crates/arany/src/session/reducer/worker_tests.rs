@@ -470,7 +470,7 @@ impl Fixture {
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
                 schema_version: 1,
-                compiler_version: 3,
+                compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,
                 source_tokens_estimate: 1,
                 input_tokens: None,

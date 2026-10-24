@@ -2968,7 +2968,6 @@ enum PermissionCase {
 }
 
 async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: PermissionCase) {
-    use arany::test_support::scenario::tool_outcome;
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
@@ -3028,17 +3027,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         expected_digest: None,
         content: "Next".into(),
     };
-    let mut outcomes = vec![tool_outcome(call)];
-    if case == PermissionCase::ModeSwitch {
-        outcomes.push(outcomes[0].clone());
-    } else if live_edits {
-        outcomes.push(tool_outcome(second));
-    }
-    if allow {
-        outcomes.push(arany::ProviderOutcome::Answer(arany::Answer {
-            text: "Finished".into(),
-        }));
-    }
+    let outcomes = permission_outcomes(case, allow, call, second);
     let provider = Arc::new(ScriptedProvider::new(outcomes).with_profile("openai", "gpt-5.4"));
     let (mut writer, mut reader, task) = if let Some(guard) = guard {
         start_with_guard(&state, provider.clone(), true, guard)
@@ -3107,6 +3096,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             projections += 1;
         }
         if value["id"] == 3 {
+            assert_eq!(value["result"]["stopReason"], "end_turn", "{case:?}");
             break;
         }
     }
@@ -3133,6 +3123,13 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     let events = store.load_session(session).await.unwrap();
     let view = store.load_view(session).await.unwrap().unwrap();
     store.close().await.unwrap();
+    assert_eq!(
+        arany::SessionView::replay(session, &events)
+            .unwrap()
+            .unwrap(),
+        view
+    );
+    assert_permission_continuation(&view, &provider, allow, case);
     assert_eq!(view.runs[0].tools.len(), calls);
     if case == PermissionCase::ModeSwitch {
         assert_eq!(provider.requests.lock().unwrap().len(), 3);
@@ -3205,10 +3202,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             .count(),
         calls
     );
-    assert_eq!(
-        provider.requests.lock().unwrap().len(),
-        if allow { calls + 1 } else { 1 }
-    );
+    assert_eq!(provider.requests.lock().unwrap().len(), calls + 1);
     assert!(provider.responses.lock().unwrap().is_empty());
     if live_edits {
         assert_eq!(std::fs::read(workspace.join("next.txt")).unwrap(), b"Next");
@@ -3222,6 +3216,84 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             tool.observation.as_ref().unwrap().attestation,
             Some(arany::Attestation::Guard(_))
         ));
+    }
+}
+
+fn permission_answer(case: PermissionCase, allow: bool) -> &'static str {
+    if allow {
+        "Finished"
+    } else {
+        match case {
+            PermissionCase::HookAsk => {
+                "The requested read needs an unavailable human approval channel."
+            }
+            PermissionCase::Read
+            | PermissionCase::Write
+            | PermissionCase::ModeSwitch
+            | PermissionCase::LiveEdits => "The requested operation was declined and did not run.",
+        }
+    }
+}
+
+fn permission_outcomes(
+    case: PermissionCase,
+    allow: bool,
+    call: arany::ToolCall,
+    second: arany::ToolCall,
+) -> Vec<arany::ProviderOutcome> {
+    use arany::test_support::scenario::tool_outcome;
+    let mut outcomes = vec![tool_outcome(call)];
+    match case {
+        PermissionCase::ModeSwitch => outcomes.push(outcomes[0].clone()),
+        PermissionCase::LiveEdits => outcomes.push(tool_outcome(second)),
+        PermissionCase::Read | PermissionCase::Write | PermissionCase::HookAsk => {}
+    }
+    outcomes.push(arany::ProviderOutcome::Answer(arany::Answer {
+        text: permission_answer(case, allow).into(),
+    }));
+    outcomes
+}
+
+fn assert_permission_continuation(
+    view: &arany::SessionView,
+    provider: &ScriptedProvider,
+    allow: bool,
+    case: PermissionCase,
+) {
+    let run = &view.runs[0];
+    assert_eq!(run.status, RunStatus::Finished, "{case:?}");
+    assert!(run.failure.is_none());
+    assert_eq!(
+        run.assistant_message.as_deref(),
+        Some(permission_answer(case, allow))
+    );
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Completed);
+    let requests = provider.requests.lock().unwrap();
+    let context = requests.last().unwrap().input.tools.as_ref().unwrap();
+    let step = context.steps.last().unwrap();
+    let tool = run.tools.last().unwrap();
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(step.requests.len(), 1, "{case:?}: original request");
+    assert_eq!(step.requests[0].id.as_str(), "call_1");
+    assert_eq!(step.requests[0].call, tool.intent.call);
+    assert_eq!(
+        step.observations.as_slice(),
+        std::slice::from_ref(observation)
+    );
+    if !allow {
+        let label = match case {
+            PermissionCase::HookAsk => "channel_unavailable",
+            PermissionCase::Read
+            | PermissionCase::Write
+            | PermissionCase::ModeSwitch
+            | PermissionCase::LiveEdits => "user_declined",
+        };
+        assert_eq!(
+            observation.output,
+            format!("{label}: no operation was dispatched")
+        );
+        assert!(observation.attestation.is_none());
+        assert_eq!(run.tools.len(), 1, "{case:?}: no automatic retry");
     }
 }
 

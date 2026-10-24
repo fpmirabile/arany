@@ -223,7 +223,7 @@ impl Engine {
             conversation: ConversationRewind {
                 session_id: None,
                 defaults: view.defaults.clone(),
-                prompt: (selected.objective.len() <= 8 * 1024).then(|| selected.objective.clone()),
+                prompt: Some(selected.objective.clone()),
                 images_omitted: !selected.images.is_empty(),
             },
         })

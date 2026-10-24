@@ -8,7 +8,7 @@ mod lineage;
 mod reducer;
 pub mod rewind;
 mod stop;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use reducer::HookView;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -34,8 +34,9 @@ pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
-    CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
-    MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, validate_compaction_references,
+    COMPACTION_COMPILER_VERSION, CompactionInputError, MAX_COMPACTION_INPUT_BYTES,
+    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
+    MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
