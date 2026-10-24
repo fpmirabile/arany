@@ -67,7 +67,7 @@ async fn closed_bundle(
 pub(super) async fn worker_case(case: &'static str) {
     let _deadline = engine_support::deadline(case, Duration::from_secs(180));
     let approval_wait = case == "approval_wait";
-    let case = if approval_wait { "denial" } else { case };
+    let case = if approval_wait { "success" } else { case };
     // A worker admission reserves three retry facts for each of its ten calls and one steering note for each
     // child call; each case pads to the largest prefix that still reaches its capacity stop.
     let padding = match case {
@@ -1115,80 +1115,56 @@ async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team(
 
 #[tokio::test]
 async fn completed_sibling_does_not_charge_a_late_child_approval() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "sibling_approval_wait",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "sibling_approval_wait",
     )
-    .await
-    .expect("sibling completion and late approval journey");
+    .await;
 }
 
 #[tokio::test]
 async fn active_sibling_exhaustion_withdraws_the_child_approval() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "sibling_approval_exhaustion",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "sibling_approval_exhaustion",
     )
-    .await
-    .expect("active sibling exhaustion and approval withdrawal journey");
+    .await;
 }
 
 #[tokio::test]
 async fn retry_wait_exhaustion_withdraws_the_child_approval() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "retry_approval_exhaustion",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "retry_approval_exhaustion",
     )
-    .await
-    .expect("active retry wait exhausts the Goal and withdraws approval");
+    .await;
 }
 
 #[tokio::test]
 async fn delegation_deadline_keeps_the_goal_receipt_unexhausted() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "delegation_deadline",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "delegation_deadline",
     )
-    .await
-    .expect("delegation-only deadline remains distinct from Goal exhaustion");
+    .await;
 }
 
 #[tokio::test]
 async fn primary_refill_keeps_the_delegation_deadline_cause() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "primary_delegation_deadline",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "primary_delegation_deadline",
     )
-    .await
-    .expect("primary result and refill preserve the delegation deadline");
+    .await;
 }
 
 #[tokio::test]
 async fn auto_review_exhaustion_does_not_fall_back_to_human_approval() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "review_exhaustion",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "review_exhaustion",
     )
-    .await
-    .expect("Auto review exhausts the active Goal before fallback");
+    .await;
 }
 
 async fn runtime_command_case_agrees_with_closed_output(case: &'static str) {

@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 
 const APPROVAL_WITHDRAWAL_WAIT: Duration = Duration::from_secs(5);
 const RETRY_WAIT_MS: u32 = 10_000;
@@ -232,8 +232,9 @@ impl ApprovalJourney {
         self.stage = ApprovalJourneyStage::Exhausted;
     }
 
-    async fn retry_started(&mut self) {
+    async fn retry_started(&mut self, provider: &TeamProvider) {
         self.retry_wait_active = true;
+        provider.gates[1].add_permits(1);
         self.maybe_exhaust().await;
     }
 }
@@ -692,6 +693,13 @@ impl Provider for TeamProvider {
                 Duration::from_millis(u64::from(RETRY_WAIT_MS)),
             )));
         }
+        if self.case == "retry_approval_exhaustion"
+            && request.phase == AgentPhase::ChildWork
+            && request.input.objective.starts_with("editor 1 ")
+            && step == 0
+        {
+            self.gates[1].acquire().await.unwrap().forget();
+        }
         if self.case == "primary_time" && request.phase == AgentPhase::RootSynthesis && step == 2 {
             self.gates[6].acquire_many(2).await.unwrap().forget();
             tokio::time::pause();
@@ -924,84 +932,93 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let mut primary_seen = false;
     let mut primary_tool_gated = false;
     let mut approval_journey = ApprovalJourney::new(case);
-    let result = loop {
-        tokio::select! {
-            result = &mut handle.result => break result,
-            Some(approval) = inbox.next() => {
-                if case == "review_exhaustion" {
-                    panic!("expired AI review must not fall back to a human ask");
-                }
-                if case == "primary_delegation_deadline"
-                    && !matches!(approval.intent.target, EffectTarget::WorkerView { .. })
-                {
-                    exhaust_delegation_after_primary_tool(approval, &provider).await;
-                    primary_tool_gated = true;
-                    continue;
-                }
-                if approval_journey_case(case) {
-                    approval_journey.approval(approval, &provider).await;
-                    continue;
-                }
-                let allow = !(case == "primary_denial" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
-                approval.decide(allow);
-            },
-            Some(index) = completions.recv(), if case == "sibling_approval_wait" => {
-                approval_journey.completion(index).await;
-            },
-            retry = async { retry_entered.as_mut().expect("retry backoff gate").await }, if retry_entered.is_some() => {
-                retry.expect("retry enters its gated backoff");
-                retry_entered = None;
-                approval_journey.retry_started().await;
-            },
-            Some(index) = arrivals.recv() => {
-                ready.push(index);
-                if case.starts_with("hook_") { if index == 7 { provider.gates[7].add_permits(1); } }
-                else if case == "review_exhaustion" && index == 7 {
-                    tokio::time::pause();
-                    tokio::time::advance(Duration::from_millis(
-                        REVIEW_EXHAUSTION_GOAL_ACTIVE_MS + 1,
-                    )).await;
-                    tokio::task::yield_now().await;
-                    tokio::time::resume();
-                }
-                else if approval_journey_case(case) {
-                    approval_journey.arrival(index, &provider).await;
-                }
-                else if matches!(case, "tokens" | "waves" | "reassign") { provider.gates[index].add_permits(1); }
-                else if matches!(case, "cap" | "hard_cap") {
-                    let cap = if case == "hard_cap" { 8 } else { 4 };
-                    if ready.len() == cap {
-                        let requests = provider.requests.lock().unwrap();
-                        assert_eq!(requests.iter().filter(|r| r.phase == AgentPhase::ChildWork).map(|r| r.agent_run_id).collect::<std::collections::HashSet<_>>().len(), cap);
-                        for gate in &provider.gates { gate.add_permits(1); }
+    let finished = Notify::new();
+    let execution = async {
+        let result = (&mut handle.result).await;
+        finished.notify_one();
+        result
+    };
+    let controller = async {
+        loop {
+            tokio::select! {
+                () = finished.notified() => break,
+                Some(approval) = inbox.next() => {
+                    if case == "review_exhaustion" {
+                        panic!("expired AI review must not fall back to a human ask");
                     }
-                } else if ready.len() == if matches!(case, "mixed" | "c1_failure" | "cancel_mixed") { 3 } else { 2 } {
-                    if case.starts_with("cancel_") { cancellation.cancel(); }
-                    else if case == "c1_failure" { provider.gates[7].add_permits(1); }
-                    else if case == "failure" { provider.gates[0].add_permits(1); }
-                    else if matches!(case, "primary_denial" | "primary_delegation_deadline") {}
-                    else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
-                    else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
-                }
-            },
-            Some(event) = handle.events.next() => if let Tapped::Committed(envelope) = event {
-                match &envelope.event {
-                    Event::WorkerIntegrationRecorded { record, .. } => {
-                        integrated.push(record.assignment_id);
-                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command") { provider.gates[0].add_permits(1); }
+                    if case == "primary_delegation_deadline"
+                        && !matches!(approval.intent.target, EffectTarget::WorkerView { .. })
+                    {
+                        exhaust_delegation_after_primary_tool(approval, &provider).await;
+                        primary_tool_gated = true;
+                        continue;
                     }
-                    Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
-                    Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
-                    Event::ToolFinished { observation, .. } if case != "primary_delegation_deadline" && matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free") => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
-                    Event::ProviderCallRecorded { record, agent_run_id, .. } if case == "command" && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::ToolRequested => {
-                        assert_ne!(*agent_run_id, provider.requests.lock().unwrap().iter().find(|r| r.phase == AgentPhase::ChildWork).unwrap().agent_run_id);
-                        primary_seen = true; for gate in &provider.gates { gate.add_permits(1); }
+                    if approval_journey_case(case) {
+                        approval_journey.approval(approval, &provider).await;
+                        continue;
                     }
-                    _ => {}
+                    let allow = !(case == "primary_denial" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
+                    approval.decide(allow);
+                },
+                Some(index) = completions.recv(), if case == "sibling_approval_wait" => {
+                    approval_journey.completion(index).await;
+                },
+                retry = async { retry_entered.as_mut().expect("retry backoff gate").await }, if retry_entered.is_some() => {
+                    retry.expect("retry enters its gated backoff");
+                    retry_entered = None;
+                    approval_journey.retry_started(&provider).await;
+                },
+                Some(index) = arrivals.recv() => {
+                    ready.push(index);
+                    if case.starts_with("hook_") { if index == 7 { provider.gates[7].add_permits(1); } }
+                    else if case == "review_exhaustion" && index == 7 {
+                        tokio::time::pause();
+                        tokio::time::advance(Duration::from_millis(
+                            REVIEW_EXHAUSTION_GOAL_ACTIVE_MS + 1,
+                        )).await;
+                        tokio::task::yield_now().await;
+                        tokio::time::resume();
+                    }
+                    else if approval_journey_case(case) {
+                        approval_journey.arrival(index, &provider).await;
+                    }
+                    else if matches!(case, "tokens" | "waves" | "reassign") { provider.gates[index].add_permits(1); }
+                    else if matches!(case, "cap" | "hard_cap") {
+                        let cap = if case == "hard_cap" { 8 } else { 4 };
+                        if ready.len() == cap {
+                            let requests = provider.requests.lock().unwrap();
+                            assert_eq!(requests.iter().filter(|r| r.phase == AgentPhase::ChildWork).map(|r| r.agent_run_id).collect::<std::collections::HashSet<_>>().len(), cap);
+                            for gate in &provider.gates { gate.add_permits(1); }
+                        }
+                    } else if ready.len() == if matches!(case, "mixed" | "c1_failure" | "cancel_mixed") { 3 } else { 2 } {
+                        if case.starts_with("cancel_") { cancellation.cancel(); }
+                        else if case == "c1_failure" { provider.gates[7].add_permits(1); }
+                        else if case == "failure" { provider.gates[0].add_permits(1); }
+                        else if matches!(case, "primary_denial" | "primary_delegation_deadline") {}
+                        else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
+                        else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
+                    }
+                },
+                Some(event) = handle.events.next() => if let Tapped::Committed(envelope) = event {
+                    match &envelope.event {
+                        Event::WorkerIntegrationRecorded { record, .. } => {
+                            integrated.push(record.assignment_id);
+                            if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command") { provider.gates[0].add_permits(1); }
+                        }
+                        Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
+                        Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
+                        Event::ToolFinished { observation, .. } if case != "primary_delegation_deadline" && matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free") => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
+                        Event::ProviderCallRecorded { record, agent_run_id, .. } if case == "command" && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::ToolRequested => {
+                            assert_ne!(*agent_run_id, provider.requests.lock().unwrap().iter().find(|r| r.phase == AgentPhase::ChildWork).unwrap().agent_run_id);
+                            primary_seen = true; for gate in &provider.gates { gate.add_permits(1); }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
     };
+    let (result, ()) = tokio::join!(execution, controller);
     if case == "hook_uncertain_sibling" {
         assert!(
             matches!(result, Err(EngineError::Tool(ToolError::Uncertain))),
