@@ -1,5 +1,5 @@
 use super::hints::HintPublisher;
-use super::ledger::{Action, Admission, GoalLedger, duration_ms};
+use super::ledger::{Action, ActiveReservationLimit, Admission, GoalLedger, duration_ms};
 use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::journal::Journal;
 use crate::provider::{
@@ -19,6 +19,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 mod children;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use children::MAX_DELEGATION_DEADLINE;
 pub(super) mod step;
 mod stop;
 mod tool_compaction;
@@ -88,6 +90,7 @@ struct DisplayCheckpoint {
 struct ActiveSegment {
     started: Instant,
     reserved_ms: u64,
+    limit: ActiveReservationLimit,
 }
 
 impl ActiveSegment {
@@ -103,6 +106,7 @@ impl ActiveSegment {
 struct ActivePause {
     segment: ActiveSegment,
     paused_at: Instant,
+    activity_started: Duration,
 }
 
 impl DisplayCheckpoint {
@@ -149,6 +153,8 @@ pub(super) struct RunLoop<'a> {
     >,
     active_time_floor: std::sync::atomic::AtomicBool,
     window_pressure_handled: std::sync::atomic::AtomicU64,
+    approval_withdrawals:
+        std::sync::Mutex<std::collections::HashMap<uuid::Uuid, crate::tools::ApprovalWithdrawal>>,
 }
 
 pub(super) struct LoopControls<'a> {
@@ -216,6 +222,7 @@ impl<'a> RunLoop<'a> {
             definitions: std::sync::OnceLock::new(),
             active_time_floor: std::sync::atomic::AtomicBool::new(false),
             window_pressure_handled: std::sync::atomic::AtomicU64::new(0),
+            approval_withdrawals: Default::default(),
             journal,
             session_id: identity.session_id,
             run_id: identity.run_id,
@@ -234,6 +241,30 @@ impl<'a> RunLoop<'a> {
 
     fn ledger(&self) -> &GoalLedger {
         self.ledger
+    }
+
+    fn defer_approval_withdrawal(
+        &self,
+        intent_id: uuid::Uuid,
+        withdrawal: crate::tools::ApprovalWithdrawal,
+    ) -> Result<(), EngineError> {
+        self.approval_withdrawals
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .insert(intent_id, withdrawal);
+        Ok(())
+    }
+
+    fn commit_approval_withdrawal(&self, intent_id: uuid::Uuid) -> Result<(), EngineError> {
+        if let Some(withdrawal) = self
+            .approval_withdrawals
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .remove(&intent_id)
+        {
+            withdrawal.commit();
+        }
+        Ok(())
     }
 
     fn settle_result(&self, result: &CallResult) -> Result<(), EngineError> {
@@ -295,9 +326,10 @@ impl<'a> RunLoop<'a> {
         Ok(self
             .ledger()
             .reserve_active(duration_ms(action_bound), action, Some(actor))?
-            .map(|(started, reserved_ms)| ActiveSegment {
+            .map(|(started, reserved_ms, limit)| ActiveSegment {
                 started,
                 reserved_ms,
+                limit,
             }))
     }
 
@@ -326,6 +358,7 @@ impl<'a> RunLoop<'a> {
             .map(|segment| ActivePause {
                 segment,
                 paused_at: Instant::now(),
+                activity_started: self.ledger().active_elapsed(),
             }))
     }
 
@@ -334,11 +367,11 @@ impl<'a> RunLoop<'a> {
         pause: ActivePause,
         resume_at: Option<Instant>,
     ) -> Result<(), EngineError> {
-        let sampled_at = if self.ledger().providers_active() {
-            Instant::now()
-        } else {
-            pause.paused_at
-        };
+        let active_during = self
+            .ledger()
+            .active_elapsed()
+            .saturating_sub(pause.activity_started);
+        let sampled_at = pause.paused_at + active_during;
         self.settle_active_segment_at(pause.segment, sampled_at, resume_at)
     }
 

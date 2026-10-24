@@ -1,6 +1,7 @@
 use super::hooks::HookFold;
 use super::permission::Permission;
 use super::{ActiveTime, Answer, HookDenial, Resolution};
+use crate::engine::ledger::ActiveDeadlineCause;
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
@@ -77,7 +78,6 @@ pub(super) enum NotDispatched {
     UnguardedNeedsHuman,
     ApprovalRefused,
     ApprovalUnavailable,
-    ApprovalTimedOut,
 }
 
 impl RunLoop<'_> {
@@ -141,7 +141,6 @@ impl NotDispatched {
             | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
             | Self::ApprovalUnavailable
-            | Self::ApprovalTimedOut
             | Self::ApprovalRefused => ActiveTimeEffect::Recheck,
             Self::TimeoutLimit { .. }
             | Self::HookDenied(
@@ -173,7 +172,6 @@ impl NotDispatched {
             | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
             | Self::ApprovalUnavailable
-            | Self::ApprovalTimedOut
             | Self::ApprovalRefused => true,
             Self::TimeoutLimit { .. }
             | Self::HookDenied(_)
@@ -235,7 +233,7 @@ pub(super) struct AfterAsk {
     pub(super) paused: bool,
     pub(super) can_start_provider_call: bool,
     pub(super) cancelled: bool,
-    pub(super) deadline_reached: bool,
+    pub(super) deadline: Option<ActiveDeadlineCause>,
 }
 
 pub(super) fn refuse<'a>(reason: NotDispatched, stop: Option<StopCause>) -> Refusal<'a> {
@@ -360,7 +358,6 @@ pub(super) fn decide_dispatch<'a>(
             | NotDispatched::SaveUnconfirmed
             | NotDispatched::UnguardedNeedsHuman
             | NotDispatched::ApprovalUnavailable
-            | NotDispatched::ApprovalTimedOut
             | NotDispatched::ApprovalRefused => {
                 (facts.permission.decision, facts.unresolved_source())
             }
@@ -383,6 +380,8 @@ pub(super) fn decide_dispatch<'a>(
         }
         (None, DispatchSite::Researcher) => (true, facts.permission.basis, false),
     };
+    let active_time_exhausted =
+        active_time_exhausted || after.deadline == Some(ActiveDeadlineCause::Goal);
     if facts.host && (source != PermissionSource::Human || after.approval.is_none()) {
         approved = false;
         source = PermissionSource::UnavailableApproval;
@@ -391,11 +390,7 @@ pub(super) fn decide_dispatch<'a>(
         let stop = if facts.site == DispatchSite::Primary && recoverable_primary_refusal(&reason) {
             None
         } else {
-            Some(refusal_cause(
-                after.paused,
-                after.cancelled,
-                after.deadline_reached,
-            ))
+            Some(refusal_cause(after.paused, after.cancelled, after.deadline))
         };
         Err(refuse(reason, stop))
     };
@@ -408,12 +403,12 @@ pub(super) fn decide_dispatch<'a>(
         _ if after.paused && after.approval.is_some() && !active_time_exhausted => {
             refused(NotDispatched::Paused)
         }
-        _ if after
-            .approval
-            .as_ref()
-            .is_some_and(|approval| approval.timed_out) =>
-        {
-            refused(NotDispatched::ApprovalTimedOut)
+        DispatchSite::Researcher if active_time_exhausted => Err(refuse(
+            NotDispatched::ActiveTime,
+            Some(StopCause::ActiveTime),
+        )),
+        _ if after.deadline == Some(ActiveDeadlineCause::Delegation) => {
+            refused(NotDispatched::DelegationDeadline)
         }
         DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
         DispatchSite::Researcher => refused(if source == PermissionSource::UnavailableApproval {
@@ -491,20 +486,25 @@ fn recoverable_primary_refusal(reason: &NotDispatched) -> bool {
         | NotDispatched::Cancelled
         | NotDispatched::TokenBudget
         | NotDispatched::UnsavedRule
-        | NotDispatched::SaveUnconfirmed
-        | NotDispatched::ApprovalTimedOut => false,
+        | NotDispatched::SaveUnconfirmed => false,
     }
 }
 
-fn refusal_cause(paused: bool, cancelled: bool, deadline_reached: bool) -> StopCause {
+fn refusal_cause(
+    paused: bool,
+    cancelled: bool,
+    deadline: Option<ActiveDeadlineCause>,
+) -> StopCause {
     if paused {
         StopCause::Paused
     } else if cancelled {
         StopCause::Cancelled
-    } else if deadline_reached {
-        StopCause::DelegationDeadline
     } else {
-        StopCause::ToolStopped
+        match deadline {
+            Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
+            Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
+            None => StopCause::ToolStopped,
+        }
     }
 }
 
@@ -529,7 +529,6 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         | NotDispatched::SaveUnconfirmed
         | NotDispatched::UnguardedNeedsHuman
         | NotDispatched::ApprovalUnavailable
-        | NotDispatched::ApprovalTimedOut
         | NotDispatched::ApprovalRefused => None,
     };
     let (disposition, output) = match reason {
@@ -611,10 +610,6 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
             ToolDisposition::Denied,
             DenialFeedback::ChannelUnavailable.output().into(),
         ),
-        NotDispatched::ApprovalTimedOut => (
-            ToolDisposition::Denied,
-            DenialFeedback::ChildTimeout.output().into(),
-        ),
         NotDispatched::ApprovalRefused => (
             ToolDisposition::Denied,
             DenialFeedback::UserDeclined.output().into(),
@@ -629,7 +624,6 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         | NotDispatched::UnguardedNeedsHuman => {
             Some(crate::tools::ApprovalCause::ChannelUnavailable)
         }
-        NotDispatched::ApprovalTimedOut => Some(crate::tools::ApprovalCause::ChildTimeout),
         NotDispatched::ApprovalRefused => Some(crate::tools::ApprovalCause::Declined),
         NotDispatched::HostSourceUnavailable
         | NotDispatched::TimeoutLimit { .. }
@@ -735,13 +729,33 @@ mod tests {
 
     #[test]
     fn refusals_keep_their_own_cause() {
-        for (flags, expected) in [
-            ([true, true, true], StopCause::Paused),
-            ([false, true, true], StopCause::Cancelled),
-            ([false, false, true], StopCause::DelegationDeadline),
-            ([false, false, false], StopCause::ToolStopped),
+        for (paused, cancelled, deadline, expected) in [
+            (
+                true,
+                true,
+                Some(ActiveDeadlineCause::Goal),
+                StopCause::Paused,
+            ),
+            (
+                false,
+                true,
+                Some(ActiveDeadlineCause::Goal),
+                StopCause::Cancelled,
+            ),
+            (
+                false,
+                false,
+                Some(ActiveDeadlineCause::Goal),
+                StopCause::ActiveTime,
+            ),
+            (
+                false,
+                false,
+                Some(ActiveDeadlineCause::Delegation),
+                StopCause::DelegationDeadline,
+            ),
+            (false, false, None, StopCause::ToolStopped),
         ] {
-            let [paused, cancelled, deadline] = flags;
             assert_eq!(refusal_cause(paused, cancelled, deadline), expected);
         }
     }
@@ -782,11 +796,11 @@ mod tests {
 
     fn resolution(approved: bool, source: PermissionSource) -> Resolution {
         Resolution {
-            timed_out: false,
             approved,
             source,
             active_time_exhausted: false,
             save: None,
+            withdrawal: None,
         }
     }
 
@@ -821,6 +835,7 @@ mod tests {
         Paused,
         Cancelled,
         Deadline,
+        GoalDeadline,
     }
 
     fn decide<'a>(
@@ -866,7 +881,13 @@ mod tests {
             paused: has(Fact::Paused),
             can_start_provider_call: !has(Fact::TokensSpent) && !has(Fact::TokensSpentAfterAsk),
             cancelled: has(Fact::Cancelled),
-            deadline_reached: has(Fact::Deadline),
+            deadline: if has(Fact::GoalDeadline) {
+                Some(ActiveDeadlineCause::Goal)
+            } else if has(Fact::Deadline) {
+                Some(ActiveDeadlineCause::Delegation)
+            } else {
+                None
+            },
         };
         (facts.ask(), decide_dispatch(&facts, &after))
     }
@@ -887,11 +908,11 @@ mod tests {
             Some(PermissionSource::Human),
         ] {
             let resolution = source.map(|source| Resolution {
-                timed_out: false,
                 approved: true,
                 source,
                 active_time_exhausted: false,
                 save: None,
+                withdrawal: None,
             });
             let (_, decision) = decide(
                 DispatchSite::Primary,
@@ -921,11 +942,11 @@ mod tests {
             &hooks,
             &[Fact::Host, Fact::InProcess],
             Some(Resolution {
-                timed_out: false,
                 approved: false,
                 source: PermissionSource::Human,
                 active_time_exhausted: false,
                 save: None,
+                withdrawal: None,
             }),
         );
         assert!(decision.outcome.is_err());
@@ -1008,13 +1029,18 @@ mod tests {
             (decide(Primary, asks(Request), &none, &[Paused], exhausted_ask), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
             (decide(Primary, asks(Request), &none, &[Offered, Batch], ok(false, S::UnavailableApproval)), Some(Request), no(N::UnguardedNeedsHuman, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Offered, Cancelled], ok(false, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
+            (decide(Primary, asks(Request), &none, &[], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, None), ask_, S::Human),
             (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Cancelled], ok(true, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
             // A researcher after its Ask, or where it would have been.
             (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
-            (decide(Researcher, asks(Request), &none, &[], Some(Resolution { timed_out: true, ..resolution(false, S::UnavailableApproval) })), Some(Request), no(N::ApprovalTimedOut, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
-            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::ApprovalUnavailable, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::ToolStopped)), ask_, S::Human),
+            (decide(Researcher, asks(Request), &none, &[Blocked], None), None, no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::DelegationDeadline, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Blocked, GoalDeadline], None), None, no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[GoalDeadline], ok(true, S::Human)), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
+            (decide(Researcher, asks(Request), &none, &[GoalDeadline, Cancelled], ok(true, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
             (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::Paused, Some(StopCause::Paused)), ask_, S::Human),
         ];
@@ -1084,29 +1110,34 @@ mod tests {
 
     #[test]
     fn approval_denial_history_preserves_dispatch_output_without_redaction() {
-        for (reason, expected) in [
+        let mut historical_timeout = undispatched(
+            read_intent(),
+            ToolDisposition::Denied,
+            DenialFeedback::ChildTimeout.output(),
+        );
+        historical_timeout.approval_cause = Some(crate::tools::ApprovalCause::ChildTimeout);
+        for (observation, expected) in [
             (
-                NotDispatched::Cancelled,
+                not_dispatched(read_intent(), &NotDispatched::Cancelled),
                 "Run cancelled before this operation; no operation was dispatched",
             ),
             (
-                NotDispatched::Paused,
+                not_dispatched(read_intent(), &NotDispatched::Paused),
                 "Goal paused before this operation; no operation was dispatched",
             ),
             (
-                NotDispatched::ApprovalTimedOut,
+                historical_timeout,
                 "Child approval wait timed out; no operation was dispatched",
             ),
             (
-                NotDispatched::ApprovalRefused,
+                not_dispatched(read_intent(), &NotDispatched::ApprovalRefused),
                 "user_declined: no operation was dispatched",
             ),
             (
-                NotDispatched::ApprovalUnavailable,
+                not_dispatched(read_intent(), &NotDispatched::ApprovalUnavailable),
                 "channel_unavailable: no operation was dispatched",
             ),
         ] {
-            let observation = not_dispatched(read_intent(), &reason);
             assert_eq!(observation.output, expected);
             let tool = crate::session::ToolView {
                 checkpoint: None,
