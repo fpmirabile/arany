@@ -3177,7 +3177,7 @@ impl Provider for GitJourney {
         let outcome = match step {
             0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }),
             1 => crate::tool_outcome(ToolCall::GitDiff {
-                path: "src".into(),
+                path: ".".into(),
                 base: None,
                 head: None,
                 staged: false,

@@ -3670,6 +3670,8 @@ pub(super) mod tests {
             },
         );
         let output = format!("{status}{diff}{log}");
+        assert_eq!(diff["files"][0]["path"], "src/a.txt");
+        assert_eq!(log["commits"][0]["subject"], "visible baseline");
         assert!(!output.contains("DISCLOSURE_CANARY"), "{output}");
         assert!(!output.contains("cfg/private.json"), "{output}");
         assert!(
@@ -3716,7 +3718,7 @@ pub(super) mod tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join(".gitignore"), "ignored\n").unwrap();
-        let action_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let action_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
         let capture = async {
             tokio::time::advance(super::super::selection::DISCOVERY_TIME + Duration::from_secs(1))
                 .await;
