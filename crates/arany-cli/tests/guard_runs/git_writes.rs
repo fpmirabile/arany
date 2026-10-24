@@ -629,7 +629,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         assert!(observation.output.contains(if drift {
             "permission settings changed outside admission"
         } else {
-            "Approval was not granted"
+            "user_declined"
         }));
         assert_eq!(next.run.unguarded_tools(), 0);
     }

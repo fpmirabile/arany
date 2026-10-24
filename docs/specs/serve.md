@@ -237,6 +237,13 @@ observation or disposition. Output is the bounded journaled observation.
 The additional uncertain status diverges from Codex to preserve an unknown
 effect outcome.
 
+A recoverable primary denial or known Tool failure, including explicit approval
+decline or unavailable approval, completes its item with the mapped Tool status
+(`declined` for denied) and is returned once to the requesting model as the
+correlated Tool result. The turn may continue under ordinary Goal admission;
+completion status follows the committed Engine outcome. Hook and
+permission-rule prose is never copied into the observation output.
+
 ## Server requests
 
 The server advertises `approvals_v2` and sends requests with a fresh integer ID

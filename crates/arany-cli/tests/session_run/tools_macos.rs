@@ -88,6 +88,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "git"
                         | "refusal"
                         | "denied"
+                        | "headless"
                         | "cancelled"
                         | "overflow"
                         | "mcp-version"
@@ -2222,6 +2223,7 @@ int main(void) {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     for case in [
         "denied",
+        "headless",
         "cancelled",
         "overflow",
         "mcp-version",
@@ -2405,7 +2407,11 @@ int main(void) {
         }
         assert_eq!(
             requests.lock().unwrap().len(),
-            usize::from(case != "mcp-version") + if attested { 2 } else { 1 },
+            match case {
+                "denied" | "headless" | "overflow" => 3,
+                "cancelled" | "mcp-version" | "receipt-loss" => 2,
+                _ => unreachable!(),
+            },
             "no automatic retry: {case}"
         );
         let session_id = match &outcome {
@@ -2428,6 +2434,7 @@ int main(void) {
             .as_ref()
             .map_or_else(|| replay.runs[0].clone(), |outcome| outcome.run.clone());
         assert_eq!(replay.runs[0], run, "closed replay: {case}");
+        assert_native_refusal_continues(case, &run, &requests.lock().unwrap());
         assert_eq!(
             events
                 .iter()
@@ -2517,7 +2524,7 @@ int main(void) {
         assert_eq!(
             observation.disposition,
             match case {
-                "denied" | "cancelled" => ToolDisposition::Denied,
+                "denied" | "headless" | "cancelled" => ToolDisposition::Denied,
                 "overflow" => ToolDisposition::Succeeded,
                 "mcp-version" => ToolDisposition::Failed,
                 "receipt-loss" => ToolDisposition::Uncertain,
@@ -2527,6 +2534,41 @@ int main(void) {
         );
         assert_eq!(observation.attestation.is_some(), attested, "{case}");
     }
+}
+
+fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &[ProviderRequest]) {
+    let label = match case {
+        "denied" => "user_declined",
+        "headless" => "channel_unavailable",
+        _ => return,
+    };
+    assert_eq!(
+        run.failure,
+        Some(arany::RunFailure::CriterionUnmet),
+        "{case}"
+    );
+    assert_eq!(run.tools.len(), 1, "{case}: no automatic retry");
+    assert_eq!(
+        run.agents[0].provider_calls.last().unwrap().disposition,
+        arany::ProviderCallDisposition::Finished,
+        "{case}: explanatory Provider call completes"
+    );
+    let observations = requests
+        .last()
+        .unwrap()
+        .input
+        .tools
+        .as_ref()
+        .unwrap()
+        .observations();
+    assert_eq!(observations.len(), 1, "{case}: correlated refusal");
+    assert_eq!(observations[0].intent, run.tools[0].intent);
+    assert_eq!(
+        observations[0].output,
+        format!("{label}: no operation was dispatched")
+    );
+    assert_eq!(observations[0].disposition, ToolDisposition::Denied);
+    assert!(observations[0].attestation.is_none());
 }
 
 fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::EffectIntent) {
@@ -2785,6 +2827,7 @@ async fn native_approval_rows_helper() {
                 RunStatus::Failed
             }
         );
+        assert_native_approval_completion(&outcome.run, allow);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(outcome.session_id).await.unwrap();
         store.close().await.unwrap();
@@ -2805,5 +2848,33 @@ async fn native_approval_rows_helper() {
                     .is_none()
             );
         }
+    }
+}
+
+fn assert_native_approval_completion(run: &arany::RunView, allow: bool) {
+    assert_eq!(run.agents[0].provider_calls.len(), 3);
+    assert_eq!(
+        run.agents[0].provider_calls.last().unwrap().disposition,
+        arany::ProviderCallDisposition::Finished
+    );
+    assert_eq!(
+        run.failure,
+        (!allow).then_some(arany::RunFailure::CriterionUnmet)
+    );
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.disposition,
+        if allow {
+            ToolDisposition::Succeeded
+        } else {
+            ToolDisposition::Denied
+        }
+    );
+    if !allow {
+        assert_eq!(
+            observation.output,
+            "user_declined: no operation was dispatched"
+        );
+        assert!(run.assistant_message.is_none());
     }
 }

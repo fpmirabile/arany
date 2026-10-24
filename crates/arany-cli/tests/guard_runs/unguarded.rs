@@ -228,6 +228,14 @@ fn last_tool(seen: &Seen) -> &arany::ToolView {
     seen.outcome.run.tools.last().expect("a Tool ran")
 }
 
+fn assert_admission_history(run: &arany::RunView) {
+    let tool = run.tools.last().unwrap();
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(tool.model_denial_label(), None);
+    let output = serde_json::to_string(&observation.output).unwrap();
+    assert!(arany::test_support::history_tool_block(run).contains(&output));
+}
+
 fn script(
     first: &ToolCall,
     second: &ToolCall,
@@ -471,12 +479,18 @@ async fn headless_host_commands_refuse_with_or_without_inactive_exact_rules() {
                 vec![
                     arany::test_support::scenario::plan_outcome(plan(&call)),
                     tool_outcome(call),
+                    finish("answer"),
                 ],
                 None,
                 vec![],
             )
             .await;
-        denied(&seen, "needs fresh human approval");
+        denied(&seen, "channel_unavailable");
+        assert_eq!(seen.requests, 3);
+        assert_eq!(
+            seen.outcome.run.assistant_message.as_deref(),
+            Some("answer")
+        );
         assert!(seen.prompts.is_empty());
         assert!(!host.workspace.join("ran.txt").exists());
         assert_eq!(host.rules().is_some(), previous);
@@ -494,8 +508,7 @@ async fn restricted_approval_channels_never_dispatch_unguarded_even_with_an_exac
             write_rule(&host, SCRIPT);
         }
         let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
-        let mut outcomes = script(&first, &second, vec![]);
-        outcomes.pop();
+        let outcomes = script(&first, &second, vec![]);
         let seen = host
             .run(
                 &host.workspace,
@@ -505,9 +518,13 @@ async fn restricted_approval_channels_never_dispatch_unguarded_even_with_an_exac
             )
             .await;
         assert_eq!(seen.unconsumed, 0);
-        assert_eq!(seen.requests, 3);
+        assert_eq!(seen.requests, 4);
         assert!(seen.prompts.is_empty());
-        denied(&seen, "Human-only approval is unavailable");
+        denied(&seen, "channel_unavailable");
+        assert_eq!(
+            seen.outcome.run.assistant_message.as_deref(),
+            Some("answer")
+        );
         assert!(!host.workspace.join("ran.txt").exists());
         let session = seen.outcome.session_id;
         let (_, view) = host.reopen(session).await;
@@ -537,7 +554,11 @@ async fn an_ask_rule_still_denies_headless_unguarded_runs_with_an_exact_rule() {
             vec![],
         )
         .await;
-    denied(&seen, "needs fresh human approval");
+    denied(&seen, "channel_unavailable");
+    assert_eq!(
+        seen.outcome.run.assistant_message.as_deref(),
+        Some("answer")
+    );
     assert!(!host.workspace.join("ran.txt").exists());
 }
 
@@ -611,6 +632,7 @@ async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
         assert!(tool.intent.host_command.is_some());
         assert!(tool.observation.as_ref().unwrap().attestation.is_none());
         assert!(!tool.permission_verdict.as_ref().unwrap().approved);
+        assert_admission_history(&view.runs[0]);
     }
 }
 
@@ -642,7 +664,7 @@ async fn non_reusable_host_requests_offer_once_only() {
             .await;
         assert_eq!(seen.prompts.len(), 1);
         assert!(!seen.prompts[0].remember);
-        denied(&seen, "Approval was not granted");
+        denied(&seen, "user_declined");
         let (_, view) = host.reopen(seen.outcome.session_id).await;
         assert_eq!(view.runs[0].unguarded_tools(), 0);
     }
@@ -863,6 +885,7 @@ async fn live_settings_drift_refuses_before_prompt_and_rechecks_after_approval()
             assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
             assert!(tool.permission_verdict.as_ref().unwrap().approved);
         }
+        assert_admission_history(&view.runs[0]);
     }
 }
 
@@ -912,16 +935,17 @@ async fn every_privilege_tool_is_handed_off_without_approval_or_dispatch() {
                 &seen,
                 "Arany cannot run privilege-escalation commands. Please run this command by hand:",
             );
-            assert!(
-                last_tool(&seen)
-                    .observation
-                    .as_ref()
-                    .unwrap()
-                    .output
-                    .contains(program)
+            let expected = format!(
+                "Arany cannot run privilege-escalation commands. Please run this command by hand:\nargv (JSON): {}\nWorkspace-relative cwd (JSON): \"\"\nNothing ran. Do not repackage this command through a wrapper, shell or child.",
+                json!([program, "echo", "canary"]),
+            );
+            assert_eq!(
+                last_tool(&seen).observation.as_ref().unwrap().output,
+                expected
             );
             let (_, view) = host.reopen(seen.outcome.session_id).await;
             assert_eq!(view.runs[0].unguarded_tools(), 0);
+            assert_admission_history(&view.runs[0]);
         }
     }
 }
@@ -941,7 +965,11 @@ async fn unsupported_host_prefix_reply_does_not_downgrade_to_once() {
         )
         .await;
     assert_eq!(seen.prompts.len(), 1);
-    denied(&seen, "Approval was not granted");
+    denied(&seen, "channel_unavailable");
+    assert_eq!(
+        seen.outcome.run.assistant_message.as_deref(),
+        Some("refused")
+    );
     assert_eq!(seen.outcome.run.unguarded_tools(), 0);
 }
 
@@ -958,7 +986,7 @@ async fn a_denied_prompt_dispatches_nothing() {
         )
         .await;
     assert_eq!(seen.prompts.len(), 1);
-    denied(&seen, "Approval was not granted");
+    denied(&seen, "user_declined");
     assert!(!host.workspace.join("ran.txt").exists());
     assert_eq!(seen.outcome.run.unguarded_tools(), 0);
 }

@@ -429,6 +429,7 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
         "late_allow",
         "rule_change",
         "decline",
+        "decline_provider_error",
         "cancel",
         "pause",
         "disconnected",
@@ -460,6 +461,9 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
             }),
             arany::test_support::goals::finish_with("done"),
         ]));
+        if case == "decline_provider_error" {
+            provider.responses.lock().unwrap()[1] = Err(ProviderError::LocalOutputLimit);
+        }
         let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
         let cancellation = RunCancellation::new();
         let steering = arany::RunSteering::new();
@@ -501,7 +505,7 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
                     std::fs::create_dir(&workspace).unwrap();
                     approval.decide(true);
                 }
-                "decline" => approval.decide(false),
+                "decline" | "decline_provider_error" => approval.decide(false),
                 "rule_change" => {
                     private_file(
                         &state.join("permissions.json"),
@@ -534,7 +538,7 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
                 "cancel" => Some(arany::ApprovalCause::Cancelled),
                 "pause" => Some(arany::ApprovalCause::Paused),
                 "disconnected" | "headless" => Some(arany::ApprovalCause::ChannelUnavailable),
-                "decline" => Some(arany::ApprovalCause::Declined),
+                "decline" | "decline_provider_error" => Some(arany::ApprovalCause::Declined),
                 "late_allow" | "rule_change" | "drift" => None,
                 _ => unreachable!(),
             },
@@ -547,7 +551,15 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
         );
         assert_eq!(
             calls,
-            if matches!(case, "late_allow" | "rule_change") {
+            if matches!(
+                case,
+                "late_allow"
+                    | "rule_change"
+                    | "decline"
+                    | "decline_provider_error"
+                    | "disconnected"
+                    | "headless"
+            ) {
                 2
             } else {
                 1
@@ -583,8 +595,14 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
         );
         assert_eq!(
             run.status,
-            if matches!(case, "late_allow" | "rule_change") {
+            if matches!(
+                case,
+                "late_allow" | "rule_change" | "decline" | "disconnected" | "headless"
+            ) {
                 RunStatus::Finished
+            } else if case == "decline_provider_error" {
+                assert_eq!(run.failure, Some(arany::RunFailure::ProviderCall));
+                RunStatus::Failed
             } else if matches!(case, "cancel" | "pause") {
                 RunStatus::Cancelled
             } else {
@@ -592,6 +610,30 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
             },
             "{case}"
         );
+        if matches!(
+            case,
+            "decline" | "decline_provider_error" | "disconnected" | "headless"
+        ) {
+            let requests = provider.requests.lock().unwrap();
+            let observation = requests[1]
+                .input
+                .tools
+                .as_ref()
+                .unwrap()
+                .steps
+                .last()
+                .unwrap()
+                .observations
+                .last()
+                .unwrap();
+            assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+            assert!(observation.output.contains(match case {
+                "decline" | "decline_provider_error" => "user_declined",
+                "disconnected" | "headless" => "channel_unavailable",
+                _ => unreachable!(),
+            }));
+            assert_eq!(requests.len(), 2, "one ordinary continuation");
+        }
         assert_eq!(
             provider.requests.lock().unwrap().len(),
             calls,
@@ -606,4 +648,128 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
             .unwrap();
         assert!(active < 60_000, "{case}: human wait was charged");
     }
+}
+
+#[tokio::test]
+async fn declined_tool_summaries_preserve_other_facts_across_compactions() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+    let state = temp.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(
+        &state.join("permissions.json"),
+        br#"{"permissions":{"ask":["Read"]}}"#,
+    );
+    let engine = engine_support::open(root, EngineConfig::default()).unwrap();
+    let summary = "The project uses Rust and UTC. Reading the facts was declined.";
+    let provider = decline_summary_provider(summary);
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let mut input = request(&workspace, "The project uses Rust and UTC. Read the facts.");
+    input.include_paths.clear();
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: Some(approvals),
+        ..Default::default()
+    };
+    let decline = async { inbox.next().await.unwrap().decide(false) };
+    let (outcome, ()) = tokio::join!(run_with(&engine, &provider, input, controls), decline);
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_decline_summaries_retained(&engine, &provider, outcome.session_id, &workspace, summary)
+        .await;
+    engine.close().await.unwrap();
+    let (_, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+    assert_eq!(view.compactions.len(), 2);
+}
+
+fn decline_summary_provider(summary: &str) -> Arc<ScriptedProvider> {
+    let responses = vec![
+        tool_outcome(arany::ToolCall::Read {
+            path: "notes/facts.txt".into(),
+            offset: None,
+            limit: Some(32),
+        }),
+        arany::test_support::goals::finish_with(
+            "The read was declined; the project uses Rust and UTC.",
+        ),
+        arany::test_support::goals::finish_with("First continuation"),
+        arany::test_support::goals::finish_with("Second continuation"),
+    ];
+    let compact = || {
+        Ok(CompactionResponse {
+            summary: summary.into(),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: Some(24),
+                output_tokens: Some(16),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    };
+    Arc::new(ScriptedProvider::new(responses).with_compactions(vec![compact(), compact()]))
+}
+
+async fn assert_decline_summaries_retained(
+    engine: &Engine,
+    provider: &Arc<ScriptedProvider>,
+    session: SessionId,
+    workspace: &Path,
+    summary: &str,
+) {
+    for _ in 0..2 {
+        engine
+            .compact_session(
+                &AdmittedProviders::single(provider.clone()),
+                session,
+                workspace.into(),
+            )
+            .await
+            .unwrap();
+        let mut input = request(workspace, "Continue with the project facts");
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        run_with(
+            engine,
+            provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .input
+                .context_summary
+                .as_deref(),
+            Some(summary)
+        );
+    }
+    let requests = provider.compact_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let sources: Vec<_> = requests[0]
+        .items
+        .iter()
+        .map(|item| match item {
+            CompactionItem::Completed(turn) => turn.user.as_str(),
+            CompactionItem::Unanswered { user, .. } => user.as_str(),
+        })
+        .collect();
+    assert!(
+        sources
+            .iter()
+            .any(|source| source.contains("user_declined"))
+    );
+    assert!(sources.iter().any(|source| source.contains("Rust and UTC")));
+    assert_eq!(requests[1].previous_summary.as_deref(), Some(summary));
 }

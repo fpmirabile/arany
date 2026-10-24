@@ -1573,10 +1573,12 @@ pub(super) async fn native_command_changeset_corpus(
             "{case}: terminal Event"
         );
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped = human_denied || case == "partial";
+        let stopped = matches!(case, "cancel" | "partial");
         let criterion_unmet = matches!(
             case,
-            "conflict"
+            "deny"
+                | "drop"
+                | "conflict"
                 | "scope"
                 | "scope-auto"
                 | "symlink"
@@ -1668,6 +1670,7 @@ pub(super) async fn native_command_changeset_corpus(
                 .all(|request| request.run_id == view.runs[0].id
                     && request.agent_run_id == view.runs[0].agents[0].id)
         );
+        assert_refused_integration_continues(case, &run, &requests);
         let tools = &view.runs[0].tools;
         if matches!(case, "scope" | "scope-auto") {
             let goal = view
@@ -1968,4 +1971,51 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
         assert_eq!(std::fs::read(&omitted).unwrap(), b"OMITTED_CONFIG_CANARY");
     }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn assert_refused_integration_continues(
+    case: &str,
+    run: &arany::RunView,
+    requests: &[arany::ProviderRequest],
+) {
+    let label = match case {
+        "deny" => "user_declined",
+        "drop" => "channel_unavailable",
+        _ => return,
+    };
+    assert_eq!(
+        run.failure,
+        Some(arany::RunFailure::CriterionUnmet),
+        "{case}"
+    );
+    assert!(
+        run.assistant_message.is_none(),
+        "{case}: criterion remains unmet"
+    );
+    assert_eq!(
+        run.agents[0].provider_calls.last().unwrap().disposition,
+        arany::ProviderCallDisposition::Finished,
+        "{case}: explanatory Provider call completes"
+    );
+    let observations = requests
+        .last()
+        .unwrap()
+        .input
+        .tools
+        .as_ref()
+        .unwrap()
+        .observations();
+    assert_eq!(
+        observations.len(),
+        2,
+        "{case}: no repeated command or integration"
+    );
+    assert_eq!(observations[1].intent, run.tools[1].intent);
+    assert_eq!(
+        observations[1].output,
+        format!("{label}: no operation was dispatched")
+    );
+    assert_eq!(observations[1].disposition, ToolDisposition::Denied);
+    assert!(observations[1].attestation.is_none());
 }

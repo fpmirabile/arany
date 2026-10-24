@@ -426,7 +426,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
         assert_eq!(fourth.run.config.as_ref().unwrap().excluded_history_runs, 3);
         let compacted = engine.compact_session(&AdmittedProviders::single(provider.clone()), first.session_id, workspace.clone()).await.unwrap();
-        assert_eq!(compacted.compiler_version, 3);
+        assert_eq!(compacted.compiler_version, 4);
         for (id, objective) in [(first.session_id, maximal_objective.as_str()), (fork_id, "After fork")] {
             let mut next = request(&workspace, objective);
             next.session_id = Some(id);

@@ -903,6 +903,55 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     ] {
         assert!(!block.contains(internal), "{internal} leaked into history");
     }
+    assert_historical_permission_feedback(run);
+}
+
+fn assert_historical_permission_feedback(mut run: crate::session::RunView) {
+    let canary = "historical hook denial canary";
+    let denied = run.tools[0].observation.as_mut().unwrap();
+    denied.disposition = ToolDisposition::Denied;
+    denied.attestation = None;
+    denied.output = format!("Hook denied this Tool: {canary}");
+    run.tools[0].permission_verdict = Some(crate::tools::permissions::PermissionVerdict {
+        host: None,
+        intent_digest: run.tools[0].intent.digest(),
+        decision: crate::tools::permissions::Decision::Deny,
+        mode: None,
+        basis: crate::tools::permissions::PermissionSource::Hook,
+        source: crate::tools::permissions::PermissionSource::Hook,
+        approved: false,
+        hook_restriction: Some(crate::tools::permissions::Decision::Deny),
+        hooks: 1,
+        narrowed: false,
+    });
+    run.tool_compaction_summary = None;
+    run.tool_compaction_covered_count = 0;
+    let block = history_tool_block(&run);
+    assert!(!block.contains(canary));
+    let projected: Value = serde_json::from_str(&block).unwrap();
+    assert_eq!(
+        projected["tool_records"][0]["output"],
+        "hook_denied: no operation was dispatched"
+    );
+
+    run.tool_compaction_covered_count = 1;
+    run.tool_compaction_summary = Some(format!("covered summary contains {canary}"));
+    let block = history_tool_block(&run);
+    assert!(!block.contains(canary));
+    assert!(!block.contains("hook_denied: no operation was dispatched"));
+    let projected: Value = serde_json::from_str(&block).unwrap();
+    assert_eq!(projected["tool_records"].as_array().unwrap().len(), 1);
+    assert!(block.contains("Earlier Tool summary omitted because it may contain denial text."));
+
+    run.tools[0].observation.as_mut().unwrap().output =
+        "hook_denied: no operation was dispatched".into();
+    run.tool_compaction_summary = Some("Useful working context remains".into());
+    let projected: Value = serde_json::from_str(&history_tool_block(&run)).unwrap();
+    assert_eq!(
+        projected["summary_untrusted"],
+        "Useful working context remains"
+    );
+    assert_eq!(projected["tool_records"].as_array().unwrap().len(), 1);
 }
 
 #[test]

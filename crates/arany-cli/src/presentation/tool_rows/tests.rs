@@ -76,6 +76,75 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn historical_hook_denial_rows_hide_committed_reason_text() {
+        let canary = "old hook reason";
+        let mut tool = tool_fixture(
+            ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: None,
+            },
+            &format!("Hook denied this Tool: {canary}"),
+        );
+        let observation = tool.observation.as_mut().unwrap();
+        observation.disposition = ToolDisposition::Denied;
+        tool.permission_verdict = Some(arany::permissions::PermissionVerdict {
+            host: None,
+            intent_digest: [1; 32],
+            decision: arany::permissions::Decision::Deny,
+            mode: None,
+            basis: arany::permissions::PermissionSource::Hook,
+            source: arany::permissions::PermissionSource::Hook,
+            approved: false,
+            hook_restriction: Some(arany::permissions::Decision::Deny),
+            hooks: 1,
+            narrowed: false,
+        });
+
+        let summary = tool_summary(&tool);
+        assert!(summary.contains("hook_denied"));
+        assert!(!summary.contains(canary));
+        let detail = tool_detail_text(&tool);
+        assert!(detail.contains("hook_denied: no operation was dispatched"));
+        assert!(!detail.contains(canary));
+
+        let failure = "Guard enforcement: protected filesystem path refused";
+        let observation = tool.observation.as_mut().unwrap();
+        observation.output = failure.into();
+        observation.enforcement_cause = Some(arany::EnforcementCause::FilesystemDenied);
+        tool.permission_verdict = Some(arany::permissions::PermissionVerdict {
+            host: None,
+            intent_digest: [1; 32],
+            decision: arany::permissions::Decision::Allow,
+            mode: None,
+            basis: arany::permissions::PermissionSource::Human,
+            source: arany::permissions::PermissionSource::Human,
+            approved: true,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        });
+        assert!(tool.model_denial_label().is_none());
+        let summary = tool_summary(&tool);
+        assert!(summary.contains(failure));
+        assert!(!summary.contains("user_declined"));
+    }
+
+    #[test]
+    fn host_admission_details_preserve_the_exact_recovery_guidance() {
+        for tool in arany::test_support::host_admission_fixtures()
+            .into_iter()
+            .chain(std::iter::once(
+                arany::test_support::uncertain_hook_fixture(),
+            ))
+        {
+            let expected = &tool.observation.as_ref().unwrap().output;
+            assert_eq!(tool.model_denial_label(), None);
+            assert!(tool_detail_text(&tool).ends_with(expected));
+        }
+    }
+
+    #[test]
     fn git_write_rows_show_their_receipt_and_approvals_the_exact_action() {
         let oid = "a".repeat(40);
         for (call, output, expected) in [
