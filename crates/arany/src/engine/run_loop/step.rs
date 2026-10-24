@@ -12,7 +12,7 @@ use crate::tools::types::{CommandChangeset, CommandResult, MAX_TOOL_RESULT_BYTES
 use crate::tools::{
     ActiveActionRequest, ActiveToolWindow, ApprovalMode, ApprovalReply, ApprovalWithdrawal,
     CacheUpdate, EffectIntent, ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation,
-    ToolRequest, ToolResourceClass, ToolRuntime, ToolStep, UnguardedPrompt,
+    ToolRequest, ToolResourceClass, ToolRuntime, ToolStep,
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -29,11 +29,11 @@ pub(super) mod hooks;
 mod permission;
 mod review;
 
-use ask::{AskOptions, AskSite, Resolution, Resolver};
+use ask::{AskOptions, AskSite, Resolution, Resolver, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
-    UnguardedRefusal, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
@@ -1134,51 +1134,6 @@ impl RunLoop<'_> {
             .map(Admission::Reserved)
     }
 
-    async fn approval_paused(&self) {
-        match self.controls.steering.as_ref() {
-            Some(steering) => steering.paused().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    async fn human_reply(
-        &self,
-        approvals: &crate::tools::ToolApprovals,
-        intent: &EffectIntent,
-        prompt: Option<UnguardedPrompt>,
-        allow_auto_edits: bool,
-        remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
-    ) -> ApprovalReply {
-        let mut cancellation = self.controls.cancellation.clone();
-        let reply = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => ApprovalReply::Unavailable,
-            () = self.approval_paused() => ApprovalReply::Unavailable,
-            reply = async {
-                match prompt.clone() {
-                    Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => approvals.ask_local(intent, allow_auto_edits, remember_prefix).await,
-                }
-            } => reply,
-        };
-        let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
-        match reply {
-            ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
-            ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
-                if intent.call.is_unguarded() || intent.call.is_host() {
-                    ApprovalReply::Unavailable
-                } else {
-                    ApprovalReply::AllowOnce
-                }
-            }
-            reply @ (ApprovalReply::Deny
-            | ApprovalReply::Unavailable
-            | ApprovalReply::AllowOnce
-            | ApprovalReply::AllowForSession
-            | ApprovalReply::AllowPrefixInFolder) => reply,
-        }
-    }
-
     async fn dispatch_primary(
         &self,
         runtime: &ToolRuntime,
@@ -1726,41 +1681,6 @@ pub(super) enum HookDenial {
     Requested,
     Narrowed(String),
     Denied(String),
-}
-
-async fn unguarded_gate(
-    runtime: &ToolRuntime,
-    intent: &EffectIntent,
-) -> Result<UnguardedPrompt, UnguardedRefusal> {
-    let ToolCall::CommandUnguarded { args, .. } = &intent.call else {
-        return Err(UnguardedRefusal::UnavailableProgram);
-    };
-    if crate::tools::unguarded::prohibited_intent(intent) {
-        return Err(UnguardedRefusal::PrivilegeTool);
-    }
-    if !runtime.host_settings_admitted {
-        return Err(UnguardedRefusal::SettingsChanged);
-    }
-    let pin = intent
-        .host_command
-        .as_ref()
-        .ok_or(UnguardedRefusal::UnavailableProgram)?;
-    if !runtime.host_settings_current(pin) {
-        return Err(UnguardedRefusal::SettingsChanged);
-    }
-    if !runtime.host_interpreter_admitted(intent).await {
-        return Err(UnguardedRefusal::InterpreterNotAdmitted);
-    }
-    if crate::tools::types::uses_guard_alias(args) {
-        return Err(UnguardedRefusal::GuardAlias);
-    }
-    Ok(UnguardedPrompt {
-        executable: pin.executable.clone(),
-        attribution: None,
-        remember: true,
-        sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
-        inactive_rules: runtime.has_inactive_host_rules(),
-    })
 }
 
 #[must_use]
@@ -2323,14 +2243,11 @@ mod tests {
     #[test]
     fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
         let step = include_str!("step.rs");
+        let ask = include_str!("step/ask.rs");
         let tools = include_str!("../../tools.rs");
         let guard = include_str!("../../tools/guard.rs");
         for (source, start, end) in [
-            (
-                step,
-                "    async fn human_reply(",
-                "    async fn dispatch_primary(",
-            ),
+            (ask, "    pub(super) async fn human_reply(", "\n    }\n}"),
             (step, "    async fn resolve_ask(", "\n}\n"),
             (
                 step,
