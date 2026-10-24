@@ -323,7 +323,7 @@ No cleanup implementation or public JSON protocol is justified. Allocation is
 separate from logical size and reclaimability because filesystem sharing and
 sparse backing make those quantities different. The
 [Tool contract](../specs/tools.md#local-storage-inventory) owns accepted behavior;
-the [remaining plan](../../planning/arany-storage/README.md) owns Guard expansion.
+the remaining recorded-Guard storage work in [NEXT_STEPS](../../NEXT_STEPS.md#tool-and-engine-follow-ups) owns Guard expansion.
 
 ### D-25 — Branch reads use Git semantics with inert tracking metadata
 

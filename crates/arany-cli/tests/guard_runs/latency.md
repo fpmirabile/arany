@@ -1,8 +1,7 @@
 # Linux Tool latency corpus
 
 The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports the Read
-row offline. Guarded Edit and command rows remain in
-[slice 2](../../../../planning/linux-tool-latency/README.md#2-pr-complete-the-same-report-with-guarded-edit-and-command-rows).
+row offline. Guarded Edit and command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
 This is measurement evidence for [Tools](../../../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners)
 and [Execution](../../../../docs/specs/execution.md#committed-event-stream), not a
 new runtime deadline, CLI reporting feature or native support claim.
@@ -107,7 +106,7 @@ private `arany-tool-latency-*` directory beneath the evidence root. Retain its d
 the binary identity, revision/toolchain, invocation summary and closed-journal audit
 in the owner's run artifact. Perform three separate invocations and report each
 p95; do not pool them or keep only the fastest. Record target misses and diagnosis
-ownership. [NEXT_STEPS item 9](../../../../NEXT_STEPS.md#daily-use-first) owns the
+ownership. [NEXT_STEPS item 13](../../../../NEXT_STEPS.md#daily-use-first) owns the
 accepted host, objectives and remaining native evidence.
 
 The existing dispatch-only measurement remains separate and unchanged:

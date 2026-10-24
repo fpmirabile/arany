@@ -64,6 +64,6 @@ not a current vulnerability finding or a native-store result.
 route choices; [D-18](./next-step-decision-register.md#d-18--explicitly-accepted-chatgpt-plan-route-is-beta-scope)
 owns acceptance of the weaker ChatGPT-plan guarantee. Native Claude-plan use needs prior Anthropic approval or a
 changed published route; the unmodified-binary path requires its own architecture
-and security decision. [Next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks)
+and security decision. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release)
 owns live checks. Recheck authorization, billing and availability before use or
 public distribution; this prose consolidation advances no retrieval date.

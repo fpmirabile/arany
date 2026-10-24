@@ -120,7 +120,7 @@ Keep this client-specific suffix out of Arany model IDs.
 **Code admission:** the reviewed documents establish console keys and Messages
 compatibility, not successful Arany use. The endpoint needs its own exact
 text-compaction check; platform evidence cannot be transferred to Code.
-[NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first) owns live/platform checks.
+[NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first) owns the remaining live and platform status.
 
 ### GLM: Standard API Key; subscription excluded
 
