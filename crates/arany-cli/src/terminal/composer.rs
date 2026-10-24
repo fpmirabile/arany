@@ -2043,15 +2043,25 @@ mod tests {
         );
         let editable = composer.text().to_owned();
         assert_eq!(editable.len(), MAX_PRIMARY_DRAFT_BYTES);
+        assert!(!composer.has_text_pastes());
         for text in ["a", "é", "\r\n"] {
             assert_eq!(composer.insert_paste(text), Ok(ComposerEdit::AtCapacity));
             assert_eq!(composer.text(), editable);
         }
         composer.apply(TerminalInput::Home);
+        let payload = "@hidden ".repeat(200);
         assert_eq!(
-            composer.insert_paste(&"@hidden ".repeat(200)),
+            composer.insert_paste(&payload),
+            Ok(ComposerEdit::AtCapacity)
+        );
+        assert_eq!(composer.text(), editable);
+        composer.clear();
+        assert_eq!(composer.insert_paste(&payload), Ok(ComposerEdit::Changed));
+        assert_eq!(
+            composer.insert_literal(&"a".repeat(MAX_PRIMARY_DRAFT_BYTES - payload.len())),
             Ok(ComposerEdit::Changed)
         );
+        assert_eq!(composer.text().len(), MAX_PRIMARY_DRAFT_BYTES);
         assert!(composer.has_text_pastes());
         assert!(
             arany::mention_paths(&composer.editable_text())
