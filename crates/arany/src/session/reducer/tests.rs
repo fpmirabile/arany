@@ -7412,43 +7412,103 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn a_glob_replays_only_its_recorded_in_process_observation() {
+    fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts() {
+        let cases = [
+            (
+                ToolCall::Glob {
+                    pattern: "**/*.rs".into(),
+                    path: "src".into(),
+                    limit: 100,
+                },
+                r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false}"#,
+            ),
+            (
+                ToolCall::List { path: "src".into() },
+                r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"may_be_truncated":false}"#,
+            ),
+        ];
+        for (call, output) in cases {
+            let (mut view, goal, run, agent) = primary_tool_session(false);
+            let intent = child_intent(run, agent, call);
+            apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+            apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
+            apply(&mut view, tool_started(run, agent, &intent)).expect("discovery starts");
+            let mut guarded = observation_for(intent.clone(), b"");
+            guarded.output = output.into();
+            guarded.attestation = Some(crate::tools::Attestation::Guard(
+                crate::tools::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                },
+            ));
+            let finished = |observation| Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation,
+            };
+            let mut in_process = guarded.clone();
+            in_process.attestation = Some(crate::tools::Attestation::InProcess {
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            });
+            assert!(rejected(&view, finished(in_process)));
+            let mut invalid = guarded.clone();
+            if let Some(crate::tools::Attestation::Guard(receipt)) = &mut invalid.attestation {
+                receipt.intent_digest = [0; 32];
+            }
+            assert!(rejected(&view, finished(invalid)));
+            apply(&mut view, finished(guarded.clone())).expect("Guard attestation");
+            assert_eq!(
+                view.runs[0].tools.last().unwrap().observation.as_ref(),
+                Some(&guarded)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_file_search_replays_its_in_process_observation() {
         let (mut view, goal, run, agent) = primary_tool_session(false);
-        let glob = child_intent(
+        let intent = child_intent(
             run,
             agent,
-            ToolCall::Glob {
-                pattern: "**/*.rs".into(),
-                path: "src".into(),
+            ToolCall::Search {
+                path: "src/lib.rs".into(),
+                query: "needle".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
                 limit: 100,
             },
         );
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
-        apply(&mut view, tool_started(run, agent, &glob)).expect("glob starts");
-        let mut guarded = observation_for(glob.clone(), b"");
-        guarded.attestation = Some(crate::tools::Attestation::Guard(
-            crate::tools::GuardReceipt {
-                contract_version: 1,
-                intent_digest: glob.digest(),
-                enforcement_digest: glob.enforcement_digest,
-                limits: glob.limits.clone(),
-            },
+        apply(&mut view, tool_started(run, agent, &intent)).expect("exact Search starts");
+        let mut observation = observation_for(intent.clone(), b"");
+        observation.output =
+            r#"{"entries":[{"path":"src/lib.rs","line":1,"text":"needle"}],"limit":100,"may_be_truncated":false,"next_offset":null}"#.into();
+        assert!(matches!(
+            observation.attestation,
+            Some(crate::tools::Attestation::InProcess { .. })
         ));
-        let finished = |observation| Event::ToolFinished {
-            checkpoint: None,
-            run_id: run,
-            agent_run_id: agent,
-            observation,
-        };
-        assert!(rejected(&view, finished(guarded)));
-        let mut recorded = observation_for(glob.clone(), b"");
-        recorded.output =
-            r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false}"#
-                .into();
-        apply(&mut view, finished(recorded.clone())).expect("in-process attestation");
-        let tool = view.runs[0].tools.last().unwrap();
-        assert_eq!(tool.observation.as_ref(), Some(&recorded));
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation: observation.clone(),
+            },
+        )
+        .expect("in-process Search attestation");
+        assert_eq!(
+            view.runs[0].tools.last().unwrap().observation.as_ref(),
+            Some(&observation)
+        );
     }
 
     #[test]
