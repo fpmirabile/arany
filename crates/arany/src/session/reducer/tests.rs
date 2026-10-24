@@ -3928,9 +3928,9 @@ mod goal_replay_tests {
         apply(&mut view.clone(), event).is_err()
     }
 
-    #[test]
-    fn supervisor_replay_requires_exact_adjacent_verdicts_and_accepts_capped_and_interrupted_prefixes()
-     {
+    use crate::supervisor::{MAX_VERDICTS, SupervisorState};
+
+    fn supervisor_session() -> (SessionView, Vec<EventEnvelope>, GoalId, RunId, AgentRunId) {
         let session = SessionId::new();
         let (goal, run, actor) = (GoalId::new(), RunId::new(), AgentRunId::new());
         let mut pin = config(CollaborationPolicy::Single, true);
@@ -3952,32 +3952,37 @@ mod goal_replay_tests {
             ),
         ];
         events.extend(start_run(goal, run, actor, pin));
-        let mut envelopes = journal(session, events);
-        let mut view = SessionView::replay_open(session, &envelopes)
+        let envelopes = journal(session, events);
+        let view = SessionView::replay_open(session, &envelopes)
             .unwrap()
             .unwrap();
-        let append = |view: &mut SessionView, envelopes: &mut Vec<EventEnvelope>, event: Event| {
-            apply(view, event.clone()).unwrap();
-            let (run_id, agent_run_id) = event.scope();
-            envelopes.push(EventEnvelope {
-                sequence: view.last_sequence,
-                session_id: session,
-                run_id,
-                agent_run_id,
-                event,
-                created_at_ms: 0,
-            });
-        };
-        let reserve = || Event::GoalProviderCallReserved {
-            goal_id: goal,
-            run_id: run,
-            agent_run_id: actor,
-            active_ceiling_ms: 0,
-        };
-        let mut verdict_count = 0;
+        (view, envelopes, goal, run, actor)
+    }
+
+    fn append_record(view: &mut SessionView, envelopes: &mut Vec<EventEnvelope>, event: Event) {
+        apply(view, event.clone()).unwrap();
+        let (run_id, agent_run_id) = event.scope();
+        envelopes.push(EventEnvelope {
+            sequence: view.last_sequence,
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event,
+            created_at_ms: 0,
+        });
+    }
+    #[test]
+    fn supervisor_replay_requires_exact_adjacent_verdicts_and_accepts_capped_and_interrupted_prefixes()
+     {
+        let (mut view, mut envelopes, goal, run, actor) = supervisor_session();
+        let mut evaluator = SupervisorState::default();
         for i in 0..260 {
-            append(&mut view, &mut envelopes, reserve());
-            append(
+            append_record(
+                &mut view,
+                &mut envelopes,
+                reserve_child_call(goal, run, actor),
+            );
+            append_record(
                 &mut view,
                 &mut envelopes,
                 Event::ProviderCallRecorded {
@@ -3991,7 +3996,7 @@ mod goal_replay_tests {
                 },
             );
             let intent = read_intent(run, actor, "src/lib.rs");
-            append(
+            append_record(
                 &mut view,
                 &mut envelopes,
                 Event::ToolStarted {
@@ -4001,7 +4006,7 @@ mod goal_replay_tests {
                     active_ceiling_ms: 0,
                 },
             );
-            append(
+            append_record(
                 &mut view,
                 &mut envelopes,
                 Event::ToolFinished {
@@ -4011,125 +4016,168 @@ mod goal_replay_tests {
                     observation: observation_for(intent, b"ok"),
                 },
             );
-            if i == 2 {
-                let mut corpus = crate::supervisor::corpus::Corpus::new().unwrap();
-                let interrupted =
-                    SessionView::replay_for_corpus(session, &envelopes, None, &mut corpus)
-                        .unwrap()
-                        .unwrap();
-                let output = corpus.finish(&interrupted).unwrap();
-                let last: serde_json::Value =
-                    serde_json::from_str(output.lines().last().unwrap()).unwrap();
-                assert_eq!(last["features"]["loop"]["repeat_identical"], 3);
-                assert!(last["journaled_level"].is_null());
-            }
-            let pending = view.runs[0].supervisor.pending_event();
-            assert_eq!(
-                view.runs[0].supervisor.verdicts().len(),
-                verdict_count,
-                "pending verdicts are not display facts"
-            );
-            if i == 0 {
-                let mut negative = view.clone();
-                let forged = Event::SupervisorVerdictRecorded {
-                    run_id: run,
-                    agent_run_id: actor,
-                    verdict: crate::supervisor::SupervisorVerdict {
-                        subject_sequence: view.last_sequence,
-                        site: crate::supervisor::Site::ToolOutcome,
-                        evaluator: 1,
-                        mode: crate::supervisor::Mode::Shadow,
-                        signals: vec![crate::supervisor::Signal {
-                            signal: crate::supervisor::SignalKind::Loop,
-                            level: crate::supervisor::Level::Notice,
-                            would_response: None,
-                            features: crate::supervisor::Features::Loop(Default::default()),
-                            evidence: vec![view.last_sequence],
-                        }],
-                        capped: false,
-                    },
-                };
-                assert!(apply(&mut negative, forged).is_err());
-            }
-            if let Some(verdict) = pending {
-                verdict_count += 1;
-                if i == 2 {
-                    assert!(matches!(
-                        apply(&mut view.clone(), reserve()),
-                        Err(ReplayError::InvalidTransition)
-                    ));
-                    let interrupted = SessionView::replay(session, &envelopes).unwrap().unwrap();
-                    assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
-                    let mut resumed: Vec<_> = envelopes.iter().map(|e| e.event.clone()).collect();
-                    resumed.push(Event::GoalResumed { goal_id: goal });
-                    resumed.extend(start_run(
-                        goal,
-                        RunId::new(),
-                        AgentRunId::new(),
-                        view.runs[0].config.clone().unwrap(),
-                    ));
-                    assert!(
-                        SessionView::replay_open(session, &journal(session, resumed)).is_ok(),
-                        "a new Run follows an interrupted prefix with a pending verdict"
-                    );
-                    for case in 0..6 {
-                        let mut forged = verdict.clone();
-                        if let Event::SupervisorVerdictRecorded {
-                            verdict,
-                            agent_run_id,
-                            ..
-                        } = &mut forged
-                        {
-                            match case {
-                                0 => verdict.subject_sequence += 1,
-                                1 => verdict.site = crate::supervisor::Site::Stall,
-                                2 => verdict.capped = true,
-                                3 => *agent_run_id = AgentRunId::new(),
-                                4 => verdict.signals[0].evidence = vec![1],
-                                _ => {
-                                    if let crate::supervisor::Features::Loop(f) =
-                                        &mut verdict.signals[0].features
-                                    {
-                                        f.repeat_identical += 1;
-                                    }
-                                }
-                            }
-                        }
-                        assert!(
-                            matches!(
-                                apply(&mut view.clone(), forged),
-                                Err(ReplayError::InvalidTransition)
-                            ),
-                            "forgery {case}"
-                        );
-                    }
-                }
-                if let Event::SupervisorVerdictRecorded { verdict, .. } = &verdict {
-                    assert_eq!(verdict.capped, verdict_count == 256);
-                }
-                append(&mut view, &mut envelopes, verdict.clone());
-                let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
-                assert_eq!(*recorded_actor, actor);
-                assert!(
-                    matches!(&verdict, Event::SupervisorVerdictRecorded { verdict, .. } if verdict == recorded)
-                );
-                assert!(
-                    apply(&mut view.clone(), verdict).is_err(),
-                    "duplicate verdict"
-                );
-            }
+            supervisor_boundary(&mut view, &mut envelopes, goal, i, &mut evaluator);
         }
-        assert_eq!(verdict_count, 256);
-        assert_eq!(view.runs[0].supervisor.verdicts().len(), 256);
         assert_eq!(
-            SessionView::replay_open(session, &envelopes)
+            view.runs[0].supervisor.verdicts().len(),
+            usize::from(MAX_VERDICTS)
+        );
+        assert_eq!(
+            SessionView::replay_open(view.id, &envelopes)
                 .unwrap()
                 .unwrap(),
             view
         );
-        assert!(view.runs[0].supervisor.pending_event().is_none());
-        append(&mut view, &mut envelopes, reserve());
-        append(
+        assert!(evaluator.pending_event().is_none());
+        supervisor_corpus_labels(view, envelopes, goal);
+    }
+
+    fn recorded_supervisor_verdict(view: &SessionView, actor: AgentRunId) -> Event {
+        Event::SupervisorVerdictRecorded {
+            run_id: view.runs[0].id,
+            agent_run_id: actor,
+            verdict: crate::supervisor::SupervisorVerdict {
+                subject_sequence: view.last_sequence,
+                site: crate::supervisor::Site::ToolOutcome,
+                evaluator: 1,
+                mode: crate::supervisor::Mode::Shadow,
+                signals: vec![crate::supervisor::Signal {
+                    signal: crate::supervisor::SignalKind::Loop,
+                    level: crate::supervisor::Level::Notice,
+                    would_response: None,
+                    features: crate::supervisor::Features::Loop(Default::default()),
+                    evidence: vec![view.last_sequence],
+                }],
+                capped: false,
+            },
+        }
+    }
+
+    fn supervisor_interrupted_prefix(
+        view: &SessionView,
+        envelopes: &[EventEnvelope],
+        goal: GoalId,
+    ) {
+        let session = view.id;
+        let mut corpus = crate::supervisor::corpus::Corpus::new().unwrap();
+        let interrupted = SessionView::replay_for_corpus(session, envelopes, None, &mut corpus)
+            .unwrap()
+            .unwrap();
+        let output = corpus.finish(&interrupted).unwrap();
+        let last: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        assert_eq!(last["features"]["loop"]["repeat_identical"], 3);
+        assert!(last["journaled_level"].is_null());
+        let interrupted = SessionView::replay(session, envelopes).unwrap().unwrap();
+        assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
+        let mut resumed: Vec<_> = envelopes.iter().map(|e| e.event.clone()).collect();
+        resumed.push(Event::GoalResumed { goal_id: goal });
+        resumed.extend(start_run(
+            goal,
+            RunId::new(),
+            AgentRunId::new(),
+            view.runs[0].config.clone().unwrap(),
+        ));
+        assert!(
+            SessionView::replay_open(session, &journal(session, resumed)).is_ok(),
+            "a new Run follows an interrupted prefix with a pending verdict"
+        );
+    }
+
+    fn supervisor_recorded_cases(view: &SessionView, event: &Event) {
+        use crate::supervisor::{Features, Level, Response, Site};
+        for case in 0..11 {
+            let mut forged = event.clone();
+            let Event::SupervisorVerdictRecorded {
+                run_id,
+                agent_run_id,
+                verdict,
+            } = &mut forged
+            else {
+                unreachable!()
+            };
+            match case {
+                0 => verdict.subject_sequence += 1,
+                1 => verdict.site = Site::Stall,
+                2 => verdict.capped = true,
+                3 => *agent_run_id = AgentRunId::new(),
+                4 => *run_id = RunId::new(),
+                5 => verdict.evaluator += 1,
+                6 => verdict.signals[0].evidence = vec![0],
+                7 => verdict.signals.clear(),
+                8 => verdict.signals[0].evidence = vec![1],
+                9 => {
+                    verdict.signals[0].features = Features::Loop(Default::default());
+                    verdict.signals[0].level = Level::WouldNarrow;
+                    verdict.signals[0].would_response = Some(Response::Revoke);
+                }
+                _ => verdict.signals[0].evidence = vec![verdict.subject_sequence; 2],
+            }
+            assert_eq!(
+                apply(&mut view.clone(), forged).is_ok(),
+                (8..=9).contains(&case),
+                "forgery {case}"
+            );
+        }
+        let mut unpinned = view.clone();
+        unpinned.runs[0].config.as_mut().unwrap().supervisor = None;
+        assert!(apply(&mut unpinned, event.clone()).is_err());
+    }
+
+    fn supervisor_boundary(
+        view: &mut SessionView,
+        envelopes: &mut Vec<EventEnvelope>,
+        goal: GoalId,
+        i: usize,
+        evaluator: &mut SupervisorState,
+    ) {
+        let (run, actor) = (view.runs[0].id, view.runs[0].primary().unwrap().id);
+        evaluator.after(view, envelopes.last().unwrap());
+        let pending = evaluator.pending_event();
+
+        if i == 0 {
+            let mut forged = view.clone();
+            apply(&mut forged, recorded_supervisor_verdict(view, actor)).unwrap();
+            assert_eq!(forged.runs[0].supervisor.verdicts().len(), 1);
+        }
+        if i == 2 {
+            assert!(apply(&mut view.clone(), reserve_child_call(goal, run, actor)).is_ok());
+            supervisor_interrupted_prefix(view, envelopes, goal);
+            let verdict = pending.as_ref().unwrap();
+            supervisor_recorded_cases(view, verdict);
+            let mut misplaced = view.clone();
+            apply(&mut misplaced, reserve_child_call(goal, run, actor)).unwrap();
+            assert!(apply(&mut misplaced, verdict.clone()).is_err());
+        }
+        if let Some(verdict) = pending {
+            append_record(view, envelopes, verdict.clone());
+            evaluator.after(view, envelopes.last().unwrap());
+            let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
+            assert_eq!(*recorded_actor, actor);
+            assert!(
+                matches!(&verdict, Event::SupervisorVerdictRecorded { verdict, .. } if verdict == recorded)
+            );
+            assert!(
+                apply(&mut view.clone(), verdict).is_err(),
+                "duplicate verdict"
+            );
+        } else if view.runs[0].supervisor.verdicts().len() == usize::from(MAX_VERDICTS) {
+            let overflow = recorded_supervisor_verdict(view, actor);
+            assert!(apply(&mut view.clone(), overflow).is_err());
+        }
+    }
+
+    fn supervisor_corpus_labels(
+        mut view: SessionView,
+        mut envelopes: Vec<EventEnvelope>,
+        goal: GoalId,
+    ) {
+        let (session, run, actor) = (view.id, view.runs[0].id, view.runs[0].primary().unwrap().id);
+        append_record(
+            &mut view,
+            &mut envelopes,
+            reserve_child_call(goal, run, actor),
+        );
+        append_record(
             &mut view,
             &mut envelopes,
             Event::GoalSteeringNoteRecorded {
@@ -4173,7 +4221,7 @@ mod goal_replay_tests {
         }
         for failed in [false, true] {
             let mut terminal_view = view.clone();
-            let mut terminal_events = envelopes.clone();
+            let mut terminal_events = envelopes.to_vec();
             for event in [
                 Event::AgentFinished {
                     run_id: run,
@@ -4198,10 +4246,10 @@ mod goal_replay_tests {
                     active_ms: 0,
                 },
             ] {
-                append(&mut terminal_view, &mut terminal_events, event);
+                append_record(&mut terminal_view, &mut terminal_events, event);
             }
             if failed {
-                append(
+                append_record(
                     &mut terminal_view,
                     &mut terminal_events,
                     Event::GoalFinished {
@@ -5908,10 +5956,7 @@ mod goal_replay_tests {
             .unwrap();
             apply(&mut view, tool_finished(run, agent, &intent, b"x")).unwrap();
             if !researcher {
-                let verdict = view.runs[0]
-                    .supervisor
-                    .pending_event()
-                    .expect("third identical observation");
+                let verdict = recorded_supervisor_verdict(&view, agent);
                 apply(&mut view, verdict).unwrap();
             }
             let mut later = view.clone();
