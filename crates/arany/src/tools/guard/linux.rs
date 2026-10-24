@@ -61,10 +61,10 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling";
 
-const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-preparation-runtime-grants-ro-attested";
+const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v15:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v16:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
@@ -1843,7 +1843,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(LINUX_SELECTION_CONTRACT),
-            "96197a2d4a4f93c182b0f63a13bc9bec4c155aa05919a9880a6b6e6e1e7ad109"
+            "35f1aa2d4c41ec3e4703f055ab4a9921d8aa39d6daffd3c9d670ec73582e74d5"
         );
         super::super::tests::assert_enforcement_prose(
             LINUX_SELECTION_CONTRACT,

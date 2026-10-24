@@ -1253,6 +1253,17 @@ pub(super) async fn native_command_changeset_corpus(
         }
     }
     for (case, suffix, rejected) in [
+        (
+            "large-snapshot",
+            "set -- src/large/*; test \"$#\" -eq 2049; for file; do test -f \"$file\"; test -s \"$file\"; done",
+            None,
+        ),
+        (
+            "depth-32",
+            "test -s \"$(find src -name input -print -quit)\"",
+            None,
+        ),
+        ("depth-33", "true", Some(ToolDisposition::Limit)),
         ("nonzero", "exit 7", None),
         (
             "selection",
@@ -1309,6 +1320,23 @@ pub(super) async fn native_command_changeset_corpus(
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         crate::private_file(&workspace.join("src/m-modified"), b"before\n");
         crate::private_file(&workspace.join("src/z-deleted"), b"delete\n");
+        if case == "large-snapshot" {
+            std::fs::create_dir_all(workspace.join("src/large")).unwrap();
+            for index in 0..=2048 {
+                crate::private_file(
+                    &workspace.join(format!("src/large/bulk-{index:05}")),
+                    &vec![b'x'; 16 * 1024],
+                );
+            }
+        }
+        if matches!(case, "depth-32" | "depth-33") {
+            let levels = if case == "depth-32" { 30 } else { 31 };
+            let directory = (0..levels).fold(std::path::PathBuf::from("src"), |path, index| {
+                path.join(format!("d{index:02}"))
+            });
+            std::fs::create_dir_all(workspace.join(&directory)).unwrap();
+            crate::private_file(&workspace.join(directory.join("input")), b"bounded input");
+        }
         if case == "selection" {
             crate::private_file(&workspace.join("src/.gitignore"), b"ignored/\n");
             std::fs::create_dir(workspace.join("src/ignored")).unwrap();
@@ -1573,7 +1601,7 @@ pub(super) async fn native_command_changeset_corpus(
             "{case}: terminal Event"
         );
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped = human_denied || case == "partial";
+        let stopped = human_denied || matches!(case, "partial" | "depth-33");
         let criterion_unmet = matches!(
             case,
             "conflict"
@@ -1587,6 +1615,7 @@ pub(super) async fn native_command_changeset_corpus(
                 | "bytes-overflow"
                 | "files-overflow"
                 | "directory-conversion"
+                | "depth-33"
         );
         assert_eq!(
             run.status,
@@ -1599,8 +1628,9 @@ pub(super) async fn native_command_changeset_corpus(
             } else {
                 RunStatus::Finished
             },
-            "{case}: {} Tools",
-            run.tools.len()
+            "{case}: {} Tools: {:#?}",
+            run.tools.len(),
+            run.tools
         );
         let requests = requests.lock().unwrap().clone();
         if case == "scope" {
@@ -1753,10 +1783,15 @@ pub(super) async fn native_command_changeset_corpus(
         );
         let command = tools[0].observation.as_ref().unwrap();
         assert_eq!(command.intent.call, call);
-        assert!(
+        assert_eq!(
             command.attestation.is_some(),
-            "{case}: native command receipt"
+            case != "depth-33",
+            "{case}: command dispatch receipt"
         );
+        if case == "depth-33" {
+            assert_eq!(command.limit_cause, Some(arany::LimitCause::Resource));
+            assert!(command.output.contains("no operation was dispatched"));
+        }
         assert_eq!(
             command.disposition,
             rejected.unwrap_or(if case == "nonzero" {
@@ -1865,7 +1900,10 @@ pub(super) async fn native_command_changeset_corpus(
                 b"delete\n"
             );
             assert!(view.runs[0].assistant_message.is_none());
-        } else if matches!(case, "nonzero" | "ai-approve" | "selection") {
+        } else if matches!(
+            case,
+            "nonzero" | "ai-approve" | "selection" | "large-snapshot" | "depth-32"
+        ) {
             if case == "nonzero" {
                 assert_eq!(
                     requests[2]
@@ -1902,6 +1940,14 @@ pub(super) async fn native_command_changeset_corpus(
                 std::fs::read(workspace.join("src/m-modified")).unwrap(),
                 b"modified\n"
             );
+            if case == "large-snapshot" {
+                assert_eq!(
+                    std::fs::read(workspace.join("src/large/bulk-00000"))
+                        .unwrap()
+                        .len(),
+                    16 * 1024
+                );
+            }
             assert!(
                 !workspace.join("src/z-deleted").exists(),
                 "{case}: delete publication receipts: {:?}",
