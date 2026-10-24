@@ -1194,6 +1194,7 @@ impl ToolObservation {
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
         ) || (self.disposition == ToolDisposition::Limit
+            && self.limit_cause == Some(LimitCause::Resource)
             && self.attestation.is_none()
             && self.intent.target == EffectTarget::Workspace
             && matches!(&self.intent.call, ToolCall::Command { .. }))

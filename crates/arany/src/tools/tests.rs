@@ -4803,7 +4803,7 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
             cwd: ".".into(),
         },
     );
-    let observation = super::unstarted_observation(intent, super::ToolError::Limit);
+    let mut observation = super::unstarted_observation(intent, super::ToolError::Limit);
     assert_eq!(observation.disposition, ToolDisposition::Limit);
     assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
     assert!(observation.attestation.is_none());
@@ -4811,4 +4811,7 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
     assert!(observation.stops_run());
     assert!(observation.output.contains("resource limit"));
     assert!(observation.output.contains("no operation was dispatched"));
+    observation.limit_cause = Some(super::LimitCause::RequestedTime);
+    assert!(observation.valid());
+    assert!(!observation.stops_run());
 }
