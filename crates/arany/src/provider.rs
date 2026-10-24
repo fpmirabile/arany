@@ -537,6 +537,10 @@ impl ProviderIdentity {
         }
     }
 
+    pub(crate) fn ceiling_retry_cause(&self) -> Option<RetryCause> {
+        self.chatgpt_provenance().map(|_| RetryCause::StreamCut)
+    }
+
     pub(crate) fn valid(&self) -> bool {
         let provider = ProviderKind::parse(&self.profile);
         let chatgpt = provider == Some(ProviderKind::ChatGpt);
