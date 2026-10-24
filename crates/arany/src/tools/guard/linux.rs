@@ -2410,7 +2410,7 @@ mod tests {
             return Err("fixture process namespace identity changed during pidfd binding".into());
         }
         // SAFETY: The OwnedFd moves into the AsyncFd, so its descriptor stays open and unchanged until the AsyncFd drops.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code, reason = "tokio 1.54 offers only an unsafe AsyncFd registration")]
         let registered = unsafe { tokio::io::unix::AsyncFd::register(pidfd) };
         registered.map_err(|error| error.to_string())
     }
