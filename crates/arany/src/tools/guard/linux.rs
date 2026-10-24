@@ -2404,7 +2404,7 @@ mod tests {
         if before.first() != Some(&host_pid) || before.last() != Some(&namespace_pid) {
             return Err("fixture process namespace identity changed before pidfd binding".into());
         }
-        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::NONBLOCK)
             .map_err(|error| error.to_string())?;
         if process_namespace_ids(host_pid)? != before {
             return Err("fixture process namespace identity changed during pidfd binding".into());
