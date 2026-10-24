@@ -1002,6 +1002,7 @@ impl RunLoop<'_> {
             stop_hook_feedback: Vec::new(),
             tools: Some(runtime.editor_context(grant, remaining)?),
             tool_calls_remaining: remaining,
+            active_deadline: None,
         })
     }
 
@@ -1281,9 +1282,14 @@ impl RunLoop<'_> {
             return Ok(WorkerObservation::Stopped);
         }
         self.shape_worker_intent(&mut intent, child.agent_run_id)?;
+        let active_deadline = child.active_deadline.clone();
         let observation = self
             .run_intent(
-                &Grant::Researcher { child, deadline },
+                &Grant::Researcher {
+                    child,
+                    deadline,
+                    active_deadline,
+                },
                 runtime,
                 intent,
                 &call,

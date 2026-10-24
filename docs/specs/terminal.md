@@ -330,7 +330,7 @@ Admitted PNG bytes are kept unchanged, including metadata, without local decompr
 
 ## Interruption, suspension and restoration
 
-Primary Tool approval prompts remain answerable without a wall-clock deadline while terminal input/output and the Run remain live, including suspension or a live tmux/screen PTY. Explicit No records a human decline and stops the Run without dispatching the proposal; Escape and Ctrl+C cancel the whole Run. EOF, SIGHUP/shutdown and lost terminal input/output withdraw the request. An abandoned approval, including a child approval whose Engine deadline elapsed, closes its dialog and restores composer input without sending a verdict. Channel unavailability and the temporary child approval timeout are named separately from human denial. Earlier completed effects remain.
+Primary Tool approval prompts remain answerable without a wall-clock deadline while terminal input/output and the Run remain live, including suspension or a live tmux/screen PTY. Explicit No records a human decline and stops the Run without dispatching the proposal; Escape and Ctrl+C cancel the whole Run. EOF, SIGHUP/shutdown and lost terminal input/output withdraw the request. An abandoned approval closes its dialog and restores composer input without sending a verdict. A child approval remains pending through idle waits, then withdraws when shared delegation or Goal active time is exhausted; terminal output names that cause separately from human denial. Earlier completed effects remain.
 
 | State/action | Required outcome |
 |---|---|

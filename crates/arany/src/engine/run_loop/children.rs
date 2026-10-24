@@ -5,6 +5,9 @@ use super::{
     PrimaryDecision, PrimarySite, RunLoop, call_record, decide_primary_call, primary_admitted,
     valid_answer, wave_deferred,
 };
+use crate::engine::ledger::{
+    ActiveDeadline, ActiveDeadlineCause, ActiveReservationLimit, duration_ms,
+};
 use crate::engine::routing::{CallScope, decide_attempt};
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
@@ -25,7 +28,7 @@ use tokio::time::Instant;
 
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
-const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
+pub(crate) const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 // Keep enough room for a full Read page and its metadata before offering child Tools.
 const MIN_CHILD_RESULT_BYTES: usize = crate::tools::types::MAX_TOOL_RESULT_BYTES;
@@ -41,6 +44,7 @@ pub(super) struct ChildWork {
     pub(super) stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
+    pub(super) active_deadline: Option<ActiveDeadline>,
 }
 
 impl ChildWork {
@@ -56,6 +60,7 @@ struct Spawned {
     children: Vec<ChildWork>,
     parallel: usize,
     active_segment: Option<ActiveSegment>,
+    bound: Duration,
 }
 
 struct Drained {
@@ -86,6 +91,7 @@ struct ChildQueue {
     // Once set, the wave starts no call, spawn or primary turn; it ends as a budget stop.
     stop: Option<StopCause>,
     capacity_error: Option<EngineError>,
+    active_deadline: Option<ActiveDeadline>,
 }
 
 struct ChildWave<'a> {
@@ -94,6 +100,15 @@ struct ChildWave<'a> {
     queue: &'a mut ChildQueue,
     segments: &'a mut Option<ActiveSegment>,
     deadline: Instant,
+}
+
+impl ChildWave<'_> {
+    fn deadline(&self) -> Instant {
+        self.queue
+            .active_deadline
+            .as_ref()
+            .map_or(self.deadline, |deadline| deadline.wall_deadline())
+    }
 }
 
 #[must_use]
@@ -505,13 +520,15 @@ pub(super) fn decide_child_stop(
 
 // What stops the wave after a child's call settles, when nothing stopped it yet.
 fn wave_stop_after(
-    queue_stopped: bool,
+    queue_stop: Option<StopCause>,
     cancelled: bool,
     paused: bool,
     end: Option<AgentDisposition>,
     hook: HookFacts,
 ) -> Option<WaveStop> {
-    if queue_stopped {
+    if let Some(cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline)) = queue_stop {
+        Some(WaveStop::Boundary(cause))
+    } else if queue_stop.is_some() {
         Some(WaveStop::BUDGET)
     } else if cancelled {
         Some(WaveStop::Abort(StopCause::Cancelled))
@@ -545,6 +562,7 @@ impl ChildQueue {
             deferred: None,
             stop: None,
             capacity_error: None,
+            active_deadline: None,
         }
     }
 
@@ -655,6 +673,7 @@ impl RunLoop<'_> {
             mut children,
             parallel,
             active_segment: mut segment,
+            bound,
         }) = self
             .spawn_children(count, objectives.iter().any(|a| a.editor.is_some()))
             .await?
@@ -664,8 +683,12 @@ impl RunLoop<'_> {
                 .await
                 .map(|()| RunProgress::Ready(DelegationProgress::Settled));
         };
-        let deadline = segment.as_ref().expect("delegation segment").deadline();
+        let segment_ref = segment.as_ref().expect("delegation segment");
+        let deadline = segment_ref.deadline();
+        let (allowance_ms, cause) = active_deadline_allowance(segment_ref, bound, Instant::now());
+        let active_deadline = self.ledger().active_deadline(allowance_ms, cause);
         let mut queue = self.child_queue(objectives, agent, parallel);
+        queue.active_deadline = Some(active_deadline);
         if queue.unspawned.iter().all(|a| a.editor.is_none()) {
             match self
                 .spawn_researchers(
@@ -904,15 +927,17 @@ impl RunLoop<'_> {
         }
         for index in pending {
             if children[index].editor {
-                let completed = self
-                    .complete_worker(
+                let completed = {
+                    let _active_work = self.ledger().active_work();
+                    self.complete_worker(
                         &mut children[index],
                         WorkerEnd {
                             answer: None,
                             ..end
                         },
                     )
-                    .await?;
+                    .await?
+                };
                 match self
                     .settle_worker_handover(root_request, &children[index], completed)
                     .await?
@@ -1068,6 +1093,7 @@ impl RunLoop<'_> {
             children: Vec::with_capacity(count),
             parallel,
             active_segment: Some(segment),
+            bound,
         }))
     }
 
@@ -1085,6 +1111,7 @@ impl RunLoop<'_> {
             if let Some(s) = segments.take() {
                 self.settle_active_segment(s)?;
             }
+            let _active_work = self.ledger().active_work();
             let mut child = match self.begin_worker(root, editor).await? {
                 WorkerAdmission::Admitted(child) => Some(*child),
                 WorkerAdmission::Refused => None,
@@ -1097,6 +1124,7 @@ impl RunLoop<'_> {
             };
             if let Some(child) = &mut child {
                 child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
+                child.active_deadline = queue.active_deadline.clone();
             }
             *segments = match self
                 .reserve_active_segment(
@@ -1168,6 +1196,7 @@ impl RunLoop<'_> {
                 .map(|r| r.research_context(queue.tool_allowance))
                 .transpose()?,
             tool_calls_remaining: queue.tool_allowance,
+            active_deadline: queue.active_deadline.clone(),
         })
     }
 
@@ -1220,7 +1249,9 @@ impl RunLoop<'_> {
         let mut cancellation = self.controls.cancellation.clone();
         let steering = self.controls.steering.clone();
         let session_id = self.session_id;
+        let provider_activity = self.ledger().provider_activity();
         let handle = queue.calls.spawn(async move {
+            let _provider_work = provider_activity.start();
             // A pause or cancellation in the wait ends the child's call unsent; the wave then drains.
             if !delay.is_zero()
                 && crate::engine::routing::back_off(
@@ -1310,7 +1341,7 @@ impl RunLoop<'_> {
             };
             if abort.is_none() {
                 abort = wave_stop_after(
-                    wave.queue.stop.is_some(),
+                    wave.queue.stop,
                     self.controls.cancellation.is_cancelled(),
                     self.pause_requested(),
                     step_disposition,
@@ -1348,12 +1379,19 @@ impl RunLoop<'_> {
             return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
         };
         let respawn = self
-            .child_attempt_continuation(wave.queue, task_id, index, &result, *abort, wave.deadline)
+            .child_attempt_continuation(
+                wave.queue,
+                task_id,
+                index,
+                &result,
+                *abort,
+                wave.deadline(),
+            )
             .await;
         match respawn {
             Ok(Some(delay)) => {
                 if let Err(error) =
-                    self.respawn_attempt(wave.queue, task_id, index, delay, wave.deadline)
+                    self.respawn_attempt(wave.queue, task_id, index, delay, wave.deadline())
                 {
                     return Err(wave.queue.abort_with(error).await);
                 }
@@ -1549,7 +1587,7 @@ impl RunLoop<'_> {
         }
         *wave.segments = match self
             .reserve_active_segment(
-                wave.deadline.saturating_duration_since(Instant::now()),
+                wave.deadline().saturating_duration_since(Instant::now()),
                 crate::session::BudgetAction::Delegation,
                 self.primary_id,
             )?
@@ -1656,18 +1694,25 @@ impl RunLoop<'_> {
         turn: ProviderTurn,
         deadline: Instant,
     ) -> Result<(Option<StopCause>, bool), EngineError> {
+        let active_deadline = child.active_deadline.clone();
         let step_stop = match Box::pin(self.execute_step(
-            Grant::Researcher { child, deadline },
+            Grant::Researcher {
+                child,
+                deadline,
+                active_deadline,
+            },
             requests.pop().ok_or(EngineError::CoordinatorFailed)?,
             turn,
         ))
         .await?
         {
             StepEnd::Continue => None,
-            StepEnd::Stopped(StopCause::ActiveTime) => {
-                queue.stop.get_or_insert(StopCause::ActiveTime);
-                self.observe_worker_stop().await?;
-                Some(StopCause::ActiveTime)
+            StepEnd::Stopped(cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline)) => {
+                queue.stop.get_or_insert(cause);
+                if cause == StopCause::ActiveTime {
+                    self.observe_worker_stop().await?;
+                }
+                Some(cause)
             }
             StepEnd::Stopped(cause) => Some(cause),
         };
@@ -1696,14 +1741,9 @@ impl RunLoop<'_> {
                 return self.refill_editor_child(wave, index).await;
             }
             ChildDecision::Finish { answer, turn, .. } => {
+                let deadline = wave.deadline();
                 match self
-                    .subagent_stop(
-                        &mut wave.children[index],
-                        &answer,
-                        turn,
-                        abort,
-                        wave.deadline,
-                    )
+                    .subagent_stop(&mut wave.children[index], &answer, turn, abort, deadline)
                     .await?
                 {
                     ChildStop::Proceed => (Some(answer), WorkerCause::ToolFailed),
@@ -1714,13 +1754,14 @@ impl RunLoop<'_> {
                 }
             }
             ChildDecision::ToolStep(requests, turn) => {
+                let deadline = wave.deadline();
                 let (stop, can_continue) = self
                     .run_editor_tool(
                         &mut wave.children[index],
                         wave.queue,
                         requests,
                         turn,
-                        wave.deadline,
+                        deadline,
                     )
                     .await?;
                 step_stop = stop;
@@ -1800,18 +1841,21 @@ impl RunLoop<'_> {
             failure,
             step_stop,
         } = completion;
-        let completed = self
-            .complete_worker(
+        let deadline = wave.deadline();
+        let completed = {
+            let _active_work = self.ledger().active_work();
+            self.complete_worker(
                 &mut wave.children[index],
                 WorkerEnd {
                     answer,
-                    deadline: wave.deadline,
+                    deadline,
                     torn_down: matches!(abort, Some(WaveStop::Abort(_))),
                     failure,
                     step_stop,
                 },
             )
-            .await?;
+            .await?
+        };
         if let Some(s) = wave.segments.take() {
             self.settle_active_segment(s)?;
         }
@@ -1824,7 +1868,7 @@ impl RunLoop<'_> {
         }
         *wave.segments = match self
             .reserve_active_segment(
-                wave.deadline.saturating_duration_since(Instant::now()),
+                wave.deadline().saturating_duration_since(Instant::now()),
                 crate::session::BudgetAction::Delegation,
                 self.primary_id,
             )?
@@ -1858,8 +1902,15 @@ impl RunLoop<'_> {
         abort: &mut Option<WaveStop>,
         drain_deadline: &mut Option<Instant>,
     ) -> Result<Result<(Id, crate::engine::routing::AttemptResult), JoinError>, EngineError> {
-        if queue.stop.is_some() && abort.is_none() {
-            *abort = Some(WaveStop::BUDGET);
+        if let Some(cause) = queue.stop
+            && abort.is_none()
+        {
+            *abort = Some(match cause {
+                cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline) => {
+                    WaveStop::Boundary(cause)
+                }
+                _ => WaveStop::BUDGET,
+            });
         }
         // A pause lets in-flight child calls finish and be recorded; every other stop drains them.
         if abort.is_some_and(|stop| stop != WaveStop::Boundary(StopCause::Paused))
@@ -1914,11 +1965,12 @@ impl RunLoop<'_> {
                     limits,
                     valid_response,
                     *abort,
-                    wave.deadline,
+                    wave.deadline(),
                 )
                 .await?;
             return self.apply_editor_call(wave, index, decision, abort).await;
         }
+        let deadline = wave.deadline();
         let admission = match self
             .settle_child_call(
                 &mut wave.children[index],
@@ -1928,7 +1980,7 @@ impl RunLoop<'_> {
                     valid_response,
                 },
                 abort,
-                wave.deadline,
+                deadline,
             )
             .await
         {
@@ -2054,10 +2106,12 @@ impl RunLoop<'_> {
         self.ledger().child_call_finished()?;
         let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
         // Boxed: the Tool future is large and would overflow the caller's stack.
+        let active_deadline = child.active_deadline.clone();
         let end = Box::pin(self.execute_step(
             Grant::Researcher {
                 child: &mut *child,
                 deadline,
+                active_deadline,
             },
             request,
             turn,
@@ -2375,7 +2429,11 @@ impl RunLoop<'_> {
         if self.pause_requested() {
             Some(WaveStop::Boundary(StopCause::Paused))
         } else if let Some(
-            cause @ (StopCause::ContextFull | StopCause::Cancelled | StopCause::HookStop),
+            cause @ (StopCause::ContextFull
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::ActiveTime
+            | StopCause::DelegationDeadline),
         ) = queue.stop
         {
             Some(WaveStop::Boundary(cause))
@@ -2393,6 +2451,14 @@ impl RunLoop<'_> {
     }
 
     async fn fill_slots(&self, wave: &mut ChildWave<'_>) -> Result<RunProgress<()>, EngineError> {
+        if let Some(deadline) = &wave.queue.active_deadline
+            && deadline.reached()
+        {
+            wave.queue.stop = Some(match deadline.cause {
+                ActiveDeadlineCause::Goal => StopCause::ActiveTime,
+                ActiveDeadlineCause::Delegation => StopCause::DelegationDeadline,
+            });
+        }
         while wave.queue.active.len() < self.ledger().provider_concurrency(wave.queue.parallel)
             && !self.controls.cancellation.is_cancelled()
             && !self.pause_requested()
@@ -2403,7 +2469,7 @@ impl RunLoop<'_> {
         {
             if wave.queue.pending.is_empty() {
                 match self
-                    .fill_primary_slot(wave.queue, wave.root_request, wave.deadline)
+                    .fill_primary_slot(wave.queue, wave.root_request, wave.deadline())
                     .await?
                 {
                     Admission::Reserved(SlotDispatch::Started) => continue,
@@ -2437,7 +2503,12 @@ impl RunLoop<'_> {
             index
         } else {
             let child = match self
-                .spawn_next_child(wave.queue, wave.root_request, wave.segments, wave.deadline)
+                .spawn_next_child(
+                    wave.queue,
+                    wave.root_request,
+                    wave.segments,
+                    wave.deadline(),
+                )
                 .await?
             {
                 RunProgress::Ready(Some(child)) => child,
@@ -2513,7 +2584,7 @@ impl RunLoop<'_> {
             return Ok(Admission::Reserved(SlotDispatch::Stopped));
         }
         self.child_steering_note(child, &mut request).await?;
-        self.spawn_child_attempt(wave.queue, index, request, provider, wave.deadline)?;
+        self.spawn_child_attempt(wave.queue, index, request, provider, wave.deadline())?;
         Ok(Admission::Reserved(SlotDispatch::Started))
     }
 
@@ -2584,7 +2655,9 @@ impl RunLoop<'_> {
         let cancellation = self.controls.cancellation.clone();
         let request = active.request.clone();
         let limits = active.limits.clone();
+        let provider_activity = self.ledger().provider_activity();
         let handle = queue.calls.spawn(async move {
+            let _provider_work = provider_activity.start();
             crate::engine::routing::invoke_attempt(
                 provider.as_ref(),
                 request,
@@ -2904,6 +2977,24 @@ fn delegation_active_bound(research: bool, call_deadline: Duration, waves: usize
     }
 }
 
+fn active_deadline_allowance(
+    segment: &ActiveSegment,
+    bound: Duration,
+    sampled_at: Instant,
+) -> (u64, ActiveDeadlineCause) {
+    let bound_ms = duration_ms(bound);
+    let allowance_ms = segment
+        .reserved_ms
+        .saturating_sub(segment.active_ms(sampled_at))
+        .saturating_sub(duration_ms(crate::engine::STORE_ACTION_OVERHEAD))
+        .min(bound_ms);
+    let cause = match segment.limit {
+        ActiveReservationLimit::Goal => ActiveDeadlineCause::Goal,
+        ActiveReservationLimit::ActionBound => ActiveDeadlineCause::Delegation,
+    };
+    (allowance_ms, cause)
+}
+
 fn restrict_catalog(
     tools: &mut ToolContext,
     definition: &crate::tools::definitions::AgentDefinition,
@@ -3057,6 +3148,7 @@ mod delegation_bound_tests {
                     stop_hook_feedback: Vec::new(),
                     tools: Some(tools),
                     tool_calls_remaining: 16,
+                    active_deadline: None,
                 };
                 let root = crate::provider::test_support::primary_request("test-model");
                 let offered = runner.child_request(&mut child, &root).unwrap();
@@ -3092,6 +3184,7 @@ mod delegation_bound_tests {
                 stop_hook_feedback: Vec::new(),
                 tools: None,
                 tool_calls_remaining: 0,
+                active_deadline: None,
             };
             let matched = config
                 .matched_hooks(HookEvent::SubagentStop, |group| {
@@ -3136,6 +3229,45 @@ mod delegation_bound_tests {
 #[cfg(test)]
 mod decision_tests {
     use super::*;
+
+    #[test]
+    fn delayed_pre_wave_time_reduces_the_active_deadline_allowance() {
+        let started = Instant::now();
+        let carried_ms = duration_ms(Duration::from_secs(20));
+        let delayed_ms = duration_ms(Duration::from_secs(21));
+        let bound = Duration::from_secs(120);
+        let requested_ms = duration_ms(bound)
+            .saturating_add(duration_ms(crate::engine::STORE_ACTION_OVERHEAD))
+            .saturating_add(carried_ms);
+        let sampled_at = started + Duration::from_millis(delayed_ms);
+        for (limit, reserved_ms, expected_cause) in [
+            (
+                ActiveReservationLimit::ActionBound,
+                requested_ms,
+                ActiveDeadlineCause::Delegation,
+            ),
+            (
+                ActiveReservationLimit::Goal,
+                requested_ms.saturating_sub(15_000),
+                ActiveDeadlineCause::Goal,
+            ),
+        ] {
+            let segment = ActiveSegment {
+                started,
+                reserved_ms,
+                limit,
+            };
+            let (allowance_ms, cause) = active_deadline_allowance(&segment, bound, sampled_at);
+
+            assert_eq!(
+                allowance_ms,
+                reserved_ms
+                    .saturating_sub(delayed_ms)
+                    .saturating_sub(duration_ms(crate::engine::STORE_ACTION_OVERHEAD))
+            );
+            assert_eq!(cause, expected_cause);
+        }
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Kind {
@@ -3618,10 +3750,10 @@ mod decision_tests {
         };
         let abort = |cause| Some(WaveStop::Abort(cause));
         let boundary = |cause| Some(WaveStop::Boundary(cause));
-        // (queue stopped, cancelled, paused, child end, hook state, wave stop)
+        // (queue stop, cancelled, paused, child end, hook state, wave stop)
         let rows = [
             (
-                true,
+                Some(StopCause::Budget),
                 true,
                 true,
                 Some(Failed),
@@ -3629,7 +3761,7 @@ mod decision_tests {
                 Some(WaveStop::BUDGET),
             ),
             (
-                false,
+                None,
                 true,
                 true,
                 Some(StoppedByHook),
@@ -3637,7 +3769,7 @@ mod decision_tests {
                 abort(StopCause::Cancelled),
             ),
             (
-                false,
+                None,
                 false,
                 true,
                 Some(StoppedByHook),
@@ -3645,7 +3777,7 @@ mod decision_tests {
                 boundary(StopCause::Paused),
             ),
             (
-                false,
+                None,
                 false,
                 false,
                 Some(StoppedByHook),
@@ -3653,7 +3785,7 @@ mod decision_tests {
                 boundary(StopCause::HookStop),
             ),
             (
-                false,
+                None,
                 false,
                 false,
                 Some(Failed),
@@ -3661,7 +3793,7 @@ mod decision_tests {
                 abort(StopCause::Uncertain),
             ),
             (
-                false,
+                None,
                 false,
                 false,
                 Some(Failed),
@@ -3669,7 +3801,7 @@ mod decision_tests {
                 boundary(StopCause::HookStop),
             ),
             (
-                false,
+                None,
                 false,
                 false,
                 Some(Failed),
@@ -3677,7 +3809,7 @@ mod decision_tests {
                 abort(StopCause::ToolStopped),
             ),
             (
-                false,
+                None,
                 false,
                 false,
                 Some(Failed),
@@ -3685,17 +3817,17 @@ mod decision_tests {
                 abort(StopCause::ToolStopped),
             ),
             (
-                false,
+                None,
                 false,
                 false,
                 Some(Cancelled),
                 settled,
                 abort(StopCause::Cancelled),
             ),
-            (false, false, false, Some(Finished), settled, None),
-            (false, false, false, None, settled, None),
+            (None, false, false, Some(Finished), settled, None),
+            (None, false, false, None, settled, None),
             (
-                false,
+                None,
                 false,
                 false,
                 None,
@@ -3703,13 +3835,19 @@ mod decision_tests {
                 abort(StopCause::ToolStopped),
             ),
         ];
-        for (index, (queue_stopped, cancelled, paused, end, hook, expected)) in
+        for (index, (queue_stop, cancelled, paused, end, hook, expected)) in
             rows.into_iter().enumerate()
         {
             assert_eq!(
-                wave_stop_after(queue_stopped, cancelled, paused, end, hook),
+                wave_stop_after(queue_stop, cancelled, paused, end, hook),
                 expected,
                 "row {index}"
+            );
+        }
+        for cause in [StopCause::ActiveTime, StopCause::DelegationDeadline] {
+            assert_eq!(
+                wave_stop_after(Some(cause), false, false, Some(Failed), settled),
+                boundary(cause)
             );
         }
         for (result, reason) in [
