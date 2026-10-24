@@ -35,6 +35,8 @@ pub use rewind::{
 };
 mod routing;
 mod run_loop;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use run_loop::MAX_DELEGATION_DEADLINE;
 #[cfg(test)]
 mod tests;
 pub use crate::tools::Cancellation as RunCancellation;

@@ -75,6 +75,7 @@ pub struct ToolApproval {
     pub allow_auto_edits: bool,
     pub remember_prefix: Option<super::permissions::TypedGitPrefix>,
     reply: oneshot::Sender<ApprovalReply>,
+    withdrawal: Option<oneshot::Receiver<()>>,
 }
 
 impl ToolApproval {
@@ -84,6 +85,40 @@ impl ToolApproval {
 
     pub async fn abandoned(&mut self) {
         self.reply.closed().await;
+    }
+
+    pub async fn withdrawal_committed(&mut self) -> Option<bool> {
+        match self.withdrawal.take() {
+            Some(withdrawal) => Some(withdrawal.await.is_ok()),
+            None => None,
+        }
+    }
+}
+
+pub(crate) struct ApprovalWait {
+    response: Option<oneshot::Receiver<ApprovalReply>>,
+    withdrawal: Option<oneshot::Sender<()>>,
+}
+
+impl ApprovalWait {
+    pub(crate) async fn reply(&mut self) -> ApprovalReply {
+        match self.response.take() {
+            Some(response) => response.await.unwrap_or(ApprovalReply::Unavailable),
+            None => ApprovalReply::Unavailable,
+        }
+    }
+
+    pub(crate) fn reject_late_replies(&mut self) -> Option<ApprovalWithdrawal> {
+        self.response.take();
+        self.withdrawal.take().map(ApprovalWithdrawal)
+    }
+}
+
+pub(crate) struct ApprovalWithdrawal(oneshot::Sender<()>);
+
+impl ApprovalWithdrawal {
+    pub(crate) fn commit(self) {
+        let _ = self.0.send(());
     }
 }
 
@@ -154,6 +189,34 @@ impl ToolApprovals {
             .await
     }
 
+    pub(crate) async fn begin_local(
+        &self,
+        intent: &EffectIntent,
+        allow_auto_edits: bool,
+        remember_prefix: Option<super::permissions::TypedGitPrefix>,
+    ) -> ApprovalWait {
+        let (reply, response) = oneshot::channel();
+        let (withdrawal, committed) = oneshot::channel();
+        let approval = ToolApproval {
+            intent: intent.clone(),
+            unguarded: None,
+            allow_auto_edits,
+            remember_prefix,
+            reply,
+            withdrawal: Some(committed),
+        };
+        if self.sender.send(approval).await.is_err() {
+            return ApprovalWait {
+                response: Some(response),
+                withdrawal: None,
+            };
+        }
+        ApprovalWait {
+            response: Some(response),
+            withdrawal: Some(withdrawal),
+        }
+    }
+
     pub(crate) async fn ask_unguarded(
         &self,
         intent: &EffectIntent,
@@ -178,6 +241,7 @@ impl ToolApprovals {
                 allow_auto_edits,
                 remember_prefix,
                 reply,
+                withdrawal: None,
             })
             .await
             .is_err()

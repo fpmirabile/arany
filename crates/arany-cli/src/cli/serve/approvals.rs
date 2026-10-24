@@ -82,9 +82,13 @@ impl Approvals {
                         answer = None;
                     }
                     () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
-                        withdraw(&state, &outbound, withdrawals);
-                        current = None;
                         answer = None;
+                        let pending = state.lock().expect("approval state").pending.take();
+                        let committed = current.as_mut().expect("approval").withdrawal_committed().await;
+                        if committed != Some(false) {
+                            notify_withdrawal(pending, &outbound, withdrawals);
+                        }
+                        current = None;
                     }
                     approval = inbox.next() => {
                         let Some(mut approval) = approval else { break };
@@ -173,11 +177,6 @@ impl Drop for Approvals {
             worker.abort();
         }
     }
-}
-
-fn withdraw(state: &Mutex<State>, output: &mpsc::Sender<Message>, enabled: bool) {
-    let pending = state.lock().expect("approval state").pending.take();
-    notify_withdrawal(pending, output, enabled);
 }
 
 fn notify_withdrawal(pending: Option<Pending>, output: &mpsc::Sender<Message>, enabled: bool) {
@@ -270,6 +269,8 @@ mod tests {
     use super::*;
     use arany::{AgentRunId, ApprovalMode, RunId, ToolApprovals, ToolLimits};
     use std::time::Duration;
+
+    const WITHDRAWAL_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
@@ -487,5 +488,75 @@ mod tests {
             owner.close();
             assert!(!third.await.expect("third ask"));
         }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_withdrawal_rejects_late_answers_before_notifying_the_client() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+        let (outbound, mut output) = mpsc::channel(8);
+        let owner = Approvals::start(
+            inbox,
+            RunCancellation::new(),
+            SessionId::new(),
+            Channel {
+                outbound,
+                next_id: Arc::new(AtomicI64::new(1)),
+                withdrawals: true,
+            },
+            RunCancellation::new(),
+            |_| async { Some(1) },
+        );
+        let (reject, rejected) = tokio::sync::oneshot::channel();
+        let (rejected_ack, rejected_acknowledged) = tokio::sync::oneshot::channel();
+        let (commit, committed) = tokio::sync::oneshot::channel();
+        let ask = tokio::spawn(arany::test_support::approval::delay_withdrawal(
+            approvals,
+            intent(read()),
+            rejected,
+            rejected_ack,
+            committed,
+        ));
+        let request = next_request(&mut output).await;
+        reject.send(()).unwrap();
+        tokio::time::timeout(WITHDRAWAL_COMMIT_WAIT, rejected_acknowledged)
+            .await
+            .expect("Engine rejects late replies immediately")
+            .unwrap();
+        tokio::time::timeout(WITHDRAWAL_COMMIT_WAIT, async {
+            loop {
+                if owner
+                    .state
+                    .lock()
+                    .expect("approval state")
+                    .pending
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("protocol request retires before the lifecycle commit");
+        owner.respond(
+            request.id.clone(),
+            Some(serde_json::json!({"decision":"accept"})),
+        );
+        assert!(output.try_recv().is_err());
+        commit.send(()).unwrap();
+        let Some(Message::Notification(notification)) =
+            tokio::time::timeout(WITHDRAWAL_COMMIT_WAIT, output.recv())
+                .await
+                .expect("committed withdrawal is sent")
+        else {
+            panic!("expected cancellation notification")
+        };
+        assert_eq!(notification.method, "$/cancel_request");
+        assert_eq!(
+            notification.params.unwrap()["requestId"],
+            serde_json::to_value(&request.id).unwrap()
+        );
+        ask.await.unwrap();
     }
 }

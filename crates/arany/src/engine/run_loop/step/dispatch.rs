@@ -55,7 +55,6 @@ pub(super) enum NotDispatched {
     UnguardedNeedsHuman,
     ApprovalRefused,
     ApprovalUnavailable,
-    ApprovalTimedOut,
 }
 
 impl RunLoop<'_> {
@@ -119,7 +118,6 @@ impl NotDispatched {
             | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
             | Self::ApprovalUnavailable
-            | Self::ApprovalTimedOut
             | Self::ApprovalRefused => ActiveTimeEffect::Recheck,
             Self::TimeoutLimit { .. }
             | Self::HookDenied(
@@ -151,7 +149,6 @@ impl NotDispatched {
             | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
             | Self::ApprovalUnavailable
-            | Self::ApprovalTimedOut
             | Self::ApprovalRefused => true,
             Self::TimeoutLimit { .. }
             | Self::HookDenied(_)
@@ -338,7 +335,6 @@ pub(super) fn decide_dispatch<'a>(
             | NotDispatched::SaveUnconfirmed
             | NotDispatched::UnguardedNeedsHuman
             | NotDispatched::ApprovalUnavailable
-            | NotDispatched::ApprovalTimedOut
             | NotDispatched::ApprovalRefused => {
                 (facts.permission.decision, facts.unresolved_source())
             }
@@ -384,13 +380,11 @@ pub(super) fn decide_dispatch<'a>(
         _ if after.paused && after.approval.is_some() && !active_time_exhausted => {
             refused(NotDispatched::Paused)
         }
-        _ if after
-            .approval
-            .as_ref()
-            .is_some_and(|approval| approval.timed_out) =>
-        {
-            refused(NotDispatched::ApprovalTimedOut)
-        }
+        DispatchSite::Researcher if active_time_exhausted => Err(refuse(
+            NotDispatched::ActiveTime,
+            Some(StopCause::ActiveTime),
+        )),
+        _ if after.deadline_reached => refused(NotDispatched::DelegationDeadline),
         DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
         DispatchSite::Researcher => refused(if source == PermissionSource::UnavailableApproval {
             NotDispatched::ApprovalUnavailable
@@ -480,7 +474,6 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         | NotDispatched::SaveUnconfirmed
         | NotDispatched::UnguardedNeedsHuman
         | NotDispatched::ApprovalUnavailable
-        | NotDispatched::ApprovalTimedOut
         | NotDispatched::ApprovalRefused => None,
     };
     let (disposition, output) = match reason {
@@ -562,10 +555,6 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
             ToolDisposition::Denied,
             "Approval channel unavailable; no operation was dispatched".into(),
         ),
-        NotDispatched::ApprovalTimedOut => (
-            ToolDisposition::Denied,
-            "Child approval wait timed out; no operation was dispatched".into(),
-        ),
         NotDispatched::ApprovalRefused => (
             ToolDisposition::Denied,
             "Approval was not granted; no operation was dispatched".into(),
@@ -580,7 +569,6 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         | NotDispatched::UnguardedNeedsHuman => {
             Some(crate::tools::ApprovalCause::ChannelUnavailable)
         }
-        NotDispatched::ApprovalTimedOut => Some(crate::tools::ApprovalCause::ChildTimeout),
         NotDispatched::ApprovalRefused => Some(crate::tools::ApprovalCause::Declined),
         NotDispatched::HostSourceUnavailable
         | NotDispatched::TimeoutLimit { .. }
@@ -706,11 +694,11 @@ mod tests {
 
     fn resolution(approved: bool, source: PermissionSource) -> Resolution {
         Resolution {
-            timed_out: false,
             approved,
             source,
             active_time_exhausted: false,
             save: None,
+            withdrawal: None,
         }
     }
 
@@ -811,11 +799,11 @@ mod tests {
             Some(PermissionSource::Human),
         ] {
             let resolution = source.map(|source| Resolution {
-                timed_out: false,
                 approved: true,
                 source,
                 active_time_exhausted: false,
                 save: None,
+                withdrawal: None,
             });
             let (_, decision) = decide(
                 DispatchSite::Primary,
@@ -845,11 +833,11 @@ mod tests {
             &hooks,
             &[Fact::Host, Fact::InProcess],
             Some(Resolution {
-                timed_out: false,
                 approved: false,
                 source: PermissionSource::Human,
                 active_time_exhausted: false,
                 save: None,
+                withdrawal: None,
             }),
         );
         assert!(decision.outcome.is_err());
@@ -937,7 +925,6 @@ mod tests {
             // A researcher after its Ask, or where it would have been.
             (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
-            (decide(Researcher, asks(Request), &none, &[], Some(Resolution { timed_out: true, ..resolution(false, S::UnavailableApproval) })), Some(Request), no(N::ApprovalTimedOut, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::ApprovalUnavailable, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::Paused, Some(StopCause::Paused)), ask_, S::Human),
