@@ -292,9 +292,6 @@ async fn journey(
                 admission.workspace.clone(),
                 conversation_run.expect("conversation checkpoint"),
                 (view.last_sequence, view.rewinds.prefix_digest()),
-                i64::try_from(arany::now_ms())
-                    .unwrap_or(i64::MAX)
-                    .saturating_add(60_000),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -328,9 +325,7 @@ async fn journey(
             .take()
             .is_some_and(|basis| !preview.observations_match(&basis))
         {
-            return Err("rewind preview changed or expired; preview again"
-                .to_owned()
-                .into());
+            return Err("rewind preview changed; preview again".to_owned().into());
         }
         let lines = display::preview_lines(&preview);
         if preview.checkpoint_storage_unavailable() {

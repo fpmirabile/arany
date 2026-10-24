@@ -177,7 +177,8 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
 | `ToolPermissionDecided` | 6 |
-| `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
+| `SupervisorVerdictRecorded`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
+| `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
 | `WorkerHandoverRecorded` | 2 |
 | `HookStarted` | 9 |
@@ -283,6 +284,8 @@ The complete lifecycle has a 240-second ceiling; requests end at least five seco
 
 The current Tool and hook intent payloads omit absolute approval expiry. The expiry-removal steps follow the primary generic-host steps. ToolFinished and HookFinished also require nullable `approval_cause`; migration sets it to `null` because older history cannot prove why approval was absent. The migration removes the intent expiry, validates and rebinds intent references in verdicts, hook subjects, receipts, command integrations and worker cleanup, and retains content hashes. Historical prefix hashes are verified before replacement. A migrated pending intent is interrupted history, never a restored live approval.
 
+`WorkspaceRewindStarted` 1 → 2 removes the preview-expiry field. Its v1 canonical payload is validated before conversion, and the migration recomputes each affected prefix binding through the standard migration path; it creates no live preview or receipt.
+
 `ToolFinished` 25 → 26 and `HookFinished` 14 → 15 add `selection: null` to prior complete command results because historical selection counts were not recorded. A near-limit result is refitted within its original `result_bytes` budget with explicit omission markers. The migration preserves output totals, exit status, changesets and hook verdicts. It refuses a result that already exceeds `result_bytes` or already contains `selection`, or whose converted result cannot fit or validate; non-command observations keep their bytes.
 
 `ProviderCallRecorded` 18 → 19 rewrites refusal records from `invalid_response` to `rejected`, preserving other records; a source refusal using `invalid_path` or any disposition other than `invalid_response` refuses.
@@ -309,7 +312,7 @@ Owners read these records through the migration. A record whose version is at or
 
 ### Workspace rewind Events
 
-`WorkspaceRewindStarted` and `WorkspaceRewindFinished` are Session-scoped v1 facts, each at most 64 KiB including JSON escaping; larger payloads reject before decoding. Started records a UUIDv7 rewind ID, a Run or rewind checkpoint with its exact sequence, the current head sequence and canonical prefix digest, canonical effective-plan SHA-256, file count/restored bytes, sorted disjoint kept/overwrite selections, Workspace identity, Tool policy/enforcement digests and expiry. Overwrite selections carry the observed digest, byte length and executable bit, or explicit null for absence. Kept and overwritten paths together are capped at 64; paths are at most 512 bytes. Neither selections nor stored bytes grant permission.
+`WorkspaceRewindStarted` v2 and `WorkspaceRewindFinished` v1 are Session-scoped facts, each at most 64 KiB including JSON escaping; larger payloads reject before decoding. Started records a UUIDv7 rewind ID, a Run or rewind checkpoint with its exact sequence, the current head sequence and canonical prefix digest, canonical effective-plan SHA-256, file count/restored bytes, sorted disjoint kept/overwrite selections, Workspace identity and Tool policy/enforcement digests. Overwrite selections carry the observed digest, byte length and executable bit, or explicit null for absence. Kept and overwritten paths together are capped at 64; paths are at most 512 bytes. Neither selections nor stored bytes grant permission.
 
 Finished records its own rewind ID, closed `restored`, `conflict`, `denied`, `failed`, `cancelled` or `uncertain` outcome, required nullable attestation and checkpoint, and sorted conflict paths (the first 32, plus the exact total, at most 2,048). Restored requires an attestation with plan, Workspace, enforcement and nonzero Guard receipt digests. An attested Uncertain outcome uses the same binding. Exactly those attested outcomes require checkpoint capture status for overwritten content: captured/skipped if any before state exists, otherwise not_needed. Pre-GO known refusal/cancellation carries neither capture nor receipt. An unconfirmed outcome with no receipt stays Uncertain; it does not assert whether GO occurred. Finished must immediately follow its own Started. The [Session contract](./session.md#rewind-planning-and-replay) owns planning, sealing and history projection; [Goals](./goals.md#rewind-and-goal-recovery) owns recovery and evidence invalidation. Runtime restore remains unavailable.
 

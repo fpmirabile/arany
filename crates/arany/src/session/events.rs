@@ -161,7 +161,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("GoalStarted", 8),
     ("GoalFinished", 8),
     ("SupervisorVerdictRecorded", 1),
-    ("WorkspaceRewindStarted", 1),
+    ("WorkspaceRewindStarted", 2),
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
@@ -1475,6 +1475,38 @@ pub(crate) fn intent_without_expiry(mut value: serde_json::Value) -> Option<serd
         return None;
     }
     Some(value)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RewindStartedV1 {
+    rewind_id: uuid::Uuid,
+    target: super::rewind::CheckpointTarget,
+    head_sequence: u64,
+    prefix_digest: [u8; 32],
+    plan_digest: [u8; 32],
+    file_count: u32,
+    restored_bytes: u64,
+    kept: Vec<String>,
+    overwrite: Vec<super::rewind::Overwrite>,
+    workspace_device: u64,
+    workspace_inode: u64,
+    policy_digest: [u8; 32],
+    enforcement_digest: [u8; 32],
+    expires_at_ms: i64,
+}
+
+pub(crate) fn rewind_started_v1_payload(payload: &str) -> Option<String> {
+    let record = serde_json::from_str::<RewindStartedV1>(payload).ok()?;
+    (record.expires_at_ms > 0)
+        .then(|| serde_json::to_string(&record).ok())
+        .flatten()
+}
+
+pub(crate) fn rewind_started_v1_to_v2(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let record = value.as_object_mut()?;
+    let expiry = record.remove("expires_at_ms")?.as_i64()?;
+    (expiry > 0).then_some(value)
 }
 
 pub(crate) fn replace_intent_pin(value: &mut serde_json::Value, old: &[u8; 32], new: &[u8; 32]) {
