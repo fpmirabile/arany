@@ -49,7 +49,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Architecture homogenization](./architecture-homogenization/README.md) | `Ready`: 54 behavior-preserving implementation slices in 16 tracks plus one terminal lifecycle research slice (55 slices / 17 tracks); bounded flows, complete runtime/decoder ownership and live-worktree gates, four independent owner decisions |
+| [Architecture homogenization](./architecture-homogenization/README.md) | `Ready`: 62 implementation slices in 20 tracks plus one terminal lifecycle research slice (63 slices / 21 tracks); bounded refactors and eight follow-ups for four decided owners: cached admission, intent records, Engine Supervisor and migrated Provider identity |
 | [Tool failure continuation](./failure-feedback/README.md) | `In progress`: C1 primary failure/decline results and sanitized continuation delivered; C2 delegated feedback remains; prior-Run cause reinjection is owned by the Session contract |
 | [Provider check journal](./provider-check-journal/README.md) | `In progress`: C1 implemented; C2 selected ChatGPT checks and account-index migration remain; prerequisite for setup UI |
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |

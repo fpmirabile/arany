@@ -1,7 +1,7 @@
 use super::agent::names_child;
 use super::{
-    AgentStatus, HookView, RunView, SessionView, ToolView, active_run, active_run_goal,
-    current_goal_mut, observed_command_changeset, pending_tool_requests,
+    AgentStatus, HookView, MAX_HOST_SESSION_GRANTS, RunView, SessionView, ToolView, active_run,
+    active_run_goal, current_goal_mut, observed_command_changeset, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError};
@@ -1090,7 +1090,7 @@ fn valid_host_approval(
                 && verdict.decision == Decision::Ask
                 && (!host.session
                     || matches!(verdict.mode, None | Some(PermissionMode::Default))
-                        && view.host_grants(host.epoch).count() < 128)
+                        && view.host_grants(host.epoch).count() < MAX_HOST_SESSION_GRANTS)
         }
         PermissionSource::SessionApproval => {
             !host.session
