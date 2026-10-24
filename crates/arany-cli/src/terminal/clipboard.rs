@@ -1079,7 +1079,7 @@ pub(super) mod cleanup_tests {
             agent_panel: None,
             agent_chat: None,
             child_drafts: Vec::new(),
-            primary_input_capacity: crate::terminal::MAX_DRAFT_BYTES,
+            primary_input_capacity: crate::terminal::MAX_PRIMARY_DRAFT_BYTES,
             help_selected: None,
             usage_panel: None,
             clipboard: None,

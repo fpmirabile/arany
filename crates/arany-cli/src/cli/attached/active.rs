@@ -330,6 +330,10 @@ impl SubmissionFinish<'_> {
     }
 }
 
+fn preparation_text(objective: &str, draft: Option<&ComposerDraft>) -> String {
+    draft.map_or_else(|| objective.to_owned(), ComposerDraft::editable_text)
+}
+
 async fn admit_submission<'a>(
     input: SubmissionInput,
     finish: &SubmissionFinish<'a>,
@@ -379,7 +383,7 @@ async fn admit_submission<'a>(
             .is_some_and(|source| source.autonomous),
         GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
     };
-    let editable = draft.map_or_else(|| objective.clone(), ComposerDraft::editable_text);
+    let editable = preparation_text(&objective, draft);
     let include_paths = submission_includes(admission, ui.view, goal, &editable)?;
     let execution_settings = super::controls::settings_or_defaults(admission).await?;
     let goal = goal_request(ui.view, goal, execution_settings)?;
@@ -1031,6 +1035,59 @@ mod goal_request_tests {
     use super::*;
     use crate::cli::attached::{Admission, EntryMode};
     use arany::SessionDefaults;
+
+    #[test]
+    fn full_bound_restored_prompt_prepares_exact_objective_and_mentions() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let marker = " @src/lib.rs";
+        let prompt = format!(
+            "/{}{}",
+            "x".repeat(crate::terminal::MAX_PRIMARY_DRAFT_BYTES - 1 - marker.len()),
+            marker
+        );
+        let mut composer = Composer::default();
+        assert_eq!(composer.restore_prompt(&prompt), Ok(ComposerEdit::Changed));
+        assert_eq!(
+            composer.submission(),
+            Ok(crate::terminal::Submission::Objective(&prompt))
+        );
+        assert_eq!(composer.editable_text(), prompt);
+        let draft = composer.take_draft();
+        let prepared_text = preparation_text(&prompt, Some(&draft));
+        assert_eq!(prepared_text, prompt);
+
+        let admission = Admission {
+            roster: None,
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
+            workspace: temp.path().join("workspace"),
+            include_paths: vec![std::path::PathBuf::from("already-included.rs")],
+            tools: false,
+            workspace_permissions: None,
+            defaults: SessionDefaults::default(),
+            screen_reader: false,
+            classic: false,
+            no_color: false,
+            setup_requested: false,
+            entry: EntryMode::New,
+            prompt: None,
+            resume_goal: None,
+        };
+        assert_eq!(
+            submission_includes(
+                &admission,
+                &session_with_goal(false),
+                GoalStart::Plain,
+                &prepared_text,
+            )
+            .unwrap(),
+            vec![
+                std::path::PathBuf::from("already-included.rs"),
+                std::path::PathBuf::from("src/lib.rs"),
+            ]
+        );
+    }
 
     #[test]
     fn goal_starts_map_to_plain_autonomous_and_resume_requests() {

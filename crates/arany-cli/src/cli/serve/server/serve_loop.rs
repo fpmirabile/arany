@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 use std::{collections::VecDeque, future::Future, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
 use tokio::sync::{mpsc, watch};
 
+const MAX_REWIND_OTHER_RESULT_BYTES: usize = 256 * 1024;
+
 struct ServerLoop {
     shutdown: bool,
     opt_out: Vec<String>,
@@ -239,8 +241,13 @@ impl ServerLoop {
         if self.active.is_some() {
             return Err(Fault::state(Reason::Busy));
         }
-        // Reserve the maximal bounded receipt before any mutation or fork.
-        encode_line(&response(id.clone(), "x".repeat(256 * 1024)))
+        let reservation = format!(
+            "{}{}",
+            "x".repeat(MAX_REWIND_OTHER_RESULT_BYTES),
+            "\u{1}".repeat(arany::MAX_USER_MESSAGE_BYTES),
+        );
+        // Control bytes reserve the prompt's worst-case JSON escaping.
+        encode_line(&response(id.clone(), reservation))
             .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
         let cancellation = RunCancellation::new();
         let mut restoration = Box::pin(rewind::restore(
