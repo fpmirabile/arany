@@ -1,8 +1,8 @@
 use super::controls::ActiveSubmission;
 use super::{Admission, Feedback, emit_outcome, load_confirmed_outcome};
-use crate::cli::exec::SHUTDOWN_GRACE;
 use crate::cli::provider::routing::RoutingError;
 use crate::cli::provider::select::{Selection, SelectionError, select_provider};
+use crate::cli::run_outcome::{SHUTDOWN_GRACE, stop_after_answer, stop_text};
 use crate::terminal::{
     AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
     TerminalError, TerminalInput, TerminalNotice,
@@ -190,13 +190,10 @@ pub(super) fn finish_attempt(
     // A Run that could not settle has no committed outcome to show, only its projected stop.
     if !run.run.status.is_outcome() {
         return Err(RunAttemptError::Failed(RunFailure::Unsettled(
-            stopped.map_or(
-                "Run did not reach a terminal state",
-                crate::cli::exec::stop_text,
-            ),
+            stopped.map_or("Run did not reach a terminal state", stop_text),
         )));
     }
-    match crate::cli::exec::stop_after_answer(
+    match stop_after_answer(
         run.run.status,
         stopped,
         continuation_error.as_ref(),

@@ -166,7 +166,7 @@ pub(crate) async fn run(
     super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
     let mut signals =
-        super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        super::run_outcome::StopSignals::install().map_err(|_| "signal handling unavailable")?;
     let engine = Engine::open(
         state,
         EngineConfig {
