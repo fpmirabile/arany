@@ -154,6 +154,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        EventStep {
+            kind: "WorkspaceRewindStarted",
+            from: 1,
+            transform: crate::session::rewind_started_v1_to_v2,
+            canonical: crate::session::rewind_started_v1_payload,
+        },
         variant_step!("ToolStarted", 15, crate::session::pre_multiedit_payload),
         variant_step!("ToolFinished", 21, crate::session::pre_multiedit_payload),
         variant_step!("HookStarted", 5, crate::session::pre_multiedit_payload),

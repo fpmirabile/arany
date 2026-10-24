@@ -11,7 +11,7 @@ use arany_cli::{
     presentation::rewind as display,
     protocol::{methods::*, rpc::Reason},
 };
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 pub(super) struct Pending {
     thread: SessionId,
@@ -19,8 +19,6 @@ pub(super) struct Pending {
     target: CheckpointTarget,
     head: u64,
     prefix: [u8; 32],
-    expires: tokio::time::Instant,
-    expires_at_ms: i64,
     code: Option<RewindPreview>,
 }
 
@@ -127,28 +125,13 @@ pub(super) async fn preview(
         },
     };
     let token = uuid::Uuid::now_v7().to_string();
-    let expires_at_ms = code.as_ref().map_or_else(
-        || {
-            i64::try_from(arany::now_ms())
-                .unwrap_or(i64::MAX)
-                .saturating_add(60_000)
-        },
-        RewindPreview::expires_at_ms,
-    );
     let pending = Pending {
         thread: input.thread_id,
         token: token.clone(),
         target,
         head: view.last_sequence,
         prefix: view.rewinds.prefix_digest(),
-        expires: tokio::time::Instant::now()
-            + Duration::from_millis(
-                expires_at_ms
-                    .saturating_sub(i64::try_from(arany::now_ms()).unwrap_or(i64::MAX))
-                    .max(0) as u64,
-            ),
         code,
-        expires_at_ms,
     };
     Ok((
         ThreadRewindPreviewResult {
@@ -171,7 +154,6 @@ pub(super) async fn preview(
                 })
                 .collect(),
             preview_token: token,
-            expires_at_ms,
         },
         pending,
     ))
@@ -250,16 +232,12 @@ pub(super) async fn restore(
     }
     let saved = pending
         .as_ref()
-        .filter(|p| {
-            p.thread == input.thread_id
-                && p.token == input.preview_token
-                && p.expires > tokio::time::Instant::now()
-        })
-        .ok_or_else(|| Fault::state(Reason::PreviewExpired))?;
+        .filter(|p| p.thread == input.thread_id && p.token == input.preview_token)
+        .ok_or_else(|| Fault::state(Reason::PreviewChanged))?;
     let view = threads::load_view(state, input.thread_id).await?;
     if saved.head != view.last_sequence || saved.prefix != view.rewinds.prefix_digest() {
         pending.take();
-        return Err(Fault::state(Reason::PreviewExpired));
+        return Err(Fault::state(Reason::PreviewChanged));
     }
     if input.restore != RewindRestore::Code {
         if !matches!(saved.target, CheckpointTarget::Run { .. }) {
@@ -296,7 +274,6 @@ pub(super) async fn restore(
                     loaded.workspace.clone(),
                     run_id,
                     (saved.head, saved.prefix),
-                    saved.expires_at_ms,
                 )
                 .await
                 .map_err(Fault::engine)?,
@@ -320,7 +297,7 @@ pub(super) async fn restore(
                 .await
                 .map_err(Fault::engine)?;
             if !selected.observations_match(&original) {
-                return Err(Fault::state(Reason::PreviewExpired));
+                return Err(Fault::state(Reason::PreviewChanged));
             }
             selected
         };
