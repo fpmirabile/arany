@@ -744,11 +744,8 @@ fn subject_site(run: &RunView, envelope: &EventEnvelope) -> Option<Site> {
             if !observation.intent.call.is_internal()
                 && !matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) =>
         {
-            let capture = matches!(
-                observation.intent.call,
-                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
-            ) && serde_json::from_str::<CommandResult>(&observation.output)
-                .is_ok_and(|c| c.valid() && !c.changeset.files.is_empty());
+            let capture =
+                command_result(observation).is_some_and(|c| !c.changeset.files.is_empty());
             Some(if capture {
                 Site::CommandCapture
             } else {
@@ -788,6 +785,7 @@ fn subject(
     envelope: &EventEnvelope,
     roots: u16,
 ) -> Option<(Site, Step, Option<DisproportionFeatures>)> {
+    let site = subject_site(run, envelope)?;
     let mut step = Step {
         sequence: envelope.sequence,
         call: [0; 32],
@@ -800,105 +798,11 @@ fn subject(
         edits: Vec::new(),
     };
     let mut footprint = None;
-    let site = match &envelope.event {
-        Event::ToolFinished { observation: o, .. }
-            if !o.intent.call.is_internal()
-                && !matches!(o.intent.call, ToolCall::ApplyChangeset { .. }) =>
-        {
-            step.call = call_key(&o.intent.call);
-            let mut projection = crate::tools::types::model_observation(o);
-            let object = projection.as_object_mut().expect("typed result");
-            object.remove("call");
-            object.remove("target");
-            if let Some(data) = object
-                .get_mut("output")
-                .and_then(|output| output.pointer_mut("/private_capture/data"))
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                data.remove("first_sequence");
-                data.remove("seal_sequence");
-            }
-            let command = matches!(
-                o.intent.call,
-                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
-            )
-            .then(|| {
-                serde_json::from_str::<CommandResult>(&o.output)
-                    .ok()
-                    .filter(CommandResult::valid)
-            })
-            .flatten();
-            let exit_code = command.as_ref().map(|c| c.exit_code).or_else(|| {
-                crate::worker::WorkerCommandResult::parse(&o.output)
-                    .filter(crate::worker::WorkerCommandResult::valid)
-                    .map(|c| c.exit_code)
-            });
-            let exit_class = exit_code.map(|code| match code {
-                Some(0) => 0,
-                Some(_) => 1,
-                None => 2,
-            });
-            step.outcome = hash(
-                &serde_json::to_vec(&(
-                    o.disposition,
-                    o.enforcement_cause,
-                    exit_class,
-                    hash(&serde_json::to_vec(&projection).expect("typed projection")),
-                ))
-                .expect("typed outcome"),
-            );
-            step.observation = true;
-            step.succeeded = o.disposition == ToolDisposition::Succeeded;
-            step.denied = o.disposition == ToolDisposition::Denied || o.enforcement_cause.is_some();
-            step.alias =
-                o.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied);
-            if step.succeeded {
-                if let Some(Attestation::WorkerMutation { .. }) = o.attestation {
-                    // The preceding seal already supplies the private edit facts.
-                } else if let ToolCall::Write { path, content, .. } = &o.intent.call {
-                    step.edits.push((
-                        hash(path.as_bytes()),
-                        hash(crate::validate::hex_digest(content.as_bytes()).as_bytes()),
-                    ));
-                } else if let ToolCall::Edit { path, .. }
-                | ToolCall::MultiEdit {
-                    file_path: path, ..
-                } = &o.intent.call
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&o.output)
-                    && let Some(digest) = value.get("sha256").and_then(|v| v.as_str())
-                {
-                    step.edits
-                        .push((hash(path.as_bytes()), hash(digest.as_bytes())));
-                }
-            }
-            if let Some(command) = command.filter(|c| !c.changeset.files.is_empty()) {
-                let facts: Vec<_> = command
-                    .changeset
-                    .files
-                    .iter()
-                    .map(|f| {
-                        let version = |v: &crate::tools::FileVersion| WorkerBaseVersion::File {
-                            sha256: v.sha256.clone(),
-                            bytes: v.bytes().expect("validated command version").len() as u32,
-                            executable: v.executable,
-                        };
-                        crate::session::worker::WorkerFileFact {
-                            path: f.path.clone(),
-                            before: f.before.as_ref().map_or(WorkerBaseVersion::Absent, version),
-                            after: f.after.as_ref().map_or(WorkerBaseVersion::Absent, version),
-                        }
-                    })
-                    .collect();
-                footprint = Some(capture_features(run, actor, &facts, roots));
-                capture_edits(&mut step, &facts);
-                Site::CommandCapture
-            } else {
-                Site::ToolOutcome
-            }
+    match &envelope.event {
+        Event::ToolFinished { observation, .. } => {
+            footprint = tool_step(run, actor, observation, roots, &mut step);
         }
-        Event::WorkerDataSealed { record, .. }
-            if record.data.purpose == WorkerDataPurpose::Mutation =>
-        {
+        Event::WorkerDataSealed { record, .. } => {
             let data = run
                 .workers
                 .data
@@ -909,7 +813,6 @@ fn subject(
             };
             footprint = Some(capture_features(run, actor, facts, roots));
             capture_edits(&mut step, facts);
-            Site::WorkerCapture
         }
         Event::WorkerHandoverRecorded { record, .. } => {
             let data = run
@@ -921,36 +824,117 @@ fn subject(
                 return None;
             };
             footprint = Some(capture_features(run, record.assignment_id, facts, roots));
-            Site::Handover
         }
-        Event::ProviderCallRecorded { record, .. }
-            if matches!(
-                record.disposition,
-                crate::session::ProviderCallDisposition::InvalidResponse
-            ) || record.refusal.is_some() =>
-        {
+        Event::ProviderCallRecorded { .. } | Event::HookFinished { .. } => {
             step.stall = true;
-            Site::Stall
-        }
-        Event::HookFinished { outcome, .. }
-            if matches!(
-                outcome.result,
-                crate::tools::permissions::HookResult::Blocked { .. }
-            ) && run.lifecycle_hooks.last().is_some_and(|h| {
-                matches!(
-                    h.invocation.event,
-                    crate::tools::permissions::HookEvent::Stop
-                        | crate::tools::permissions::HookEvent::SubagentStop
-                )
-            }) =>
-        {
-            step.stall = true;
-            Site::Stall
         }
         _ => return None,
-    };
+    }
     Some((site, step, footprint))
 }
+
+fn outcome_key(o: &crate::tools::ToolObservation, command: Option<&CommandResult>) -> [u8; 32] {
+    let mut projection = crate::tools::types::model_observation(o);
+    let object = projection.as_object_mut().expect("typed result");
+    object.remove("call");
+    object.remove("target");
+    if let Some(data) = object
+        .get_mut("output")
+        .and_then(|output| output.pointer_mut("/private_capture/data"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        data.remove("first_sequence");
+        data.remove("seal_sequence");
+    }
+    let exit_code = command.map(|c| c.exit_code).or_else(|| {
+        crate::worker::WorkerCommandResult::parse(&o.output)
+            .filter(crate::worker::WorkerCommandResult::valid)
+            .map(|c| c.exit_code)
+    });
+    let exit_class = exit_code.map(|code| match code {
+        Some(0) => 0,
+        Some(_) => 1,
+        None => 2,
+    });
+    hash(
+        &serde_json::to_vec(&(
+            o.disposition,
+            o.enforcement_cause,
+            exit_class,
+            hash(&serde_json::to_vec(&projection).expect("typed projection")),
+        ))
+        .expect("typed outcome"),
+    )
+}
+
+fn command_result(o: &crate::tools::ToolObservation) -> Option<CommandResult> {
+    matches!(
+        o.intent.call,
+        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+    )
+    .then(|| {
+        serde_json::from_str::<CommandResult>(&o.output)
+            .ok()
+            .filter(CommandResult::valid)
+    })
+    .flatten()
+}
+
+fn tool_step(
+    run: &RunView,
+    actor: AgentRunId,
+    o: &crate::tools::ToolObservation,
+    roots: u16,
+    step: &mut Step,
+) -> Option<DisproportionFeatures> {
+    let command = command_result(o);
+    step.call = call_key(&o.intent.call);
+    step.outcome = outcome_key(o, command.as_ref());
+    step.observation = true;
+    step.succeeded = o.disposition == ToolDisposition::Succeeded;
+    step.denied = o.disposition == ToolDisposition::Denied || o.enforcement_cause.is_some();
+    step.alias = o.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied);
+    if step.succeeded {
+        if let Some(Attestation::WorkerMutation { .. }) = o.attestation {
+            // The preceding seal already supplies the private edit facts.
+        } else if let ToolCall::Write { path, content, .. } = &o.intent.call {
+            step.edits.push((
+                hash(path.as_bytes()),
+                hash(crate::validate::hex_digest(content.as_bytes()).as_bytes()),
+            ));
+        } else if let ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } = &o.intent.call
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&o.output)
+            && let Some(digest) = value.get("sha256").and_then(|v| v.as_str())
+        {
+            step.edits
+                .push((hash(path.as_bytes()), hash(digest.as_bytes())));
+        }
+    }
+    let command = command.filter(|c| !c.changeset.files.is_empty())?;
+    let facts: Vec<_> = command
+        .changeset
+        .files
+        .iter()
+        .map(|f| {
+            let version = |v: &crate::tools::FileVersion| WorkerBaseVersion::File {
+                sha256: v.sha256.clone(),
+                bytes: v.bytes().expect("validated command version").len() as u32,
+                executable: v.executable,
+            };
+            crate::session::worker::WorkerFileFact {
+                path: f.path.clone(),
+                before: f.before.as_ref().map_or(WorkerBaseVersion::Absent, version),
+                after: f.after.as_ref().map_or(WorkerBaseVersion::Absent, version),
+            }
+        })
+        .collect();
+    capture_edits(step, &facts);
+    Some(capture_features(run, actor, &facts, roots))
+}
+
 fn capture_edits(step: &mut Step, facts: &[crate::session::worker::WorkerFileFact]) {
     for f in facts {
         if let WorkerBaseVersion::File { sha256, .. } = &f.after {
