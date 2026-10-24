@@ -1612,7 +1612,7 @@ impl RunLoop<'_> {
                                 .then_some(seq)
                         })
                         .collect();
-                    evidence.drain(..evidence.len().saturating_sub(8));
+                    evidence.drain(..evidence.len().saturating_sub(MAX_WORKER_EVIDENCE));
                     if evidence.is_empty() {
                         return None;
                     }

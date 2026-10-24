@@ -10,6 +10,7 @@ pub const WORKER_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 pub const WORKER_FILES: usize = 2048;
 pub const WORKER_CHUNKS: usize = WORKER_DATA_BYTES.div_ceil(WORKER_CHUNK_BYTES);
 pub const WORKER_MANIFEST_CHUNKS: usize = WORKER_MANIFEST_BYTES.div_ceil(WORKER_CHUNK_BYTES);
+pub(crate) const MAX_WORKER_EVIDENCE: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

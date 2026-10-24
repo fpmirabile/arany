@@ -23,7 +23,7 @@ impl Event {
                     && record.assignment_id == record.data.assignment_id
                     && record.data.valid()
                     && record.base_digest != [0; 32]
-                    && record.criterion_evidence.len() <= 8
+                    && record.criterion_evidence.len() <= MAX_WORKER_EVIDENCE
                     && record.criterion_evidence.iter().enumerate().all(|(i, s)| {
                         *s > 0 && record.criterion_evidence[..i].iter().all(|p| p < s)
                     })
@@ -63,7 +63,7 @@ impl Event {
                 if record.assignment_id.valid()
                     && record.criterion_digest != [0; 32]
                     && !record.evidence.is_empty()
-                    && record.evidence.len() <= 8
+                    && record.evidence.len() <= MAX_WORKER_EVIDENCE
                     && record.evidence.iter().all(|s| *s > 0)
                     && record.evidence.windows(2).all(|s| s[0] < s[1])
                 {
