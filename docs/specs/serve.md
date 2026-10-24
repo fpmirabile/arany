@@ -7,7 +7,7 @@ transport, thread and turn projection, and JSON Schema export. The server runs
 `initialize` / `initialized`, `thread/start|resume|fork|unsubscribe|list`, `turn/start|interrupt|steer`,
 `thread/settings/update`, `thread/rewind/preview`, `thread/rewind`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
 The server sends one-use human approval requests. The remaining work belongs to
-[NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
+[NEXT_STEPS Pursue item 6](../../NEXT_STEPS.md#pursue-in-order).
 
 [Session](./session.md) owns durable Session identity and replay,
 [execution](./execution.md) owns committed Runs and Events,

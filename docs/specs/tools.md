@@ -486,7 +486,7 @@ at most 64 KiB with at most 128 detail rows; summaries and a partial/overflow
 marker have reserved space.
 
 Guard backing storage/scratch is explicitly not yet included, pending
-[the remaining storage slice](../../planning/arany-storage/README.md). No owned
+the remaining storage work in [NEXT_STEPS](../../NEXT_STEPS.md#tool-and-engine-follow-ups). No owned
 worktree registry exists in this version; this is not a zero-size worktree claim.
 Coverage also excludes unregistered StateRoots, developer checkouts, external
 worktrees, shared Cargo/npm caches, installed binaries and OS-keyring allocation.

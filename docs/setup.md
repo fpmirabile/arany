@@ -275,7 +275,7 @@ The [dated vendor research](./research/deepseek-kimi-glm-providers-2026-10.md#ki
 links the platform schema and Code endpoint, model and identity sources. Existing
 valid version-1 Responses profiles migrate automatically and require a fresh
 check. Live acceptance and native platform evidence remain
-[owner checks](../NEXT_STEPS.md#daily-use-first).
+[next steps](../NEXT_STEPS.md#daily-use-first).
 
 GLM Standard API candidates require their exact text-compaction checks. Ordinary
 Messages text needs no provider-enforced response schema. Synthetic fixtures do
@@ -341,7 +341,7 @@ and JSON mode do not establish Messages thinking support. Run the exact
 synthetic data and may be billable. Each model needs its own passing check
 before a Run; failure leaves it unadmitted.
 [Vendor research](./research/deepseek-kimi-glm-providers-2026-10.md#glm-standard-api-key-subscription-excluded)
-owns the source review; [owner checks](../NEXT_STEPS.md#daily-use-first) own live
+owns the source review; [next steps](../NEXT_STEPS.md#daily-use-first) own live
 billing, compatibility and native evidence.
 
 ## Select a private roster preset

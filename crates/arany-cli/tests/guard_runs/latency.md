@@ -1,8 +1,7 @@
 # Linux Tool latency corpus
 
 The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports the Read
-row offline. Guarded Edit and command rows remain in
-[slice 2](../../../../planning/linux-tool-latency/README.md#2-pr-complete-the-same-report-with-guarded-edit-and-command-rows).
+row offline. Guarded Edit and command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
 This is measurement evidence for [Tools](../../../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners)
 and [Execution](../../../../docs/specs/execution.md#committed-event-stream), not a
 new runtime deadline, CLI reporting feature or native support claim.
