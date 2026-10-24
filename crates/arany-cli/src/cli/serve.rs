@@ -45,7 +45,7 @@ pub(crate) async fn run(
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
-    let mut signals = super::exec::StopSignals::install()
+    let mut signals = super::run_outcome::StopSignals::install()
         .map_err(|_| "signal handling unavailable".to_owned())?;
     let engine = Engine::open(
         state,
@@ -191,7 +191,7 @@ pub(in crate::cli) async fn shutdown_grace(
             // Release the watch read guard before cleanup sends another shutdown notification.
             let _ = shutdown.wait_for(|stopping| *stopping).await;
         } => {
-            tokio::time::timeout(super::exec::SHUTDOWN_GRACE, serving)
+            tokio::time::timeout(super::run_outcome::SHUTDOWN_GRACE, serving)
                 .await
                 .unwrap_or_else(|_| Err("shutdown timed out; Run may be interrupted; check Session history".into()))
         }

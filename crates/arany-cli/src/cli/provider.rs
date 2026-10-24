@@ -344,7 +344,7 @@ async fn check_signalled<T, E>(
     check: impl std::future::Future<Output = Result<T, E>>,
     cancellation: RunCancellation,
 ) -> Result<Result<T, E>, String> {
-    let mut signals = super::exec::StopSignals::install()
+    let mut signals = super::run_outcome::StopSignals::install()
         .map_err(|_| "signal handling unavailable".to_owned())?;
     tokio::pin!(check);
     Ok(tokio::select! {
