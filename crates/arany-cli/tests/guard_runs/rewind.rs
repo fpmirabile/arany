@@ -339,7 +339,7 @@ async fn case(case: &str) {
     }
     if case == "race" {
         assert!(
-            matches!(result, Err(EngineError::RewindPreviewExpired)),
+            matches!(result, Err(EngineError::RewindPreviewChanged)),
             "{result:?}"
         );
         assert!(workspace.join("notes/new.txt").exists());

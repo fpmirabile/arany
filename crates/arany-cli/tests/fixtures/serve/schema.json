@@ -1217,7 +1217,7 @@
         "providerUnavailable",
         "providerRejected",
         "invalidSelection",
-        "previewExpired",
+        "previewChanged",
         "rewindBlocked",
         "rewindTooLarge",
         "conversationRewindLimit",
@@ -2092,10 +2092,6 @@
         "checkpoint": {
           "$ref": "#/$defs/RewindCheckpoint"
         },
-        "expiresAtMs": {
-          "format": "int64",
-          "type": "integer"
-        },
         "files": {
           "items": {
             "$ref": "#/$defs/RewindFilePreview"
@@ -2125,8 +2121,7 @@
         "files",
         "blockers",
         "nonRewindable",
-        "previewToken",
-        "expiresAtMs"
+        "previewToken"
       ],
       "type": "object"
     },

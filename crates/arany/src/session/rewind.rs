@@ -99,7 +99,6 @@ pub struct RewindStarted {
     pub workspace_inode: u64,
     pub policy_digest: [u8; 32],
     pub enforcement_digest: [u8; 32],
-    pub expires_at_ms: i64,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -218,7 +217,6 @@ impl RewindStarted {
             && self.workspace_inode != 0
             && self.policy_digest != [0; 32]
             && self.enforcement_digest != [0; 32]
-            && self.expires_at_ms > 0
             && self.kept.len() + self.overwrite.len() <= MAX_REWIND_SELECTIONS
             && sorted_paths(self.kept.iter().map(String::as_str))
             && sorted_paths(self.overwrite.iter().map(|o| o.path.as_str()))
