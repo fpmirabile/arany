@@ -12,6 +12,13 @@ use tokio::sync::{Notify, mpsc};
 
 pub(super) type Shared = Arc<Mutex<State>>;
 
+struct InputContext<'a> {
+    config: &'a Config,
+    state: &'a Shared,
+    serve: &'a mpsc::Sender<ClientMessage>,
+    output: &'a mpsc::Sender<Value>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     initialized: bool,
@@ -192,6 +199,12 @@ pub(super) async fn input(
     if let Some(error) = refusal {
         return immediate(output, error);
     }
+    let context = InputContext {
+        config,
+        state,
+        serve,
+        output,
+    };
     match request.method.as_str() {
         "initialize" => initialize_input(id, request.params, state, output, serve).await,
         "authenticate" => authenticate_input(id, request.params, config, state, output).await,
@@ -205,115 +218,20 @@ pub(super) async fn input(
             new_session_input(id, params, config, state, serve).await
         }
         "session/load" | "session/resume" => {
-            let replay = request.method == "session/load";
-            let params = if replay {
-                parse::<wire::LoadSession>(request.params).map(|p| wire::ResumeSession {
-                    session_id: p.session_id,
-                    cwd: p.session.cwd,
-                    mcp_servers: p.session.mcp_servers,
-                    additional_directories: p.session.additional_directories,
-                })
-            } else {
-                parse::<wire::ResumeSession>(request.params)
-            };
-            let Ok(params) = params else {
-                return immediate(output, invalid());
-            };
-            if !params.additional_directories.is_empty() {
-                return immediate(output, invalid());
-            }
-            let busy = {
-                let state = state.lock().expect("translator state");
-                state
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.session == params.session_id)
-                    || state.pending.values().any(|pending| {
-                        matches!(pending,
-                        Pending::Mode {session, ..} if *session == params.session_id)
-                    })
-            };
-            if busy {
-                return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
-            }
-            notice_mcp(state, &params.mcp_servers);
-            let cwd = params.cwd;
-            let mut selection = config.thread(cwd.clone());
-            let mode = state
-                .lock()
-                .expect("translator state")
-                .sessions
-                .get(&params.session_id)
-                .map(|session| session.mode.clone())
-                .unwrap_or_else(|| config.permission_mode.clone());
-            selection.permission_mode = Some(mode.clone());
-            send_request(
-                state,
-                serve,
-                "thread/resume",
-                ThreadResumeParams {
-                    thread_id: params.session_id,
-                    cwd: selection.cwd,
-                    provider: selection.provider,
-                    model: selection.model,
-                    effort: selection.effort,
-                    collaboration: selection.collaboration,
-                    max_active_children: selection.max_active_children,
-                    tools: selection.tools,
-                    permission_mode: selection.permission_mode,
-                    include_paths: selection.include_paths,
-                },
-                Pending::Load {
-                    id,
-                    cwd,
-                    replay,
-                    mode,
-                },
+            load_input(
+                id,
+                request.method == "session/load",
+                request.params,
+                &context,
             )
             .await
         }
         "session/set_mode" | "session/set_config_option" => {
-            let config_option = request.method == "session/set_config_option";
-            let params = if config_option {
-                parse::<wire::SetConfigOption>(request.params).and_then(|p| {
-                    if p.config_id != "mode" || p.value_type.as_deref() == Some("boolean") {
-                        return Err(());
-                    }
-                    Ok(wire::SetMode {
-                        session_id: p.session_id,
-                        mode_id: p.value,
-                    })
-                })
-            } else {
-                parse::<wire::SetMode>(request.params)
-            };
-            let Ok(params) = params else {
-                return immediate(output, invalid());
-            };
-            if !state
-                .lock()
-                .expect("translator state")
-                .sessions
-                .contains_key(&params.session_id)
-            {
-                return immediate(
-                    output,
-                    wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
-                );
-            }
-            send_request(
-                state,
-                serve,
-                "thread/settings/update",
-                ThreadSettingsUpdateParams {
-                    thread_id: params.session_id,
-                    permission_mode: params.mode_id,
-                },
-                Pending::Mode {
-                    id,
-                    session: params.session_id,
-                    config: config_option,
-                },
+            mode_input(
+                id,
+                request.method == "session/set_config_option",
+                request.params,
+                &context,
             )
             .await
         }
@@ -465,6 +383,149 @@ pub(super) async fn input(
             wire::error(Some(id), -32601, "Method not found", "methodNotFound"),
         ),
     }
+}
+
+async fn load_input(
+    id: RequestId,
+    replay: bool,
+    value: Option<Value>,
+    context: &InputContext<'_>,
+) -> Result<(), String> {
+    let invalid = || {
+        wire::error(
+            Some(id.clone()),
+            -32602,
+            "Invalid parameters",
+            "invalidParams",
+        )
+    };
+    let params = if replay {
+        parse::<wire::LoadSession>(value).map(|p| wire::ResumeSession {
+            session_id: p.session_id,
+            cwd: p.session.cwd,
+            mcp_servers: p.session.mcp_servers,
+            additional_directories: p.session.additional_directories,
+        })
+    } else {
+        parse::<wire::ResumeSession>(value)
+    };
+    let Ok(params) = params else {
+        return immediate(context.output, invalid());
+    };
+    if !params.additional_directories.is_empty() {
+        return immediate(context.output, invalid());
+    }
+    let busy = {
+        let state = context.state.lock().expect("translator state");
+        state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.session == params.session_id)
+            || state.pending.values().any(|pending| {
+                matches!(pending, Pending::Mode { session, .. } if *session == params.session_id)
+            })
+    };
+    if busy {
+        return immediate(
+            context.output,
+            wire::error(Some(id), -32600, "Server busy", "busy"),
+        );
+    }
+    notice_mcp(context.state, &params.mcp_servers);
+    let cwd = params.cwd;
+    let mut selection = context.config.thread(cwd.clone());
+    let mode = context
+        .state
+        .lock()
+        .expect("translator state")
+        .sessions
+        .get(&params.session_id)
+        .map(|session| session.mode.clone())
+        .unwrap_or_else(|| context.config.permission_mode.clone());
+    selection.permission_mode = Some(mode.clone());
+    send_request(
+        context.state,
+        context.serve,
+        "thread/resume",
+        ThreadResumeParams {
+            thread_id: params.session_id,
+            cwd: selection.cwd,
+            provider: selection.provider,
+            model: selection.model,
+            effort: selection.effort,
+            collaboration: selection.collaboration,
+            max_active_children: selection.max_active_children,
+            tools: selection.tools,
+            permission_mode: selection.permission_mode,
+            include_paths: selection.include_paths,
+        },
+        Pending::Load {
+            id,
+            cwd,
+            replay,
+            mode,
+        },
+    )
+    .await
+}
+
+async fn mode_input(
+    id: RequestId,
+    config_option: bool,
+    value: Option<Value>,
+    context: &InputContext<'_>,
+) -> Result<(), String> {
+    let invalid = || {
+        wire::error(
+            Some(id.clone()),
+            -32602,
+            "Invalid parameters",
+            "invalidParams",
+        )
+    };
+    let params = if config_option {
+        parse::<wire::SetConfigOption>(value).and_then(|p| {
+            if p.config_id != "mode" || p.value_type.as_deref() == Some("boolean") {
+                return Err(());
+            }
+            Ok(wire::SetMode {
+                session_id: p.session_id,
+                mode_id: p.value,
+            })
+        })
+    } else {
+        parse::<wire::SetMode>(value)
+    };
+    let Ok(params) = params else {
+        return immediate(context.output, invalid());
+    };
+    if !context
+        .state
+        .lock()
+        .expect("translator state")
+        .sessions
+        .contains_key(&params.session_id)
+    {
+        return immediate(
+            context.output,
+            wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
+        );
+    }
+    send_request(
+        context.state,
+        context.serve,
+        "thread/settings/update",
+        ThreadSettingsUpdateParams {
+            thread_id: params.session_id,
+            permission_mode: params.mode_id,
+        },
+        Pending::Mode {
+            id,
+            session: params.session_id,
+            config: config_option,
+        },
+    )
+    .await
 }
 
 async fn input_notification(

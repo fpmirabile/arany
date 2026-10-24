@@ -2529,7 +2529,12 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
 
 #[test]
 fn host_prefix_migration_preserves_source_bytes_but_never_fabricates_authority() {
-    let step = REGISTRY.event_step("ToolPermissionDecided", 6).unwrap();
+    let step = REGISTRY
+        .event_step(
+            "ToolPermissionDecided",
+            crate::test_support::payload_version("ToolPermissionDecided") - 1,
+        )
+        .unwrap();
     assert_eq!((step.canonical)(VERDICT_V4).as_deref(), Some(VERDICT_V4));
     for field in ["basis", "source"] {
         let mut forged: Value = serde_json::from_str(VERDICT_V4).unwrap();
