@@ -1158,10 +1158,10 @@ mod tests {
         ] {
             let mut composer = Composer::default();
             composer.insert_paste(&"p".repeat(paste_bytes)).unwrap();
-            for _ in 0..prefix_bytes {
+            if prefix_bytes > 0 {
                 assert_eq!(
-                    composer.apply(TerminalInput::Character('t')),
-                    ComposerEdit::Changed
+                    composer.insert_literal(&"t".repeat(prefix_bytes)),
+                    Ok(ComposerEdit::Changed)
                 );
             }
             assert_eq!(composer.input_capacity(), capacity);

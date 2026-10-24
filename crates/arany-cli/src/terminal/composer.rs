@@ -9,7 +9,7 @@ use super::{
 use arany::{
     ImageAttachment, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, MAX_USER_MESSAGE_BYTES, ModelEntry,
 };
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use uuid::Uuid;
 
 pub const MAX_DRAFT_BYTES: usize = 8 * 1024;
@@ -818,12 +818,7 @@ impl Composer {
         }
         self.text.insert_str(self.cursor, &text);
         let target = self.cursor + text.len();
-        self.cursor = self
-            .text
-            .grapheme_indices(true)
-            .map(|(start, grapheme)| start + grapheme.len())
-            .find(|end| *end >= target)
-            .unwrap_or(self.text.len());
+        self.cursor = boundary_at_or_after(&self.text, target);
         if let Some(paste) = self
             .pastes
             .iter()
@@ -1242,12 +1237,7 @@ impl Composer {
             true
         });
         self.text.replace_range(start..end, "");
-        self.cursor = self
-            .text
-            .grapheme_indices(true)
-            .map(|(offset, _)| offset)
-            .find(|offset| *offset >= start)
-            .unwrap_or(self.text.len());
+        self.cursor = boundary_at_or_after(&self.text, start);
     }
 
     fn move_vertical(&mut self, up: bool) -> ComposerEdit {
@@ -1286,16 +1276,32 @@ impl Composer {
 }
 
 fn previous_boundary(text: &str, cursor: usize) -> usize {
-    text.grapheme_indices(true)
-        .take_while(|(start, _)| *start < cursor)
-        .last()
-        .map_or(0, |(start, _)| start)
+    GraphemeCursor::new(cursor, text.len(), true)
+        .prev_boundary(text, 0)
+        .expect("complete text contains all grapheme context")
+        .unwrap_or(0)
 }
 
 fn next_boundary(text: &str, cursor: usize) -> usize {
-    text.grapheme_indices(true)
-        .find(|(start, _)| *start > cursor)
-        .map_or(text.len(), |(start, _)| start)
+    GraphemeCursor::new(cursor, text.len(), true)
+        .next_boundary(text, 0)
+        .expect("complete text contains all grapheme context")
+        .unwrap_or(text.len())
+}
+
+fn boundary_at_or_after(text: &str, offset: usize) -> usize {
+    let mut cursor = GraphemeCursor::new(offset, text.len(), true);
+    if cursor
+        .is_boundary(text, 0)
+        .expect("complete text contains all grapheme context")
+    {
+        offset
+    } else {
+        cursor
+            .next_boundary(text, 0)
+            .expect("complete text contains all grapheme context")
+            .unwrap_or(text.len())
+    }
 }
 
 fn previous_word_boundary(text: &str, cursor: usize) -> usize {
@@ -1846,6 +1852,7 @@ mod tests {
             ("ab", 1, "\u{301}", "a\u{301}b", 3),
             ("\u{301}b", 0, "a", "a\u{301}b", 3),
             ("🇧", 0, "🇦", "🇦🇧", 8),
+            ("🇦🇧🇨🇩", 8, "🇪", "🇦🇧🇪🇨🇩", 16),
             ("👩👩", 4, "\u{200d}", "👩\u{200d}👩", 11),
             ("", 0, "/exit\n/setup", "/exit\n/setup", 12),
         ] {
