@@ -902,7 +902,7 @@ pub(super) async fn select_model(
     if validate_native_model_id(model).is_err() {
         return Ok("Error: invalid native model".into());
     }
-    if let Some(name) = profile.strip_prefix("custom:") {
+    if let Some(name) = ProviderKind::custom_name(profile) {
         let root = open_state(admission)?;
         let custom = match CustomProfile::load_named(&root, name) {
             Ok(custom) => custom,
@@ -1113,161 +1113,21 @@ pub(super) async fn handle_command(
             "New conversation · send a message to save it".into()
         }
         InteractiveCommand::Resume => {
-            let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
-                return Ok("Usage: /resume SESSION_ID".into());
-            };
-            let root = open_state(admission)?;
-            match resume_session(root, admission.workspace.clone(), id).await {
-                Ok(resumed) => {
-                    let resumed =
-                        match super::prepare_resume(admission, resumed, Some(&view.defaults)).await
-                        {
-                            Ok(resumed) => resumed,
-                            Err(error) => return Ok(format!("Error: {error}")),
-                        };
-                    *session_id = id;
-                    *view = resumed;
-                    super::remembered_session_notice(
-                        admission,
-                        view,
-                        format!(
-                            "Resumed: {}",
-                            crate::presentation::escape_terminal(&view.conversation_title())
-                        ),
-                    )
-                    .await
-                }
-                Err(error) => format!("Error: {error}"),
-            }
+            return resume_command(admission, session_id, view, argument).await;
         }
         InteractiveCommand::Goal if argument == Some("pause") => {
             "No Goal is running; /goal pause works during a Run".into()
         }
         InteractiveCommand::Goal => crate::presentation::goal_status(view),
         InteractiveCommand::Fork => {
-            if argument.is_none() && view.created_sequence == 0 {
-                return Ok("Send a message before forking this conversation".into());
-            }
-            let source_id = match argument {
-                Some(value) => match SessionId::from_str(value) {
-                    Ok(id) => id,
-                    Err(_) => return Ok("Usage: /fork [SESSION_ID]".into()),
-                },
-                None => *session_id,
-            };
-            let root = open_state(admission)?;
-            match fork_session(root, admission.workspace.clone(), source_id, None).await {
-                Ok(id) => {
-                    let forked = match load_view(&admission.state_dir, id).await {
-                        Ok(forked) => forked,
-                        Err(error) => {
-                            return Ok(format!(
-                                "Error: Forked Session {id}, but it could not be opened: {error}"
-                            ));
-                        }
-                    };
-                    let forked = match super::prepare_resume(
-                        admission,
-                        forked,
-                        Some(&view.defaults),
-                    )
-                    .await
-                    {
-                        Ok(forked) => forked,
-                        Err(error) => {
-                            return Ok(format!(
-                                "Error: Forked Session {id}, but it could not be opened: {error}"
-                            ));
-                        }
-                    };
-                    *session_id = id;
-                    *view = forked;
-                    super::remembered_session_notice(
-                        admission,
-                        view,
-                        format!("Forked Session {id}"),
-                    )
-                    .await
-                }
-                Err(error) => format!("Error: {error}"),
-            }
+            return fork_command(admission, session_id, view, argument).await;
         }
         InteractiveCommand::Rename => {
-            let Some(title) = argument else {
-                return Ok("Usage: /rename TITLE".into());
-            };
-            if title.is_empty() || title.len() > 128 {
-                return Ok("Error: invalid Run request".into());
-            }
-            if view.created_sequence == 0 {
-                view.title = title.to_owned();
-                view.title_is_explicit = true;
-                return Ok(format!("Renamed conversation: {title}"));
-            }
-            let root = open_state(admission)?;
-            match rename_session(
-                root,
-                admission.workspace.clone(),
-                *session_id,
-                title.to_owned(),
-            )
-            .await
-            {
-                Ok(()) => match load_view(&admission.state_dir, *session_id).await {
-                    Ok(renamed) => {
-                        *view = renamed;
-                        format!("Renamed Session: {title}")
-                    }
-                    Err(error) => {
-                        format!("Error: Renamed Session, but it could not be reloaded: {error}")
-                    }
-                },
-                Err(error) => format!("Error: {error}"),
-            }
+            return rename_command(admission, *session_id, view, argument).await;
         }
-        InteractiveCommand::Provider => match argument {
-            Some(profile) if ProviderArg::from_str(profile).is_ok() => {
-                let account_id = if ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt) {
-                    match chatgpt::selected_account_id() {
-                        Ok(id) => Some(id),
-                        Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
-                            return Ok(
-                                "Error: no selected ChatGPT account; use /setup to connect".into()
-                            );
-                        }
-                        Err(error) => return Ok(format!("Error: {error}")),
-                    }
-                } else if view.defaults.provider.as_deref() == Some(profile) {
-                    view.defaults.account_id
-                } else {
-                    None
-                };
-                let mut defaults = view.defaults.clone();
-                if defaults.provider.as_deref() != Some(profile)
-                    || defaults.account_id != account_id
-                {
-                    defaults.provider = Some(profile.to_owned());
-                    defaults.model = None;
-                    defaults.effort = None;
-                    defaults.account_id = account_id;
-                    if let Err(error) =
-                        update_defaults(admission, *session_id, view, defaults).await
-                    {
-                        return recover_defaults_change(error);
-                    }
-                }
-                if view.defaults.model.is_none() {
-                    format!("Provider: {profile}; set /model")
-                } else {
-                    format!("Provider: {profile}")
-                }
-            }
-            Some(_) => "Provider must be openai, anthropic, chatgpt, or custom:NAME".into(),
-            None => format!(
-                "Provider: {}",
-                view.defaults.provider.as_deref().unwrap_or("not selected")
-            ),
-        },
+        InteractiveCommand::Provider => {
+            return provider_command(admission, *session_id, view, argument).await;
+        }
         InteractiveCommand::Model => {
             let Some(argument) = argument else {
                 return Err("Model selection requires the terminal catalog".into());
@@ -1321,32 +1181,191 @@ pub(super) async fn handle_command(
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
         }
-        InteractiveCommand::Cache => {
-            let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
-                return Ok(CACHE_CLEAR_FAILED.into());
-            };
-            let (result, cleared) = match argument {
-                Some("clear") => (
-                    root.clear_workspace_build_cache(&admission.workspace),
-                    "Cleared this Workspace's private build cache",
-                ),
-                Some("clear all") => (
-                    root.clear_all_build_caches(),
-                    "Cleared all private build caches",
-                ),
-                _ => return Ok(format!("Error: {CACHE_USAGE}")),
-            };
-            match result {
-                Ok(()) => cleared.into(),
-                Err(arany::StoreError::BuildCacheBusy) => {
-                    "Build cache is in use; retry after its command finishes".into()
-                }
-                Err(_) => CACHE_CLEAR_FAILED.into(),
-            }
-        }
+        InteractiveCommand::Cache => return Ok(cache_command(admission, argument)),
         _ => "Command is not available in this build".into(),
     };
     Ok(notice)
+}
+
+async fn resume_command(
+    admission: &Admission,
+    session_id: &mut SessionId,
+    view: &mut SessionView,
+    argument: Option<&str>,
+) -> Result<String, LoopError> {
+    let Some(id) = argument.and_then(|value| SessionId::from_str(value).ok()) else {
+        return Ok("Usage: /resume SESSION_ID".into());
+    };
+    let root = open_state(admission)?;
+    let resumed = match resume_session(root, admission.workspace.clone(), id).await {
+        Ok(resumed) => resumed,
+        Err(error) => return Ok(format!("Error: {error}")),
+    };
+    let resumed = match super::prepare_resume(admission, resumed, Some(&view.defaults)).await {
+        Ok(resumed) => resumed,
+        Err(error) => return Ok(format!("Error: {error}")),
+    };
+    *session_id = id;
+    *view = resumed;
+    Ok(super::remembered_session_notice(
+        admission,
+        view,
+        format!(
+            "Resumed: {}",
+            crate::presentation::escape_terminal(&view.conversation_title())
+        ),
+    )
+    .await)
+}
+
+async fn fork_command(
+    admission: &Admission,
+    session_id: &mut SessionId,
+    view: &mut SessionView,
+    argument: Option<&str>,
+) -> Result<String, LoopError> {
+    if argument.is_none() && view.created_sequence == 0 {
+        return Ok("Send a message before forking this conversation".into());
+    }
+    let source_id = match argument {
+        Some(value) => match SessionId::from_str(value) {
+            Ok(id) => id,
+            Err(_) => return Ok("Usage: /fork [SESSION_ID]".into()),
+        },
+        None => *session_id,
+    };
+    let root = open_state(admission)?;
+    let id = match fork_session(root, admission.workspace.clone(), source_id, None).await {
+        Ok(id) => id,
+        Err(error) => return Ok(format!("Error: {error}")),
+    };
+    let forked = match load_view(&admission.state_dir, id).await {
+        Ok(forked) => forked,
+        Err(error) => {
+            return Ok(format!(
+                "Error: Forked Session {id}, but it could not be opened: {error}"
+            ));
+        }
+    };
+    let forked = match super::prepare_resume(admission, forked, Some(&view.defaults)).await {
+        Ok(forked) => forked,
+        Err(error) => {
+            return Ok(format!(
+                "Error: Forked Session {id}, but it could not be opened: {error}"
+            ));
+        }
+    };
+    *session_id = id;
+    *view = forked;
+    Ok(super::remembered_session_notice(admission, view, format!("Forked Session {id}")).await)
+}
+
+async fn rename_command(
+    admission: &Admission,
+    session_id: SessionId,
+    view: &mut SessionView,
+    argument: Option<&str>,
+) -> Result<String, LoopError> {
+    let Some(title) = argument else {
+        return Ok("Usage: /rename TITLE".into());
+    };
+    if title.is_empty() || title.len() > 128 {
+        return Ok("Error: invalid Run request".into());
+    }
+    if view.created_sequence == 0 {
+        view.title = title.to_owned();
+        view.title_is_explicit = true;
+        return Ok(format!("Renamed conversation: {title}"));
+    }
+    let root = open_state(admission)?;
+    match rename_session(
+        root,
+        admission.workspace.clone(),
+        session_id,
+        title.to_owned(),
+    )
+    .await
+    {
+        Ok(()) => match load_view(&admission.state_dir, session_id).await {
+            Ok(renamed) => {
+                *view = renamed;
+                Ok(format!("Renamed Session: {title}"))
+            }
+            Err(error) => Ok(format!(
+                "Error: Renamed Session, but it could not be reloaded: {error}"
+            )),
+        },
+        Err(error) => Ok(format!("Error: {error}")),
+    }
+}
+
+async fn provider_command(
+    admission: &Admission,
+    session_id: SessionId,
+    view: &mut SessionView,
+    argument: Option<&str>,
+) -> Result<String, LoopError> {
+    let Some(profile) = argument else {
+        return Ok(format!(
+            "Provider: {}",
+            view.defaults.provider.as_deref().unwrap_or("not selected")
+        ));
+    };
+    if ProviderArg::from_str(profile).is_err() {
+        return Ok("Provider must be openai, anthropic, chatgpt, or custom:NAME".into());
+    }
+    let account_id = if ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt) {
+        match chatgpt::selected_account_id() {
+            Ok(id) => Some(id),
+            Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
+                return Ok("Error: no selected ChatGPT account; use /setup to connect".into());
+            }
+            Err(error) => return Ok(format!("Error: {error}")),
+        }
+    } else if view.defaults.provider.as_deref() == Some(profile) {
+        view.defaults.account_id
+    } else {
+        None
+    };
+    let mut defaults = view.defaults.clone();
+    if defaults.provider.as_deref() != Some(profile) || defaults.account_id != account_id {
+        defaults.provider = Some(profile.to_owned());
+        defaults.model = None;
+        defaults.effort = None;
+        defaults.account_id = account_id;
+        if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
+            return recover_defaults_change(error);
+        }
+    }
+    Ok(if view.defaults.model.is_none() {
+        format!("Provider: {profile}; set /model")
+    } else {
+        format!("Provider: {profile}")
+    })
+}
+
+fn cache_command(admission: &Admission, argument: Option<&str>) -> String {
+    let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
+        return CACHE_CLEAR_FAILED.into();
+    };
+    let (result, cleared) = match argument {
+        Some("clear") => (
+            root.clear_workspace_build_cache(&admission.workspace),
+            "Cleared this Workspace's private build cache",
+        ),
+        Some("clear all") => (
+            root.clear_all_build_caches(),
+            "Cleared all private build caches",
+        ),
+        _ => return format!("Error: {CACHE_USAGE}"),
+    };
+    match result {
+        Ok(()) => cleared.into(),
+        Err(arany::StoreError::BuildCacheBusy) => {
+            "Build cache is in use; retry after its command finishes".into()
+        }
+        Err(_) => CACHE_CLEAR_FAILED.into(),
+    }
 }
 
 pub(super) fn active_command_notice(
