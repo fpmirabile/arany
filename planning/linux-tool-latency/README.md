@@ -10,7 +10,7 @@
 
 ## Outcome and scope
 
-Deliver one capability: a reproducible, offline Linux report of p95 latency from a complete Provider Tool proposal reaching the Engine through acknowledgement of its durable result, for Read, Edit and one fixed guarded command. This supplies the measurable part of [Daily use first item 11](../../NEXT_STEPS.md#daily-use-first), without changing effect behavior or replacing [Pursue item 2](../../NEXT_STEPS.md#pursue-in-order)'s narrower Read-dispatch evidence.
+Deliver one capability: a reproducible, offline Linux report of p95 latency from a complete Provider Tool proposal reaching the Engine through acknowledgement of its durable result, for Read, Edit and one fixed guarded command. This supplies the measurable part of [Daily use first item 9](../../NEXT_STEPS.md#daily-use-first), without changing effect behavior or replacing [Pursue item 2](../../NEXT_STEPS.md#pursue-in-order)'s narrower Read-dispatch evidence.
 
 The deliverable is an explicitly ignored release corpus, deterministic checks of its measurement boundaries and results, and an owner-run named-host evidence procedure. Performance optimization, a new CLI/OTLP reporting surface, cold-disk measurements, live Provider timing, macOS latency evidence, CI repair and flake closure are outside this feature.
 
@@ -131,7 +131,7 @@ Extend the same corpus, not a second benchmark system: scripted Edit/command pro
 
 Verification: repeat formatting/Clippy for touched code, targeted Read/guarded coding and permissions/uncertainty owners, and recorder checks showing no success endpoint on failed acknowledgement. Run the release corpus explicitly on the owner-selected Linux host, or leave its named-host row pending. All three rows must have exactly 100 measured successes for a valid invocation; failures cannot become performance passes. Complete final-head CI verifies correctness across Linux/macOS; the latency test stays explicitly ignored even under `arany_ci` and adds no CI configuration or wall-time gate.
 
-Update item 11's single owner-run evidence row with the actual invocation procedure, accepted targets and remaining evidence. Recommended proposed test name/command, to be made exact by this slice:
+Update item 9's single owner-run evidence row with the actual invocation procedure, accepted targets and remaining evidence. Recommended proposed test name/command, to be made exact by this slice:
 
 ```sh
 cargo test -p arany-cli --test guard_runs --release --locked --offline linux_tool_latency_corpus -- --exact --ignored --nocapture --test-threads=1
@@ -155,12 +155,12 @@ The owner records: date, exact revision, binary/toolchain/profile, host label, C
 
 - Accepted the monotonic receipt-to-finish-acknowledgement metric, audited against closed journals, with replayable wall-time intervals reported separately. Retain local sample reports without changing the stored Event format.
 - Accepted provisional named-host p95 objectives of Read 100 ms, Edit 250 ms and no-op command 500 ms as a starting point, with Read dispatch <= 50 ms reported separately. Record and investigate baseline misses; no CI wall-time gate or automatic threshold adjustment.
-- Selected the owner's ordinary native Linux development machine, `asustuf` (kernel `7.2.10-zen1-1-zen`), idle on stable power and local disk, for three separately reported invocations. `/home` uses `/dev/nvme1n1p1`, ext4, on `nvme1n1` (`WD_BLACK SN770 2TB`, `ROTA=0`, `TRAN=nvme`). Accepted the fixed warm/no-op workload for item 11's first row; cold disk, long history, large snapshots and macOS remain explicitly unverified.
+- Selected the owner's ordinary native Linux development machine, `asustuf` (kernel `7.2.10-zen1-1-zen`), idle on stable power and local disk, for three separately reported invocations. `/home` uses `/dev/nvme1n1p1`, ext4, on `nvme1n1` (`WD_BLACK SN770 2TB`, `ROTA=0`, `TRAN=nvme`). Accepted the fixed warm/no-op workload for item 9's first row; cold disk, long history, large snapshots and macOS remain explicitly unverified.
 
 ## Exit criteria
 
 - Both vertical slices provide one usable reporting capability; default CI has deterministic correctness checks and no hardware-sensitive latency assertion. Specs, Guard, SQLite durability and Goal limits retain their existing behavior.
 - A valid report has complete endpoint joins, exact counts and results, native attestations and closed-journal replay without re-execution; ordered raw samples reproduce its p50/p95/max. Rejected, failed, cancelled, uncertain, missing and overflow cases cannot enter a successful distribution.
-- The owner-run Linux evidence row remains open until the named host, fixed workload, three reports and replay audit are recorded. Target misses stay visible with diagnosis ownership; capability delivery alone does not close item 11's latency claim. Dispatch evidence closes Pursue item 2 only through its own measurement owner.
+- The owner-run Linux evidence row remains open until the named host, fixed workload, three reports and replay audit are recorded. Target misses stay visible with diagnosis ownership; capability delivery alone does not close item 9's latency claim. Dispatch evidence closes Pursue item 2 only through its own measurement owner.
 - Green executed macOS CI, flake closure and future macOS latency remain separately tracked. No live Provider was needed or measured.
 - Once implementation is complete, move the accepted procedure to the corpus/evidence owner, leave unresolved native evidence in `NEXT_STEPS.md`, and remove this plan and index row per the [planning lifecycle](../README.md#lifecycle), including when implementation is still uncommitted locally.
