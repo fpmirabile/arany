@@ -2,7 +2,7 @@ use super::children::ChildWork;
 use super::stop::{RunProgress, RunRefusal, SizingRefusal, StepEnd, StopCause};
 use super::{ActivePause, ActiveSegment, RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::hints::HintPublisher;
-use crate::engine::ledger::{Action, Admission, duration_ms};
+use crate::engine::ledger::{Action, ActiveDeadlineCause, Admission, duration_ms};
 use crate::engine::{EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{ProviderRequest, ProviderTurn};
 use crate::session::Event;
@@ -534,39 +534,28 @@ impl RunLoop<'_> {
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
             Grant::Researcher {
-                child, deadline, ..
+                child,
+                deadline,
+                active_deadline,
             } => {
+                let deadline_refusal = match active_deadline.as_ref().map(|deadline| deadline.cause)
+                {
+                    Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
+                    Some(ActiveDeadlineCause::Delegation) | None => {
+                        SizingRefusal::DelegationDeadline
+                    }
+                };
                 let deadline = grant.deadline().unwrap_or(*deadline);
                 let Some(mut intent) =
                     self.researcher_intent(runtime, child.agent_run_id, call, deadline)
                 else {
-                    return Ok(Err(SizingRefusal::DelegationDeadline));
+                    return Ok(Err(deadline_refusal));
                 };
                 if child.editor {
                     self.shape_worker_intent(&mut intent, child.agent_run_id)?;
-                    let remaining = deadline
-                        .saturating_duration_since(Instant::now())
-                        .saturating_sub(
-                            runtime.reservation_overhead(&intent.call)
-                                + TOOL_CLEANUP_OVERHEAD
-                                + STORE_ACTION_OVERHEAD,
-                        );
-                    let remaining =
-                        remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
-                    intent.limits.runtime_ms = intent.limits.runtime_ms.min(
-                        u32::try_from(
-                            duration_ms(remaining)
-                                / if intent.limits.cache_bytes > 0 { 6 } else { 4 },
-                        )
-                        .unwrap_or(u32::MAX),
-                    );
-                    intent.limits.cache_transfer_ms = if intent.limits.cache_bytes > 0 {
-                        intent.limits.runtime_ms
-                    } else {
-                        0
-                    };
+                    self.size_editor_runtime(runtime, &mut intent, deadline);
                     if intent.limits.runtime_ms < 1_000 {
-                        return Ok(Err(SizingRefusal::DelegationDeadline));
+                        return Ok(Err(deadline_refusal));
                     }
                 }
                 Some(intent)
@@ -610,6 +599,33 @@ impl RunLoop<'_> {
             return Ok(Err(SizingRefusal::ContextFull));
         };
         Ok(Ok(intent))
+    }
+
+    fn size_editor_runtime(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &mut EffectIntent,
+        deadline: Instant,
+    ) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .saturating_sub(
+                runtime.reservation_overhead(&intent.call)
+                    + TOOL_CLEANUP_OVERHEAD
+                    + STORE_ACTION_OVERHEAD,
+            );
+        let remaining = remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
+        intent.limits.runtime_ms = intent.limits.runtime_ms.min(
+            u32::try_from(
+                duration_ms(remaining) / if intent.limits.cache_bytes > 0 { 6 } else { 4 },
+            )
+            .unwrap_or(u32::MAX),
+        );
+        intent.limits.cache_transfer_ms = if intent.limits.cache_bytes > 0 {
+            intent.limits.runtime_ms
+        } else {
+            0
+        };
     }
 
     async fn record_delegation_deadline(
@@ -1395,14 +1411,17 @@ impl RunLoop<'_> {
                 paused: self.pause_requested(),
                 can_start_provider_call: self.ledger().can_start_provider_call(),
                 cancelled: self.controls.cancellation.is_cancelled(),
-                deadline_reached: match grant {
+                deadline: match grant {
+                    Grant::Primary { .. } => None,
                     Grant::Researcher {
                         active_deadline: Some(deadline),
                         ..
-                    } => deadline.reached(),
-                    _ => grant
-                        .deadline()
-                        .is_some_and(|deadline| Instant::now() >= deadline),
+                    } => deadline.reached().then_some(deadline.cause),
+                    Grant::Researcher {
+                        deadline,
+                        active_deadline: None,
+                        ..
+                    } => (Instant::now() >= *deadline).then_some(ActiveDeadlineCause::Delegation),
                 },
             },
         );

@@ -1,5 +1,6 @@
 use super::hooks::HookFold;
 use super::{ActiveTime, Answer, HookDenial, Permission, Resolution};
+use crate::engine::ledger::ActiveDeadlineCause;
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
@@ -210,7 +211,7 @@ pub(super) struct AfterAsk {
     pub(super) paused: bool,
     pub(super) can_start_provider_call: bool,
     pub(super) cancelled: bool,
-    pub(super) deadline_reached: bool,
+    pub(super) deadline: Option<ActiveDeadlineCause>,
 }
 
 pub(super) fn refuse<'a>(reason: NotDispatched, stop: Option<StopCause>) -> Refusal<'a> {
@@ -357,6 +358,8 @@ pub(super) fn decide_dispatch<'a>(
         }
         (None, DispatchSite::Researcher) => (true, facts.permission.basis, false),
     };
+    let active_time_exhausted =
+        active_time_exhausted || after.deadline == Some(ActiveDeadlineCause::Goal);
     if facts.host && (source != PermissionSource::Human || after.approval.is_none()) {
         approved = false;
         source = PermissionSource::UnavailableApproval;
@@ -364,11 +367,7 @@ pub(super) fn decide_dispatch<'a>(
     let refused = |reason| {
         Err(refuse(
             reason,
-            Some(refusal_cause(
-                after.paused,
-                after.cancelled,
-                after.deadline_reached,
-            )),
+            Some(refusal_cause(after.paused, after.cancelled, after.deadline)),
         ))
     };
     let outcome = match facts.site {
@@ -384,7 +383,9 @@ pub(super) fn decide_dispatch<'a>(
             NotDispatched::ActiveTime,
             Some(StopCause::ActiveTime),
         )),
-        _ if after.deadline_reached => refused(NotDispatched::DelegationDeadline),
+        _ if after.deadline == Some(ActiveDeadlineCause::Delegation) => {
+            refused(NotDispatched::DelegationDeadline)
+        }
         DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
         DispatchSite::Researcher => refused(if source == PermissionSource::UnavailableApproval {
             NotDispatched::ApprovalUnavailable
@@ -441,15 +442,21 @@ pub(super) fn decide_queue_pause(reserved: bool, paused: bool) -> Result<(), Ref
     }
 }
 
-fn refusal_cause(paused: bool, cancelled: bool, deadline_reached: bool) -> StopCause {
+fn refusal_cause(
+    paused: bool,
+    cancelled: bool,
+    deadline: Option<ActiveDeadlineCause>,
+) -> StopCause {
     if paused {
         StopCause::Paused
     } else if cancelled {
         StopCause::Cancelled
-    } else if deadline_reached {
-        StopCause::DelegationDeadline
     } else {
-        StopCause::ToolStopped
+        match deadline {
+            Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
+            Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
+            None => StopCause::ToolStopped,
+        }
     }
 }
 
@@ -647,13 +654,33 @@ mod tests {
 
     #[test]
     fn refusals_keep_their_own_cause() {
-        for (flags, expected) in [
-            ([true, true, true], StopCause::Paused),
-            ([false, true, true], StopCause::Cancelled),
-            ([false, false, true], StopCause::DelegationDeadline),
-            ([false, false, false], StopCause::ToolStopped),
+        for (paused, cancelled, deadline, expected) in [
+            (
+                true,
+                true,
+                Some(ActiveDeadlineCause::Goal),
+                StopCause::Paused,
+            ),
+            (
+                false,
+                true,
+                Some(ActiveDeadlineCause::Goal),
+                StopCause::Cancelled,
+            ),
+            (
+                false,
+                false,
+                Some(ActiveDeadlineCause::Goal),
+                StopCause::ActiveTime,
+            ),
+            (
+                false,
+                false,
+                Some(ActiveDeadlineCause::Delegation),
+                StopCause::DelegationDeadline,
+            ),
+            (false, false, None, StopCause::ToolStopped),
         ] {
-            let [paused, cancelled, deadline] = flags;
             assert_eq!(refusal_cause(paused, cancelled, deadline), expected);
         }
     }
@@ -733,6 +760,7 @@ mod tests {
         Paused,
         Cancelled,
         Deadline,
+        GoalDeadline,
     }
 
     fn decide<'a>(
@@ -778,7 +806,13 @@ mod tests {
             paused: has(Fact::Paused),
             can_start_provider_call: !has(Fact::TokensSpent) && !has(Fact::TokensSpentAfterAsk),
             cancelled: has(Fact::Cancelled),
-            deadline_reached: has(Fact::Deadline),
+            deadline: if has(Fact::GoalDeadline) {
+                Some(ActiveDeadlineCause::Goal)
+            } else if has(Fact::Deadline) {
+                Some(ActiveDeadlineCause::Delegation)
+            } else {
+                None
+            },
         };
         (facts.ask(), decide_dispatch(&facts, &after))
     }
@@ -927,6 +961,9 @@ mod tests {
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
             (decide(Researcher, asks(Request), &none, &[Blocked], None), None, no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::DelegationDeadline, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Blocked, GoalDeadline], None), None, no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[GoalDeadline], ok(true, S::Human)), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
+            (decide(Researcher, asks(Request), &none, &[GoalDeadline, Cancelled], ok(true, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
             (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::Paused, Some(StopCause::Paused)), ask_, S::Human),
         ];

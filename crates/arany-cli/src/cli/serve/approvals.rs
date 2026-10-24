@@ -84,10 +84,8 @@ impl Approvals {
                     () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
                         answer = None;
                         let pending = state.lock().expect("approval state").pending.take();
-                        let committed = current.as_mut().expect("approval").withdrawal_committed().await;
-                        if committed != Some(false) {
-                            notify_withdrawal(pending, &outbound, withdrawals);
-                        }
+                        let _ = current.as_mut().expect("approval").withdrawal_committed().await;
+                        notify_withdrawal(pending, &outbound, withdrawals);
                         current = None;
                     }
                     approval = inbox.next() => {
@@ -493,6 +491,12 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_withdrawal_rejects_late_answers_before_notifying_the_client() {
         let _deadline = crate::cli::serve::tests::deadline();
+        for commit in [false, true] {
+            lifecycle_withdrawal_case(commit).await;
+        }
+    }
+
+    async fn lifecycle_withdrawal_case(commit: bool) {
         let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
         let (outbound, mut output) = mpsc::channel(8);
         let owner = Approvals::start(
@@ -509,7 +513,7 @@ mod tests {
         );
         let (reject, rejected) = tokio::sync::oneshot::channel();
         let (rejected_ack, rejected_acknowledged) = tokio::sync::oneshot::channel();
-        let (commit, committed) = tokio::sync::oneshot::channel();
+        let (commit_signal, committed) = tokio::sync::oneshot::channel();
         let ask = tokio::spawn(arany::test_support::approval::delay_withdrawal(
             approvals,
             intent(read()),
@@ -544,11 +548,15 @@ mod tests {
             Some(serde_json::json!({"decision":"accept"})),
         );
         assert!(output.try_recv().is_err());
-        commit.send(()).unwrap();
+        if commit {
+            commit_signal.send(()).unwrap();
+        } else {
+            drop(commit_signal);
+        }
         let Some(Message::Notification(notification)) =
             tokio::time::timeout(WITHDRAWAL_COMMIT_WAIT, output.recv())
                 .await
-                .expect("committed withdrawal is sent")
+                .expect("ended withdrawal is sent")
         else {
             panic!("expected cancellation notification")
         };
