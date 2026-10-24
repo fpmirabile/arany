@@ -114,7 +114,9 @@ pub(super) fn finished(
         return Err(ReplayError::InvalidTransition);
     };
     if names_child(current, *run_id, *agent_run_id) {
-        debug_assert!(checkpoint.is_none());
+        if checkpoint.is_some() {
+            return Err(ReplayError::InvalidTransition);
+        }
         current.finish_child_tool(*run_id, *agent_run_id, observation, prior)
     } else {
         validate_primary_finished(current, *run_id, observation)?;
