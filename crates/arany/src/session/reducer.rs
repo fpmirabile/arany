@@ -724,6 +724,8 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
                 && worker::coordination_ready(run))
 }
 
+pub(crate) const MAX_HOST_SESSION_GRANTS: usize = 128;
+
 impl SessionView {
     pub(crate) fn host_grants(&self, epoch: uuid::Uuid) -> impl Iterator<Item = &ToolView> {
         self.runs
@@ -754,7 +756,7 @@ impl SessionView {
         epoch: uuid::Uuid,
     ) -> Option<[u8; 32]> {
         self.host_grants(epoch)
-            .take(128)
+            .take(MAX_HOST_SESSION_GRANTS)
             .find(|tool| crate::tools::unguarded::same_approval(&tool.intent, intent))
             .map(|tool| tool.intent.digest())
     }
