@@ -1004,6 +1004,7 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "hard_cap",
         "tokens",
         "leased_edit",
+        "large_write",
         "background",
         "defer_finish",
         "budget_calls",

@@ -1455,9 +1455,19 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let compact = event_reply(completed_with_id("resp_compact", Some(12), r#"Condensed"#));
     let (endpoint, server) =
         serve_sequence(vec![direct.clone(), delegate.clone(), compact.clone()]).await;
-    probe_model_at(&client(), endpoint, TOKEN, "model-a", Effort::Medium)
-        .await
-        .expect("three strict synthetic calls");
+    let (_temp, mut journal) = probe_check(crate::RunCancellation::new()).await;
+    probe_model_at(
+        &client(),
+        endpoint,
+        TOKEN,
+        ("model-a", Effort::Medium),
+        &mut journal,
+    )
+    .await
+    .expect("three strict synthetic calls");
+    let view = journal.close().await.unwrap();
+    assert_eq!(view.completed_calls, 4);
+    assert!(view.pending.is_none());
     let requests = server.await.expect("server");
     assert_eq!(requests.len(), 3);
     for (index, request) in requests.iter().enumerate() {
@@ -1515,16 +1525,27 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     ] {
         let expected_calls = replies.len();
         let (endpoint, server) = serve_sequence(replies).await;
-        let error = probe_model_at(&client(), endpoint, TOKEN, "model-a", Effort::Medium)
-            .await
-            .expect_err(label);
+        let error = probe_model_at(
+            &client(),
+            endpoint,
+            TOKEN,
+            ("model-a", Effort::Medium),
+            &mut probe_check(crate::RunCancellation::new()).await.1,
+        )
+        .await
+        .expect_err(label);
         assert!(
             if label == "local output cap" {
-                matches!(error, ProviderError::LocalOutputLimit)
+                matches!(
+                    error,
+                    crate::ChatGptCheckError::Provider(ProviderError::LocalOutputLimit)
+                )
             } else {
                 matches!(
                     error,
-                    ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract
+                    crate::ChatGptCheckError::Provider(
+                        ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract
+                    )
                 )
             },
             "{label}"
@@ -1539,10 +1560,40 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let endpoint = Url::parse("http://127.0.0.1:9/v1/responses").unwrap();
     for (token, model) in [("", "model-a"), (TOKEN, "bad model")] {
         assert!(matches!(
-            probe_model_at(&client(), endpoint.clone(), token, model, Effort::Medium).await,
-            Err(ProviderError::Rejected)
+            probe_model_at(
+                &client(),
+                endpoint.clone(),
+                token,
+                (model, Effort::Medium),
+                &mut probe_check(crate::RunCancellation::new()).await.1
+            )
+            .await,
+            Err(crate::ChatGptCheckError::Provider(ProviderError::Rejected))
         ));
     }
+    let (_temp, mut journal) = probe_check(crate::RunCancellation::new()).await;
+    journal
+        .finish(crate::CheckDisposition::Failed)
+        .await
+        .unwrap();
+    let dispatched = std::cell::Cell::new(false);
+    assert!(matches!(
+        journal_probe(&mut journal, crate::CheckCallKind::Answer, async {
+            dispatched.set(true);
+            Ok((
+                (),
+                Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        })
+        .await,
+        Err(crate::ChatGptCheckError::Journal(_))
+    ));
+    assert!(!dispatched.get(), "refused append polled the transport");
 }
 
 #[test]
@@ -2247,5 +2298,143 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
             Some(crate::ProviderFailureReason::StreamProtocol)
         );
         assert!(error.retry_cause().is_none());
+    }
+}
+
+async fn probe_check(
+    cancellation: crate::RunCancellation,
+) -> (tempfile::TempDir, crate::ChatGptCheck) {
+    let temp = tempfile::tempdir().unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut check = crate::ChatGptCheck::start(
+        state,
+        crate::ChatGptCheckRequest {
+            account: uuid::Uuid::now_v7(),
+            model: "model-a".into(),
+            effort: Effort::Medium,
+            fingerprint: [1; 32],
+        },
+        |_| Ok(Vec::new()),
+        cancellation,
+    )
+    .await
+    .unwrap();
+    check.evidence_cleared().await.unwrap();
+    let token = check.begin_catalog().await.unwrap();
+    check
+        .record_catalog(token, crate::CheckDisposition::Succeeded)
+        .await
+        .unwrap();
+    (temp, check)
+}
+
+#[tokio::test]
+async fn probe_stops_leave_intent_and_result_acknowledgments_confirmed() {
+    #[derive(Clone, Copy)]
+    enum Acknowledgment {
+        Intent,
+        Result,
+    }
+    #[derive(Clone, Copy)]
+    enum Stop {
+        Cancellation,
+        Deadline,
+    }
+    for acknowledgment in [Acknowledgment::Intent, Acknowledgment::Result] {
+        for stop in [Stop::Cancellation, Stop::Deadline] {
+            let cancellation = crate::RunCancellation::new();
+            let (temp, mut check) = probe_check(cancellation.clone()).await;
+            let id = check.id();
+            let admits: fn(&crate::CheckView) -> bool = match acknowledgment {
+                Acknowledgment::Intent => {
+                    |view| view.pending == Some((1, crate::CheckCallKind::Answer))
+                }
+                Acknowledgment::Result => |view| view.completed_calls == 2,
+            };
+            let (entered, release) = crate::FaultPlan::gate_check_acknowledgment(id, admits);
+            let dispatched = std::cell::Cell::new(false);
+            let execute = async {
+                let result = journal_probe(&mut check, crate::CheckCallKind::Answer, async {
+                    dispatched.set(true);
+                    Ok((
+                        (),
+                        Usage {
+                            input_tokens: Some(12),
+                            output_tokens: Some(8),
+                            cache_read_input_tokens: None,
+                            cache_creation_input_tokens: None,
+                        },
+                    ))
+                })
+                .await;
+                let stopped = match acknowledgment {
+                    Acknowledgment::Intent => result,
+                    Acknowledgment::Result => {
+                        result.expect("confirmed response");
+                        journal_probe::<()>(&mut check, crate::CheckCallKind::Delegate, async {
+                            panic!("stopped check dispatched another probe");
+                        })
+                        .await
+                    }
+                };
+                assert!(matches!(
+                    (stop, stopped),
+                    (Stop::Cancellation, Err(crate::ChatGptCheckError::Cancelled))
+                        | (Stop::Deadline, Err(crate::ChatGptCheckError::Deadline))
+                ));
+                assert!(matches!(
+                    (stop, check.begin_catalog().await),
+                    (Stop::Cancellation, Err(crate::ChatGptCheckError::Cancelled))
+                        | (Stop::Deadline, Err(crate::ChatGptCheckError::Deadline))
+                ));
+                if matches!(stop, Stop::Cancellation) {
+                    assert!(matches!(
+                        check.evidence_started([1; 32]).await,
+                        Err(crate::ChatGptCheckError::Cancelled)
+                    ));
+                    assert!(matches!(
+                        check.evidence_published([1; 32]).await,
+                        Err(crate::ChatGptCheckError::Cancelled)
+                    ));
+                }
+                check.finish(crate::CheckDisposition::Failed).await.unwrap();
+                let receipt = check.receipt();
+                (receipt, check.close().await.unwrap())
+            };
+            let request_stop = async {
+                entered.await.unwrap();
+                match stop {
+                    Stop::Cancellation => {
+                        cancellation.cancel();
+                    }
+                    Stop::Deadline => {
+                        tokio::time::pause();
+                        tokio::time::advance(crate::provider::PROBE_TOTAL_DEADLINE).await;
+                        tokio::time::resume();
+                    }
+                }
+                release.send(()).unwrap();
+            };
+            let ((receipt, view), ()) = tokio::join!(execute, request_stop);
+            let disposition = match (acknowledgment, stop) {
+                (Acknowledgment::Intent, _) => crate::CheckDisposition::Uncertain,
+                (Acknowledgment::Result, Stop::Cancellation) => crate::CheckDisposition::Cancelled,
+                (Acknowledgment::Result, Stop::Deadline) => crate::CheckDisposition::Failed,
+            };
+            assert_eq!(receipt.disposition, Some(disposition));
+            assert_eq!(view.disposition, Some(disposition));
+            assert!(view.pending.is_none());
+            assert_eq!(view.completed_calls, 2);
+            assert_eq!(
+                dispatched.get(),
+                matches!(acknowledgment, Acknowledgment::Result)
+            );
+            let store = crate::Store::open_read_only(
+                crate::StateRoot::open_existing(&temp.path().join("state")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(store.load_check(id).await.unwrap(), Some(view));
+            store.close().await.unwrap();
+        }
     }
 }

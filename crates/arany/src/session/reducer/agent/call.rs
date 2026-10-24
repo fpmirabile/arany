@@ -34,7 +34,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
         .ok_or(ReplayError::InvalidTransition)?;
     let agent = &run.agents[index];
     validate_attempt_role(run, agent, *agent_run_id, record)?;
-    validate_provider_cap(run, *agent_run_id, record)?;
+    validate_provider_cap(run, agent, *agent_run_id, record)?;
     let admission = continuation_admission(run, agent, record, plan_recorded, awaiting_plan);
     validate_disposition(run, agent, record, plan_recorded, admission)?;
     validate_display(run, agent, record)?;
@@ -125,6 +125,7 @@ fn validate_attempt_role(
 
 fn validate_provider_cap(
     run: &RunView,
+    agent: &AgentView,
     agent_run_id: AgentRunId,
     record: &ProviderCallRecord,
 ) -> Result<(), ReplayError> {
@@ -138,6 +139,18 @@ fn validate_provider_cap(
         let identity = run.current_identity(agent_run_id, role, initial);
         let cap = match role {
             ProviderRole::Primary => identity.limits.max_output_tokens,
+            ProviderRole::Child if agent.assignment.is_some() => run
+                .provider_fallbacks
+                .iter()
+                .filter(|(actor, fallback)| {
+                    *actor == agent_run_id
+                        && fallback.role == role
+                        && usize::try_from(fallback.call_index).ok()
+                            == Some(agent.provider_calls.len())
+                })
+                .fold(identity.limits.max_output_tokens, |cap, (_, fallback)| {
+                    cap.min(fallback.from.limits.max_output_tokens)
+                }),
             ProviderRole::Child => identity
                 .limits
                 .max_output_tokens

@@ -83,44 +83,147 @@ pub(crate) fn selected_reauthorization_target(
     account::selected_reauthorization_target(expected_id)
 }
 
+pub(crate) struct ModelCheckReport {
+    pub(crate) account: Uuid,
+    pub(crate) context_window_tokens: Option<u32>,
+    pub(crate) view: arany::CheckView,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ModelCheckError {
+    #[error("{0}")]
+    Admission(#[from] AuthorizationError),
+    #[error("Provider check could not start: {0}")]
+    Journal(#[from] arany::CheckOpenError),
+    #[error("{source}\n{receipt}")]
+    Check {
+        source: AuthorizationError,
+        receipt: arany::CheckReceipt,
+    },
+}
+
 pub(crate) async fn check_selected_model(
     workspace: PathBuf,
     expected_account_id: Option<Uuid>,
     model: String,
     effort: Effort,
-) -> Result<(Uuid, Option<u32>), AuthorizationError> {
+    cancellation: arany::RunCancellation,
+) -> Result<ModelCheckReport, ModelCheckError> {
     validate_native_model_id(&model).map_err(|_| AuthorizationError::InvalidSelection)?;
     let selected = account::selected_for_use(workspace.clone(), expected_account_id).await?;
+    let fingerprint = account::model_check_fingerprint(&selected, &model, effort)?;
+    let root = arany::StateRoot::account_path()
+        .and_then(|path| arany::StateRoot::open_existing(&path))
+        .map_err(|_| AuthorizationError::Unavailable)?;
+    let mut check = arany::ChatGptCheck::start(
+        root,
+        arany::ChatGptCheckRequest {
+            account: selected.id,
+            model: model.clone(),
+            effort,
+            fingerprint,
+        },
+        account::retained_checks,
+        cancellation,
+    )
+    .await?;
+    let result = check_model(&mut check, workspace, selected.clone(), model, effort).await;
+    if result.is_err() {
+        let _ = check.finish(arany::CheckDisposition::Failed).await;
+    }
+    let receipt = check.receipt();
+    let closed = check.close().await;
+    match (result, closed) {
+        (Ok(context_window_tokens), Ok(view)) => Ok(ModelCheckReport {
+            account: selected.id,
+            context_window_tokens,
+            view,
+        }),
+        (Err(source), _) => Err(ModelCheckError::Check { source, receipt }),
+        (Ok(_), Err(_)) => Err(ModelCheckError::Check {
+            source: AuthorizationError::EvidenceUnavailable,
+            receipt,
+        }),
+    }
+}
+
+async fn check_model(
+    check: &mut arany::ChatGptCheck,
+    workspace: PathBuf,
+    selected: account::SelectedAccount,
+    model: String,
+    effort: Effort,
+) -> Result<Option<u32>, AuthorizationError> {
     account::clear_model_check(workspace.clone(), selected.clone(), model.clone(), effort).await?;
-    let models =
-        catalog::list_models(&selected.credentials, &selected.consent, selected.storage).await?;
-    let context_window_tokens = catalog::model_window(&models, &model)?;
-    arany::probe_chatgpt_model(&selected.credentials.access_token, &model, effort)
+    check
+        .evidence_cleared()
         .await
-        .map_err(|error| match error {
-            ProviderError::RemoteHttp(status) => AuthorizationError::ConformanceHttp {
-                status,
-                advice: admission_http_advice(status),
-            },
-            ProviderError::RateLimited(_) | ProviderError::QuotaExceeded => {
-                AuthorizationError::ConformanceHttp {
-                    status: 429,
-                    advice: admission_http_advice(429),
-                }
+        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
+    let models = catalog::list_models_checked(
+        &selected.credentials,
+        &selected.consent,
+        selected.storage,
+        check,
+    )
+    .await?;
+    let context_window_tokens = catalog::model_window(&models, &model)?;
+    arany::probe_chatgpt_model(&selected.credentials.access_token, &model, effort, check)
+        .await
+        .map_err(AuthorizationError::from)?;
+    let record = account::prepare_model_check(
+        workspace.clone(),
+        selected.clone(),
+        (model, effort),
+        context_window_tokens,
+        check.id(),
+    )
+    .await?;
+    let digest = record.digest()?;
+    check
+        .evidence_started(digest)
+        .await
+        .map_err(AuthorizationError::from)?;
+    account::record_model_check(workspace, selected, record).await?;
+    check
+        .evidence_published(digest)
+        .await
+        .map_err(AuthorizationError::from)?;
+    Ok(context_window_tokens)
+}
+
+impl From<arany::ChatGptCheckError> for AuthorizationError {
+    fn from(error: arany::ChatGptCheckError) -> Self {
+        match error {
+            arany::ChatGptCheckError::Cancelled => Self::CheckCancelled,
+            arany::ChatGptCheckError::Deadline => Self::CheckDeadline,
+            arany::ChatGptCheckError::Journal(_) => Self::EvidenceUnavailable,
+            arany::ChatGptCheckError::Provider(error) => conformance_error(error),
+        }
+    }
+}
+
+fn conformance_error(error: ProviderError) -> AuthorizationError {
+    match error {
+        ProviderError::RemoteHttp(status) => AuthorizationError::ConformanceHttp {
+            status,
+            advice: admission_http_advice(status),
+        },
+        ProviderError::RateLimited(_) | ProviderError::QuotaExceeded => {
+            AuthorizationError::ConformanceHttp {
+                status: 429,
+                advice: admission_http_advice(429),
             }
-            ProviderError::RemoteServerError(status, _) => AuthorizationError::ConformanceHttp {
-                status,
-                advice: admission_http_advice(status),
-            },
-            ProviderError::RemoteStreamCode(code) => AuthorizationError::ConformanceStream {
-                advice: stream_failure_advice(&code),
-                code,
-            },
-            _ => AuthorizationError::ConformanceFailed,
-        })?;
-    let id = selected.id;
-    account::record_model_check(workspace, selected, model, effort, context_window_tokens).await?;
-    Ok((id, context_window_tokens))
+        }
+        ProviderError::RemoteServerError(status, _) => AuthorizationError::ConformanceHttp {
+            status,
+            advice: admission_http_advice(status),
+        },
+        ProviderError::RemoteStreamCode(code) => AuthorizationError::ConformanceStream {
+            advice: stream_failure_advice(&code),
+            code,
+        },
+        _ => AuthorizationError::ConformanceFailed,
+    }
 }
 
 fn stream_failure_advice(code: &str) -> &'static str {
@@ -283,6 +386,10 @@ pub(crate) enum AuthorizationError {
     InvalidSelection,
     #[error("model is not visible to the selected ChatGPT account")]
     ModelUnavailable,
+    #[error("ChatGPT conformance check cancelled")]
+    CheckCancelled,
+    #[error("ChatGPT conformance check deadline reached")]
+    CheckDeadline,
     #[error("ChatGPT synthetic conformance failed")]
     ConformanceFailed,
     #[error(
@@ -674,6 +781,26 @@ fn fixture_host_id() -> Uuid {
 mod tests {
     use super::*;
     use crate::accounts::credentials::AccountStorage;
+
+    #[test]
+    fn stopped_checks_report_the_stop_cause_without_claiming_a_journal_failure() {
+        for (error, expected) in [
+            (
+                arany::ChatGptCheckError::Cancelled,
+                "ChatGPT conformance check cancelled",
+            ),
+            (
+                arany::ChatGptCheckError::Deadline,
+                "ChatGPT conformance check deadline reached",
+            ),
+            (
+                arany::StoreError::Closed.into(),
+                "ChatGPT conformance evidence is unavailable",
+            ),
+        ] {
+            assert_eq!(AuthorizationError::from(error).to_string(), expected);
+        }
+    }
 
     #[test]
     fn conformance_http_notice_has_fixed_admission_recovery() {

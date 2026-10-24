@@ -295,14 +295,21 @@ fn chatgpt_plan_direct_turn_replays_exact_events() {
         .expect("check output UTF-8")
         .lines()
         .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 5, "unexpected check receipt");
+    assert_eq!(lines.len(), 8, "unexpected check receipt");
     let account_id = lines[1]
         .strip_prefix("Account: ")
         .expect("check account line")
         .parse::<Uuid>()
         .expect("checked account UUID");
+    let output = crate::check_output(
+        &output,
+        &StateRoot::account_path().unwrap(),
+        arany::CheckDisposition::Succeeded,
+    );
+    let window = lines[4];
+    assert!(window.starts_with("Context window: "));
     let expected = format!(
-        "Provider: chatgpt\nAccount: {account_id}\nModel: {model}\nEffort: {effort}\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
+        "Provider: chatgpt\nAccount: {account_id}\nModel: {model}\nEffort: {effort}\n{window}\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
     );
     assert!(
         output == expected.as_bytes(),

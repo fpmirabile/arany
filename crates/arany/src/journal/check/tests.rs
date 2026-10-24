@@ -282,3 +282,125 @@ async fn unfinished_checks_reopen_without_effects_and_recover_only_under_the_lea
         );
     }
 }
+
+pub(crate) fn chatgpt_fixture() -> (CheckId, Vec<CheckEvent>) {
+    let id = CheckId::new();
+    let target = CheckTarget::Chatgpt {
+        account: Uuid::now_v7(),
+        model: "model-1".into(),
+        effort: Effort::High,
+    };
+    let probes = [
+        CheckCallKind::Answer,
+        CheckCallKind::Delegate,
+        CheckCallKind::Compaction,
+    ]
+    .into_iter()
+    .map(|kind| CheckProbe {
+        kind,
+        effort: Some(Effort::High),
+        output_tokens: crate::provider::PROBE_OUTPUT_CAP,
+    })
+    .collect();
+    let start = CheckStart::new(target, "model-1".into(), [1; 32], [2; 32], 1, probes).unwrap();
+    let mut events = vec![
+        CheckEvent::ProviderCheckStarted { start },
+        CheckEvent::ProviderCheckEvidenceCleared,
+    ];
+    for kind in [
+        CheckCallKind::Catalog,
+        CheckCallKind::Answer,
+        CheckCallKind::Delegate,
+        CheckCallKind::Compaction,
+    ] {
+        let view = CheckView::replay(id, &events).unwrap().unwrap();
+        events.push(CheckEvent::ProviderCheckCallStarted {
+            ordinal: view.completed_calls,
+            kind,
+            destination: view.start.destination,
+            calls_remaining: view.calls_remaining(),
+            output_remaining: view.output_remaining(),
+            time_remaining_ms: 1000,
+        });
+        events.push(CheckEvent::ProviderCheckCallFinished {
+            ordinal: view.completed_calls,
+            disposition: CheckDisposition::Succeeded,
+            usage: (kind != CheckCallKind::Catalog).then_some(CheckUsage {
+                input_tokens: 12,
+                output_tokens: if kind == CheckCallKind::Answer {
+                    crate::provider::PROBE_OUTPUT_CAP + 1
+                } else {
+                    8
+                },
+            }),
+            catalog_complete: kind == CheckCallKind::Catalog,
+        });
+    }
+    events.push(CheckEvent::ProviderCheckEvidenceStarted {
+        digest: [3; 32],
+        snapshot: [1; 32],
+    });
+    events.push(CheckEvent::ProviderCheckFinished {
+        disposition: CheckDisposition::Succeeded,
+        evidence: Some([3; 32]),
+    });
+    (id, events)
+}
+
+#[tokio::test]
+async fn chatgpt_prefixes_recover_without_publication_or_reusing_the_live_lease() {
+    let (id, events) = chatgpt_fixture();
+    for length in 1..events.len() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let CheckEvent::ProviderCheckStarted { start } = events[0].clone() else {
+            unreachable!()
+        };
+        let mut journal = CheckJournal::start(StateRoot::admit(&path).unwrap(), start.clone())
+            .await
+            .unwrap();
+        let check_id = journal.view().id;
+        for event in &events[1..length] {
+            journal.append(event.clone()).await.unwrap();
+        }
+        let root = StateRoot::open_existing(&path).unwrap();
+        assert!(matches!(
+            CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start.clone()).await,
+            Err(CheckOpenError {
+                source: StoreError::ProviderCheckBusy,
+                ..
+            })
+        ));
+        assert!(
+            !root
+                .check_evidence_valid(check_id, [1; 32], [3; 32])
+                .unwrap()
+        );
+        assert_eq!(
+            CheckView::replay(id, &events[..length])
+                .unwrap()
+                .unwrap()
+                .replay_disposition(),
+            CheckDisposition::Uncertain
+        );
+        journal.close().await.unwrap();
+        let next = CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.store
+                .load_check(check_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .disposition,
+            Some(CheckDisposition::Uncertain)
+        );
+        assert!(
+            !root
+                .check_evidence_valid(check_id, [1; 32], [3; 32])
+                .unwrap()
+        );
+        next.close().await.unwrap();
+    }
+}
