@@ -364,6 +364,15 @@ fn forked_history(path: &Path) -> History {
 // A source with a finished Run (optionally Goal-compacted), a rewind and a compaction over it,
 // `renames` idle renames, a child fork and a grandchild fork.
 fn history(path: &Path, goal_compacted: bool, renames: usize) -> History {
+    let (root, connection, source) = history_source(path, goal_compacted, renames);
+    fork_history(root, connection, source)
+}
+
+fn history_source(
+    path: &Path,
+    goal_compacted: bool,
+    renames: usize,
+) -> (StateRoot, Connection, SessionId) {
     let root = StateRoot::admit(path).unwrap();
     let fixture = crate::session::worker_compacted_fixture(goal_compacted);
     let source = fixture.session;
@@ -418,12 +427,48 @@ fn history(path: &Path, goal_compacted: bool, renames: usize) -> History {
             .unwrap();
     }
     transaction.commit().unwrap();
+    (root, connection, source)
+}
+
+fn fork_history(root: StateRoot, mut connection: Connection, source: SessionId) -> History {
     let child = fork_session(&mut connection, source, "Child".into()).unwrap();
     let grandchild = fork_session(&mut connection, child, "Grandchild".into()).unwrap();
     History {
         root,
         sessions: [source, child, grandchild],
     }
+}
+
+fn rewind_history(path: &Path) -> History {
+    let (root, mut connection, source) = history_source(path, false, 0);
+    let followup = crate::session::worker_compacted_fixture(false);
+    let mut hot = None;
+    for event in followup.events.iter().skip(1) {
+        append(&mut connection, &mut hot, source, event.clone()).unwrap();
+        if matches!(event, Event::AgentSpawned { agent_run_id, .. } if *agent_run_id == followup.primary)
+        {
+            break;
+        }
+    }
+    for event in [
+        Event::AgentFinished {
+            run_id: followup.run,
+            agent_run_id: followup.primary,
+            disposition: crate::session::AgentDisposition::Cancelled,
+            summary: None,
+            result: None,
+            worker: None,
+        },
+        Event::RunFinished {
+            run_id: followup.run,
+            disposition: crate::session::RunDisposition::Cancelled,
+            failure: None,
+            active_ms: 0,
+        },
+    ] {
+        append(&mut connection, &mut hot, source, event).unwrap();
+    }
+    fork_history(root, connection, source)
 }
 
 fn rows(connection: &Connection) -> Vec<RawRow> {
@@ -839,7 +884,7 @@ fn run_started_v19_migrates_without_reading_user_instructions() {
 fn rewind_v1_file_migrates_and_cold_replays_all_bound_prefixes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
-    let History { root, sessions } = history(&path, false, 0);
+    let History { root, sessions } = rewind_history(&path);
     let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
     let current_fork_digests = fork_digests(&connection);
     downgrade_rewind_started(&connection);
@@ -881,15 +926,24 @@ fn rewind_v1_file_migrates_and_cold_replays_all_bound_prefixes() {
     );
     drop(upgraded);
     let cold = open_connection(&root, true).unwrap();
-    let (_, source) = resolve_view(&cold, sessions[0], 0, &mut 0).unwrap();
+    for session in sessions {
+        let (_, view) = resolve_view(&cold, session, 0, &mut 0).unwrap();
+        let view = view.unwrap();
+        assert_eq!(
+            view.rewinds.operations[0].outcome(),
+            crate::session::rewind::RewindOutcome::Restored
+        );
+        assert_eq!(view.runs.len(), 2);
+        assert_eq!(view.runs[1].status, crate::session::RunStatus::Cancelled);
+    }
     drop(cold);
-    assert_eq!(
-        source.unwrap().rewinds.operations[0].outcome(),
-        crate::session::rewind::RewindOutcome::Restored
-    );
+}
 
+#[test]
+fn rewind_v1_forged_prefix_archives_history_intact() {
+    let temp = tempfile::tempdir().unwrap();
     let forged_path = temp.path().join("forged");
-    let History { root: forged, .. } = history(&forged_path, false, 0);
+    let History { root: forged, .. } = rewind_history(&forged_path);
     let connection = Connection::open(forged_path.join(DATABASE_FILE)).unwrap();
     downgrade_rewind_started(&connection);
     forge_rewind_v1_digest(&connection);

@@ -490,22 +490,29 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
     assert!(!selected.files[0].history_drift);
     assert_eq!(selected.files[0].expected_current, None);
     let event = started(&view, target(&view));
+    let version = event.version();
     let payload = event.payload().unwrap();
     let exact = format!(
         "{payload}{}",
         " ".repeat(MAX_REWIND_EVENT_BYTES - payload.len())
     );
-    assert!(Event::decode(event.kind(), 1, &exact, None, None).is_ok());
+    assert!(Event::decode(event.kind(), version, &exact, None, None).is_ok());
     assert!(matches!(
-        Event::decode(event.kind(), 1, &(exact + " "), None, None),
+        Event::decode(event.kind(), version, &(exact + " "), None, None),
         Err(ReplayError::InvalidPayload)
     ));
     assert!(matches!(
-        Event::decode(event.kind(), 1, &payload, Some(view.runs[0].id), None),
+        Event::decode(event.kind(), version, &payload, Some(view.runs[0].id), None),
         Err(ReplayError::InvalidPayload)
     ));
     assert!(matches!(
-        Event::decode(event.kind(), 1, &payload, None, Some(AgentRunId::new())),
+        Event::decode(
+            event.kind(),
+            version,
+            &payload,
+            None,
+            Some(AgentRunId::new())
+        ),
         Err(ReplayError::InvalidPayload)
     ));
     let Event::WorkspaceRewindStarted { mut record } = event.clone() else {
@@ -516,7 +523,7 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
         .collect();
     assert!(serde_json::to_vec(&record).unwrap().len() > MAX_REWIND_EVENT_BYTES);
     assert!(!record.valid());
-    for version in [0, 2] {
+    for version in [0, version - 1, version + 1] {
         assert!(matches!(
             Event::decode(event.kind(), version, &payload, None, None),
             Err(ReplayError::UnknownEvent)
@@ -527,11 +534,12 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
         payload.replacen("\"kept\":[]", "\"unknown\":[]", 1),
         format!("{} ", " ".repeat(MAX_REWIND_EVENT_BYTES)),
     ] {
-        assert!(Event::decode(event.kind(), 1, &invalid, None, None).is_err());
+        assert!(Event::decode(event.kind(), version, &invalid, None, None).is_err());
     }
     let mut open = view.clone();
     apply(&mut open, event);
     let event = finished(&open, RewindOutcome::Restored);
+    let version = event.version();
     let payload = event.payload().unwrap();
     for (run, agent, bytes) in [
         (Some(view.runs[0].id), None, payload.clone()),
@@ -539,14 +547,14 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
         (None, None, " ".repeat(MAX_REWIND_EVENT_BYTES + 1)),
     ] {
         assert!(matches!(
-            Event::decode(event.kind(), 1, &bytes, run, agent),
+            Event::decode(event.kind(), version, &bytes, run, agent),
             Err(ReplayError::InvalidPayload)
         ));
     }
     for field in ["checkpoint", "attestation"] {
         let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         v.as_object_mut().unwrap().remove(field);
-        assert!(Event::decode(event.kind(), 1, &v.to_string(), None, None).is_err());
+        assert!(Event::decode(event.kind(), version, &v.to_string(), None, None).is_err());
     }
     assert!(Event::decode(event.kind(), 0, &payload, None, None).is_err());
     let mut r = match event {
