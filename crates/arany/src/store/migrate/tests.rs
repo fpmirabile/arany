@@ -2537,4 +2537,32 @@ fn host_prefix_migration_preserves_source_bytes_but_never_fabricates_authority()
         assert!((step.transform)(forged.clone()).is_none());
         assert!((step.canonical)(&forged.to_string()).is_none());
     }
+    let mut verdict: crate::tools::permissions::PermissionVerdict =
+        serde_json::from_str(VERDICT_V4).unwrap();
+    verdict.source = crate::tools::permissions::PermissionSource::SessionApproval;
+    verdict.basis = verdict.source;
+    verdict.host = Some(crate::tools::permissions::HostApproval {
+        rule: None,
+        epoch: uuid::Uuid::now_v7(),
+        session: false,
+        source_intent: Some([3; 32]),
+    });
+    let text = serde_json::to_string(&verdict).unwrap();
+    assert_eq!((step.canonical)(&text).as_deref(), Some(text.as_str()));
+    assert_eq!(
+        (step.transform)(serde_json::to_value(&verdict).unwrap()),
+        Some(serde_json::from_str(&text).unwrap())
+    );
+    let mut pin = crate::tools::types::test_host_pin();
+    pin.executable = "/usr/bin/printf".into();
+    verdict.host.as_mut().unwrap().rule = Some(
+        serde_json::from_value(serde_json::json!({
+            "version": crate::tools::unguarded::HOST_POLICY_VERSION,
+            "prefix": ["printf", "value"], "decision": "allow", "pin": pin,
+            "workspace_device": 1, "workspace_inode": 2, "cwd": "",
+        }))
+        .unwrap(),
+    );
+    assert!((step.canonical)(&serde_json::to_string(&verdict).unwrap()).is_none());
+    assert!((step.transform)(serde_json::to_value(verdict).unwrap()).is_none());
 }

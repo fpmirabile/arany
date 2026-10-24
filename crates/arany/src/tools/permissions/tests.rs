@@ -2560,6 +2560,27 @@ fn host_prefix_records_enforce_literal_scope_closed_policy_and_settings_bounds()
 }
 
 #[test]
+fn host_prefix_scope_normalizes_lexical_paths_without_admitting_directory_aliases() {
+    let intent = host_intent();
+    let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
+    let identity = crate::session::WorkspaceIdentity {
+        device: intent.workspace_device,
+        inode: intent.workspace_inode,
+    };
+    let mut parsed = config(json!({"hostPrefixes": [rule]}));
+    parsed.scope_to(Path::new("//test-workspace/./"), identity);
+    assert!(parsed.host_rule(&intent).is_some());
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join("child")).unwrap();
+    let alias = root.join("alias");
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    assert!(crate::tools::workspace_identity(&alias).is_err());
+    assert!(crate::tools::workspace_identity(&workspace.join("child/..")).is_err());
+}
+
+#[test]
 fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
     let intent = host_intent();
     let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();

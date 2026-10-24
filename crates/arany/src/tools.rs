@@ -116,6 +116,14 @@ pub enum ToolError {
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
     Configuration,
+    #[error(
+        "Inactive host-rule archive at archive/inactive-host-commands is unconfirmed. Stop Arany, preserve the source and archive intact, and restore a verified backup or obtain manual recovery; never remove pending markers to resume."
+    )]
+    InactiveHostArchiveUnconfirmed,
+    #[error(
+        "Inactive host-rule archive at archive/inactive-host-commands conflicts with its source. Stop Arany, preserve the source and archive intact, and restore a verified backup or obtain manual recovery; never overwrite either copy."
+    )]
+    InactiveHostArchiveConflict,
     #[error("another process is updating private account state; retry when that update finishes")]
     AccountBusy,
     #[error("required native Tool protection is unavailable")]
@@ -1793,7 +1801,9 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
     match error {
         ToolError::GuardBootstrap(failure) => failure.failure_stage(),
         ToolError::GuardRejected(stage) => stage.failure_stage(),
-        ToolError::Configuration => "admission",
+        ToolError::Configuration
+        | ToolError::InactiveHostArchiveUnconfirmed
+        | ToolError::InactiveHostArchiveConflict => "admission",
         ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => "pinned input",
         ToolError::ProtectionUnavailable => "native protection",
         ToolError::Limit | ToolError::QueueFull => "resource limit",

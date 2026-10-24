@@ -216,7 +216,11 @@ pub(super) async fn manage_rules(
         let edit = match choice {
             Some(ADD) => add_edit(terminal).await?,
             Some(value) if value >= ENTRY_BASE => {
-                entry_edit(terminal, usize::from(value - ENTRY_BASE)).await?
+                let index = usize::from(value - ENTRY_BASE);
+                entry_edit(terminal).await?.map(|edit| match edit {
+                    EntryEdit::Change(decision) => TypedPrefixEdit::Replace { index, decision },
+                    EntryEdit::Remove => TypedPrefixEdit::Remove { index },
+                })
             }
             _ => {
                 return Ok(if uncertain {
@@ -318,19 +322,13 @@ pub(super) async fn manage_host_rules(
         let edit = match choice {
             Some(ADD) => add_host_edit(terminal, view, workspace).await?,
             Some(value) if value >= ENTRY_BASE => {
-                entry_edit(terminal, usize::from(value - ENTRY_BASE))
-                    .await?
-                    .map(|edit| match edit {
-                        TypedPrefixEdit::Replace { index, decision } => {
-                            arany::permissions::HostPrefixEdit::Replace { index, decision }
-                        }
-                        TypedPrefixEdit::Remove { index } => {
-                            arany::permissions::HostPrefixEdit::Remove { index }
-                        }
-                        TypedPrefixEdit::Insert { .. } => {
-                            unreachable!("entry editing cannot insert")
-                        }
-                    })
+                let index = usize::from(value - ENTRY_BASE);
+                entry_edit(terminal).await?.map(|edit| match edit {
+                    EntryEdit::Change(decision) => {
+                        arany::permissions::HostPrefixEdit::Replace { index, decision }
+                    }
+                    EntryEdit::Remove => arany::permissions::HostPrefixEdit::Remove { index },
+                })
             }
             _ => {
                 return Ok(HostRuleEditOutcome::Confirmed(
@@ -352,31 +350,17 @@ async fn add_host_edit(
     view: &arany::SessionView,
     workspace: &Path,
 ) -> Result<Option<arany::permissions::HostPrefixEdit>, SetupError> {
-    let candidates = view
-        .runs
-        .iter()
-        .rev()
-        .flat_map(|run| run.tools.iter().rev())
-        .filter(|tool| {
-            tool.intent
-                .host_command
-                .as_ref()
-                .is_some_and(|pin| Path::new(&pin.workspace) == workspace)
-        })
-        .filter(|tool| arany::permissions::HostPrefixRule::from_intent(&tool.intent, 1).is_ok())
-        .take(arany::permissions::MAX_RULES)
-        .collect::<Vec<_>>();
+    let candidates = host_candidates(
+        view.runs
+            .iter()
+            .rev()
+            .flat_map(|run| run.tools.iter().rev()),
+        workspace,
+    );
     let options = candidates
         .iter()
         .enumerate()
-        .map(|(index, tool)| {
-            (
-                index,
-                crate::presentation::escape_terminal(
-                    &serde_json::to_string(&tool.intent.call).expect("call"),
-                ),
-            )
-        })
+        .map(|(index, tool)| (index, host_command_label(&tool.intent.call)))
         .collect::<Vec<_>>();
     let Some(index) = pick(
         terminal,
@@ -426,6 +410,46 @@ async fn add_host_edit(
     ))))
 }
 
+fn host_candidates<'a>(
+    tools: impl Iterator<Item = &'a arany::ToolView>,
+    workspace: &Path,
+) -> Vec<&'a arany::ToolView> {
+    let mut seen = std::collections::HashSet::new();
+    tools
+        .filter(|tool| {
+            tool.intent
+                .host_command
+                .as_ref()
+                .is_some_and(|pin| Path::new(&pin.workspace) == workspace)
+                && arany::permissions::HostPrefixRule::from_intent(&tool.intent, 1).is_ok()
+        })
+        .filter(|tool| match &tool.intent.call {
+            arany::ToolCall::CommandUnguarded {
+                program, args, cwd, ..
+            } => seen.insert((program, args, cwd)),
+            _ => false,
+        })
+        .take(arany::permissions::MAX_RULES)
+        .collect()
+}
+
+fn host_command_label(call: &arany::ToolCall) -> String {
+    let arany::ToolCall::CommandUnguarded {
+        program, args, cwd, ..
+    } = call
+    else {
+        return String::new();
+    };
+    let mut label = std::iter::once(program.as_str())
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !cwd.is_empty() {
+        label.push_str(&format!(" · cwd {cwd}"));
+    }
+    crate::presentation::escape_terminal(&label)
+}
+
 async fn add_edit(terminal: &mut AttachedTerminal) -> Result<Option<TypedPrefixEdit>, SetupError> {
     let verbs = TypedGitPrefix::ALL
         .map(|prefix| (prefix, verb_label(prefix)))
@@ -470,10 +494,12 @@ fn decisions() -> Vec<(Decision, String)> {
         .to_vec()
 }
 
-async fn entry_edit(
-    terminal: &mut AttachedTerminal,
-    index: usize,
-) -> Result<Option<TypedPrefixEdit>, SetupError> {
+enum EntryEdit {
+    Change(Decision),
+    Remove,
+}
+
+async fn entry_edit(terminal: &mut AttachedTerminal) -> Result<Option<EntryEdit>, SetupError> {
     let mut options = decisions()
         .into_iter()
         .map(|(decision, label)| (Some(decision), format!("Change to {label}")))
@@ -483,8 +509,8 @@ async fn entry_edit(
         pick(terminal, "Rule", "Change or remove this rule", &options)
             .await?
             .map(|decision| match decision {
-                Some(decision) => TypedPrefixEdit::Replace { index, decision },
-                None => TypedPrefixEdit::Remove { index },
+                Some(decision) => EntryEdit::Change(decision),
+                None => EntryEdit::Remove,
             }),
     )
 }
@@ -782,6 +808,74 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 #[cfg(test)]
 mod tests {
     use super::{parse_linear_selection, toggle_profile};
+
+    fn host_candidate(value: &str, cwd: &str) -> arany::ToolView {
+        let pin = serde_json::from_value(serde_json::json!({
+            "state_roots": ["/state", "/account"], "permissions_digest": null,
+            "workspace": "/project", "executable": "/usr/bin/printf", "device": 1, "inode": 2,
+            "sha256": "a".repeat(64), "path": "/usr/bin:/bin", "environment_digest": vec![4; 32],
+        }))
+        .unwrap();
+        arany::ToolView {
+            intent: arany::EffectIntent {
+                host: None,
+                host_command: Some(pin),
+                target: arany::worker::EffectTarget::Workspace,
+                id: uuid::Uuid::now_v7(),
+                run_id: arany::RunId::new(),
+                agent_run_id: arany::AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call: arany::ToolCall::CommandUnguarded {
+                    program: "printf".into(),
+                    args: vec![value.into()],
+                    cwd: cwd.into(),
+                    justification: "Reason hidden from picker labels".into(),
+                    prefix_rule: None,
+                },
+                limits: arany::ToolLimits::default(),
+                use_count: 1,
+            },
+            checkpoint: None,
+            observation: None,
+            review_call_index: None,
+            permission_verdict: None,
+            hooks: Vec::new(),
+            hook_sequence: None,
+            finished_sequence: None,
+        }
+    }
+
+    #[test]
+    fn host_picker_deduplicates_before_limiting_and_labels_only_command_and_cwd() {
+        let newest = host_candidate("current", "");
+        let nested = host_candidate("current", "nested");
+        let older = host_candidate("older", "");
+        let mut tools = vec![newest; arany::permissions::MAX_RULES];
+        tools.extend([nested, older]);
+        let candidates = super::host_candidates(tools.iter(), std::path::Path::new("/project"));
+        assert_eq!(candidates.len(), 3);
+        assert!(std::ptr::eq(candidates[0], &tools[0]));
+        let labels = candidates
+            .iter()
+            .map(|tool| super::host_command_label(&tool.intent.call))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "printf current",
+                "printf current · cwd nested",
+                "printf older"
+            ]
+        );
+        let hostile = host_candidate("line\u{1b}[31m", "nested\nfolder");
+        assert_eq!(
+            super::host_command_label(&hostile.intent.call),
+            "printf line\\u{001b}[31m · cwd nested\\u{000a}folder"
+        );
+    }
 
     #[cfg(all(unix, debug_assertions))]
     #[test]

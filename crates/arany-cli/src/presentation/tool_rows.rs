@@ -411,12 +411,7 @@ pub fn unguarded_approval_lines(
             "Previous exact project approvals were archived intact under archive/inactive-host-commands; fresh approval is required.".into(),
         );
     }
-    if prompt.prefix
-        && let arany::ToolCall::CommandUnguarded {
-            prefix_rule: Some(prefix),
-            ..
-        } = &intent.call
-    {
+    if let Some(prefix) = host_prefix_proposal(intent, prompt) {
         lines.push(format!(
             "Remember literal argv prefix (JSON): {}",
             escape_terminal(&serde_json::to_string(prefix).expect("prefix tokens"))
@@ -1017,6 +1012,19 @@ impl ToolApprovalChoice {
     }
 }
 
+fn host_prefix_proposal<'a>(
+    intent: &'a arany::EffectIntent,
+    prompt: &arany::UnguardedPrompt,
+) -> Option<&'a [String]> {
+    match &intent.call {
+        arany::ToolCall::CommandUnguarded {
+            prefix_rule: Some(prefix),
+            ..
+        } if prompt.prefix => Some(prefix),
+        _ => None,
+    }
+}
+
 pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApprovalChoice> {
     let mut choices = vec![ToolApprovalChoice::Yes];
     if approval
@@ -1036,7 +1044,8 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
     if approval
         .unguarded
         .as_ref()
-        .is_some_and(|prompt| prompt.prefix)
+        .and_then(|prompt| host_prefix_proposal(&approval.intent, prompt))
+        .is_some()
     {
         choices.push(ToolApprovalChoice::HostPrefix);
     }

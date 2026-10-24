@@ -1007,6 +1007,55 @@ mod unguarded_tests {
         }
     }
 
+    #[tokio::test]
+    async fn host_prefix_choice_requires_the_displayed_proposal() {
+        use crate::presentation::{ToolApprovalChoice, tool_approval_choices};
+        for (offered, proposed) in [(true, true), (false, true), (true, false), (false, false)] {
+            let mut intent = intent(&["value"], "");
+            if let ToolCall::CommandUnguarded {
+                program,
+                prefix_rule,
+                ..
+            } = &mut intent.call
+            {
+                *program = "printf".into();
+                *prefix_rule =
+                    proposed.then(|| vec!["printf".into(), "line\n\"quoted\"\u{1b}".into()]);
+            }
+            let prompt = UnguardedPrompt {
+                executable: "/usr/bin/printf".into(),
+                attribution: None,
+                remember: false,
+                prefix: offered,
+                sensitive: false,
+                inactive_rules: false,
+            };
+            let lines = unguarded_approval_lines(&intent, &prompt);
+            let prefix =
+                r#"Remember literal argv prefix (JSON): ["printf","line\n\"quoted\"\u001b"]"#;
+            assert_eq!(lines.iter().any(|line| line == prefix), offered && proposed);
+            let warning = "Every eligible suffix is authorized host behavior, not confinement. Saving approves this action once; the rule applies next Run. The first save creates default permission settings for other Tools.";
+            assert_eq!(
+                lines.iter().any(|line| line == warning),
+                offered && proposed
+            );
+            assert!(lines.iter().all(|line| !line.contains('\u{1b}')));
+            let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+            let ask = arany::test_support::approval::ask(&approvals, &intent);
+            let reply = async {
+                let mut approval = inbox.next().await.unwrap();
+                approval.unguarded = Some(prompt);
+                assert_eq!(
+                    tool_approval_choices(&approval).contains(&ToolApprovalChoice::HostPrefix),
+                    offered && proposed
+                );
+                approval.decide(arany::ApprovalReply::Deny);
+            };
+            let (approved, ()) = tokio::join!(ask, reply);
+            assert!(!approved);
+        }
+    }
+
     #[test]
     fn the_unguarded_prompt_carries_the_plan_copy_and_escapes_model_text() {
         let prompt = UnguardedPrompt {
