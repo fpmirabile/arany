@@ -1,7 +1,6 @@
 use super::ToolError;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use std::time::Duration;
-use tokio::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(super) const CONTROL_BYTES: usize = 32 * 1024;
 pub(super) const CONTROL_TOTAL_BYTES: usize = 256 * 1024;
@@ -15,6 +14,11 @@ pub(super) const DISCOVERY_TIME: Duration = Duration::from_secs(2);
 pub(super) const COMMAND_CALLS: u64 = 8_388_608;
 pub(super) const PHASE_TIME: Duration = Duration::from_secs(5);
 
+enum Deadline {
+    System(Instant),
+    Runtime(tokio::time::Instant),
+}
+
 pub(super) struct Selector {
     controls: Vec<(String, Gitignore)>,
     bytes: usize,
@@ -22,13 +26,20 @@ pub(super) struct Selector {
     expanded: usize,
     calls: u64,
     max_calls: u64,
-    deadline: Instant,
+    deadline: Deadline,
     #[cfg(test)]
     pub(super) in_progress: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Selector {
-    pub(super) fn new(calls: u64, deadline: std::time::Instant) -> Self {
+    pub(super) fn new(calls: u64, deadline: Instant) -> Self {
+        Self::with_deadline(
+            calls,
+            Deadline::System(deadline.min(Instant::now() + PHASE_TIME)),
+        )
+    }
+
+    fn with_deadline(calls: u64, deadline: Deadline) -> Self {
         Self {
             controls: Vec::new(),
             bytes: 0,
@@ -36,22 +47,35 @@ impl Selector {
             expanded: 0,
             calls,
             max_calls: COMMAND_CALLS,
-            deadline: Instant::from_std(deadline).min(Instant::now() + PHASE_TIME),
+            deadline,
             #[cfg(test)]
             in_progress: None,
         }
     }
 
-    pub(super) fn discovery(deadline: std::time::Instant) -> Self {
-        let deadline = Instant::from_std(deadline).min(Instant::now() + DISCOVERY_TIME);
+    pub(super) fn discovery(deadline: Instant) -> Self {
         Self {
             max_calls: DISCOVERY_CALLS,
-            ..Self::new(0, deadline.into_std())
+            ..Self::new(0, deadline.min(Instant::now() + DISCOVERY_TIME))
+        }
+    }
+
+    pub(super) fn discovery_until(deadline: tokio::time::Instant) -> Self {
+        Self {
+            max_calls: DISCOVERY_CALLS,
+            ..Self::with_deadline(
+                0,
+                Deadline::Runtime(deadline.min(tokio::time::Instant::now() + DISCOVERY_TIME)),
+            )
         }
     }
 
     pub(super) fn check_time(&self) -> Result<(), ToolError> {
-        if Instant::now() >= self.deadline {
+        let expired = match self.deadline {
+            Deadline::System(deadline) => Instant::now() >= deadline,
+            Deadline::Runtime(deadline) => tokio::time::Instant::now() >= deadline,
+        };
+        if expired {
             return Err(ToolError::Timeout(String::new()));
         }
         Ok(())
@@ -166,8 +190,11 @@ mod tests {
     #[test]
     fn discovery_keeps_its_smaller_work_and_time_budgets() {
         let now = Instant::now();
-        let mut selector = Selector::discovery((now + PHASE_TIME).into_std());
-        assert!(selector.deadline <= Instant::now() + DISCOVERY_TIME);
+        let mut selector = Selector::discovery(now + PHASE_TIME);
+        assert!(matches!(
+            selector.deadline,
+            Deadline::System(deadline) if deadline <= Instant::now() + DISCOVERY_TIME
+        ));
         selector.add("", b"ignored").unwrap();
         selector.calls = DISCOVERY_CALLS - 1;
         assert!(selector.excluded("ignored", false).unwrap());
@@ -175,21 +202,30 @@ mod tests {
             selector.excluded("visible", false),
             Err(ToolError::Limit)
         ));
-        let mut expired = Selector::discovery(now.into_std());
+        let mut expired = Selector::discovery(now);
         assert!(matches!(
             expired.add("", b"ignored"),
             Err(ToolError::Timeout(_))
         ));
     }
 
-    #[test]
-    fn selection_uses_the_shorter_phase_or_action_deadline() {
+    #[tokio::test(start_paused = true)]
+    async fn selection_uses_the_shorter_phase_or_action_deadline() {
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        tokio::time::resume();
         let now = Instant::now();
         let action = now + Duration::from_millis(25);
-        assert_eq!(Selector::new(0, action.into_std()).deadline, action);
-        let bounded = Selector::new(0, (now + Duration::from_secs(60)).into_std());
-        assert!(bounded.deadline <= Instant::now() + PHASE_TIME);
-        let mut expired = Selector::new(0, now.into_std());
+        let selector = Selector::new(0, action);
+        assert!(matches!(selector.deadline, Deadline::System(deadline) if deadline == action));
+        let mut discovery = Selector::discovery(now + DISCOVERY_TIME);
+        discovery.add("", b"ignored").unwrap();
+        let mut bounded = Selector::new(0, now + Duration::from_secs(60));
+        assert!(matches!(
+            bounded.deadline,
+            Deadline::System(deadline) if deadline <= Instant::now() + PHASE_TIME
+        ));
+        bounded.add("", b"ignored").unwrap();
+        let mut expired = Selector::new(0, now);
         assert!(matches!(
             expired.add("", b"ignored"),
             Err(ToolError::Timeout(_))
@@ -221,7 +257,7 @@ mod tests {
             ("x".repeat(1984), "x".repeat(1984), false),
         ];
         for (line, candidate, directory) in corpus {
-            let mut admitted = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
+            let mut admitted = Selector::new(0, Instant::now() + PHASE_TIME);
             admitted.add("", line.as_bytes()).unwrap();
             let matched = admitted.controls[0].1.matched(&candidate, directory);
             let actual = matched
@@ -240,12 +276,12 @@ mod tests {
 
     #[test]
     fn retained_matchers_and_all_admission_budgets_are_bounded() {
-        let mut rules = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
+        let mut rules = Selector::new(0, Instant::now() + PHASE_TIME);
         rules.add("", "x\n".repeat(504).as_bytes()).unwrap();
         assert_eq!(rules.rules, 504);
         assert!(matches!(rules.add("nested", b"x"), Err(ToolError::Limit)));
 
-        let mut selector = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
+        let mut selector = Selector::new(0, Instant::now() + PHASE_TIME);
         for index in 0..CONTROL_FILES {
             let directory = format!("branch{}/nested{}", index / 16, index % 16);
             selector.add(&directory, "x".repeat(64).as_bytes()).unwrap();
@@ -254,7 +290,7 @@ mod tests {
         assert!(!selector.excluded("branch0/nested0/visible", false).unwrap());
         assert!(matches!(selector.add("extra", b""), Err(ToolError::Limit)));
 
-        let mut bytes = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
+        let mut bytes = Selector::new(0, Instant::now() + PHASE_TIME);
         let comments = format!("#{}\n", "c".repeat(4094)).repeat(8);
         for index in 0..8 {
             bytes.add(&index.to_string(), comments.as_bytes()).unwrap();
@@ -262,15 +298,15 @@ mod tests {
         assert_eq!(bytes.bytes, CONTROL_TOTAL_BYTES);
         assert!(matches!(bytes.add("overflow", b"#"), Err(ToolError::Limit)));
 
-        let mut work = Selector::new(COMMAND_CALLS - 1, (Instant::now() + PHASE_TIME).into_std());
+        let mut work = Selector::new(COMMAND_CALLS - 1, Instant::now() + PHASE_TIME);
         work.add("", b"ignored").unwrap();
         assert!(work.excluded("ignored", false).unwrap());
         assert!(matches!(
             work.excluded("visible", false),
             Err(ToolError::Limit)
         ));
-        let mut elapsed = Selector::new(0, (Instant::now() + PHASE_TIME).into_std());
-        elapsed.deadline = Instant::now();
+        let mut elapsed = Selector::new(0, Instant::now() + PHASE_TIME);
+        elapsed.deadline = Deadline::System(Instant::now());
         assert!(matches!(
             elapsed.excluded("visible", false),
             Err(ToolError::Timeout(_))

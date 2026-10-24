@@ -1398,7 +1398,7 @@ impl GitDisclosure {
         let mut disclosure = Self {
             hidden: hidden.clone(),
             root: Some(super::fs::open_directory(workspace)?),
-            selector: Selector::discovery(action_deadline.into_std()),
+            selector: Selector::discovery_until(action_deadline),
             controls: BTreeSet::new(),
         };
         disclosure.control("")?;
@@ -1409,8 +1409,8 @@ impl GitDisclosure {
         Self {
             hidden,
             root: None,
-            selector: Selector::discovery(
-                (tokio::time::Instant::now() + super::selection::DISCOVERY_TIME).into_std(),
+            selector: Selector::discovery_until(
+                tokio::time::Instant::now() + super::selection::DISCOVERY_TIME,
             ),
             controls: BTreeSet::new(),
         }
