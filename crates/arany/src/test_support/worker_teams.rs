@@ -1,13 +1,22 @@
 use super::goals::{assert_action_bounds, finish_with, replayed};
 use super::scenario::{request, tool_outcome};
-use crate::worker::{EditorAssignment, WorkerIntegrationOutcome, WorkerMode};
+use crate::worker::{EditorAssignment, EffectTarget, WorkerIntegrationOutcome, WorkerMode};
 use crate::*;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use tokio::sync::{Semaphore, mpsc};
+use std::time::Duration;
+use tokio::sync::{Notify, Semaphore, mpsc};
+
+const APPROVAL_WITHDRAWAL_WAIT: Duration = Duration::from_secs(5);
+const RETRY_WAIT_MS: u32 = 10_000;
+// Native setup must reach the held Ask before the synthetic budget exhaustion.
+const RETRY_GOAL_ACTIVE_MS: u64 = 10 * 60 * 1000;
+const RETRY_EXHAUSTION_ADVANCE: Duration = Duration::from_millis(RETRY_GOAL_ACTIVE_MS + 1);
+const REVIEW_EXHAUSTION_GOAL_ACTIVE_MS: u64 = 120_000;
+const DELEGATION_DEADLINE_MARGIN: Duration = Duration::from_secs(1);
 
 pub struct TeamObservation {
     pub directory: tempfile::TempDir,
@@ -25,6 +34,7 @@ struct TeamProvider {
     requests: Mutex<Vec<ProviderRequest>>,
     violations: Mutex<Vec<&'static str>>,
     ready: mpsc::Sender<usize>,
+    completed: mpsc::UnboundedSender<usize>,
     gates: [Semaphore; 8],
     active: AtomicUsize,
     maximum: AtomicUsize,
@@ -36,6 +46,262 @@ impl Drop for ActiveCall<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+struct CompletionSignal(mpsc::UnboundedSender<usize>, usize);
+
+impl Drop for CompletionSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(self.1);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalJourneyStage {
+    Initial,
+    FirstChildAllowed,
+    SiblingHeld,
+    LateAccepted,
+    IntegrationHeld,
+    Completed,
+    Exhausted,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ApprovalArrival {
+    Continuation,
+    SecondContinuation { release_gate: bool },
+}
+
+struct ApprovalJourney {
+    case: &'static str,
+    stage: ApprovalJourneyStage,
+    held_approval: Option<ToolApproval>,
+    held_approval_id: Option<uuid::Uuid>,
+    continuation_index: Option<usize>,
+    second_continuation_index: Option<usize>,
+    held_integration: Option<ToolApproval>,
+    integration_held_once: bool,
+    integration_accepted: bool,
+    approval_withdrawn: bool,
+    late_accept_attempted: bool,
+    retry_wait_active: bool,
+}
+
+impl ApprovalJourney {
+    fn new(case: &'static str) -> Self {
+        Self {
+            case,
+            stage: ApprovalJourneyStage::Initial,
+            held_approval: None,
+            held_approval_id: None,
+            continuation_index: None,
+            second_continuation_index: None,
+            held_integration: None,
+            integration_held_once: false,
+            integration_accepted: false,
+            approval_withdrawn: false,
+            late_accept_attempted: false,
+            retry_wait_active: false,
+        }
+    }
+
+    async fn approval(&mut self, approval: ToolApproval, provider: &TeamProvider) {
+        assert_ne!(self.case, "review_exhaustion");
+        if self.should_hold_integration(&approval) {
+            self.integration_held_once = true;
+            self.held_integration = Some(approval);
+            self.stage = ApprovalJourneyStage::IntegrationHeld;
+            if let Some(index) = self.second_continuation_index {
+                provider.gates[index].add_permits(1);
+            }
+            return;
+        }
+        if !self.is_sibling_approval(&approval) {
+            approval.decide(true);
+            return;
+        }
+        if matches!(self.stage, ApprovalJourneyStage::Initial) {
+            approval.decide(true);
+            self.stage = ApprovalJourneyStage::FirstChildAllowed;
+            return;
+        }
+        self.held_approval_id = Some(approval.intent.id);
+        self.held_approval = Some(approval);
+        self.stage = ApprovalJourneyStage::SiblingHeld;
+        if self.case == "sibling_approval_wait"
+            && let Some(index) = self.continuation_index
+        {
+            provider.gates[index].add_permits(1);
+        }
+        self.maybe_exhaust().await;
+    }
+
+    fn should_hold_integration(&self, approval: &ToolApproval) -> bool {
+        self.case == "sibling_approval_wait"
+            && !self.integration_held_once
+            && matches!(&approval.intent.call, ToolCall::ApplyChangeset { .. })
+    }
+
+    fn is_sibling_approval(&self, approval: &ToolApproval) -> bool {
+        matches!(
+            self.case,
+            "sibling_approval_wait"
+                | "sibling_approval_exhaustion"
+                | "retry_approval_exhaustion"
+                | "delegation_deadline"
+        ) && matches!(approval.intent.target, EffectTarget::WorkerView { .. })
+    }
+
+    async fn arrival(&mut self, index: usize, provider: &TeamProvider) {
+        if !approval_journey_case(self.case) {
+            return;
+        }
+        match self.record_arrival(index) {
+            ApprovalArrival::SecondContinuation { release_gate } => {
+                if release_gate {
+                    provider.gates[index].add_permits(1);
+                }
+            }
+            ApprovalArrival::Continuation => {
+                if self.case == "sibling_approval_wait" && self.held_approval.is_some() {
+                    provider.gates[index].add_permits(1);
+                }
+                self.maybe_exhaust().await;
+            }
+        }
+    }
+
+    fn record_arrival(&mut self, index: usize) -> ApprovalArrival {
+        if matches!(
+            self.stage,
+            ApprovalJourneyStage::LateAccepted | ApprovalJourneyStage::IntegrationHeld
+        ) {
+            self.second_continuation_index = Some(index);
+            ApprovalArrival::SecondContinuation {
+                release_gate: matches!(self.stage, ApprovalJourneyStage::IntegrationHeld),
+            }
+        } else {
+            self.continuation_index = Some(index);
+            ApprovalArrival::Continuation
+        }
+    }
+
+    async fn completion(&mut self, index: usize) {
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3_600)).await;
+        tokio::time::resume();
+        if let Some(approval) = self.held_approval.take() {
+            approval.decide(true);
+            self.stage = ApprovalJourneyStage::LateAccepted;
+        } else if let Some(approval) = self.held_integration.take() {
+            approval.decide(true);
+            self.integration_accepted = true;
+            self.stage = ApprovalJourneyStage::Completed;
+        } else {
+            panic!("unexpected completed sibling {index}");
+        }
+    }
+
+    async fn maybe_exhaust(&mut self) {
+        if !approval_exhaustion_case(self.case) || self.held_approval.is_none() {
+            return;
+        }
+        if self.case == "retry_approval_exhaustion" && !self.retry_wait_active
+            || self.case != "retry_approval_exhaustion" && self.continuation_index.is_none()
+        {
+            return;
+        }
+        let mut approval = self.held_approval.take().expect("held approval");
+        tokio::select! {
+            biased;
+            () = approval.abandoned() => panic!("approval withdrawn before the active-time advance"),
+            () = std::future::ready(()) => {}
+        }
+        tokio::time::pause();
+        tokio::time::advance(approval_exhaustion_duration(self.case)).await;
+        tokio::time::resume();
+        tokio::time::timeout(APPROVAL_WITHDRAWAL_WAIT, approval.abandoned())
+            .await
+            .expect("active Goal exhaustion withdraws the pending approval");
+        assert_eq!(
+            tokio::time::timeout(APPROVAL_WITHDRAWAL_WAIT, approval.withdrawal_committed())
+                .await
+                .expect("withdrawal follows the committed Tool outcome"),
+            Some(true)
+        );
+        approval.decide(true);
+        self.approval_withdrawn = true;
+        self.late_accept_attempted = true;
+        self.stage = ApprovalJourneyStage::Exhausted;
+    }
+
+    async fn retry_started(&mut self, provider: &TeamProvider) {
+        self.retry_wait_active = true;
+        provider.gates[1].add_permits(1);
+        self.maybe_exhaust().await;
+    }
+}
+
+fn approval_journey_case(case: &str) -> bool {
+    matches!(
+        case,
+        "sibling_approval_wait"
+            | "sibling_approval_exhaustion"
+            | "retry_approval_exhaustion"
+            | "delegation_deadline"
+    )
+}
+
+fn approval_exhaustion_case(case: &str) -> bool {
+    matches!(
+        case,
+        "sibling_approval_exhaustion" | "retry_approval_exhaustion" | "delegation_deadline"
+    )
+}
+
+fn approval_exhaustion_duration(case: &str) -> Duration {
+    match case {
+        "sibling_approval_exhaustion" => Duration::from_secs(11 * 60),
+        "retry_approval_exhaustion" => RETRY_EXHAUSTION_ADVANCE,
+        "delegation_deadline" => {
+            crate::MAX_DELEGATION_DEADLINE.saturating_add(DELEGATION_DEADLINE_MARGIN)
+        }
+        _ => Duration::ZERO,
+    }
+}
+
+async fn exhaust_delegation_after_primary_tool(approval: ToolApproval, provider: &TeamProvider) {
+    assert!(matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
+    let session = provider.requests.lock().unwrap()[0].session_id;
+    let (entered, release) = crate::fault::FaultPlan::gate_goal_append_acknowledgment(
+        session,
+        |event| {
+            matches!(
+                event,
+                Event::ToolFinished { observation, .. }
+                    if matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free")
+                        && observation.disposition == crate::ToolDisposition::Succeeded
+            )
+        },
+    );
+    approval.decide(true);
+    entered
+        .await
+        .expect("successful primary Tool reaches its commit gate");
+    assert_eq!(
+        provider.active.load(Ordering::SeqCst),
+        2,
+        "both child continuations remain active at the primary commit gate"
+    );
+    tokio::time::pause();
+    tokio::time::advance(crate::MAX_DELEGATION_DEADLINE.saturating_add(DELEGATION_DEADLINE_MARGIN))
+        .await;
+    tokio::time::resume();
+    release
+        .send(())
+        .expect("primary Tool acknowledgment released");
 }
 
 impl TeamProvider {
@@ -132,6 +398,7 @@ impl TeamProvider {
                                 | "defer_finish"
                                 | "budget_calls"
                                 | "primary_time"
+                                | "primary_delegation_deadline"
                                 | "primary_denial"
                                 | "cancel_background"
                         ) {
@@ -272,11 +539,16 @@ impl TeamProvider {
             "private edit reached Workspace early",
         );
         self.ready.send(index).await.unwrap();
-        if matches!(self.case, "primary_time" | "primary_denial") {
+        if matches!(
+            self.case,
+            "primary_time" | "primary_denial" | "primary_delegation_deadline"
+        ) {
             self.gates[6].add_permits(1);
         }
         let permit = self.gates[index].acquire().await.unwrap();
         permit.forget();
+        let _completion = (self.case == "sibling_approval_wait")
+            .then(|| CompletionSignal(self.completed.clone(), index));
         if self.case == "conflict" && index == 1 {
             std::fs::write(self.workspace.join("notes/1"), "host edit").unwrap();
         }
@@ -331,6 +603,7 @@ impl TeamProvider {
                 | "command"
                 | "budget_calls"
                 | "primary_time"
+                | "primary_delegation_deadline"
                 | "primary_denial"
         ) && prior == 1
         {
@@ -415,6 +688,23 @@ impl Provider for TeamProvider {
             requests.push(request.clone());
             step
         };
+        if self.case == "retry_approval_exhaustion"
+            && request.phase == AgentPhase::ChildWork
+            && request.input.objective.starts_with("editor 0 ")
+            && step == 1
+        {
+            self.ready.send(0).await.unwrap();
+            return Err(ProviderError::HttpServerUnavailable(Some(
+                Duration::from_millis(u64::from(RETRY_WAIT_MS)),
+            )));
+        }
+        if self.case == "retry_approval_exhaustion"
+            && request.phase == AgentPhase::ChildWork
+            && request.input.objective.starts_with("editor 1 ")
+            && step == 0
+        {
+            self.gates[1].acquire().await.unwrap().forget();
+        }
         if self.case == "primary_time" && request.phase == AgentPhase::RootSynthesis && step == 2 {
             self.gates[6].acquire_many(2).await.unwrap().forget();
             tokio::time::pause();
@@ -422,9 +712,26 @@ impl Provider for TeamProvider {
             // Resume before native Guard work: blocking tasks inhibit paused-clock auto-advance.
             tokio::time::resume();
         }
-        if self.case == "primary_denial" && request.phase == AgentPhase::RootSynthesis && step == 2
+        if matches!(self.case, "primary_denial" | "primary_delegation_deadline")
+            && request.phase == AgentPhase::RootSynthesis
+            && step == 2
         {
             self.gates[6].acquire_many(2).await.unwrap().forget();
+        }
+        if self.case == "review_exhaustion" && request.phase == AgentPhase::ToolReview {
+            self.ready.send(7).await.unwrap();
+            self.gates[7].acquire().await.unwrap().forget();
+            return Ok(ProviderResponse {
+                turn: ProviderTurn::scripted(),
+                outcome: ProviderOutcome::Review(crate::ReviewVerdict::Approve),
+                response_id: None,
+                usage: Usage {
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    ..Default::default()
+                },
+                wire_provenance: None,
+            });
         }
         let outcome = if request.phase == AgentPhase::ChildWork {
             self.child(&request, step).await?
@@ -531,11 +838,21 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let budget = GoalBudget {
         max_provider_calls: Some(if case == "budget_calls" { 9 } else { 64 }),
         max_tokens: (case == "tokens").then_some(1024),
+        max_active_ms: match case {
+            "sibling_approval_wait" | "sibling_approval_exhaustion" => Some(10 * 60 * 1000),
+            "retry_approval_exhaustion" => Some(RETRY_GOAL_ACTIVE_MS),
+            "review_exhaustion" => Some(REVIEW_EXHAUSTION_GOAL_ACTIVE_MS),
+            _ => None,
+        },
         ..Default::default()
     };
     let (ready, mut arrivals) = mpsc::channel(16);
+    let (completed, mut completions) = mpsc::unbounded_channel();
     let mut identity = ProviderIdentity::new("scripted", "test-model", Provenance::native());
     identity.limits.concurrency = 8;
+    if matches!(case, "delegation_deadline" | "primary_delegation_deadline") {
+        identity.limits.deadline = crate::MAX_DELEGATION_DEADLINE;
+    }
     let provider = Arc::new(TeamProvider {
         identity,
         case,
@@ -545,6 +862,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         requests: Default::default(),
         violations: Default::default(),
         ready,
+        completed,
         gates: std::array::from_fn(|_| Semaphore::new(0)),
         active: AtomicUsize::new(0),
         maximum: AtomicUsize::new(0),
@@ -562,15 +880,27 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         }
     };
     input.goal = GoalRequest::new(budget, GoalPhase::Implementation);
-    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let (approvals, mut inbox) = ToolApprovals::new(if case == "review_exhaustion" {
+        ApprovalMode::Auto
+    } else {
+        ApprovalMode::Request
+    });
     let cancellation = RunCancellation::new();
-    if case == "fallback" {
+    let mut retry_entered = None;
+    let mut _retry_release = None;
+    if matches!(case, "fallback" | "retry_approval_exhaustion") {
         // The journaled retry delays stay; only the waits before each editor's switch end at once.
         let session = engine
             .create_session(workspace.clone(), None)
             .await
             .unwrap();
-        crate::fault::FaultPlan::skip_retry_backoff(session);
+        if case == "fallback" {
+            crate::fault::FaultPlan::skip_retry_backoff(session);
+        } else {
+            let (entered, release) = crate::fault::FaultPlan::gate_retry_backoff(session);
+            retry_entered = Some(entered);
+            _retry_release = Some(release);
+        }
         input.session_id = Some(session);
         input.title = None;
     }
@@ -604,51 +934,95 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let mut ready = Vec::new();
     let mut integrated = Vec::new();
     let mut primary_seen = false;
-    let result = loop {
-        tokio::select! {
-            result = &mut handle.result => break result,
-            Some(approval) = inbox.next() => {
-                let allow = !(case == "primary_denial" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
-                approval.decide(allow);
-            },
-            Some(index) = arrivals.recv() => {
-                ready.push(index);
-                if case.starts_with("hook_") { if index == 7 { provider.gates[7].add_permits(1); } }
-                else if case == "tokens" || case == "waves" || case == "reassign" { provider.gates[index].add_permits(1); }
-                else if matches!(case, "cap" | "hard_cap") {
-                    let cap = if case == "hard_cap" { 8 } else { 4 };
-                    if ready.len() == cap {
-                        let requests = provider.requests.lock().unwrap();
-                        assert_eq!(requests.iter().filter(|r| r.phase == AgentPhase::ChildWork).map(|r| r.agent_run_id).collect::<std::collections::HashSet<_>>().len(), cap);
-                        for gate in &provider.gates { gate.add_permits(1); }
+    let mut primary_tool_gated = false;
+    let mut approval_journey = ApprovalJourney::new(case);
+    let finished = Notify::new();
+    let execution = async {
+        let result = (&mut handle.result).await;
+        finished.notify_one();
+        result
+    };
+    let controller = async {
+        loop {
+            tokio::select! {
+                () = finished.notified() => break,
+                Some(approval) = inbox.next() => {
+                    if case == "review_exhaustion" {
+                        panic!("expired AI review must not fall back to a human ask");
                     }
-                } else if ready.len() == if matches!(case, "mixed" | "c1_failure" | "cancel_mixed") { 3 } else { 2 } {
-                    if case.starts_with("cancel_") { cancellation.cancel(); }
-                    else if case == "c1_failure" { provider.gates[7].add_permits(1); }
-                    else if case == "failure" { provider.gates[0].add_permits(1); }
-                    else if case == "primary_denial" {}
-                    else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
-                    else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
-                }
-            },
-            Some(event) = handle.events.next() => if let Tapped::Committed(envelope) = event {
-                match &envelope.event {
-                    Event::WorkerIntegrationRecorded { record, .. } => {
-                        integrated.push(record.assignment_id);
-                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command") { provider.gates[0].add_permits(1); }
+                    if case == "primary_delegation_deadline"
+                        && !matches!(approval.intent.target, EffectTarget::WorkerView { .. })
+                    {
+                        exhaust_delegation_after_primary_tool(approval, &provider).await;
+                        primary_tool_gated = true;
+                        continue;
                     }
-                    Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
-                    Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
-                    Event::ToolFinished { observation, .. } if matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free") => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
-                    Event::ProviderCallRecorded { record, agent_run_id, .. } if case == "command" && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::ToolRequested => {
-                        assert_ne!(*agent_run_id, provider.requests.lock().unwrap().iter().find(|r| r.phase == AgentPhase::ChildWork).unwrap().agent_run_id);
-                        primary_seen = true; for gate in &provider.gates { gate.add_permits(1); }
+                    if approval_journey_case(case) {
+                        approval_journey.approval(approval, &provider).await;
+                        continue;
                     }
-                    _ => {}
+                    let allow = !(case == "primary_denial" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
+                    approval.decide(allow);
+                },
+                Some(index) = completions.recv(), if case == "sibling_approval_wait" => {
+                    approval_journey.completion(index).await;
+                },
+                retry = async { retry_entered.as_mut().expect("retry backoff gate").await }, if retry_entered.is_some() => {
+                    retry.expect("retry enters its gated backoff");
+                    retry_entered = None;
+                    approval_journey.retry_started(&provider).await;
+                },
+                Some(index) = arrivals.recv() => {
+                    ready.push(index);
+                    if case.starts_with("hook_") { if index == 7 { provider.gates[7].add_permits(1); } }
+                    else if case == "review_exhaustion" && index == 7 {
+                        tokio::time::pause();
+                        tokio::time::advance(Duration::from_millis(
+                            REVIEW_EXHAUSTION_GOAL_ACTIVE_MS + 1,
+                        )).await;
+                        tokio::task::yield_now().await;
+                        tokio::time::resume();
+                    }
+                    else if approval_journey_case(case) {
+                        approval_journey.arrival(index, &provider).await;
+                    }
+                    else if matches!(case, "tokens" | "waves" | "reassign") { provider.gates[index].add_permits(1); }
+                    else if matches!(case, "cap" | "hard_cap") {
+                        let cap = if case == "hard_cap" { 8 } else { 4 };
+                        if ready.len() == cap {
+                            let requests = provider.requests.lock().unwrap();
+                            assert_eq!(requests.iter().filter(|r| r.phase == AgentPhase::ChildWork).map(|r| r.agent_run_id).collect::<std::collections::HashSet<_>>().len(), cap);
+                            for gate in &provider.gates { gate.add_permits(1); }
+                        }
+                    } else if ready.len() == if matches!(case, "mixed" | "c1_failure" | "cancel_mixed") { 3 } else { 2 } {
+                        if case.starts_with("cancel_") { cancellation.cancel(); }
+                        else if case == "c1_failure" { provider.gates[7].add_permits(1); }
+                        else if case == "failure" { provider.gates[0].add_permits(1); }
+                        else if matches!(case, "primary_denial" | "primary_delegation_deadline") {}
+                        else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
+                        else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
+                    }
+                },
+                Some(event) = handle.events.next() => if let Tapped::Committed(envelope) = event {
+                    match &envelope.event {
+                        Event::WorkerIntegrationRecorded { record, .. } => {
+                            integrated.push(record.assignment_id);
+                            if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command") { provider.gates[0].add_permits(1); }
+                        }
+                        Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
+                        Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
+                        Event::ToolFinished { observation, .. } if case != "primary_delegation_deadline" && matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free") => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
+                        Event::ProviderCallRecorded { record, agent_run_id, .. } if case == "command" && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::ToolRequested => {
+                            assert_ne!(*agent_run_id, provider.requests.lock().unwrap().iter().find(|r| r.phase == AgentPhase::ChildWork).unwrap().agent_run_id);
+                            primary_seen = true; for gate in &provider.gates { gate.add_permits(1); }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
     };
+    let (result, ()) = tokio::join!(execution, controller);
     if case == "hook_uncertain_sibling" {
         assert!(
             matches!(result, Err(EngineError::Tool(ToolError::Uncertain))),
@@ -698,6 +1072,101 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let (events, view) = replayed(&state, session).await;
     assert_action_bounds(&events, false, false);
     let run = &view.runs[0];
+    if case == "primary_delegation_deadline" {
+        assert!(primary_tool_gated, "primary Tool commit gate did not run");
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ProviderCallRecorded { record, .. }
+                if record.phase == AgentPhase::RootSynthesis
+                    && record.disposition == ProviderCallDisposition::ToolRequested
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ToolFinished { observation, .. }
+                if matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free")
+                    && observation.disposition == crate::ToolDisposition::Succeeded
+        )));
+        assert_eq!(run.failure, Some(RunFailure::ToolStopped));
+        assert!(!view.goals[0].budget_closed);
+        assert!(view.goals[0].budget_refusal.is_none());
+        let requests = provider.requests.lock().unwrap();
+        for (phase, expected) in [(AgentPhase::ChildWork, 4), (AgentPhase::RootSynthesis, 1)] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.phase == phase)
+                    .count(),
+                expected,
+                "refill dispatched extra {phase:?} work after the deadline"
+            );
+        }
+    }
+    if approval_journey_case(case) {
+        let approval_id = approval_journey
+            .held_approval_id
+            .expect("held child approval was answered or withdrawn");
+        let tool = run
+            .agents
+            .iter()
+            .flat_map(|agent| &agent.tools)
+            .find(|tool| tool.intent.id == approval_id)
+            .expect("reopened replay contains the child approval");
+        let observation = tool.observation.as_ref().unwrap();
+        if case == "sibling_approval_wait" {
+            assert_eq!(observation.disposition, crate::ToolDisposition::Succeeded);
+            assert!(view.goals[0].active_ms < 10 * 60 * 1000);
+            assert!(approval_journey.integration_accepted);
+        } else {
+            assert_eq!(observation.disposition, crate::ToolDisposition::Limit);
+            assert!(observation.attestation.is_none());
+            assert!(approval_journey.approval_withdrawn);
+            assert!(approval_journey.late_accept_attempted);
+            if case == "delegation_deadline" {
+                assert_eq!(run.failure, Some(RunFailure::ToolStopped));
+                assert!(!view.goals[0].budget_closed);
+                assert!(view.goals[0].budget_refusal.is_none());
+            } else {
+                assert_eq!(
+                    view.run_stop(run),
+                    Some(crate::RunStop::GoalExhausted(crate::GoalLimit::ActiveTime))
+                );
+                let minimum_ms = if case == "retry_approval_exhaustion" {
+                    RETRY_GOAL_ACTIVE_MS
+                } else {
+                    10 * 60 * 1000
+                };
+                assert!(view.goals[0].active_ms >= minimum_ms);
+            }
+            if case == "retry_approval_exhaustion" {
+                assert!(events.iter().any(|event| matches!(
+                    &event.event,
+                    Event::ProviderRetryScheduled { retry, .. }
+                        if retry.delay_ms == RETRY_WAIT_MS
+                )));
+            }
+        }
+    }
+    if case == "review_exhaustion" {
+        assert!(
+            provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.phase == AgentPhase::ToolReview)
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ProviderCallRecorded { record, .. }
+                if record.phase == AgentPhase::ToolReview
+                    && record.disposition == ProviderCallDisposition::TimedOut
+        )));
+        assert_eq!(
+            view.run_stop(run),
+            Some(crate::RunStop::GoalExhausted(crate::GoalLimit::ActiveTime))
+        );
+        assert!(view.goals[0].active_ms >= REVIEW_EXHAUSTION_GOAL_ACTIVE_MS);
+    }
     assert_eq!(
         result.stopped,
         view.run_stop(run),
@@ -711,6 +1180,11 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             | "hard_cap"
             | "budget_calls"
             | "primary_time"
+            | "sibling_approval_exhaustion"
+            | "retry_approval_exhaustion"
+            | "delegation_deadline"
+            | "primary_delegation_deadline"
+            | "review_exhaustion"
             | "turn_limit"
             | "resume_unknown"
     );
@@ -1103,6 +1577,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     )
     .unwrap();
     let (ready, _arrivals) = mpsc::channel(16);
+    let (completed, _completions) = mpsc::unbounded_channel();
     let provider = Arc::new(TeamProvider {
         identity: ProviderIdentity::new("scripted", "test-model", Provenance::native()),
         case: "resume_id",
@@ -1112,6 +1587,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         requests: Default::default(),
         violations: Default::default(),
         ready,
+        completed,
         gates: std::array::from_fn(|_| Semaphore::new(1)),
         active: AtomicUsize::new(0),
         maximum: AtomicUsize::new(0),
@@ -1677,5 +2153,29 @@ pub async fn recover_open_worker_command(guard: &Path) -> TeamObservation {
         session: original.session,
         events,
         view,
+    }
+}
+
+#[cfg(test)]
+mod approval_journey_tests {
+    use super::*;
+
+    #[test]
+    fn integration_and_arrival_orders_release_the_second_continuation() {
+        let mut arrival_first = ApprovalJourney::new("sibling_approval_wait");
+        arrival_first.stage = ApprovalJourneyStage::LateAccepted;
+        assert_eq!(
+            arrival_first.record_arrival(1),
+            ApprovalArrival::SecondContinuation {
+                release_gate: false
+            }
+        );
+
+        let mut integration_first = ApprovalJourney::new("sibling_approval_wait");
+        integration_first.stage = ApprovalJourneyStage::IntegrationHeld;
+        assert_eq!(
+            integration_first.record_arrival(1),
+            ApprovalArrival::SecondContinuation { release_gate: true }
+        );
     }
 }
