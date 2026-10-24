@@ -65,7 +65,6 @@ pub fn validate_workspace_inputs(
     Ok(())
 }
 
-const CHILD_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 // GoalStarted or GoalResumed, GoalRunLinked, MessageAccepted, RunStarted and AgentSpawned.
 const RUN_START_EVENTS: usize = 5;
 

@@ -56,6 +56,8 @@ This contract owns the official ChatGPT-plan OAuth route: registration and sign-
 
 ### Run limits
 
+Primary and private editor calls declare 32,768 visible output tokens; researcher calls request 4,096. The shared [execution contract](./execution.md#accepted-outcomes) owns the child caps and route narrowing.
+
 | Limit | Value | Overflow |
 |---|---|---|
 | Local output cap | The request's [role-specific cap](./execution.md#accepted-outcomes) applied to visible output: `usage.output_tokens` minus `usage.output_tokens_details.reasoning_tokens`. Absent or null details count every output token. Compaction keeps a separate 4,096 cap instead of its request's 1,024: the request cannot carry a cap, so its instructions ask for at most 6,144 UTF-8 bytes, noting that a non-ASCII character takes up to 4 bytes. That is three quarters of the Engine's 8 KiB summary bound, which still rejects a longer summary. | `local_output_limit`, no retry. Reasoning above the total, or details without an unsigned 32-bit count, is a response-contract failure. |

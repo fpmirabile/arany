@@ -55,7 +55,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Provider check journal](./provider-check-journal/README.md) | `In progress`: C1 implemented; C2 selected ChatGPT checks and account-index migration remain; prerequisite for setup UI |
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [Anthropic Tool turns](./anthropic-tool-stream/README.md) | `Ready`: S1 names Anthropic failure stages in `development.log`; S2 journals the closed reason; S3 fixes the cause after the owner's live re-run |
-| [Route output budget](./route-output-budget/README.md) | `Ready`: 1 raises the primary output cap to 32,768 tokens on ChatGPT and native OpenAI/Anthropic so 64 KiB Write and Edit fit; 2 gives private editor children the same cap |
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Primary host commands](./primary-host-commands/README.md) | `Ready`: guarantee wording and H1 approved; S1 primary escalation, session approval and privilege-tool refusal, S2 user-owned host prefixes, S3 serve/ACP/exec |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | `In progress`: PR1 and PR2 are implemented; PR3 changeset capacity remains; `ignore` 0.4.33 is approved |
