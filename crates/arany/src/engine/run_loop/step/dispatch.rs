@@ -1,6 +1,7 @@
+use super::ask::Resolution;
 use super::hooks::HookFold;
 use super::permission::Permission;
-use super::{ActiveTime, Answer, HookDenial, Resolution};
+use super::{ActiveTime, Answer, HookDenial};
 use crate::engine::ledger::ActiveDeadlineCause;
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};

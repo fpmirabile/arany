@@ -22,12 +22,14 @@ const EDITOR_RUNTIME_DIVISOR: u64 = 4;
 // Cache restoration and publication need additional time within the delegation allowance.
 const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
 
+mod ask;
 mod checkpoint;
 mod dispatch;
 pub(super) mod hooks;
 mod permission;
 mod review;
 
+use ask::{AskOptions, AskSite, Resolution, Resolver};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
@@ -100,32 +102,6 @@ impl Grant<'_> {
 }
 
 const MAX_NARROWINGS_PER_STEP: usize = 1;
-
-enum Resolver<'a> {
-    AiReview { objective: &'a str },
-    Human,
-}
-
-enum AskSite {
-    Primary(AskOptions),
-    Delegated {
-        active_deadline: Option<crate::engine::ledger::ActiveDeadline>,
-    },
-}
-
-struct AskOptions {
-    unguarded_prompt: Option<UnguardedPrompt>,
-    allow_auto_edits: bool,
-    remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
-}
-
-struct Resolution {
-    approved: bool,
-    source: PermissionSource,
-    active_time_exhausted: bool,
-    save: Option<RuleSave>,
-    withdrawal: Option<ApprovalWithdrawal>,
-}
 
 #[derive(Debug, Eq, PartialEq)]
 enum ReviewProgress {
@@ -1158,72 +1134,6 @@ impl RunLoop<'_> {
         }
         self.save_remembered_rule(runtime, site, verdict, save)
             .map(Admission::Reserved)
-    }
-
-    async fn ask(
-        &self,
-        grant: &Grant<'_>,
-        intent: &EffectIntent,
-        mode: ApprovalMode,
-        options: AskOptions,
-    ) -> Result<Admission<Resolution>, EngineError> {
-        match grant {
-            Grant::Primary {
-                request,
-                review_allowed,
-            } => {
-                let resolvers;
-                let chain = if mode == ApprovalMode::Auto
-                    && *review_allowed
-                    && self.ledger().admits(Action::Review)
-                {
-                    resolvers = [
-                        Resolver::AiReview {
-                            objective: &request.input.objective,
-                        },
-                        Resolver::Human,
-                    ];
-                    &resolvers[..]
-                } else {
-                    &[Resolver::Human]
-                };
-                self.resolve_ask(intent, chain, AskSite::Primary(options))
-                    .await
-            }
-            Grant::Researcher {
-                active_deadline, ..
-            } => {
-                let objective =
-                    if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
-                        Some(
-                            self.ledger()
-                                .view(|view| {
-                                    self.goal_id
-                                        .and_then(|id| view.goal(id))
-                                        .map(|goal| goal.objective.clone())
-                                })?
-                                .ok_or(EngineError::InvalidHistory)?,
-                        )
-                    } else {
-                        None
-                    };
-                let resolvers;
-                let chain = if let Some(objective) = &objective {
-                    resolvers = [Resolver::AiReview { objective }, Resolver::Human];
-                    &resolvers[..]
-                } else {
-                    &[Resolver::Human]
-                };
-                self.resolve_ask(
-                    intent,
-                    chain,
-                    AskSite::Delegated {
-                        active_deadline: active_deadline.clone(),
-                    },
-                )
-                .await
-            }
-        }
     }
 
     async fn approval_paused(&self) {

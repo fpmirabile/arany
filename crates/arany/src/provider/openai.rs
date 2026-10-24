@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
+mod limits;
 mod subscription;
 pub(crate) mod wire;
 pub use subscription::ChatGptProvider;
