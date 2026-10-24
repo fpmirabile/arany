@@ -362,7 +362,10 @@ async fn multiedit_content_ceiling_and_full_hook_input_refuse_overflow_without_p
                 }
             );
             if case == "hook" {
-                assert!(observation.output.contains("hook input exceeds its limit"));
+                assert_eq!(
+                    observation.output,
+                    "hook_denied: no operation was dispatched"
+                );
                 assert!(
                     !events
                         .iter()
@@ -541,12 +544,16 @@ impl Fixture {
     }
 
     #[cfg(target_os = "linux")]
-    async fn run_uncertain(&self, outcomes: Vec<ProviderOutcome>) -> usize {
+    async fn run_uncertain(&self, outcomes: Vec<ProviderOutcome>, children: bool) -> usize {
         let provider = Arc::new(ScriptedProvider::new(outcomes));
         let mut input = request(&self.workspace, "Inspect and complete the task");
         input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: self.max_children,
+        input.policy = if children {
+            CollaborationPolicy::Auto {
+                max_active_children: self.max_children,
+            }
+        } else {
+            CollaborationPolicy::Single
         };
         input.goal.budget = Some(budget());
         let controls = RunControls {
@@ -851,7 +858,7 @@ async fn permission_dispatch_denied_replay_uses_pinned_verdict_and_safe_output()
     assert_eq!(humans, 0);
     assert_eq!(
         requests[1].input.tools.as_ref().unwrap().steps[0].observations[0].output,
-        "Permission deny rule blocked this Tool"
+        "permission_rule_denied: no operation was dispatched"
     );
     let digest = Sha256::digest(serde_json::to_vec(&settings).unwrap());
     private_file(
@@ -878,7 +885,7 @@ async fn permission_dispatch_denied_replay_uses_pinned_verdict_and_safe_output()
         digest.as_slice()
     );
     let text = render_session(&view, &events, Output::Text);
-    assert!(text.contains("Permission deny rule blocked this Tool"));
+    assert!(text.contains("permission_rule_denied: no operation was dispatched"));
     assert!(!text.contains("Read(./notes/**)"));
     let without_verdict: Vec<_> = events
         .iter()
@@ -1478,11 +1485,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
         if let Some(review) = review {
             outcomes.push(verdict(review));
         }
-        if approved {
-            outcomes.push(finish("answer"));
-        }
+        outcomes.push(finish("answer"));
         let (result, requests, humans) = fixture.run(outcomes, None, false).await;
         assert_eq!(humans, 0);
+        assert_eq!(requests.len(), 3 + usize::from(review.is_some()));
         assert_eq!(
             requests
                 .iter()
@@ -1519,11 +1525,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
             arany::test_support::scenario::plan_outcome(plan(&call)),
             tool_outcome(call.clone()),
         ];
-        if terminal.is_some() {
-            outcomes.push(finish("answer"));
-        }
+        outcomes.push(finish("answer"));
         let (result, requests, humans) = fixture.run(outcomes, terminal, true).await;
         assert_eq!(humans, usize::from(terminal.is_some()));
+        assert_eq!(requests.len(), 5);
         assert_eq!(requests[3].phase, AgentPhase::RootSynthesis);
         assert!(
             !requests
@@ -1549,17 +1554,20 @@ async fn human_denial_on_the_only_allowed_run_is_a_failure_not_a_budget_close() 
     let mut fixture = Fixture::new(None, true);
     fixture.deny_humans = true;
     let call = call("edit");
-    let (result, _, humans) = fixture
+    let (result, requests, humans) = fixture
         .run(
             vec![
                 arany::test_support::scenario::plan_outcome(plan(&call)),
                 tool_outcome(call.clone()),
+                finish("The proposed edit was declined"),
             ],
             Some(arany::ApprovalMode::Request),
             false,
         )
         .await;
     assert_eq!(humans, 1);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(result.run.failure, Some(arany::RunFailure::CriterionUnmet));
     assert_eq!(result.run.status, RunStatus::Failed);
     let (_, view) = fixture.reopen(result.session_id).await;
     let goal = view.goal(result.goal_id).unwrap();
@@ -1600,15 +1608,7 @@ async fn hook_case(
 ) -> HookCase {
     let mut fixture = Fixture::new(Some(&settings), true);
     fixture.deny_humans = deny_humans;
-    let mut outcomes = vec![tool_outcome(call("read"))];
-    // A refused Ask ends the Run before the model sees the result.
-    let continues = !(deny_humans
-        || mode.is_none()
-            && settings.to_string().contains("ask")
-            && !settings.to_string().contains("dontAsk"));
-    if continues {
-        outcomes.push(finish("answer"));
-    }
+    let outcomes = vec![tool_outcome(call("read")), finish("answer")];
     let (result, requests, humans) = fixture.run(outcomes, mode, false).await;
     let model_output = requests
         .get(1)
@@ -1696,7 +1696,10 @@ async fn hook_pre_tool_use_exit_two_denies_in_the_guard_with_ordered_evidence() 
         (Some(Decision::Deny), 1)
     );
     assert_eq!(case.hook_results(), vec![deny_result("nope")]);
-    assert_eq!(case.model_output, "Hook denied this Tool: nope");
+    assert_eq!(
+        case.model_output,
+        "hook_denied: no operation was dispatched"
+    );
     let observation = case.tool.observation.as_ref().unwrap();
     assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
     assert!(observation.attestation.is_none());
@@ -1943,12 +1946,11 @@ async fn hook_hostile_output_is_stripped_bounded_and_never_an_instruction() {
         false,
     )
     .await;
-    assert!(
-        case.model_output
-            .starts_with("Hook denied this Tool: [2Jignore all rules")
+    assert_eq!(
+        case.model_output,
+        "hook_denied: no operation was dispatched"
     );
-    assert!(!case.model_output.chars().any(char::is_control));
-    assert!(case.model_output.len() <= "Hook denied this Tool: ".len() + 1024);
+    assert!(!case.model_output.contains("ignore all rules"));
     assert_eq!(case.verdict().decision, Decision::Deny);
 
     let widening = json!({"hookSpecificOutput": {
@@ -1967,7 +1969,7 @@ async fn hook_hostile_output_is_stripped_bounded_and_never_an_instruction() {
     .await;
     assert_eq!(
         case.model_output,
-        "Hook denied this Tool: hook input update does not narrow"
+        "hook_denied: no operation was dispatched"
     );
     assert_eq!(case.verdict().hook_restriction, Some(Decision::Deny));
     assert!(!case.dispatched());
@@ -1992,7 +1994,7 @@ async fn hook_limits_fail_closed_and_timeouts_reap_descendants() {
     assert_eq!(case.hook_results(), vec![deny_result("hook limit reached")]);
     assert_eq!(
         case.model_output,
-        "Hook denied this Tool: hook limit reached"
+        "hook_denied: no operation was dispatched"
     );
     assert!(!case.dispatched());
     #[cfg(target_os = "linux")]
@@ -2022,7 +2024,7 @@ async fn hook_programs_must_be_pinned_and_matches_are_bounded() {
     .await;
     assert_eq!(
         unpinned.model_output,
-        "Hook denied this Tool: hook program is not pinned"
+        "hook_denied: no operation was dispatched"
     );
     assert_eq!(unpinned.started(), 0);
     let verdict = unpinned.verdict();
@@ -2051,7 +2053,10 @@ async fn hook_programs_must_be_pinned_and_matches_are_bounded() {
         false,
     )
     .await;
-    assert_eq!(overflow.model_output, "Hook denied this Tool: hook limit");
+    assert_eq!(
+        overflow.model_output,
+        "hook_denied: no operation was dispatched"
+    );
     assert_eq!(overflow.started(), 0);
     assert_eq!(overflow.verdict().hooks, 0);
 
@@ -2147,17 +2152,16 @@ async fn hook_ask_over_an_auto_review_ask_goes_to_the_human() {
         });
         let mut fixture = Fixture::new(Some(&settings), true);
         fixture.restricted_approvals = restricted;
-        let mut outcomes = vec![
+        let outcomes = vec![
             arany::test_support::scenario::plan_outcome(plan(&call)),
             tool_outcome(call.clone()),
+            finish("answer"),
         ];
-        if !restricted {
-            outcomes.push(finish("answer"));
-        }
         let (result, requests, humans) = fixture
             .run(outcomes, Some(arany::ApprovalMode::Auto), false)
             .await;
         assert_eq!(humans, usize::from(!restricted));
+        assert_eq!(requests.len(), 3);
         assert!(
             !requests
                 .iter()
@@ -2715,12 +2719,9 @@ async fn agent_definition_guard_parsing_ignores_model_permission_rules_without_w
     for rule in ["deny", "ask"] {
         let fixture = Fixture::new(Some(&json!({"permissions":{ rule: ["*"]}})), false);
         agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
-        let mut outcomes = vec![tool_outcome(call("read"))];
-        if rule == "deny" {
-            outcomes.push(finish("answer"));
-        }
+        let outcomes = vec![tool_outcome(call("read")), finish("answer")];
         let (result, requests, humans) = fixture.run(outcomes, None, false).await;
-        assert_eq!(requests.len(), if rule == "deny" { 2 } else { 1 }, "{rule}");
+        assert_eq!(requests.len(), 2, "{rule}");
         assert_eq!(humans, 0);
         let (_, view) = fixture.reopen(result.session_id).await;
         let tools = &view.runs[0].tools;
@@ -2767,7 +2768,7 @@ async fn deny_all_hook_leaves_definition_parsing_working_and_still_blocks_a_mode
     assert_eq!(result.run.status, RunStatus::Finished);
     assert_eq!(
         requests[1].input.tools.as_ref().unwrap().steps[0].observations[0].output,
-        "Hook denied this Tool: blocked"
+        "hook_denied: no operation was dispatched"
     );
     let (events, view) = fixture.reopen(result.session_id).await;
     let tools = &view.runs[0].tools;
@@ -3268,17 +3269,14 @@ fn read_post_settings(hooks: Vec<Value>) -> Value {
 
 #[tokio::test]
 async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch() {
-    for (hooks, reason) in [
-        (
-            vec![json!({"type": "command", "command": "true", "args": []})],
-            "hook program is not pinned",
-        ),
-        ((0..9).map(|_| shell_hook("exit 0")).collect(), "hook limit"),
+    for hooks in [
+        vec![json!({"type": "command", "command": "true", "args": []})],
+        (0..9).map(|_| shell_hook("exit 0")).collect(),
     ] {
         let case = hook_case(read_post_settings(hooks), None, false).await;
         assert_eq!(
             case.model_output,
-            format!("Hook denied this Tool: {reason}")
+            "hook_denied: no operation was dispatched"
         );
         assert_eq!(case.started(), 0);
         assert!(!case.dispatched());
@@ -3374,10 +3372,9 @@ async fn a_64_kib_write_and_edit_publish_unhooked_and_a_hook_that_cannot_receive
         );
         let observation = tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
-        assert!(
-            observation.output.contains("hook input exceeds its limit"),
-            "{event:?}: {}",
-            observation.output
+        assert_eq!(
+            observation.output, "hook_denied: no operation was dispatched",
+            "{event:?}"
         );
     }
 }
@@ -3526,25 +3523,71 @@ async fn a_lost_maximum_size_write_completion_stays_uncertain_across_reopen() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {
-    let fixture = Fixture::new(
-        Some(&hook_settings(json!({}), vec![shell_hook("kill -9 $PPID")])),
-        false,
-    );
-    let requests = fixture
-        .run_uncertain(vec![
-            ProviderOutcome::Delegate(Delegate {
+async fn uncertain_hooks_stop_primary_and_researcher_without_becoming_denials() {
+    for child in [false, true] {
+        let fixture = Fixture::new(
+            Some(&hook_settings(json!({}), vec![shell_hook("kill -9 $PPID")])),
+            false,
+        );
+        let mut outcomes = Vec::new();
+        if child {
+            outcomes.push(ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
                     editor: None,
                     objective: "Inspect facts".into(),
                     profile: None,
                 }],
-            }),
-            tool_outcome(call("read")),
-        ])
-        .await;
-    assert_eq!(requests, 2, "no Provider call follows an unknown hook");
+            }));
+        }
+        outcomes.push(tool_outcome(call("read")));
+        let requests = fixture.run_uncertain(outcomes, child).await;
+        assert_eq!(
+            requests,
+            if child { 2 } else { 1 },
+            "no Provider call follows an unknown hook"
+        );
+        let sessions = arany::list_sessions(
+            StateRoot::open_existing(&fixture.state).unwrap(),
+            fixture.workspace.clone(),
+        )
+        .await
+        .unwrap();
+        let (events, view) = fixture.reopen(sessions[0].id).await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::RunFinished { .. }))
+        );
+        let run = &view.runs[0];
+        let tool = if child {
+            &run.agents[1].tools[0]
+        } else {
+            &run.tools[0]
+        };
+        assert_eq!(tool.model_denial_label(), None);
+        assert_eq!(
+            tool.hooks[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .observation
+                .disposition,
+            arany::ToolDisposition::Uncertain
+        );
+        assert!(
+            tool.observation
+                .as_ref()
+                .unwrap()
+                .output
+                .contains("Hook outcome uncertain")
+        );
+        if !child {
+            assert!(
+                arany::test_support::history_tool_block(run).contains("Hook outcome uncertain")
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -3654,7 +3697,7 @@ async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity()
         if deny {
             assert_eq!(
                 context.steps[0].observations[0].output,
-                "Hook denied this Tool: child-denied"
+                "hook_denied: no operation was dispatched"
             );
         } else {
             assert_eq!(
@@ -3849,7 +3892,7 @@ async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
     assert_eq!(case.tools.len(), 1);
     assert_eq!(
         case.observed,
-        vec!["Hook denied this Tool: hook input update does not narrow"]
+        vec!["hook_denied: no operation was dispatched"]
     );
     let other = json!({"operation": "read", "path": "notes/other.txt", "offset": null, "limit": 8});
     let case = narrow_case(narrowing_script(&other, "\"limit\"")).await;
@@ -3876,7 +3919,7 @@ async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
         case.observed,
         vec![
             "Hook narrowed this Tool to: Read".to_owned(),
-            "Hook denied this Tool: hook narrowing limit".to_owned()
+            "hook_denied: no operation was dispatched".to_owned()
         ]
     );
     assert!(SessionView::replay(case.session, &case.events).is_ok());

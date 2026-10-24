@@ -88,6 +88,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "git"
                         | "refusal"
                         | "denied"
+                        | "headless"
                         | "cancelled"
                         | "overflow"
                         | "mcp-version"
@@ -2225,6 +2226,7 @@ int main(void) {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     for case in [
         "denied",
+        "headless",
         "cancelled",
         "overflow",
         "mcp-version",
@@ -2251,6 +2253,12 @@ int main(void) {
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
         );
+        if case == "headless" {
+            private_file(
+                &state_path.join("permissions.json"),
+                br#"{"permissions":{"ask":["Bash"]}}"#,
+            );
+        }
         let requests = Arc::new(Mutex::new(Vec::new()));
         let call = if case == "mcp-version" {
             ToolCall::McpList {
@@ -2408,7 +2416,11 @@ int main(void) {
         }
         assert_eq!(
             requests.lock().unwrap().len(),
-            usize::from(case != "mcp-version") + if attested { 2 } else { 1 },
+            match case {
+                "denied" | "headless" | "overflow" => 3,
+                "cancelled" | "mcp-version" | "receipt-loss" => 2,
+                _ => unreachable!(),
+            },
             "no automatic retry: {case}"
         );
         let session_id = match &outcome {
@@ -2431,6 +2443,7 @@ int main(void) {
             .as_ref()
             .map_or_else(|| replay.runs[0].clone(), |outcome| outcome.run.clone());
         assert_eq!(replay.runs[0], run, "closed replay: {case}");
+        assert_native_refusal_continues(case, &run, &requests.lock().unwrap());
         assert_eq!(
             events
                 .iter()
@@ -2520,7 +2533,7 @@ int main(void) {
         assert_eq!(
             observation.disposition,
             match case {
-                "denied" | "cancelled" => ToolDisposition::Denied,
+                "denied" | "headless" | "cancelled" => ToolDisposition::Denied,
                 "overflow" => ToolDisposition::Succeeded,
                 "mcp-version" => ToolDisposition::Failed,
                 "receipt-loss" => ToolDisposition::Uncertain,
@@ -2530,6 +2543,56 @@ int main(void) {
         );
         assert_eq!(observation.attestation.is_some(), attested, "{case}");
     }
+}
+
+fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &[ProviderRequest]) {
+    use arany::permissions::{Decision, PermissionSource};
+    let (label, cause) = match case {
+        "denied" => ("user_declined", arany::ApprovalCause::Declined),
+        "headless" => (
+            "channel_unavailable",
+            arany::ApprovalCause::ChannelUnavailable,
+        ),
+        _ => return,
+    };
+    assert_eq!(
+        run.failure,
+        Some(arany::RunFailure::CriterionUnmet),
+        "{case}"
+    );
+    assert_eq!(run.tools.len(), 1, "{case}: no automatic retry");
+    let tool = &run.tools[0];
+    if case == "headless" {
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert_eq!(verdict.decision, Decision::Ask, "approval is required");
+        assert_eq!(verdict.source, PermissionSource::UnavailableApproval);
+        assert_eq!(verdict.basis, PermissionSource::Rule);
+        assert!(!verdict.approved);
+    }
+    assert_eq!(
+        tool.observation.as_ref().unwrap().approval_cause,
+        Some(cause)
+    );
+    assert_eq!(
+        run.agents[0].provider_calls.last().unwrap().disposition,
+        arany::ProviderCallDisposition::Finished,
+        "{case}: explanatory Provider call completes"
+    );
+    let observations = requests
+        .last()
+        .unwrap()
+        .input
+        .tools
+        .as_ref()
+        .unwrap()
+        .observations();
+    assert_eq!(observations.len(), 1, "{case}: correlated refusal");
+    assert_eq!(observations[0].intent, tool.intent);
+    let expected = format!("{label}: no operation was dispatched");
+    assert_eq!(observations[0].output, expected);
+    assert_eq!(tool.model_denial_output(), Some(expected.as_str()));
+    assert_eq!(observations[0].disposition, ToolDisposition::Denied);
+    assert!(observations[0].attestation.is_none());
 }
 
 fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::EffectIntent) {
@@ -2788,6 +2851,7 @@ async fn native_approval_rows_helper() {
                 RunStatus::Failed
             }
         );
+        assert_native_approval_completion(&outcome.run, allow);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(outcome.session_id).await.unwrap();
         store.close().await.unwrap();
@@ -2808,5 +2872,33 @@ async fn native_approval_rows_helper() {
                     .is_none()
             );
         }
+    }
+}
+
+fn assert_native_approval_completion(run: &arany::RunView, allow: bool) {
+    assert_eq!(run.agents[0].provider_calls.len(), 3);
+    assert_eq!(
+        run.agents[0].provider_calls.last().unwrap().disposition,
+        arany::ProviderCallDisposition::Finished
+    );
+    assert_eq!(
+        run.failure,
+        (!allow).then_some(arany::RunFailure::CriterionUnmet)
+    );
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.disposition,
+        if allow {
+            ToolDisposition::Succeeded
+        } else {
+            ToolDisposition::Denied
+        }
+    );
+    if !allow {
+        assert_eq!(
+            observation.output,
+            "user_declined: no operation was dispatched"
+        );
+        assert!(run.assistant_message.is_none());
     }
 }

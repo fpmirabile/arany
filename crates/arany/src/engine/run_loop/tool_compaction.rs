@@ -671,7 +671,7 @@ impl RunLoop<'_> {
             model: identity.model.clone(),
             prompt_version: 1,
             schema_version: 1,
-            compiler_version: 3,
+            compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
             source_bytes: summary.source_bytes,
             source_tokens_estimate: summary.source_bytes.div_ceil(4),
             input_tokens: summary.usage.input_tokens,

@@ -586,7 +586,10 @@ fn rewind_compiler_preserves_histories_without_rewinds_byte_for_byte() {
     let baseline = crate::session::PreparedCompaction::prepare(&view)
         .unwrap_or_else(|_| panic!("complete history"));
     let bytes = compiled_bytes(&view, &baseline.items);
-    assert_eq!(baseline.compiler_version, 3);
+    assert_eq!(
+        baseline.compiler_version,
+        crate::session::COMPACTION_COMPILER_VERSION
+    );
     assert!(
         !String::from_utf8(bytes.clone())
             .unwrap()
@@ -601,7 +604,10 @@ fn rewind_compiler_preserves_histories_without_rewinds_byte_for_byte() {
     apply(&mut view, event);
     let with = crate::session::PreparedCompaction::prepare(&view)
         .unwrap_or_else(|_| panic!("rewound history"));
-    assert_eq!(with.compiler_version, 3);
+    assert_eq!(
+        with.compiler_version,
+        crate::session::COMPACTION_COMPILER_VERSION
+    );
     assert!(
         String::from_utf8(compiled_bytes(&view, &with.items))
             .unwrap()
@@ -701,7 +707,7 @@ fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
         model: "test".into(),
         prompt_version: 1,
         schema_version: 1,
-        compiler_version: 3,
+        compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 1,
         source_tokens_estimate: 1,
         input_tokens: None,

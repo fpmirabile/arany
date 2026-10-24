@@ -564,7 +564,9 @@ impl CompactionRecord {
             || self.covered_sequence == 0
             || self.prompt_version != 1
             || self.schema_version != 1
-            || self.compiler_version != 3
+            || !(crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION
+                ..=crate::session::COMPACTION_COMPILER_VERSION)
+                .contains(&self.compiler_version)
             || self.source_bytes == 0
             || self.source_bytes > 256 * 1024
             || self.source_tokens_estimate != self.source_bytes.div_ceil(4)

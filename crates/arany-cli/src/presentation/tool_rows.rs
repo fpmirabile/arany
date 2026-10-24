@@ -1,6 +1,7 @@
 use super::usage::grouped_count;
 use super::{escape_terminal, format_bytes, format_duration, safe_truncate};
 use arany::{RunStatus, RunView};
+use std::borrow::Cow;
 
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
@@ -117,7 +118,13 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                         unreachable!("success has its own result projection")
                     }
                 };
-                if observation.output.is_empty() {
+                if disposition == ToolDisposition::Denied {
+                    match tool.model_denial_label() {
+                        Some(label) => format!("{state}: {label}"),
+                        None if observation.output.is_empty() => state.into(),
+                        None => format!("{state}: {}", safe_truncate(&observation.output, 160)),
+                    }
+                } else if observation.output.is_empty() {
                     state.into()
                 } else {
                     match (disposition, &tool.intent.call) {
@@ -906,17 +913,24 @@ pub(crate) fn plain_tool_summary(summary: &str) -> String {
 
 pub(crate) fn tool_detail_text(tool: &arany::ToolView) -> String {
     let (head, output) = tool_detail_parts(tool);
-    head + output
+    head + output.as_ref()
 }
 
-// The bounded summary and arguments, then the borrowed result, so callers can measure before joining.
-pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, &str) {
+// The bounded summary and arguments, then the projected result, for selection and copy.
+pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>) {
     let arguments = serde_json::to_string(&tool.intent.call).expect("typed Tool call");
+    let output = match tool.model_denial_output() {
+        Some(output) => Cow::Borrowed(output),
+        None => tool
+            .observation
+            .as_ref()
+            .map_or(Cow::Borrowed("Awaiting result"), |observation| {
+                Cow::Borrowed(observation.output.as_str())
+            }),
+    };
     (
         format!("{}\nArguments: {arguments}\nResult:\n", tool_summary(tool)),
-        tool.observation
-            .as_ref()
-            .map_or("Awaiting result", |observation| observation.output.as_str()),
+        output,
     )
 }
 

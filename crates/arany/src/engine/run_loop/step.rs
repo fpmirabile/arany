@@ -1601,15 +1601,19 @@ impl RunLoop<'_> {
         };
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
         match reply {
-            ApprovalReply::AllowForSession if !remember => ApprovalReply::Deny,
+            ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
             ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
-                if intent.call.is_unguarded() {
-                    ApprovalReply::Deny
+                if intent.call.is_unguarded() || intent.call.is_host() {
+                    ApprovalReply::Unavailable
                 } else {
                     ApprovalReply::AllowOnce
                 }
             }
-            reply => reply,
+            reply @ (ApprovalReply::Deny
+            | ApprovalReply::Unavailable
+            | ApprovalReply::AllowOnce
+            | ApprovalReply::AllowForSession
+            | ApprovalReply::AllowPrefixInFolder) => reply,
         }
     }
 
