@@ -70,6 +70,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
+    bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -704,7 +705,8 @@ fn unit_command(
             | ToolCall::MultiEdit { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::ApplyChangeset { .. }
-    ) || intent.call.is_git();
+    ) || intent.call.is_git()
+        || super::super::discovery::possible(&intent.call);
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| !preparation && seed_dir.symlink_metadata(folder).is_ok())
@@ -748,9 +750,10 @@ async fn settle_launch(
     stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
     deadline: tokio::time::Instant,
     result: Result<(ToolObservation, super::CacheCandidate), ToolError>,
-    (cache, private): (
+    (cache, private, discovery): (
         &mut Option<super::BuildCacheSession>,
         Option<&super::super::worker::Action>,
+        bool,
     ),
 ) -> Result<ToolObservation, ToolError> {
     let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
@@ -800,7 +803,7 @@ async fn settle_launch(
     let Some(stderr) = drained else {
         return Err(ToolError::GuardRejected(GuardStage::OutputEof));
     };
-    if result.is_err() {
+    if result.is_err() && !discovery {
         let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
         let stage = if diagnostic.contains("bwrap:") || diagnostic.contains("unshare:") {
             GuardStage::NamespaceBootstrap
@@ -1016,7 +1019,7 @@ pub(super) async fn execute_inner(
     let permit = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ToolError::Operation),
-        permit = super::admission::acquire(intent.id, intent.limits.runtime_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
+        permit = super::admit_operation(runtime, intent) => permit?,
     };
     let capacity_started = tokio::time::Instant::now();
     let active_window = runtime.begin_active_action(capacity_started).await?;
@@ -1126,7 +1129,7 @@ pub(super) async fn execute_inner(
             }
             Ok((observation, candidate))
         };
-        capture.await
+        super::discovery_work(intent, capture).await
     };
     let result = tokio::select! {
         biased;
@@ -1140,7 +1143,11 @@ pub(super) async fn execute_inner(
         &mut stderr_task,
         deadline,
         result,
-        (&mut cache, runtime.worker.as_deref()),
+        (
+            &mut cache,
+            runtime.worker.as_deref(),
+            super::super::discovery::possible(&intent.call),
+        ),
     ))
     .await
 }
@@ -1989,6 +1996,82 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn discovery_launch_mounts_workspace_read_only_but_keeps_workers_private() {
+        let calls = [
+            serde_json::json!({"operation":"list","path":"."}),
+            serde_json::json!({"operation":"search","path":".","query":"needle"}),
+            serde_json::json!({"operation":"glob","pattern":"**/*.rs"}),
+        ];
+        for call in calls {
+            for private in [false, true] {
+                let arguments = discovery_launch_arguments(call.clone(), private);
+                let mounts = arguments
+                    .windows(3)
+                    .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--bind"))
+                    .filter(|args| args[2] == "/workspace")
+                    .collect::<Vec<_>>();
+                if private {
+                    assert!(mounts.is_empty(), "{arguments:?}");
+                } else {
+                    assert_eq!(mounts.len(), 1, "{arguments:?}");
+                    assert_eq!(mounts[0][0], "--ro-bind");
+                }
+            }
+        }
+    }
+
+    fn discovery_launch_arguments(call: serde_json::Value, private: bool) -> Vec<String> {
+        let fixture = tempfile::tempdir().unwrap();
+        let seed = crate::tools::fs::open_directory(fixture.path()).unwrap();
+        let mut runtime = crate::tools::tests::in_process_runtime(
+            fixture.path(),
+            serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
+                "commands":[],"skills":[],"mcp":[]}),
+        );
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            serde_json::from_value(call).unwrap(),
+        );
+        if private {
+            intent.target = crate::worker::EffectTarget::WorkerView {
+                assignment_id: intent.agent_run_id,
+                base_digest: [1; 32],
+                revision: 0,
+                cache_generation: None,
+            };
+            runtime.worker = Some(std::sync::Arc::new(crate::tools::worker::Action {
+                transfer: serde_json::from_value(serde_json::json!({
+                    "target":intent.target,"bytes":1,"sha256":vec![1_u8; 32],
+                    "grant":{"read_paths":["."],"write_paths":["."],"tools":["list"],
+                        "skills":[],"mcp_servers":[],"commands":[],"permission_mode":null}
+                }))
+                .unwrap(),
+                input: vec![1].into(),
+                output: std::sync::Mutex::new(None),
+                contained: std::sync::atomic::AtomicBool::new(true),
+            }));
+        }
+        unit_command(
+            &runtime,
+            &intent,
+            "arany-discovery-profile",
+            "/usr/bin:/bin",
+            UnitFilesystem {
+                preparation: false,
+                seed_path: fixture.path(),
+                seed_dir: &seed,
+                runtime_directories: Vec::new(),
+                mounts: Vec::new(),
+            },
+        )
+        .as_std()
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect()
     }
 
     #[test]

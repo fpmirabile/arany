@@ -429,6 +429,71 @@ impl View {
         })
     }
 
+    pub(crate) async fn read_guarded(
+        &mut self,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        let exact = matches!(&intent.call, ToolCall::Search { path, .. }
+            if matches!(self.current.entries.get(path), Some(Entry::File { .. })));
+        if !super::discovery::possible(&intent.call) || exact {
+            return self.read(intent, runtime.permissions());
+        }
+        if self.check(&intent).is_err() {
+            return denied(intent);
+        }
+        let bytes = match self.current.encode() {
+            Ok(bytes) => bytes,
+            Err(error) => return super::unstarted_observation(intent, error),
+        };
+        let action = Arc::new(Action {
+            transfer: Transfer {
+                target: self.target(),
+                grant: self.grant.clone(),
+                bytes: u32::try_from(bytes.len()).expect("bounded worker image"),
+                sha256: digest(&bytes),
+            },
+            input: bytes.into(),
+            output: Mutex::new(None),
+            contained: std::sync::atomic::AtomicBool::new(true),
+        });
+        let mut private = runtime.clone();
+        private.worker = Some(action.clone());
+        self.pending = Some(intent.id);
+        let result = super::guard::execute(&private, &intent, cancellation).await;
+        self.contained = action.contained.load(std::sync::atomic::Ordering::Acquire);
+        self.pending = None;
+        let mut observation = match result {
+            Ok(observation) => observation,
+            Err(error) => {
+                self.stopped = true;
+                return super::uncertain_observation(
+                    intent,
+                    error,
+                    super::CacheUpdate::NotApplicable,
+                );
+            }
+        };
+        observation.attestation =
+            observation
+                .attestation
+                .and_then(|attestation| match attestation {
+                    Attestation::Guard(receipt) => Some(Attestation::WorkerRead {
+                        intent_digest: intent.digest(),
+                        guard: Some(Box::new(receipt)),
+                    }),
+                    Attestation::InProcess { .. }
+                    | Attestation::Unguarded(_)
+                    | Attestation::Host(_)
+                    | Attestation::WorkerCommand { .. }
+                    | Attestation::WorkerRead { .. }
+                    | Attestation::WorkerMutation { .. }
+                    | Attestation::WorkerData { .. } => None,
+                });
+        observation
+    }
+
     pub(crate) fn read(
         &self,
         intent: EffectIntent,
@@ -1106,7 +1171,6 @@ fn inspect(
     result_bytes: usize,
     deadline: std::time::Instant,
 ) -> Result<String, ToolError> {
-    use serde_json::json;
     match call {
         ToolCall::Read {
             path,
@@ -1118,76 +1182,16 @@ fn inspect(
             };
             fs::read_page(content.as_ref(), *offset, *limit, result_bytes)
         }
-        ToolCall::Glob { path, .. } => {
-            // An absent leased root is recorded as a marker, not a directory.
-            if path != "."
-                && !image
-                    .entries
-                    .iter()
-                    .any(|(p, entry)| *entry != Entry::Absent && contains(path, p))
-            {
-                return Err(ToolError::NotFound);
-            }
-            if matches!(image.entries.get(path), Some(Entry::File { .. })) {
-                return Err(ToolError::Operation);
-            }
-            let base = if path == "." { "" } else { path.as_str() };
-            super::glob::inspect_files(
-                image
-                    .entries
-                    .iter()
-                    // Like a whole-project Workspace walk, skip ignored directories below the path.
-                    .filter(|(name, _)| {
-                        !name
-                            .strip_prefix(base)
-                            .unwrap_or(name)
-                            .split('/')
-                            .any(fs::ignored_directory)
-                            && !hidden(name)
-                    })
-                    .filter_map(|(name, entry)| match entry {
-                        Entry::File { content, .. } => Some((name.as_str(), content.len())),
-                        Entry::Directory | Entry::Absent => None,
-                    }),
-                call,
-                result_bytes,
-            )
-        }
-        ToolCall::List { path } => {
-            let mut rows = Vec::new();
-            for (name, entry) in image
-                .entries
-                .iter()
-                .filter(|(p, _)| contains(path, p) && !hidden(p))
-            {
-                match entry {
-                    Entry::Directory => rows.push(json!({"path":name,"kind":"directory"})),
-                    Entry::File { content, .. } => {
-                        rows.push(json!({"path":name,"bytes":content.len()}))
-                    }
-                    Entry::Absent => {}
-                }
-                if rows.len() == 64 {
-                    break;
-                }
-            }
-            let truncated = rows.len() == 64;
-            fs::fit_rows(rows, truncated, result_bytes)
-        }
         ToolCall::Search { path, .. } => {
             let mut search = super::search::Search::new(call, deadline)?;
-            // BTreeMap order is the Workspace's UTF-8 byte order, as in the Workspace search.
-            for (name, entry) in image
-                .entries
-                .iter()
-                .filter(|(p, _)| contains(path, p) && !hidden(p))
-            {
-                if let Entry::File { content, .. } = entry
-                    && search.includes(name)
-                    && search.scan(name, content)?
-                {
-                    break;
-                }
+            let Some(Entry::File { content, .. }) = image.entries.get(path) else {
+                return Err(ToolError::Path);
+            };
+            if hidden(path) {
+                return Err(ToolError::FilesystemDenied);
+            }
+            if search.includes(path) {
+                search.scan(path, content)?;
             }
             search.finish(result_bytes)
         }
@@ -1228,7 +1232,8 @@ impl Transfer {
                     | ToolCall::Edit { .. }
                     | ToolCall::MultiEdit { .. }
                     | ToolCall::Mkdir { .. }
-            ) || command
+            ) || super::discovery::possible(&intent.call)
+                || command
                 || handover_call(&intent.call, intent.agent_run_id))
             || self.bytes == 0
             || self.bytes as usize > WORKER_DATA_BYTES
@@ -1590,6 +1595,67 @@ mod tests {
         intent
     }
 
+    fn inspect_discovery(
+        image: &Image,
+        call: &ToolCall,
+        hidden: fs::Keep,
+        result_bytes: usize,
+        deadline: std::time::Instant,
+    ) -> Result<String, ToolError> {
+        let root = tempfile::tempdir().unwrap();
+        let directory = fs::open_directory(root.path()).unwrap();
+        materialize(image, &directory)?;
+        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        super::super::discovery::inspect(super::super::discovery::Request {
+            root: &directory,
+            call,
+            config: &config,
+            hidden,
+            result_bytes,
+            deadline,
+            output: super::super::discovery::Output::Tool,
+            private_image: true,
+            cancellation: None,
+        })
+    }
+
+    fn read_discovery(
+        view: &View,
+        intent: EffectIntent,
+        permissions: Option<&super::super::permissions::PermissionConfig>,
+    ) -> ToolObservation {
+        if !super::super::discovery::possible(&intent.call)
+            || matches!(&intent.call, ToolCall::Search { path, .. } if matches!(view.current.entries.get(path), Some(Entry::File { .. })))
+        {
+            return view.read(intent, permissions);
+        }
+        let hidden = permissions
+            .map(|p| p.hidden_paths(&intent.call))
+            .unwrap_or_default();
+        let result = inspect_discovery(
+            &view.current,
+            &intent.call,
+            &|path| hidden.covers(path),
+            intent.limits.result_bytes as usize,
+            std::time::Instant::now() + super::super::selection::DISCOVERY_TIME,
+        );
+        let (disposition, output, enforcement_cause, limit_cause) =
+            super::super::dispatch::outcome(&intent, result);
+        ToolObservation {
+            attestation: Some(Attestation::WorkerRead {
+                intent_digest: intent.digest(),
+                guard: None,
+            }),
+            intent,
+            disposition,
+            output,
+            enforcement_cause,
+            limit_cause,
+            approval_cause: None,
+            cache_update: super::super::CacheUpdate::NotApplicable,
+        }
+    }
+
     fn captured(view: &mut View, intent: EffectIntent) -> Candidate {
         let root = tempfile::tempdir().unwrap();
         let directory = fs::open_directory(root.path()).unwrap();
@@ -1633,6 +1699,39 @@ mod tests {
             bytes: candidate.data.len() as u32,
             sha256: digest(&candidate.data),
         }
+    }
+
+    #[test]
+    fn private_discovery_uses_only_controls_present_in_its_image() {
+        let (directory, _runtime, view) = fixture();
+        std::fs::write(directory.path().join(".gitignore"), b"*").unwrap();
+        let call = ToolCall::Glob {
+            pattern: "**".into(),
+            path: "owned".into(),
+            limit: 100,
+        };
+        let output = inspect_discovery(
+            &view.current,
+            &call,
+            fs::NONE,
+            super::super::types::MAX_TOOL_RESULT_BYTES,
+            std::time::Instant::now() + super::super::selection::DISCOVERY_TIME,
+        )
+        .unwrap();
+        assert!(output.contains("owned/a"));
+        let mut image = view.current.clone();
+        image
+            .entries
+            .insert(".gitignore".into(), Entry::file(b"owned/", false));
+        let output = inspect_discovery(
+            &image,
+            &call,
+            fs::NONE,
+            super::super::types::MAX_TOOL_RESULT_BYTES,
+            std::time::Instant::now() + super::super::selection::DISCOVERY_TIME,
+        )
+        .unwrap();
+        assert!(!output.contains("owned/a"));
     }
 
     #[tokio::test]
@@ -1682,7 +1781,7 @@ mod tests {
         )
         .unwrap();
         let read = |call| {
-            let observed = view.read(intent(&runtime, &view, call), Some(&config));
+            let observed = read_discovery(&view, intent(&runtime, &view, call), Some(&config));
             assert_eq!(
                 observed.disposition,
                 ToolDisposition::Succeeded,
@@ -1827,7 +1926,8 @@ mod tests {
         data.first_sequence = next_sequence;
         data.seal_sequence = next_sequence + u64::from(data.chunks);
         view.acknowledge(candidate, data).unwrap();
-        let listing = view.read(
+        let listing = read_discovery(
+            &view,
             intent(
                 &runtime,
                 &view,
@@ -1851,7 +1951,7 @@ mod tests {
                 .entries
                 .insert(path.into(), Entry::file(b"x", false));
         }
-        let found = inspect(
+        let found = inspect_discovery(
             &ignored,
             &ToolCall::Glob {
                 pattern: "**/*.rs".into(),
@@ -1893,7 +1993,8 @@ mod tests {
             );
         }
         let search = |query: &str, include: Option<&str>, case_sensitive: bool, offset: u32| {
-            view.read(
+            read_discovery(
+                &view,
                 intent(
                     &runtime,
                     &view,
@@ -1946,7 +2047,7 @@ mod tests {
             },
         );
         refused.limits.result_bytes = 128;
-        let refused = view.read(refused, None);
+        let refused = read_discovery(&view, refused, None);
         assert_eq!(refused.disposition, ToolDisposition::Failed);
         assert!(refused.valid() && refused.output.contains("invalid or unsupported regex"));
         assert!(matches!(
@@ -2840,7 +2941,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(view.base.entries.get("owned/new"), Some(&Entry::Absent));
-        let absent = view.read(
+        let absent = read_discovery(
+            &view,
             intent(
                 &runtime,
                 &view,

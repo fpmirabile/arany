@@ -689,6 +689,14 @@ impl RunLoop<'_> {
         Ok(observation)
     }
 
+    fn exclude_worker_queue(&self, runtime: &ToolRuntime) -> Result<(), EngineError> {
+        if self.ledger().providers_idle()? {
+            self.ledger()
+                .exclude_idle_approval(runtime.queued_duration()?)?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn dispatch_worker(
         &self,
         runtime: &ToolRuntime,
@@ -706,6 +714,7 @@ impl RunLoop<'_> {
             .get_mut(&intent.agent_run_id)
             .ok_or(EngineError::CoordinatorFailed)?;
         view.note_intent(&intent);
+        let runtime = runtime.with_queue_accounting();
         if matches!(
             intent.call,
             ToolCall::Read { .. }
@@ -713,19 +722,17 @@ impl RunLoop<'_> {
                 | ToolCall::Search { .. }
                 | ToolCall::Glob { .. }
         ) {
-            return Ok((view.read(intent, runtime.permissions()), None));
+            let observation = view.read_guarded(&runtime, intent, cancellation).await;
+            self.exclude_worker_queue(&runtime)?;
+            return Ok((observation, None));
         }
-        let runtime = runtime.with_queue_accounting();
         let command = matches!(intent.call, ToolCall::Command { .. });
         let result = if command {
             view.command(&runtime, intent.clone(), cancellation).await
         } else {
             view.edit(&runtime, intent.clone(), cancellation).await
         };
-        if self.ledger().providers_idle()? {
-            self.ledger()
-                .exclude_idle_approval(runtime.queued_duration()?)?;
-        }
+        self.exclude_worker_queue(&runtime)?;
         let candidate = match result {
             Ok(candidate) => candidate,
             Err(observation) => return Ok((*observation, None)),
@@ -1259,8 +1266,7 @@ impl RunLoop<'_> {
         deadline: tokio::time::Instant,
     ) -> Result<WorkerObservation, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let Some(mut intent) =
-            self.researcher_intent(runtime, child.agent_run_id, call.clone(), deadline)
+        let Some(mut intent) = self.researcher_intent(runtime, child, call.clone(), deadline)
         else {
             return Ok(WorkerObservation::Stopped);
         };

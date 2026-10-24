@@ -18,35 +18,6 @@ pub(super) enum PermissionChoice {
 pub(super) const UNAVAILABLE_NOTICE: &str =
     "Native Tool protection is unavailable on this OS; chat is read only.";
 
-pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option<String> {
-    if !composer.file_query_changed() {
-        return None;
-    }
-    let query = composer.file_query();
-    let entries = query.as_deref().map_or_else(
-        || Ok(Vec::new()),
-        |query| {
-            let (folder, prefix) = query
-                .strip_suffix('/')
-                .map_or(("", query), |folder| (folder, ""));
-            arany::list_workspace_entries(workspace, folder, prefix)
-        },
-    );
-    match entries {
-        Ok(entries) => {
-            composer.set_file_candidates(query, entries);
-            None
-        }
-        Err(error) => {
-            // Serializing text to an in-memory JSON string has no fallible values or I/O.
-            let path = serde_json::to_string(query.as_deref().unwrap_or_default())
-                .expect("serializable path");
-            composer.set_file_candidates(query, Vec::new());
-            Some(format!("Path suggestions for {path} failed: {error}"))
-        }
-    }
-}
-
 pub(super) fn supports_tools(profile: Option<&str>) -> bool {
     native_protection_supported()
         && profile

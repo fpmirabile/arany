@@ -2715,13 +2715,55 @@ fn old_host_rules_are_inactive_and_preserved() {
     );
 }
 
+async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> ToolObservation {
+    if !runtime.config.allows(&intent.call) || !super::discovery::possible(&intent.call) {
+        return runtime.execute(intent, super::Cancellation::new()).await;
+    }
+    let root = match runtime.pinned_root(&intent) {
+        Ok(root) => root,
+        Err(error) => return super::unstarted_observation(intent, error),
+    };
+    if super::discovery::exact_search(&root, &intent.call).unwrap_or(false) {
+        return runtime.execute(intent, super::Cancellation::new()).await;
+    }
+    let hidden = runtime.hidden_paths(&intent.call);
+    let result = super::discovery::inspect(super::discovery::Request {
+        root: &root,
+        call: &intent.call,
+        config: &runtime.config,
+        hidden: &|path| hidden.covers(path),
+        result_bytes: intent.limits.result_bytes as usize,
+        deadline: std::time::Instant::now() + super::selection::DISCOVERY_TIME,
+        output: super::discovery::Output::Tool,
+        private_image: false,
+        cancellation: None,
+    });
+    let (disposition, output, enforcement_cause, limit_cause) =
+        super::dispatch::outcome(&intent, result);
+    ToolObservation {
+        attestation: Some(Attestation::Guard(super::GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        })),
+        intent,
+        disposition,
+        output,
+        enforcement_cause,
+        limit_cause,
+        approval_cause: None,
+        cache_update: super::CacheUpdate::NotApplicable,
+    }
+}
+
 async fn run_in_process(runtime: &super::ToolRuntime, call: ToolCall) -> ToolObservation {
     let intent = runtime.intent(
         crate::session::RunId::new(),
         crate::session::AgentRunId::new(),
         call,
     );
-    runtime.execute(intent, super::Cancellation::new()).await
+    inspect_read(runtime, intent).await
 }
 
 #[tokio::test]
@@ -2907,7 +2949,7 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
             call.clone(),
         );
         intent.limits.result_bytes = result_bytes;
-        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        let observation = inspect_read(&runtime, intent).await;
         assert_eq!(
             observation.disposition,
             ToolDisposition::Limit,
@@ -2935,7 +2977,7 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
             call.clone(),
         );
         intent.limits.result_bytes = 1024;
-        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        let observation = inspect_read(&runtime, intent).await;
         assert_eq!(
             observation.disposition,
             ToolDisposition::Succeeded,
@@ -2983,7 +3025,7 @@ async fn search_page(runtime: &super::ToolRuntime, call: ToolCall, result_bytes:
         call.clone(),
     );
     intent.limits.result_bytes = result_bytes;
-    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    let observation = inspect_read(runtime, intent).await;
     assert_eq!(
         observation.disposition,
         ToolDisposition::Succeeded,
@@ -3167,7 +3209,7 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
             call.clone(),
         );
         intent.limits.result_bytes = 128;
-        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Failed, "{call:?}");
         assert!(
             observation.output.starts_with("Search pattern refused: ")
@@ -3178,7 +3220,7 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
         );
         assert!(matches!(
             observation.attestation,
-            Some(Attestation::InProcess { .. })
+            Some(Attestation::Guard(_))
         ));
         assert!(!observation.stops_run());
         assert!(observation.valid());
@@ -3332,7 +3374,7 @@ async fn in_process_results_fit_their_budget_before_serialization() {
             },
         );
         intent.limits.result_bytes = result_bytes;
-        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert!(observation.output.len() <= result_bytes as usize);
         let page: Value = serde_json::from_str(&observation.output).unwrap();
@@ -3360,7 +3402,7 @@ async fn in_process_results_fit_their_budget_before_serialization() {
         },
     );
     intent.limits.result_bytes = 1024;
-    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    let observation = inspect_read(&runtime, intent).await;
     assert_eq!(observation.disposition, ToolDisposition::Succeeded);
     assert!(observation.output.len() <= 1024);
     let rows: Value = serde_json::from_str(&observation.output).unwrap();
@@ -3376,7 +3418,7 @@ async fn in_process_results_fit_their_budget_before_serialization() {
         },
     );
     intent.limits.result_bytes = 128;
-    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    let observation = inspect_read(&runtime, intent).await;
     assert_eq!(observation.disposition, ToolDisposition::Limit);
     assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
 }
@@ -3542,7 +3584,7 @@ async fn glob_result(
         call,
     );
     intent.limits.result_bytes = result_bytes;
-    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    let observation = inspect_read(runtime, intent).await;
     assert!(observation.valid());
     observation
 }
@@ -3556,7 +3598,7 @@ fn glob_paths(observation: &ToolObservation) -> (Vec<String>, bool) {
     );
     assert!(matches!(
         observation.attestation,
-        Some(Attestation::InProcess { .. })
+        Some(Attestation::Guard(_))
     ));
     let value: Value = serde_json::from_str(&observation.output).unwrap();
     let paths = value["entries"]
@@ -4557,7 +4599,7 @@ async fn skill_text_reads_are_bounded_inert_and_pinned_without_guard_execution()
         let mut intent =
             runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
         intent.limits.result_bytes = limit as u32;
-        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert!(matches!(
             observation.attestation,
@@ -4672,5 +4714,163 @@ fn undispatched_guard_failures_explain_safe_causes_and_recovery() {
             cfg!(debug_assertions)
         );
         assert!(observation.output.contains("no operation was dispatched"));
+    }
+}
+
+fn ignored_discovery_fixture(roots: Value) -> (tempfile::TempDir, super::ToolRuntime) {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path();
+    std::fs::create_dir_all(workspace.join("notes/pruned")).unwrap();
+    std::fs::write(
+        workspace.join("notes/.gitignore"),
+        b"*.cache\npruned/\n!.env\n!.env.*\n!.aws/\n!.ssh/\n!.gnupg/\n!.git/\n!.npmrc\n!.pypirc\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("notes/visible.txt"), b"hit visible\n").unwrap();
+    std::fs::write(
+        workspace.join("notes/ignored.cache"),
+        b"hit IGNORED_PAYLOAD_CANARY\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("notes/pruned/.gitignore"), b"!leaf\n").unwrap();
+    std::fs::File::create(workspace.join("notes/pruned/leaf"))
+        .unwrap()
+        .set_len(MAX_FILE_BYTES as u64 + 1)
+        .unwrap();
+    std::fs::File::create(workspace.join("notes/oversized.cache"))
+        .unwrap()
+        .set_len(MAX_FILE_BYTES as u64 + 1)
+        .unwrap();
+    for path in [
+        ".ENV",
+        ".Env.local",
+        ".AWS/credentials",
+        ".SSH/key",
+        ".GNUPG/key",
+        ".GIT/config",
+        ".NPMRC",
+        ".PYPIRC",
+    ] {
+        let path = workspace.join("notes").join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"hit PROTECTED_PAYLOAD_CANARY\n").unwrap();
+    }
+    let runtime = in_process_runtime(
+        workspace,
+        json!({"version":1,"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    (temp, runtime)
+}
+
+#[tokio::test]
+async fn typed_discovery_prunes_ignored_payloads_and_preserves_explicit_access() {
+    for roots in [json!(["."]), json!(["notes"])] {
+        let (_temp, runtime) = ignored_discovery_fixture(roots);
+        for call in [
+            ToolCall::List {
+                path: "notes".into(),
+            },
+            glob("**", "notes", 100),
+            search("notes", "hit"),
+            search("notes/pruned", "hit"),
+        ] {
+            let result = run_in_process(&runtime, call).await;
+            assert_eq!(result.disposition, ToolDisposition::Succeeded);
+            for hidden in [
+                "ignored.cache",
+                "oversized.cache",
+                "pruned/leaf",
+                ".ENV",
+                ".AWS",
+                "PAYLOAD_CANARY",
+            ] {
+                assert!(!result.output.contains(hidden));
+            }
+        }
+        for call in [
+            ToolCall::Read {
+                path: "notes/ignored.cache".into(),
+                offset: None,
+                limit: None,
+            },
+            search("notes/ignored.cache", "hit"),
+        ] {
+            let result = run_in_process(&runtime, call).await;
+            assert_eq!(result.disposition, ToolDisposition::Succeeded);
+            assert!(result.output.contains("IGNORED_PAYLOAD_CANARY"));
+            assert!(matches!(
+                result.attestation,
+                Some(Attestation::InProcess { .. })
+            ));
+        }
+    }
+}
+
+fn invalid_discovery_control(case: &str) -> (tempfile::TempDir, super::ToolRuntime) {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path();
+    std::fs::create_dir(workspace.join("notes")).unwrap();
+    std::fs::write(workspace.join("notes/visible.txt"), b"hit visible\n").unwrap();
+    let control = workspace.join(".gitignore");
+    match case {
+        "encoding" => std::fs::write(&control, [0xff]).unwrap(),
+        "bytes" => {
+            std::fs::write(&control, vec![b'#'; super::selection::CONTROL_BYTES + 1]).unwrap()
+        }
+        "expansion" => std::fs::write(&control, "*".repeat(17)).unwrap(),
+        "symlink" => std::os::unix::fs::symlink("notes/visible.txt", &control).unwrap(),
+        "hardlink" => {
+            std::fs::write(workspace.join("notes/control-source"), b"ignored").unwrap();
+            std::fs::hard_link(workspace.join("notes/control-source"), &control).unwrap()
+        }
+        "permission" | "grant" => std::fs::write(&control, b"ignored").unwrap(),
+        _ => unreachable!("closed corpus case"),
+    }
+    let roots = if case == "grant" {
+        json!(["notes"])
+    } else {
+        json!(["."])
+    };
+    let mut runtime = in_process_runtime(
+        workspace,
+        json!({"version":1,"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    if case == "permission" {
+        let bytes = br#"{"permissions":{"deny":["Read(./.gitignore)"]}}"#;
+        runtime.permissions = Some(super::PermissionSnapshot {
+            config: std::sync::Arc::new(
+                super::permissions::PermissionConfig::parse(bytes).unwrap(),
+            ),
+            digest: digest(bytes),
+        });
+    }
+    (temp, runtime)
+}
+
+#[tokio::test]
+async fn discovery_control_failures_discard_results_and_do_not_taint_exact_reads() {
+    for case in [
+        "encoding",
+        "bytes",
+        "expansion",
+        "symlink",
+        "hardlink",
+        "permission",
+        "grant",
+    ] {
+        let (_temp, runtime) = invalid_discovery_control(case);
+        for call in [
+            ToolCall::List {
+                path: "notes".into(),
+            },
+            glob("**", "notes", 100),
+            search("notes", "hit"),
+        ] {
+            let result = run_in_process(&runtime, call).await;
+            assert_ne!(result.disposition, ToolDisposition::Succeeded, "{case}");
+            assert!(!result.output.contains("visible.txt") && !result.output.contains("ignored"));
+        }
+        let result = run_in_process(&runtime, search("notes/visible.txt", "hit")).await;
+        assert_eq!(result.disposition, ToolDisposition::Succeeded, "{case}");
     }
 }

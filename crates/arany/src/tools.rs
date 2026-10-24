@@ -5,7 +5,11 @@ mod cancel;
 pub(crate) mod catalog;
 pub(crate) mod config;
 pub(crate) mod definitions;
+mod discovery;
 mod dispatch;
+pub use discovery::{
+    FileSuggestionSource, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
+};
 mod executable;
 mod fs;
 mod git;
@@ -78,14 +82,6 @@ pub fn runtime_skill_names(state: &StateRoot, workspace: &Path) -> Result<Vec<St
         return Err(ToolError::Limit);
     }
     Ok(names)
-}
-
-pub fn list_workspace_entries(
-    workspace: &Path,
-    folder: &str,
-    prefix: &str,
-) -> Result<Vec<String>, ToolError> {
-    fs::workspace_entries(workspace, folder, prefix)
 }
 
 pub(crate) fn workspace_identity(workspace: &Path) -> Result<WorkspaceIdentity, ToolError> {
@@ -220,6 +216,120 @@ pub(crate) struct ToolRuntime {
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
 }
 
+struct RuntimeAdmission<'a> {
+    config: Config,
+    permissions: Option<PermissionSnapshot>,
+    unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
+    workspace: &'a Path,
+    state: &'a StateRoot,
+    guard_executable: PathBuf,
+}
+
+struct RuntimeState {
+    root: cap_std::fs::Dir,
+    workspace_identity: WorkspaceIdentity,
+    guard_available: bool,
+    enforcement_digest: [u8; 32],
+    process_enforcement_digest: [u8; 32],
+    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
+    definitions: definitions::DefinitionSnapshots,
+    #[cfg(target_os = "macos")]
+    system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
+}
+
+fn admission_paths(
+    workspace: &Path,
+    state: &StateRoot,
+    config: &Config,
+    root: &cap_std::fs::Dir,
+) -> Result<PathBuf, ToolError> {
+    state
+        .ensure_outside_workspace(root)
+        .map_err(|_| ToolError::Path)?;
+    fs::reject_overlap(workspace, state.path())?;
+    let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
+    fs::reject_overlap(workspace, &account)?;
+    for protected in [workspace, state.path(), account.as_path()] {
+        for runtime in guard::runtime_roots() {
+            fs::reject_overlap(Path::new(runtime), protected)?;
+        }
+    }
+    for grant in &config.runtime_grants {
+        grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
+    }
+    Ok(account)
+}
+
+fn skill_roots(
+    config: &Config,
+) -> std::collections::BTreeMap<String, Option<std::sync::Arc<cap_std::fs::Dir>>> {
+    config
+        .skills
+        .iter()
+        .map(|skill| {
+            (
+                skill.name.clone(),
+                fs::open_directory(Path::new(&skill.directory))
+                    .ok()
+                    .map(std::sync::Arc::new),
+            )
+        })
+        .collect()
+}
+
+fn admission_resources(
+    config: &Config,
+    state: &StateRoot,
+    account: &Path,
+) -> Result<(), ToolError> {
+    for program in config
+        .commands
+        .iter()
+        .chain(config.mcp.iter().map(|server| &server.program))
+    {
+        program.verify()?;
+    }
+    if let Some(git) = &config.git {
+        git::verify_host_executable(git)?;
+    }
+    for path in config.resource_paths() {
+        fs::reject_overlap(Path::new(path), state.path())?;
+        fs::reject_overlap(Path::new(path), account)?;
+    }
+    Ok(())
+}
+
+struct ProcessPolicy {
+    digest: [u8; 32],
+    #[cfg(target_os = "macos")]
+    programs: Option<std::sync::Arc<guard::SystemPrograms>>,
+}
+
+fn process_policy(config: &Config, guard_available: bool) -> Result<ProcessPolicy, ToolError> {
+    #[cfg(target_os = "macos")]
+    {
+        let programs = if !guard_available || config.commands.is_empty() && config.mcp.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
+        };
+        Ok(ProcessPolicy {
+            digest: guard::macos_runtime_enforcement_digest(
+                programs.as_deref(),
+                &config.runtime_grants,
+            )?,
+            programs,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = guard_available;
+        Ok(ProcessPolicy {
+            digest: guard::enforcement_digest(&config.runtime_grants)?,
+        })
+    }
+}
+
 #[derive(Default)]
 struct QueueWait {
     waiting: Option<std::time::Instant>,
@@ -250,6 +360,22 @@ pub(crate) struct ActiveToolWindow {
     pub(crate) go_deadline: tokio::time::Instant,
     pub(crate) payload_deadline: tokio::time::Instant,
     pub(crate) completion_deadline: tokio::time::Instant,
+}
+
+pub(crate) fn load_permissions(state: &StateRoot) -> Result<Option<PermissionSnapshot>, ToolError> {
+    state
+        .record(crate::store::RecordKind::Permissions)
+        .read()
+        .map_err(|_| ToolError::Configuration)?
+        .map(|bytes| {
+            permissions::PermissionConfig::parse(&bytes)
+                .map(|config| PermissionSnapshot {
+                    config: std::sync::Arc::new(config),
+                    digest: crate::validate::digest(&bytes),
+                })
+                .map_err(|_| ToolError::Configuration)
+        })
+        .transpose()
 }
 
 impl ToolRuntime {
@@ -627,24 +753,6 @@ impl ToolRuntime {
         }
     }
 
-    pub(crate) fn load_permissions(
-        state: &StateRoot,
-    ) -> Result<Option<PermissionSnapshot>, ToolError> {
-        state
-            .record(crate::store::RecordKind::Permissions)
-            .read()
-            .map_err(|_| ToolError::Configuration)?
-            .map(|bytes| {
-                permissions::PermissionConfig::parse(&bytes)
-                    .map(|config| PermissionSnapshot {
-                        config: std::sync::Arc::new(config),
-                        digest: crate::validate::digest(&bytes),
-                    })
-                    .map_err(|_| ToolError::Configuration)
-            })
-            .transpose()
-    }
-
     pub(crate) fn readmit_compaction_hooks(
         state: &StateRoot,
         workspace: &Path,
@@ -654,7 +762,7 @@ impl ToolRuntime {
         let Some(digest) = pin.permissions_digest else {
             return Ok(None);
         };
-        let snapshot = Self::load_permissions(state)?.ok_or(ToolError::ChangedInput)?;
+        let snapshot = load_permissions(state)?.ok_or(ToolError::ChangedInput)?;
         if snapshot.digest != digest {
             return Err(ToolError::ChangedInput);
         }
@@ -707,32 +815,38 @@ impl ToolRuntime {
     }
 
     pub(crate) fn admit(
-        mut config: Config,
+        config: Config,
         permissions: Option<PermissionSnapshot>,
         unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
         workspace: &Path,
         state: &StateRoot,
         guard_executable: PathBuf,
     ) -> Result<Self, ToolError> {
+        Self::admit_runtime(RuntimeAdmission {
+            config,
+            permissions,
+            unguarded_rules,
+            workspace,
+            state,
+            guard_executable,
+        })
+    }
+
+    fn admit_runtime(admission: RuntimeAdmission<'_>) -> Result<Self, ToolError> {
+        let RuntimeAdmission {
+            mut config,
+            permissions,
+            unguarded_rules,
+            workspace,
+            state,
+            guard_executable,
+        } = admission;
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
-        state
-            .ensure_outside_workspace(&root)
-            .map_err(|_| ToolError::Path)?;
-        fs::reject_overlap(workspace, state.path())?;
-        let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
-        fs::reject_overlap(workspace, &account)?;
-        for protected in [workspace, state.path(), account.as_path()] {
-            for runtime in guard::runtime_roots() {
-                fs::reject_overlap(Path::new(runtime), protected)?;
-            }
-        }
-        for grant in &config.runtime_grants {
-            grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
-        }
+        let account = admission_paths(workspace, state, &config, &root)?;
         let workspace_identity = fs::workspace_identity(&root)?;
         let permissions = permissions.map(|mut snapshot| {
             let mut config = (*snapshot.config).clone();
@@ -746,48 +860,61 @@ impl ToolRuntime {
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
         }
-        for program in config
-            .commands
-            .iter()
-            .chain(config.mcp.iter().map(|server| &server.program))
-        {
-            program.verify()?;
-        }
-        if let Some(git) = &config.git {
-            git::verify_host_executable(git)?;
-        }
-        for path in config.resource_paths() {
-            fs::reject_overlap(Path::new(path), state.path())?;
-            fs::reject_overlap(Path::new(path), &account)?;
-        }
-        #[cfg(target_os = "macos")]
-        let system_programs =
-            if !guard_available || config.commands.is_empty() && config.mcp.is_empty() {
-                None
-            } else {
-                Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
-            };
-        #[cfg(target_os = "macos")]
-        let process_enforcement_digest = guard::macos_runtime_enforcement_digest(
-            system_programs.as_deref(),
-            &config.runtime_grants,
-        )?;
-        #[cfg(not(target_os = "macos"))]
-        let process_enforcement_digest = guard::enforcement_digest(&config.runtime_grants)?;
+        admission_resources(&config, state, &account)?;
+        let ProcessPolicy {
+            digest: process_enforcement_digest,
+            #[cfg(target_os = "macos")]
+                programs: system_programs,
+        } = process_policy(&config, guard_available)?;
         #[cfg(target_os = "macos")]
         capture.complete();
-        let skill_roots = config
-            .skills
-            .iter()
-            .map(|skill| {
-                (
-                    skill.name.clone(),
-                    fs::open_directory(Path::new(&skill.directory))
-                        .ok()
-                        .map(std::sync::Arc::new),
-                )
-            })
-            .collect();
+        Self::from_admission(
+            RuntimeAdmission {
+                config,
+                permissions,
+                unguarded_rules,
+                workspace,
+                state,
+                guard_executable,
+            },
+            RuntimeState {
+                root,
+                workspace_identity,
+                guard_available,
+                enforcement_digest,
+                process_enforcement_digest,
+                host_authentication,
+                definitions,
+                #[cfg(target_os = "macos")]
+                system_programs,
+            },
+        )
+    }
+
+    fn from_admission(
+        admission: RuntimeAdmission<'_>,
+        resources: RuntimeState,
+    ) -> Result<Self, ToolError> {
+        let RuntimeAdmission {
+            config,
+            permissions,
+            unguarded_rules,
+            workspace,
+            state,
+            guard_executable,
+        } = admission;
+        let RuntimeState {
+            root,
+            workspace_identity,
+            guard_available,
+            enforcement_digest,
+            process_enforcement_digest,
+            host_authentication,
+            definitions,
+            #[cfg(target_os = "macos")]
+            system_programs,
+        } = resources;
+        let skills = skill_roots(&config);
         Ok(Self {
             host_settings_admitted: true,
             guard_available,
@@ -812,7 +939,7 @@ impl ToolRuntime {
             )),
             workspace: workspace.to_owned(),
             reads: Some(InProcessReads {
-                skills: skill_roots,
+                skills,
                 root: std::sync::Arc::new(root),
                 slots: std::sync::Arc::clone(&IN_PROCESS_READS),
             }),
@@ -1153,7 +1280,7 @@ impl ToolRuntime {
 
     pub(crate) fn host_settings_current(&self, pin: &types::HostCommandPin) -> bool {
         self.cache_state.as_ref().is_some_and(|state| {
-            Self::load_permissions(state)
+            load_permissions(state)
                 .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
         })
     }
@@ -1186,7 +1313,33 @@ impl ToolRuntime {
         .unwrap_or(false)
     }
 
+    pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
+        if discovery::possible(call) {
+            guard::RESERVATION_OVERHEAD
+        } else {
+            self.reservation_overhead(call)
+        }
+    }
+
+    pub(crate) fn intent_reservation_overhead(&self, intent: &EffectIntent) -> Duration {
+        match intent.target {
+            crate::worker::EffectTarget::WorkerView { .. } => {
+                self.worker_reservation_overhead(&intent.call)
+            }
+            crate::worker::EffectTarget::Workspace => self.reservation_overhead(&intent.call),
+        }
+    }
+
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
+        if discovery::possible(call) {
+            let exact = self
+                .reads
+                .as_ref()
+                .is_some_and(|reads| discovery::exact_search(&reads.root, call).unwrap_or(false));
+            if !exact {
+                return guard::RESERVATION_OVERHEAD;
+            }
+        }
         match call.facts().site {
             Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
             Site::Guard => {
@@ -1270,7 +1423,7 @@ impl ToolRuntime {
             };
         }
         match intent.call.facts().site {
-            Site::InProcess => self.run_in_process(intent, cancellation).await,
+            Site::InProcess => self.run_read(intent, cancellation).await,
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
@@ -1418,6 +1571,24 @@ impl ToolRuntime {
         }
         fs::validate_workspace(self)?;
         Ok(root)
+    }
+
+    async fn run_read(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
+        if !discovery::possible(&intent.call) {
+            return self.run_in_process(intent, cancellation).await;
+        }
+        let exact = self
+            .pinned_root(&intent)
+            .and_then(|root| discovery::exact_search(&root, &intent.call));
+        match exact {
+            Ok(true) => self.run_in_process(intent, cancellation).await,
+            Ok(false) => match guard::execute(self, &intent, cancellation).await {
+                Ok(observation) => observation,
+                Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
+            },
+            Err(ToolError::NotFound) => self.run_in_process(intent, cancellation).await,
+            Err(error) => unstarted_observation(intent, error),
+        }
     }
 
     async fn run_in_process(
@@ -1600,6 +1771,13 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
+        return unattested_limit(
+            intent,
+            LimitCause::ReadCapacity,
+            "Discovery capacity is busy; nothing was read",
+        );
+    }
     let enforcement_cause =
         matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
             .then_some(EnforcementCause::GuardBootstrap);

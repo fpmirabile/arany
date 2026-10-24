@@ -983,7 +983,7 @@ impl Engine {
             digest: None,
             changed: true,
         });
-        let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+        let snapshot = crate::tools::load_permissions(&self.state)?;
         *self.host_permissions.lock().expect("host permissions lock") = Some(HostSettings {
             digest: snapshot.map(|snapshot| snapshot.digest),
             changed: false,
@@ -1313,7 +1313,7 @@ impl Engine {
             ToolGrant::None => None,
             ToolGrant::Configured => {
                 let guard = guard()?;
-                let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                let snapshot = crate::tools::load_permissions(&self.state)?;
                 let unguarded_rules =
                     crate::tools::ToolRuntime::load_exact_command_rules(&self.state)?;
                 Some(ToolAdmission {
@@ -1325,7 +1325,7 @@ impl Engine {
             }
             ToolGrant::Trusted(permissions) => {
                 let guard = guard()?;
-                let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                let snapshot = crate::tools::load_permissions(&self.state)?;
                 let unguarded_rules =
                     crate::tools::ToolRuntime::load_exact_command_rules(&self.state)?;
                 Some(ToolAdmission {
@@ -2003,7 +2003,7 @@ impl Engine {
             .as_ref()
             .map(|tools| {
                 let permissions = if goal.entry == GoalEntry::Continue {
-                    let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                    let snapshot = crate::tools::load_permissions(&self.state)?;
                     if self.host_settings_match(snapshot.as_ref().map(|snapshot| snapshot.digest)) {
                         snapshot
                     } else {

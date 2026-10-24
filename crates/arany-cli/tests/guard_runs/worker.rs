@@ -5,12 +5,12 @@ use arany_cli::presentation::{Output, render_exec, render_session};
 use arany_cli::protocol::EventLine;
 use std::os::unix::fs::PermissionsExt;
 
-struct WorkerObservationBundle {
-    exit: Option<i32>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    events: Vec<arany::EventEnvelope>,
-    view: SessionView,
+pub(super) struct WorkerObservationBundle {
+    pub(super) exit: Option<i32>,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+    pub(super) events: Vec<arany::EventEnvelope>,
+    pub(super) view: SessionView,
 }
 
 fn private_file(path: &Path, bytes: &[u8]) {
@@ -18,7 +18,7 @@ fn private_file(path: &Path, bytes: &[u8]) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-async fn closed_bundle(
+pub(super) async fn closed_bundle(
     state: &Path,
     session: SessionId,
     workspace: &Path,

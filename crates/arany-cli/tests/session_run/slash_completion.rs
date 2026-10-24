@@ -12,6 +12,7 @@ use rustix::process::{Signal, kill_process};
 use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::Path,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -1136,6 +1137,46 @@ fn inspect_storage_pager(
     wait_for_caret(output, input, transcript, answered, from, 3);
 }
 
+fn inspect_file_suggestions(
+    workspace: &Path,
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+) {
+    let start = transcript.len();
+    input.write_all(b"@").unwrap();
+    wait_for_after(
+        output,
+        input,
+        transcript,
+        answered,
+        start,
+        b"visible-note.txt",
+    );
+    for hidden in ["ignored.cache", "private-note.txt", ".ENV"] {
+        assert!(!String::from_utf8_lossy(&transcript[start..]).contains(hidden));
+    }
+    std::fs::write(workspace.join(".gitignore"), b"*").unwrap();
+    let refining = transcript.len();
+    input.write_all(b"visible-no").unwrap();
+    wait_for_after(
+        output,
+        input,
+        transcript,
+        answered,
+        refining,
+        b"visible-note.txt",
+    );
+    let closed = transcript.len();
+    input.write_all(b"\x1b").unwrap();
+    wait_for_caret(output, input, transcript, answered, closed, 14);
+    let cleared = transcript.len();
+    input.write_all(b"\x03").unwrap();
+    wait_for_caret(output, input, transcript, answered, cleared, 3);
+    std::fs::write(workspace.join(".gitignore"), b"*.cache\n").unwrap();
+}
+
 #[test]
 fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_terminal() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -1164,6 +1205,25 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     .unwrap();
     std::fs::set_permissions(
         state.join("tools.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::fs::write(workspace.join(".gitignore"), b"*.cache\n!.env\n").unwrap();
+    for name in [
+        "visible-note.txt",
+        "ignored.cache",
+        "private-note.txt",
+        ".ENV",
+    ] {
+        std::fs::write(workspace.join(name), b"synthetic suggestion payload").unwrap();
+    }
+    std::fs::write(
+        state.join("permissions.json"),
+        br#"{"permissions":{"deny":["Read(./private-note.txt)"]}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        state.join("permissions.json"),
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
@@ -1209,6 +1269,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         "TTY_BEFORE:",
     )
     .to_owned();
+    inspect_file_suggestions(
+        &workspace,
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+    );
     inspect_storage_pager(&mut output, &mut input, &mut transcript, &mut answered);
     let paste_at = transcript.len();
     input

@@ -16,6 +16,7 @@ use std::{io::Write, time::Instant};
 
 pub(super) struct AttachedSession {
     ui: IdleUi,
+    files: super::files::Files,
     engine: Engine,
     view: SessionView,
     archived_history: Option<arany::ArchivedHistory>,
@@ -87,6 +88,7 @@ impl AttachedSession {
             skills_supported,
         } = parts;
         Self {
+            files: super::files::Files::default(),
             ui: IdleUi {
                 notice,
                 archive_notice,
@@ -106,6 +108,18 @@ impl AttachedSession {
     }
 
     pub(super) async fn run(mut self) -> Result<(), String> {
+        let action = self.idle_loop().await;
+        self.files.close().await;
+        match action? {
+            IdleAction::Exit => self.finish().await,
+            IdleAction::Close => close_engine(self.engine).await,
+            IdleAction::Continue | IdleAction::Handled => {
+                unreachable!("idle loop returns only on exit")
+            }
+        }
+    }
+
+    async fn idle_loop(&mut self) -> Result<IdleAction, String> {
         loop {
             self.refresh_composer();
             self.draw_idle().await?;
@@ -116,11 +130,9 @@ impl AttachedSession {
             };
             match self.handle_input(input).await? {
                 IdleAction::Continue | IdleAction::Handled => {}
-                IdleAction::Exit => break,
-                IdleAction::Close => return close_engine(self.engine).await,
+                action @ (IdleAction::Exit | IdleAction::Close) => return Ok(action),
             }
         }
-        self.finish().await
     }
 
     async fn draw_idle(&mut self) -> Result<(), String> {
@@ -158,11 +170,16 @@ impl AttachedSession {
 
     async fn next_input(&mut self) -> Result<TerminalInput, String> {
         loop {
-            let input = self
-                .terminal
-                .next_chat_input()
-                .await
-                .map_err(|error| error.to_string())?;
+            let input = tokio::select! {
+                input = self.terminal.next_chat_input() => input.map_err(|error| error.to_string())?,
+                notice = self.files.next_update() => {
+                    if let Some(notice) = notice { append_notice(&mut self.ui.notice, &notice); }
+                    self.refresh_composer();
+                    self.draw_idle().await?;
+                    continue;
+                }
+            };
+            self.refresh_composer();
             self.composer.observe_input(input);
             if self.terminal.agent_chat_open() || self.terminal.help_open() {
                 self.composer.disarm_continuation();
@@ -541,6 +558,7 @@ impl AttachedSession {
         objective: String,
         skill: Option<String>,
     ) -> Result<Option<Feedback>, String> {
+        self.files.close().await;
         materialize_session(&self.admission, &mut self.session_id, &mut self.view).await?;
         let submitted = if matches!(goal, GoalStart::Resume | GoalStart::Continue) {
             self.composer.take();
@@ -981,9 +999,7 @@ impl AttachedSession {
             self.admission.tools,
             self.admission.workspace_permissions.as_ref(),
         );
-        if let Some(error) =
-            permissions::refresh_files(&self.admission.workspace, &mut self.composer)
-        {
+        if let Some(error) = self.files.refresh(&self.admission, &mut self.composer) {
             append_notice(&mut self.ui.notice, &error);
         }
         self.composer.set_completion_selection(

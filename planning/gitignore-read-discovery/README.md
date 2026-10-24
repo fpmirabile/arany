@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `Ready`; the shared parser dependency was approved on 2026-10-22 in [Real-scale command snapshot](../real-scale-command-snapshot/README.md#open-questions-and-gates).
+- Status: `In progress`; slice 1 implements typed discovery and local suggestions pending CI/native evidence; next is slice 2 (Git disclosure).
 - Owner: Arany maintainer.
-- Last updated: 2026-10-22.
-- Delivery: Research → Plan → Implement; two vertical slices. No implementation in this documentation change.
+- Last updated: 2026-10-24.
+- Delivery: Research → Plan → Implement; two vertical slices.
 
 ## Outcome and scope
 
@@ -76,21 +76,21 @@ Use the shared private Tools module and its [shared selector admission](../real-
 
 The selector's interface is data-only and deterministic: admitted directory-relative controls in, bounded visible/excluded decisions or typed failure out. The caller owns capability access; the selector owns interpretation; Engine owns authorization/journal order; Git owns output framing. No filesystem walker from the dependency, global mutable cache, durable matcher store or new public configuration is required. Per-operation control snapshots allow changes to take effect on the next call without reinterpreting committed results.
 
-The [chosen matcher placement](../real-scale-command-snapshot/README.md#matcher-placement-and-interactive-latency) is owned once in the snapshot plan. Under that decision, discovery that constructs a matcher uses the existing Guard capacity and resource envelope; exact Read and exact-file Search can retain their current in-process paths without constructing ignore matchers. Do not leave the compiler in an unbounded controller merely because a payload later enters a Guard. Keep each complete walk/selection in one owned operation; no per-file IPC or duplicated Engine-side parser.
+The [chosen matcher placement](../real-scale-command-snapshot/README.md#matcher-placement-and-interactive-latency) is owned once in the snapshot plan. Under that decision, typed Tool discovery that constructs a matcher uses the existing Guard capacity and resource envelope; exact Read and exact-file Search can retain their current in-process paths without constructing ignore matchers. Do not leave the compiler in an unbounded controller merely because a payload later enters a Guard. Keep each complete walk/selection in one owned operation; no per-file IPC or duplicated Engine-side parser. The [Terminal contract](../../docs/specs/terminal.md#interactive-commands-and-completion) owns the owner-approved local UI completion path and its separate binary-owned build slot.
 
 Linux and macOS use identical selection and case-sensitive ignore matching. Existing case/Unicode, hard-link, no-follow, mount and replacement checks remain stricter than peer walkers. Native resource enforcement differences and unavailable evidence remain explicit; this documentation makes no native support claim.
 
 ## Interactive admission and latency
 
-Current `refresh_files` is synchronous on query change; moving it unchanged into a Guard would block input and repeatedly pay native admission. [Codex's pinned manager](https://github.com/openai/codex/blob/rust-v0.117.0/codex-rs/tui/src/file_search.rs#L52-L73) instead owns one search session and calls `session.update_query(&query)`. Adopt session reuse, with narrower bounded data and no new daemon. A restricted custom in-process ignore matcher was rejected in the shared placement review: its apparent speed would replace the mature grammar or introduce a second one, while preflight plus RSS measurements alone cannot enforce aggregate memory.
+Current `refresh_files` is synchronous on query change; moving it unchanged into a Guard would block input and repeatedly pay native admission. [Codex's pinned manager](https://github.com/openai/codex/blob/rust-v0.117.0/codex-rs/tui/src/file_search.rs#L52-L73) instead owns one search session and calls `session.update_query(&query)`. Adopt session reuse, with narrower bounded data and no new daemon. Local suggestions reuse the shared bounded matcher and admitted directory capabilities; they do not introduce a second parser or enter Tool execution.
 
-- A suggestion session captures one immutable, fully filtered name index for the admitted search root: **2,048 names / 48 KiB serialized total**, at most **64 displayed candidates**. Include directories and names only, never file contents or compiled matchers. Keep the complete response inside the existing 64 KiB result envelope; overflow reports Limit rather than passing an incomplete index off as complete. Folder narrowing is explicit.
-- Build that index asynchronously in one resource-owned operation; the terminal event loop must never wait synchronously. Query updates only rank/filter those names in-process, with the existing bounded query grammar. This replaces per-keystroke traversal; it does not add a second ignore parser. One active build and one latest-query value per attached composer; superseded requests/results cannot accumulate or overwrite a newer session generation. An active build's permit stays held until cancellation and cleanup finish.
+- A suggestion session captures one immutable, fully filtered name index for the admitted search root: **2,048 names / 48 KiB serialized total**, at most **64 displayed candidates**. Include directories and names only, never file contents or compiled matchers. Overflow reports Limit rather than passing an incomplete index off as complete. Folder narrowing is explicit.
+- Build that index asynchronously in one local operation owned by the binary; the terminal event loop must never wait synchronously. Query updates only rank/filter those names in-process, with the existing bounded query grammar. This replaces per-keystroke traversal; it does not add a second ignore parser. One build slot per binary and one latest-query value per attached composer; superseded requests/results cannot accumulate or overwrite a newer session generation. An active build's permit stays held until cancellation and cleanup finish.
 - Freeze selection for the suggestion session, expire it after **30 seconds**, and drop it on popup closure, search-root/Workspace identity change or permission/grant generation change. Clear old candidates before rebuilding. Authority changes invalidate immediately; filesystem/ignore changes become visible on a new snapshot, so this is not a live filesystem view. No watcher, persistent cache or stale-results fallback is required.
-- Use the [shared unit-wait, work and memory limits](../real-scale-command-snapshot/README.md#matcher-placement-and-interactive-latency): **100 ms wait for suggestions, 250 ms for typed discovery**. Full queue/expiry returns typed busy (`QueueFull`, model `Limit / ReadCapacity`); UI shows suggestions unavailable/busy, not an empty successful search. A new user query/session may try again; do not schedule background retries. Exact Read and exact-file Search keep the existing 16-slot in-process path.
+- Typed discovery uses the [shared unit work and memory limits](../real-scale-command-snapshot/README.md#matcher-placement-and-interactive-latency) and **250 ms capacity wait**. Local suggestions wait **100 ms for the binary build slot**, with their bounds owned by the Terminal contract. Full queue/expiry returns typed busy (`QueueFull`, model `Limit / ReadCapacity`); UI shows suggestions unavailable/busy, not an empty successful search. A new user query/session may try again; do not schedule background retries. Exact Read and exact-file Search keep the existing 16-slot in-process path.
 - Match-call/time limits live in [shared selector admission](../real-scale-command-snapshot/README.md#shared-selector-admission). A timeout clears/discards the whole result, emits typed Timeout and never exposes a path as a fallback. Query refinement has a separate **50 ms wall deadline** and at most 2,048 candidate comparisons per update; timeout discards that update without touching the accepted immutable index.
 
-**Implementation evidence gate:** extend the attached journey with explicit gates proving that typing/cancellation remains responsive while a build is queued, that many keystrokes start only one Guard walk per snapshot, and that stale generations never publish names. Use paused-time tests for queue expiry, work timeout and cancellation; reuse existing Guard saturation/failure owners. Record named-host Linux/macOS measurements for cold index construction (within the 2-second selection deadline) and **warm-query p95 ≤ 50 ms** on the maximum admitted index. Couple this with the shared adversarial RSS fixture; neither latency nor RSS has been measured in this plan update. Keep timing experiments outside the deterministic default suite. A failed measurement returns the affected design to Research, not to an automatic authority/memory expansion.
+**Implementation evidence gate:** extend the attached journey with explicit gates proving that typing/cancellation remains responsive while a build is queued, that many keystrokes start only one local walk per snapshot, and that stale generations never publish names. Use paused-time tests for queue expiry, work timeout and cancellation; reuse existing Guard saturation/failure owners. Record named-host Linux/macOS measurements for cold index construction (within the 2-second selection deadline) and **warm-query p95 ≤ 50 ms** on the maximum admitted index. Couple this with the shared adversarial RSS fixture; neither latency nor RSS has been measured in this plan update. Keep timing experiments outside the deterministic default suite. A failed measurement returns the affected design to Research, not to an automatic authority/memory expansion.
 
 ## Security and resource model
 
@@ -107,7 +107,9 @@ Git is a disclosure filter over its neutralized private view, not a claim that i
 
 ## Open questions
 
-None. The shared [parser dependency](../real-scale-command-snapshot/README.md#open-questions-and-gates) is approved; implementation depends on the selector slice, not the full snapshot plan.
+None. The owner-approved suggestion decision is recorded in the [Terminal contract](../../docs/specs/terminal.md#interactive-commands-and-completion).
+
+The shared [parser dependency](../real-scale-command-snapshot/README.md#open-questions-and-gates) is approved; implementation depends on the selector slice, not the full snapshot plan.
 
 ## Exit criteria
 

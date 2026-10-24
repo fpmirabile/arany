@@ -963,7 +963,11 @@ impl Attestation {
                     && intent.call.is_child_research()
                     && *intent_digest == intent.digest()
                     && match intent.call.facts().site {
-                        Site::InProcess => guard.is_none(),
+                        Site::InProcess => {
+                            guard.is_none()
+                                || super::discovery::possible(&intent.call)
+                                    && guard.as_ref().is_some_and(|r| r.valid_for(intent))
+                        }
                         Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
                         Site::Unguarded | Site::Host => false,
                     }
@@ -1010,7 +1014,8 @@ impl Attestation {
             Self::Guard(receipt) => {
                 intent.target == EffectTarget::Workspace
                     && !matches!(intent.call, ToolCall::PrepareWorker { .. })
-                    && intent.call.facts().site == Site::Guard
+                    && (intent.call.facts().site == Site::Guard
+                        || super::discovery::possible(&intent.call))
                     && receipt.valid_for(intent)
             }
             Self::Host(receipt) => {
@@ -1250,7 +1255,8 @@ impl ToolObservation {
                 Some(EnforcementCause::GuardBootstrap) => {
                     self.disposition == ToolDisposition::Failed
                         && self.attestation.is_none()
-                        && self.intent.call.facts().site == super::catalog::Site::Guard
+                        && (self.intent.call.facts().site == super::catalog::Site::Guard
+                            || super::discovery::possible(&self.intent.call))
                 }
             }
             && (!self.intent.call.is_host()

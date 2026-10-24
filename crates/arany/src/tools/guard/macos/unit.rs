@@ -579,11 +579,7 @@ impl Unit {
         intent: &EffectIntent,
     ) -> Result<(Self, Option<crate::tools::ActiveToolWindow>), ToolError> {
         let capture = FixtureSpan::begin(FixtureStage::Admission);
-        let permit =
-            super::super::admission::acquire(intent.id, intent.limits.runtime_ms, |queued| {
-                runtime.queue_changed(intent.id, queued)
-            })
-            .await?;
+        let permit = super::super::admit_operation(runtime, intent).await?;
         let admitted_at = tokio::time::Instant::now();
         let active_window = runtime.begin_active_action(admitted_at).await?;
         let mut unit = Self::create(permit, Path::new(UNIT_ROOT_PARENT))?;
@@ -1155,8 +1151,8 @@ pub(super) async fn execute(
                     }
                 };
                 capture_result.await
-            }
-            .await;
+            };
+            let observation = super::super::discovery_work(intent, observation).await;
             capture.complete();
             observation
         };
