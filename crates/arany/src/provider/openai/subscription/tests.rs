@@ -1455,9 +1455,19 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let compact = event_reply(completed_with_id("resp_compact", Some(12), r#"Condensed"#));
     let (endpoint, server) =
         serve_sequence(vec![direct.clone(), delegate.clone(), compact.clone()]).await;
-    probe_model_at(&client(), endpoint, TOKEN, "model-a", Effort::Medium)
-        .await
-        .expect("three strict synthetic calls");
+    let (_temp, mut journal) = probe_journal().await;
+    probe_model_at(
+        &client(),
+        endpoint,
+        TOKEN,
+        ("model-a", Effort::Medium),
+        &mut journal,
+    )
+    .await
+    .expect("three strict synthetic calls");
+    let view = journal.close().await.unwrap();
+    assert_eq!(view.completed_calls, 4);
+    assert!(view.pending.is_none());
     let requests = server.await.expect("server");
     assert_eq!(requests.len(), 3);
     for (index, request) in requests.iter().enumerate() {
@@ -1515,9 +1525,15 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     ] {
         let expected_calls = replies.len();
         let (endpoint, server) = serve_sequence(replies).await;
-        let error = probe_model_at(&client(), endpoint, TOKEN, "model-a", Effort::Medium)
-            .await
-            .expect_err(label);
+        let error = probe_model_at(
+            &client(),
+            endpoint,
+            TOKEN,
+            ("model-a", Effort::Medium),
+            &mut probe_journal().await.1,
+        )
+        .await
+        .expect_err(label);
         assert!(
             if label == "local output cap" {
                 matches!(error, ProviderError::LocalOutputLimit)
@@ -1539,10 +1555,40 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let endpoint = Url::parse("http://127.0.0.1:9/v1/responses").unwrap();
     for (token, model) in [("", "model-a"), (TOKEN, "bad model")] {
         assert!(matches!(
-            probe_model_at(&client(), endpoint.clone(), token, model, Effort::Medium).await,
+            probe_model_at(
+                &client(),
+                endpoint.clone(),
+                token,
+                (model, Effort::Medium),
+                &mut probe_journal().await.1
+            )
+            .await,
             Err(ProviderError::Rejected)
         ));
     }
+    let (_temp, mut journal) = probe_journal().await;
+    journal
+        .finish(crate::CheckDisposition::Failed)
+        .await
+        .unwrap();
+    let dispatched = std::cell::Cell::new(false);
+    assert!(matches!(
+        journal_probe(&mut journal, crate::CheckCallKind::Answer, async {
+            dispatched.set(true);
+            Ok((
+                (),
+                Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        })
+        .await,
+        Err(ProviderError::Unavailable)
+    ));
+    assert!(!dispatched.get(), "refused append polled the transport");
 }
 
 #[test]
@@ -2248,4 +2294,28 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
         );
         assert!(error.retry_cause().is_none());
     }
+}
+
+async fn probe_journal() -> (tempfile::TempDir, crate::CheckJournal) {
+    let temp = tempfile::tempdir().unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut check = crate::ChatGptCheck::start(
+        state,
+        crate::ChatGptCheckRequest {
+            account: uuid::Uuid::now_v7(),
+            model: "model-a".into(),
+            effort: Effort::Medium,
+            fingerprint: [1; 32],
+        },
+        |_| Ok(Vec::new()),
+    )
+    .await
+    .unwrap();
+    check.evidence_cleared().await.unwrap();
+    let token = check.begin_catalog().await.unwrap();
+    check
+        .record_catalog(token, crate::CheckDisposition::Succeeded)
+        .await
+        .unwrap();
+    (temp, check.journal)
 }

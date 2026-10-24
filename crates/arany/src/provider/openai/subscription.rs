@@ -9,9 +9,9 @@ use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFr
 use crate::provider::{
     AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
     CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_REPORTED_OUTPUT_TOKENS,
-    MAX_RESPONSE_BYTES, OutputTokenBound, PROBE_OUTPUT_CAP, PROBE_TOTAL_DEADLINE, PromptRole,
-    Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome, ProviderRequest,
-    ProviderResponse, RunInput, Usage, catalog::valid_model_id, render,
+    MAX_RESPONSE_BYTES, OutputTokenBound, PROBE_OUTPUT_CAP, PromptRole, Provenance, Provider,
+    ProviderError, ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput,
+    Usage, catalog::valid_model_id, render,
 };
 use crate::session::{AgentRunId, MAX_COMPACTION_OUTPUT_TOKENS, RunId, SessionId};
 #[cfg(test)]
@@ -166,24 +166,25 @@ pub(super) async fn probe_model(
     access_token: &str,
     model: &str,
     effort: Effort,
+    journal: &mut crate::CheckJournal,
 ) -> Result<(), ProviderError> {
+    if !matches!(&journal.view().start.target, crate::CheckTarget::Chatgpt { model: selected, effort: selected_effort, .. } if selected == model && *selected_effort == effort)
+    {
+        return Err(ProviderError::Rejected);
+    }
     let client = client()?;
     let endpoint = Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint");
-    timeout(
-        PROBE_TOTAL_DEADLINE,
-        probe_model_at(&client, endpoint, access_token, model, effort),
-    )
-    .await
-    .map_err(|_| ProviderError::Unavailable)?
+    probe_model_at(&client, endpoint, access_token, (model, effort), journal).await
 }
 
 async fn probe_model_at(
     client: &Client,
     endpoint: Url,
     access_token: &str,
-    model: &str,
-    effort: Effort,
+    selection: (&str, Effort),
+    journal: &mut crate::CheckJournal,
 ) -> Result<(), ProviderError> {
+    let (model, effort) = selection;
     if !valid_model_id(model)
         || access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
@@ -191,23 +192,15 @@ async fn probe_model_at(
     {
         return Err(ProviderError::Rejected);
     }
-    let session_id = SessionId::new();
-    let direct = ProviderRequest {
-        session_id,
-        run_id: RunId::new(),
-        agent_run_id: AgentRunId::new(),
-        phase: AgentPhase::RootPlan,
-        collaboration: crate::session::CollaborationPolicy::Single,
-        model: model.to_owned(),
-        max_output_tokens: PROBE_OUTPUT_CAP,
-        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
-    };
-    let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
-    if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !value.text.trim().is_empty() && value.text.len() <= 8 * 1024)
-    {
-        return Err(ProviderError::InvalidOutcome);
-    }
-    let direct_id = response.response_id.ok_or(ProviderError::InvalidOutcome)?;
+    let direct = probe_request(model);
+    let session_id = direct.session_id;
+    let direct_id = journal_probe(journal, crate::CheckCallKind::Answer, async {
+        let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
+        if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !value.text.trim().is_empty() && value.text.len() <= 8 * 1024) {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Ok((response.response_id.ok_or(ProviderError::InvalidOutcome)?, response.usage))
+    }).await?;
 
     let delegate = ProviderRequest {
         collaboration: crate::session::CollaborationPolicy::Team { max_active_children: 1 },
@@ -216,15 +209,15 @@ async fn probe_model_at(
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
         ..direct
     };
-    let response = invoke_at(client, endpoint.clone(), access_token, &delegate, effort).await?;
-    if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none())
-    {
-        return Err(ProviderError::InvalidOutcome);
-    }
-    let delegate_id = response.response_id.ok_or(ProviderError::InvalidOutcome)?;
-    if delegate_id == direct_id {
-        return Err(ProviderError::InvalidOutcome);
-    }
+    let delegate_id = journal_probe(journal, crate::CheckCallKind::Delegate, async {
+        let response = invoke_at(client, endpoint.clone(), access_token, &delegate, effort).await?;
+        if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none()) {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let id = response.response_id.ok_or(ProviderError::InvalidOutcome)?;
+        if id == direct_id { return Err(ProviderError::InvalidOutcome); }
+        Ok((id, response.usage))
+    }).await?;
 
     let compact = CompactionRequest {
         session_id,
@@ -237,17 +230,64 @@ async fn probe_model_at(
         })],
         max_output_tokens: PROBE_OUTPUT_CAP,
     };
-    let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
-    if response.summary.trim().is_empty()
-        || response.summary.len() > 8 * 1024
-        || !response
-            .response_id
-            .as_deref()
-            .is_some_and(|id| id != direct_id && id != delegate_id)
-    {
-        return Err(ProviderError::InvalidOutcome);
+    journal_probe(journal, crate::CheckCallKind::Compaction, async {
+        let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
+        if response.summary.trim().is_empty()
+            || response.summary.len() > 8 * 1024
+            || !response
+                .response_id
+                .as_deref()
+                .is_some_and(|id| id != direct_id && id != delegate_id)
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Ok(((), response.usage))
+    })
+    .await
+}
+
+fn probe_request(model: &str) -> ProviderRequest {
+    ProviderRequest {
+        session_id: SessionId::new(),
+        run_id: RunId::new(),
+        agent_run_id: AgentRunId::new(),
+        phase: AgentPhase::RootPlan,
+        collaboration: crate::session::CollaborationPolicy::Single,
+        model: model.to_owned(),
+        max_output_tokens: PROBE_OUTPUT_CAP,
+        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     }
-    Ok(())
+}
+
+async fn journal_probe<T>(
+    journal: &mut crate::CheckJournal,
+    kind: crate::CheckCallKind,
+    call: impl std::future::Future<Output = Result<(T, Usage), ProviderError>>,
+) -> Result<T, ProviderError> {
+    let token = journal
+        .call_started(kind)
+        .await
+        .map_err(|_| ProviderError::Unavailable)?;
+    let result = call.await;
+    let usage = result.as_ref().ok().and_then(|(_, usage)| {
+        Some(crate::CheckUsage {
+            input_tokens: usage.input_tokens?,
+            output_tokens: usage.output_tokens?,
+        })
+    });
+    journal
+        .call_finished(
+            token,
+            match &result {
+                Ok(_) => crate::CheckDisposition::Succeeded,
+                Err(error) => crate::provider::native_check::disposition(error),
+            },
+            usage,
+            false,
+        )
+        .await
+        .map_err(|_| ProviderError::Unavailable)?;
+    result.map(|(value, _)| value)
 }
 
 fn client() -> Result<Client, ProviderError> {

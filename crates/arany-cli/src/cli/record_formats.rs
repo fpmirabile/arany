@@ -11,7 +11,7 @@ const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserI
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.
-const FIXTURES: [Fixture<'static>; 14] = [
+const FIXTURES: [Fixture<'static>; 15] = [
     (
         RecordKind::ToolsConfig,
         1,
@@ -45,6 +45,12 @@ const FIXTURES: [Fixture<'static>; 14] = [
     (
         RecordKind::ChatgptAccounts,
         1,
+        CHATGPT_ACCOUNT_V1,
+        CHATGPT_ACCOUNT,
+    ),
+    (
+        RecordKind::ChatgptAccounts,
+        2,
         CHATGPT_ACCOUNT,
         CHATGPT_ACCOUNT,
     ),
@@ -64,7 +70,8 @@ const UI_V3_UPGRADED: &str = r#"{"version":4,"preferences":{"completion":"combin
 const UI_V4: &str = r#"{"version":4,"preferences":{"completion":"tabs","view":"fullscreen","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"off","copy_on_select":false}}"#;
 const UI_V5: &str = r#"{"version":5,"preferences":{"completion":"tabs","view":"fullscreen","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"off","copy_on_select":false,"newline":"shift_enter"}}"#;
 const ACCOUNT: &str = r#"{"schema":1,"storage":"private_file","account":{"schema":2,"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","provider":"openai","model":"gpt-5.4","effort":"low","api_key":"synthetic-test-key","anthropic_workspace_id":null}}"#;
-const CHATGPT_ACCOUNT: &str = r#"{"schema":1,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":1,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}}],"model_checks":[]}"#;
+const CHATGPT_ACCOUNT_V1: &str = r#"{"schema":1,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":1,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}}],"model_checks":[{"account_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","fingerprint":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"checked_at_sec":1700000000,"expires_at_sec":1700086400,"context_window_tokens":272000}]}"#;
+const CHATGPT_ACCOUNT: &str = r#"{"schema":2,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":1,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}}],"model_checks":[]}"#;
 const ROSTER: &str = r#"{"version":1,"profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}"#;
 const ROUTING: &str = r#"{"version":1,"providers":{"primary":null,"child":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}],"review":null,"compaction":null}}"#;
 
@@ -80,7 +87,7 @@ const NESTED_SCHEMAS: [NestedSchema; 2] = [
         RecordKind::ChatgptAccounts,
         "/accounts/0/token/schema",
         TOKEN_RECORD_SCHEMA,
-        &[(1, 1)],
+        &[(1, 1), (2, 1)],
     ),
 ];
 
@@ -244,10 +251,15 @@ fn nested_schema_bumps_require_an_enclosing_migration_even_with_an_updated_fixtu
             std::slice::from_ref(&problem)
         );
 
+        let enclosing = formats()
+            .into_iter()
+            .find(|format| format.kind == *kind)
+            .unwrap()
+            .current;
         let mut updated: Value = serde_json::from_str(
             FIXTURES
                 .iter()
-                .find(|(fixture, ..)| fixture == kind)
+                .find(|(fixture, version, ..)| fixture == kind && *version == enclosing)
                 .unwrap()
                 .2,
         )
@@ -257,7 +269,7 @@ fn nested_schema_bumps_require_an_enclosing_migration_even_with_an_updated_fixtu
         let fixtures: Vec<Fixture<'_>> = FIXTURES
             .iter()
             .map(|&(fixture, version, input, expected)| {
-                if fixture == *kind {
+                if fixture == *kind && version == enclosing {
                     (fixture, version, updated.as_str(), updated.as_str())
                 } else {
                     (fixture, version, input, expected)
@@ -285,7 +297,9 @@ fn nested_schema_bumps_require_an_enclosing_migration_even_with_an_updated_fixtu
             uncovered(&formats, &fixtures, &bumped),
             [
                 problem,
-                format!("{kind:?} 1 has no populated {path} fixture with its pinned schema"),
+                format!(
+                    "{kind:?} {enclosing} has no populated {path} fixture with its pinned schema"
+                ),
             ]
         );
     }
@@ -294,17 +308,22 @@ fn nested_schema_bumps_require_an_enclosing_migration_even_with_an_updated_fixtu
 #[test]
 fn nested_schema_fixtures_must_be_populated() {
     for (kind, path, _, _) in NESTED_SCHEMAS {
+        let enclosing = formats()
+            .into_iter()
+            .find(|format| format.kind == kind)
+            .unwrap()
+            .current;
         let empty = match kind {
             RecordKind::SavedAccount => r#"{"schema":1,"storage":"keyring","account":null}"#,
             RecordKind::ChatgptAccounts => {
-                r#"{"schema":1,"selected":null,"accounts":[],"model_checks":[]}"#
+                r#"{"schema":2,"selected":null,"accounts":[],"model_checks":[]}"#
             }
             _ => unreachable!(),
         };
         let fixtures: Vec<Fixture<'_>> = FIXTURES
             .iter()
             .map(|&(fixture, version, input, expected)| {
-                if fixture == kind {
+                if fixture == kind && version == enclosing {
                     (fixture, version, empty, empty)
                 } else {
                     (fixture, version, input, expected)
@@ -314,7 +333,7 @@ fn nested_schema_fixtures_must_be_populated() {
         assert_eq!(
             uncovered(&formats(), &fixtures, &NESTED_SCHEMAS),
             [format!(
-                "{kind:?} 1 has no populated {path} fixture with its pinned schema"
+                "{kind:?} {enclosing} has no populated {path} fixture with its pinned schema"
             )]
         );
     }

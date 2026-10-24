@@ -48,8 +48,9 @@ pub use engine::{
 pub use fault::FaultPlan;
 pub(crate) use journal::check::CheckJournal;
 pub use journal::check::{
-    CHECK_FORMATS, CheckCallKind, CheckDisposition, CheckEvent, CheckId, CheckOpenError,
-    CheckProbe, CheckReceipt, CheckStart, CheckTarget, CheckUsage, CheckView,
+    CHECK_FORMATS, ChatGptCheck, ChatGptCheckRequest, CheckCallKind, CheckCallToken,
+    CheckDisposition, CheckEvent, CheckId, CheckOpenError, CheckProbe, CheckReceipt, CheckStart,
+    CheckTarget, CheckUsage, CheckView,
 };
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]

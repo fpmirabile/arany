@@ -74,6 +74,37 @@ pub(crate) async fn list_models(
         .map_err(|_| AuthorizationError::Unavailable)?
 }
 
+pub(super) async fn list_models_checked(
+    credentials: &VerifiedCredentials,
+    consent: &ConsentReceipt,
+    storage: AccountStorage,
+    check: &mut arany::ChatGptCheck,
+) -> Result<Vec<ChatGptModel>, AuthorizationError> {
+    let token = check
+        .begin_catalog()
+        .await
+        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
+    let result = tokio::time::timeout_at(
+        check.probe_deadline(),
+        list_models(credentials, consent, storage),
+    )
+    .await
+    .map_err(|_| AuthorizationError::Unavailable)
+    .and_then(|result| result);
+    check
+        .record_catalog(
+            token,
+            match &result {
+                Ok(_) => arany::CheckDisposition::Succeeded,
+                Err(AuthorizationError::Unavailable) => arany::CheckDisposition::Uncertain,
+                Err(_) => arany::CheckDisposition::Rejected,
+            },
+        )
+        .await
+        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
+    result
+}
+
 async fn list_at(
     client: &Client,
     endpoint: Url,

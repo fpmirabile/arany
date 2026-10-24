@@ -369,6 +369,11 @@ pub(crate) enum CheckOp {
     Start {
         id: CheckId,
         start: CheckStart,
+        retained: Option<Vec<CheckId>>,
+    },
+    PublishChatgpt {
+        id: CheckId,
+        digest: [u8; 32],
     },
     Append {
         id: CheckId,
@@ -388,28 +393,47 @@ pub(crate) enum CheckOp {
 
 impl CheckJournal {
     pub(crate) async fn start(root: StateRoot, start: CheckStart) -> Result<Self, CheckOpenError> {
+        Self::start_retaining(root, start, |_| Ok(None)).await
+    }
+
+    async fn start_retaining(
+        root: StateRoot,
+        start: CheckStart,
+        retained: impl FnOnce(&StateRoot) -> Result<Option<Vec<CheckId>>, StoreError>,
+    ) -> Result<Self, CheckOpenError> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(LIFETIME_MS);
         let lease = root.lock_provider_check()?;
+        let retained = retained(&root)?;
+        if retained.as_ref().is_some_and(|ids| ids.len() > MAX_CHECKS) {
+            return Err(StoreError::InvalidHistory.into());
+        }
         let store = Store::open(root)?;
         tokio::time::timeout_at(deadline, store.check(CheckOp::Recover))
             .await
             .map_err(|_| StoreError::Closed)??;
         let id = CheckId::new();
-        let view = tokio::time::timeout_at(deadline, store.check(CheckOp::Start { id, start }))
-            .await
-            .map_err(|_| StoreError::Closed)
-            .and_then(|result| result)
-            .and_then(|view| view.ok_or(StoreError::InvalidHistory))
-            .map_err(|source| {
-                let ambiguous = matches!(source, StoreError::Closed | StoreError::Sqlite(_));
-                CheckOpenError {
-                    source,
-                    receipt: ambiguous.then_some(CheckReceipt {
-                        id,
-                        disposition: None,
-                    }),
-                }
-            })?;
+        let view = tokio::time::timeout_at(
+            deadline,
+            store.check(CheckOp::Start {
+                id,
+                start,
+                retained,
+            }),
+        )
+        .await
+        .map_err(|_| StoreError::Closed)
+        .and_then(|result| result)
+        .and_then(|view| view.ok_or(StoreError::InvalidHistory))
+        .map_err(|source| {
+            let ambiguous = matches!(source, StoreError::Closed | StoreError::Sqlite(_));
+            CheckOpenError {
+                source,
+                receipt: ambiguous.then_some(CheckReceipt {
+                    id,
+                    disposition: None,
+                }),
+            }
+        })?;
         Ok(Self {
             store,
             _lease: lease,
@@ -418,7 +442,6 @@ impl CheckJournal {
             confirmed: true,
         })
     }
-    #[cfg(test)]
     pub(crate) fn view(&self) -> &CheckView {
         &self.view
     }
@@ -604,7 +627,7 @@ impl std::fmt::Display for CheckReceipt {
         }
     }
 }
-pub(crate) struct CheckCallToken {
+pub struct CheckCallToken {
     id: CheckId,
     ordinal: u8,
 }
@@ -620,3 +643,120 @@ pub(crate) fn now_ms() -> Result<i64, StoreError> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+pub struct ChatGptCheckRequest {
+    pub account: Uuid,
+    pub model: String,
+    pub effort: Effort,
+    pub fingerprint: [u8; 32],
+}
+
+pub struct ChatGptCheck {
+    pub(crate) journal: CheckJournal,
+    probe_deadline: tokio::time::Instant,
+}
+
+impl ChatGptCheck {
+    pub async fn start(
+        root: StateRoot,
+        request: ChatGptCheckRequest,
+        retained: impl FnOnce(&StateRoot) -> Result<Vec<CheckId>, StoreError>,
+    ) -> Result<Self, CheckOpenError> {
+        let probes = [
+            CheckCallKind::Answer,
+            CheckCallKind::Delegate,
+            CheckCallKind::Compaction,
+        ]
+        .into_iter()
+        .map(|kind| CheckProbe {
+            kind,
+            effort: Some(request.effort),
+            output_tokens: crate::provider::PROBE_OUTPUT_CAP,
+        })
+        .collect();
+        let start = CheckStart::new(
+            CheckTarget::Chatgpt {
+                account: request.account,
+                model: request.model.clone(),
+                effort: request.effort,
+            },
+            request.model,
+            request.fingerprint,
+            Sha256::digest(b"https://api.openai.com/v1/models;https://api.openai.com/v1/responses")
+                .into(),
+            1,
+            probes,
+        )?;
+        let journal =
+            CheckJournal::start_retaining(root, start, |root| retained(root).map(Some)).await?;
+        let probe_deadline = (tokio::time::Instant::now() + crate::provider::PROBE_TOTAL_DEADLINE)
+            .min(journal.request_deadline());
+        Ok(Self {
+            journal,
+            probe_deadline,
+        })
+    }
+
+    pub fn id(&self) -> CheckId {
+        self.journal.view.id
+    }
+
+    pub fn probe_deadline(&self) -> tokio::time::Instant {
+        self.probe_deadline
+    }
+
+    pub async fn evidence_cleared(&mut self) -> Result<(), StoreError> {
+        self.journal
+            .append(CheckEvent::ProviderCheckEvidenceCleared)
+            .await
+    }
+
+    pub async fn begin_catalog(&mut self) -> Result<CheckCallToken, StoreError> {
+        if tokio::time::Instant::now() >= self.probe_deadline {
+            return Err(StoreError::InvalidHistory);
+        }
+        self.journal.call_started(CheckCallKind::Catalog).await
+    }
+
+    pub async fn record_catalog(
+        &mut self,
+        token: CheckCallToken,
+        disposition: CheckDisposition,
+    ) -> Result<(), StoreError> {
+        self.journal
+            .call_finished(
+                token,
+                disposition,
+                None,
+                disposition == CheckDisposition::Succeeded,
+            )
+            .await
+    }
+
+    pub async fn evidence_started(&mut self, digest: [u8; 32]) -> Result<(), StoreError> {
+        self.journal
+            .evidence_started(digest, self.journal.view.start.fingerprint)
+            .await
+    }
+
+    pub async fn evidence_published(&mut self, digest: [u8; 32]) -> Result<(), StoreError> {
+        self.journal
+            .write(CheckOp::PublishChatgpt {
+                id: self.id(),
+                digest,
+            })
+            .await
+    }
+
+    pub async fn finish(&mut self, disposition: CheckDisposition) -> Result<(), StoreError> {
+        self.journal.finish(disposition).await
+    }
+
+    pub fn receipt(&self) -> CheckReceipt {
+        self.journal.receipt()
+    }
+
+    pub async fn close(self) -> Result<CheckView, StoreError> {
+        self.journal.close().await
+    }
+}
