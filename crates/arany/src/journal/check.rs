@@ -658,6 +658,18 @@ pub struct ChatGptCheckRequest {
     pub fingerprint: [u8; 32],
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ChatGptCheckError {
+    #[error("Provider check cancelled")]
+    Cancelled,
+    #[error("Provider check deadline reached")]
+    Deadline,
+    #[error(transparent)]
+    Journal(#[from] StoreError),
+    #[error(transparent)]
+    Provider(#[from] crate::ProviderError),
+}
+
 pub struct ChatGptCheck {
     pub(crate) journal: CheckJournal,
     probe_deadline: tokio::time::Instant,
@@ -721,36 +733,49 @@ impl ChatGptCheck {
             .await
     }
 
-    pub async fn begin_catalog(&mut self) -> Result<CheckCallToken, StoreError> {
+    pub async fn begin_catalog(&mut self) -> Result<CheckCallToken, ChatGptCheckError> {
         self.begin_call(CheckCallKind::Catalog).await
     }
 
     pub(crate) async fn begin_call(
         &mut self,
         kind: CheckCallKind,
-    ) -> Result<CheckCallToken, StoreError> {
-        if self.cancellation.is_cancelled() || tokio::time::Instant::now() >= self.probe_deadline {
-            return Err(StoreError::InvalidHistory);
+    ) -> Result<CheckCallToken, ChatGptCheckError> {
+        self.admit_call()?;
+        Ok(self.journal.call_started(kind).await?)
+    }
+
+    fn admit_call(&self) -> Result<(), ChatGptCheckError> {
+        self.check_cancellation()?;
+        if tokio::time::Instant::now() >= self.probe_deadline {
+            return Err(ChatGptCheckError::Deadline);
         }
-        self.journal.call_started(kind).await
+        Ok(())
+    }
+
+    fn check_cancellation(&self) -> Result<(), ChatGptCheckError> {
+        if self.cancellation.is_cancelled() {
+            return Err(ChatGptCheckError::Cancelled);
+        }
+        Ok(())
     }
 
     pub async fn await_response<T>(
         &mut self,
         token: &CheckCallToken,
         response: impl std::future::Future<Output = T>,
-    ) -> Option<T> {
+    ) -> Result<T, ChatGptCheckError> {
         if token.id != self.id()
             || self.journal.view.pending.map(|(ordinal, _)| ordinal) != Some(token.ordinal)
-            || self.cancellation.is_cancelled()
-            || tokio::time::Instant::now() >= self.probe_deadline
         {
-            return None;
+            return Err(StoreError::InvalidHistory.into());
         }
+        self.admit_call()?;
         tokio::select! {
             biased;
-            () = self.cancellation.cancelled() => None,
-            result = tokio::time::timeout_at(self.probe_deadline, response) => result.ok(),
+            () = self.cancellation.cancelled() => Err(ChatGptCheckError::Cancelled),
+            result = tokio::time::timeout_at(self.probe_deadline, response) =>
+                result.map_err(|_| ChatGptCheckError::Deadline),
         }
     }
 
@@ -769,25 +794,23 @@ impl ChatGptCheck {
             .await
     }
 
-    pub async fn evidence_started(&mut self, digest: [u8; 32]) -> Result<(), StoreError> {
-        if self.cancellation.is_cancelled() {
-            return Err(StoreError::Closed);
-        }
-        self.journal
+    pub async fn evidence_started(&mut self, digest: [u8; 32]) -> Result<(), ChatGptCheckError> {
+        self.check_cancellation()?;
+        Ok(self
+            .journal
             .evidence_started(digest, self.journal.view.start.fingerprint)
-            .await
+            .await?)
     }
 
-    pub async fn evidence_published(&mut self, digest: [u8; 32]) -> Result<(), StoreError> {
-        if self.cancellation.is_cancelled() {
-            return Err(StoreError::Closed);
-        }
-        self.journal
+    pub async fn evidence_published(&mut self, digest: [u8; 32]) -> Result<(), ChatGptCheckError> {
+        self.check_cancellation()?;
+        Ok(self
+            .journal
             .write(CheckOp::PublishChatgpt {
                 id: self.id(),
                 digest,
             })
-            .await
+            .await?)
     }
 
     pub async fn finish(&mut self, disposition: CheckDisposition) -> Result<(), StoreError> {

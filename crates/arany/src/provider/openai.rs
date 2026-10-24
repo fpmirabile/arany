@@ -21,7 +21,7 @@ pub async fn probe_chatgpt_model(
     model: &str,
     effort: Effort,
     check: &mut crate::ChatGptCheck,
-) -> Result<(), ProviderError> {
+) -> Result<(), crate::ChatGptCheckError> {
     subscription::probe_model(access_token, model, effort, check).await
 }
 

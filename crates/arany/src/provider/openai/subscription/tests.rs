@@ -1536,11 +1536,16 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         .expect_err(label);
         assert!(
             if label == "local output cap" {
-                matches!(error, ProviderError::LocalOutputLimit)
+                matches!(
+                    error,
+                    crate::ChatGptCheckError::Provider(ProviderError::LocalOutputLimit)
+                )
             } else {
                 matches!(
                     error,
-                    ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract
+                    crate::ChatGptCheckError::Provider(
+                        ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract
+                    )
                 )
             },
             "{label}"
@@ -1563,7 +1568,7 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
                 &mut probe_check(crate::RunCancellation::new()).await.1
             )
             .await,
-            Err(ProviderError::Rejected)
+            Err(crate::ChatGptCheckError::Provider(ProviderError::Rejected))
         ));
     }
     let (_temp, mut journal) = probe_check(crate::RunCancellation::new()).await;
@@ -1586,7 +1591,7 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
             ))
         })
         .await,
-        Err(ProviderError::Unavailable)
+        Err(crate::ChatGptCheckError::Journal(_))
     ));
     assert!(!dispatched.get(), "refused append polled the transport");
 }
@@ -2362,14 +2367,35 @@ async fn probe_stops_leave_intent_and_result_acknowledgments_confirmed() {
                     ))
                 })
                 .await;
-                if result.is_ok() {
-                    assert!(
+                let stopped = match acknowledgment {
+                    Acknowledgment::Intent => result,
+                    Acknowledgment::Result => {
+                        result.expect("confirmed response");
                         journal_probe::<()>(&mut check, crate::CheckCallKind::Delegate, async {
                             panic!("stopped check dispatched another probe");
                         })
                         .await
-                        .is_err()
-                    );
+                    }
+                };
+                assert!(matches!(
+                    (stop, stopped),
+                    (Stop::Cancellation, Err(crate::ChatGptCheckError::Cancelled))
+                        | (Stop::Deadline, Err(crate::ChatGptCheckError::Deadline))
+                ));
+                assert!(matches!(
+                    (stop, check.begin_catalog().await),
+                    (Stop::Cancellation, Err(crate::ChatGptCheckError::Cancelled))
+                        | (Stop::Deadline, Err(crate::ChatGptCheckError::Deadline))
+                ));
+                if matches!(stop, Stop::Cancellation) {
+                    assert!(matches!(
+                        check.evidence_started([1; 32]).await,
+                        Err(crate::ChatGptCheckError::Cancelled)
+                    ));
+                    assert!(matches!(
+                        check.evidence_published([1; 32]).await,
+                        Err(crate::ChatGptCheckError::Cancelled)
+                    ));
                 }
                 check.finish(crate::CheckDisposition::Failed).await.unwrap();
                 let receipt = check.receipt();

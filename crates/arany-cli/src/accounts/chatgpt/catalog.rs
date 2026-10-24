@@ -83,17 +83,22 @@ pub(super) async fn list_models_checked(
     let token = check
         .begin_catalog()
         .await
-        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
+        .map_err(AuthorizationError::from)?;
     let result = check
         .await_response(&token, list_models(credentials, consent, storage))
         .await
-        .unwrap_or(Err(AuthorizationError::Unavailable));
+        .map_err(AuthorizationError::from)
+        .and_then(|result| result);
     check
         .record_catalog(
             token,
             match &result {
                 Ok(_) => arany::CheckDisposition::Succeeded,
-                Err(AuthorizationError::Unavailable) => arany::CheckDisposition::Uncertain,
+                Err(
+                    AuthorizationError::Unavailable
+                    | AuthorizationError::CheckCancelled
+                    | AuthorizationError::CheckDeadline,
+                ) => arany::CheckDisposition::Uncertain,
                 Err(_) => arany::CheckDisposition::Rejected,
             },
         )

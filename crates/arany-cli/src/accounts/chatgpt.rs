@@ -169,7 +169,7 @@ async fn check_model(
     let context_window_tokens = catalog::model_window(&models, &model)?;
     arany::probe_chatgpt_model(&selected.credentials.access_token, &model, effort, check)
         .await
-        .map_err(conformance_error)?;
+        .map_err(AuthorizationError::from)?;
     let record = account::prepare_model_check(
         workspace.clone(),
         selected.clone(),
@@ -182,13 +182,24 @@ async fn check_model(
     check
         .evidence_started(digest)
         .await
-        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
+        .map_err(AuthorizationError::from)?;
     account::record_model_check(workspace, selected, record).await?;
     check
         .evidence_published(digest)
         .await
-        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
+        .map_err(AuthorizationError::from)?;
     Ok(context_window_tokens)
+}
+
+impl From<arany::ChatGptCheckError> for AuthorizationError {
+    fn from(error: arany::ChatGptCheckError) -> Self {
+        match error {
+            arany::ChatGptCheckError::Cancelled => Self::CheckCancelled,
+            arany::ChatGptCheckError::Deadline => Self::CheckDeadline,
+            arany::ChatGptCheckError::Journal(_) => Self::EvidenceUnavailable,
+            arany::ChatGptCheckError::Provider(error) => conformance_error(error),
+        }
+    }
 }
 
 fn conformance_error(error: ProviderError) -> AuthorizationError {
@@ -375,6 +386,10 @@ pub(crate) enum AuthorizationError {
     InvalidSelection,
     #[error("model is not visible to the selected ChatGPT account")]
     ModelUnavailable,
+    #[error("ChatGPT conformance check cancelled")]
+    CheckCancelled,
+    #[error("ChatGPT conformance check deadline reached")]
+    CheckDeadline,
     #[error("ChatGPT synthetic conformance failed")]
     ConformanceFailed,
     #[error(
@@ -766,6 +781,26 @@ fn fixture_host_id() -> Uuid {
 mod tests {
     use super::*;
     use crate::accounts::credentials::AccountStorage;
+
+    #[test]
+    fn stopped_checks_report_the_stop_cause_without_claiming_a_journal_failure() {
+        for (error, expected) in [
+            (
+                arany::ChatGptCheckError::Cancelled,
+                "ChatGPT conformance check cancelled",
+            ),
+            (
+                arany::ChatGptCheckError::Deadline,
+                "ChatGPT conformance check deadline reached",
+            ),
+            (
+                arany::StoreError::Closed.into(),
+                "ChatGPT conformance evidence is unavailable",
+            ),
+        ] {
+            assert_eq!(AuthorizationError::from(error).to_string(), expected);
+        }
+    }
 
     #[test]
     fn conformance_http_notice_has_fixed_admission_recovery() {

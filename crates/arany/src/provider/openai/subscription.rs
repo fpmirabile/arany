@@ -167,10 +167,10 @@ pub(super) async fn probe_model(
     model: &str,
     effort: Effort,
     check: &mut crate::ChatGptCheck,
-) -> Result<(), ProviderError> {
+) -> Result<(), crate::ChatGptCheckError> {
     if !matches!(&check.journal.view().start.target, crate::CheckTarget::Chatgpt { model: selected, effort: selected_effort, .. } if selected == model && *selected_effort == effort)
     {
-        return Err(ProviderError::Rejected);
+        return Err(ProviderError::Rejected.into());
     }
     let client = client()?;
     let endpoint = Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint");
@@ -183,14 +183,14 @@ async fn probe_model_at(
     access_token: &str,
     selection: (&str, Effort),
     check: &mut crate::ChatGptCheck,
-) -> Result<(), ProviderError> {
+) -> Result<(), crate::ChatGptCheckError> {
     let (model, effort) = selection;
     if !valid_model_id(model)
         || access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
         || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
     {
-        return Err(ProviderError::Rejected);
+        return Err(ProviderError::Rejected.into());
     }
     let direct = probe_request(model);
     let session_id = direct.session_id;
@@ -263,15 +263,12 @@ async fn journal_probe<T>(
     check: &mut crate::ChatGptCheck,
     kind: crate::CheckCallKind,
     call: impl std::future::Future<Output = Result<(T, Usage), ProviderError>>,
-) -> Result<T, ProviderError> {
-    let token = check
-        .begin_call(kind)
-        .await
-        .map_err(|_| ProviderError::Unavailable)?;
+) -> Result<T, crate::ChatGptCheckError> {
+    let token = check.begin_call(kind).await?;
     let result = check
         .await_response(&token, call)
         .await
-        .unwrap_or(Err(ProviderError::CallTimedOut));
+        .and_then(|result| result.map_err(crate::ChatGptCheckError::from));
     let usage = result.as_ref().ok().and_then(|(_, usage)| {
         Some(crate::CheckUsage {
             input_tokens: usage.input_tokens?,
@@ -284,13 +281,19 @@ async fn journal_probe<T>(
             token,
             match &result {
                 Ok(_) => crate::CheckDisposition::Succeeded,
-                Err(error) => crate::provider::native_check::disposition(error),
+                Err(crate::ChatGptCheckError::Provider(error)) => {
+                    crate::provider::native_check::disposition(error)
+                }
+                Err(
+                    crate::ChatGptCheckError::Cancelled
+                    | crate::ChatGptCheckError::Deadline
+                    | crate::ChatGptCheckError::Journal(_),
+                ) => crate::CheckDisposition::Uncertain,
             },
             usage,
             false,
         )
-        .await
-        .map_err(|_| ProviderError::Unavailable)?;
+        .await?;
     result.map(|(value, _)| value)
 }
 
