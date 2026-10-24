@@ -22,6 +22,8 @@ pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }
 
+#[derive(Debug)]
+#[must_use = "the clock is restored when the guard drops"]
 pub struct TestClock {
     previous: Option<u64>,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,

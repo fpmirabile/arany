@@ -4805,7 +4805,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                         head,
                     )
                     .await,
-                Err(EngineError::RewindPreviewExpired)
+                Err(EngineError::RewindPreviewChanged)
             ));
             assert_eq!(
                 source_before,

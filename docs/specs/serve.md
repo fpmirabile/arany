@@ -141,7 +141,7 @@ Unknown threads on all three methods return `threadNotLoaded`.
 
 ## Rewind
 
-`thread_rewind_v1` advertises two idle, loaded-thread methods. Their vocabulary follows Codex app-server's thread/turn shape and Claude Agent SDK's explicit file-rewind embedding precedent. They call the same Engine as the [terminal](./terminal.md#rewind); [Tools](./tools.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
+`thread_rewind_v2` advertises two idle, loaded-thread methods. Their vocabulary follows Codex app-server's thread/turn shape and Claude Agent SDK's explicit file-rewind embedding precedent. They call the same Engine as the [terminal](./terminal.md#rewind); [Tools](./tools.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
 
 | Method | Params | Result |
 |---|---|---|
@@ -325,7 +325,7 @@ The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
 `items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `events_subscribe_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
-covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v1`. Breaking wire changes require a new
+covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats follow the [journal migration contract](./execution.md#journal-migration).
 

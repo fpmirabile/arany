@@ -172,7 +172,7 @@ impl Engine {
         if head.is_some_and(|(sequence, digest)| {
             sequence != view.last_sequence || digest != view.rewinds.prefix_digest()
         }) {
-            return Err(EngineError::RewindPreviewExpired);
+            return Err(EngineError::RewindPreviewChanged);
         }
         let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
         ensure_session_workspace(&view, identity)?;
@@ -346,7 +346,7 @@ impl Engine {
             || started.enforcement_digest != expected.enforcement_digest
             || prepared.preview.permissions_digest != permissions_digest
         {
-            return Err(EngineError::RewindPreviewExpired);
+            return Err(EngineError::RewindPreviewChanged);
         }
         started.rewind_id = expected.rewind_id;
         let code = self
@@ -1015,7 +1015,6 @@ mod tests {
             .await
             .unwrap()
             .preview;
-        assert!(!changed.observations_match(&refused));
         assert!(!changed.observations_match(&refused));
         std::fs::write(workspace.join("src/a"), "external").unwrap();
         assert_eq!(

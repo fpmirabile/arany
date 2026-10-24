@@ -137,7 +137,7 @@ fn rewind_conformance_covers_closed_states_receipts_and_selection_bounds() {
         let result: ThreadRewindResult = serde_json::from_value(row.clone()).unwrap();
         assert_eq!(serde_json::to_value(result).unwrap(), row);
     }
-    assert!(CAPABILITIES.contains(&"thread_rewind_v1"));
+    assert!(CAPABILITIES.contains(&"thread_rewind_v2"));
 }
 
 #[test]

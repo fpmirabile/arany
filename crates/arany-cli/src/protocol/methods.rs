@@ -20,7 +20,7 @@ pub const CAPABILITIES: &[&str] = &[
     "thread_settings_update_v1",
     "thread_unsubscribe_v1",
     "thread_list_v1",
-    "thread_rewind_v1",
+    "thread_rewind_v2",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
