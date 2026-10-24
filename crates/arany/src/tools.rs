@@ -1598,6 +1598,9 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    let resource_limit = matches!(&error, ToolError::Limit)
+        && matches!(&intent.call, ToolCall::Command { .. })
+        && intent.target == crate::session::worker::EffectTarget::Workspace;
     let enforcement_cause =
         matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
             .then_some(EnforcementCause::GuardBootstrap);
@@ -1608,14 +1611,21 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         Site::Host => "host",
     };
     record_failure(site, &intent, &error);
-    let mut output = match &error {
-        ToolError::QueueFull => format!("{error}. No operation was dispatched."),
-        _ => format!(
-            "{site} {} unavailable before dispatch; no operation was dispatched.",
-            failure_stage(&error)
-        ),
+    let mut output = if resource_limit {
+        format!("{site} resource limit reached before dispatch; no operation was dispatched.")
+    } else {
+        match &error {
+            ToolError::QueueFull => format!("{error}. No operation was dispatched."),
+            _ => format!(
+                "{site} {} unavailable before dispatch; no operation was dispatched.",
+                failure_stage(&error)
+            ),
+        }
     };
-    if intent.call.facts().site == Site::Guard && !matches!(error, ToolError::QueueFull) {
+    if intent.call.facts().site == Site::Guard
+        && !resource_limit
+        && !matches!(error, ToolError::QueueFull)
+    {
         let cause = failure_check(&error).unwrap_or(match &error {
             ToolError::Operation => "Guard startup failed; exact cause was not reported",
             _ => failure_stage(&error),
@@ -1646,10 +1656,14 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     }
     ToolObservation {
         enforcement_cause,
-        limit_cause: None,
+        limit_cause: resource_limit.then_some(LimitCause::Resource),
         output,
         intent,
-        disposition: ToolDisposition::Failed,
+        disposition: if resource_limit {
+            ToolDisposition::Limit
+        } else {
+            ToolDisposition::Failed
+        },
         attestation: None,
         approval_cause: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,

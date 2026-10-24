@@ -17,7 +17,7 @@ const ADMISSION_SCAN_LIMIT: usize = MAX_WAITERS + 64 * 4 + 16;
 const RESERVATION_VERSION: u32 = if cfg!(target_os = "linux") { 2 } else { 1 };
 #[cfg(target_os = "linux")]
 const SEED_ENTRY_LIMIT: usize =
-    (crate::tools::types::MAX_SNAPSHOT_FILES + crate::tools::types::MAX_SKILLS * 32 + 12 * 17)
+    (crate::tools::types::COMMAND_SNAPSHOT_FILES + crate::tools::types::MAX_SKILLS * 32 + 12 * 17)
         * 260;
 pub(super) const RECOVERY_ATTEMPTS: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
