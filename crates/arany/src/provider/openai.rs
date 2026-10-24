@@ -22,12 +22,7 @@ pub async fn probe_chatgpt_model(
     effort: Effort,
     check: &mut crate::ChatGptCheck,
 ) -> Result<(), ProviderError> {
-    tokio::time::timeout_at(
-        check.probe_deadline(),
-        subscription::probe_model(access_token, model, effort, &mut check.journal),
-    )
-    .await
-    .map_err(|_| ProviderError::Unavailable)?
+    subscription::probe_model(access_token, model, effort, check).await
 }
 
 pub struct OpenAiProvider {

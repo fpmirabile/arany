@@ -84,13 +84,10 @@ pub(super) async fn list_models_checked(
         .begin_catalog()
         .await
         .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
-    let result = tokio::time::timeout_at(
-        check.probe_deadline(),
-        list_models(credentials, consent, storage),
-    )
-    .await
-    .map_err(|_| AuthorizationError::Unavailable)
-    .and_then(|result| result);
+    let result = check
+        .await_response(&token, list_models(credentials, consent, storage))
+        .await
+        .unwrap_or(Err(AuthorizationError::Unavailable));
     check
         .record_catalog(
             token,

@@ -2216,6 +2216,7 @@ async fn model_check_fixture(
             fingerprint: model_check_fingerprint(selected, selection.0, selection.1).unwrap(),
         },
         retained_checks,
+        arany::RunCancellation::new(),
     )
     .await
     .unwrap();

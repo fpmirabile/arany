@@ -107,7 +107,7 @@ pub(crate) async fn check_selected_model(
     expected_account_id: Option<Uuid>,
     model: String,
     effort: Effort,
-    mut cancellation: arany::RunCancellation,
+    cancellation: arany::RunCancellation,
 ) -> Result<ModelCheckReport, ModelCheckError> {
     validate_native_model_id(&model).map_err(|_| AuthorizationError::InvalidSelection)?;
     let selected = account::selected_for_use(workspace.clone(), expected_account_id).await?;
@@ -124,25 +124,12 @@ pub(crate) async fn check_selected_model(
             fingerprint,
         },
         account::retained_checks,
+        cancellation,
     )
     .await?;
-    let deadline = check.probe_deadline();
-    let mut cancelled = false;
-    let result = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => { cancelled = true; Err(AuthorizationError::ConformanceFailed) },
-        result = tokio::time::timeout_at(deadline, check_model(
-            &mut check, workspace, selected.clone(), model, effort,
-        )) => result.map_err(|_| AuthorizationError::ConformanceFailed).and_then(|result| result),
-    };
+    let result = check_model(&mut check, workspace, selected.clone(), model, effort).await;
     if result.is_err() {
-        let _ = check
-            .finish(if cancelled {
-                arany::CheckDisposition::Cancelled
-            } else {
-                arany::CheckDisposition::Failed
-            })
-            .await;
+        let _ = check.finish(arany::CheckDisposition::Failed).await;
     }
     let receipt = check.receipt();
     let closed = check.close().await;

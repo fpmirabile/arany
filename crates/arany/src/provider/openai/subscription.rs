@@ -166,15 +166,15 @@ pub(super) async fn probe_model(
     access_token: &str,
     model: &str,
     effort: Effort,
-    journal: &mut crate::CheckJournal,
+    check: &mut crate::ChatGptCheck,
 ) -> Result<(), ProviderError> {
-    if !matches!(&journal.view().start.target, crate::CheckTarget::Chatgpt { model: selected, effort: selected_effort, .. } if selected == model && *selected_effort == effort)
+    if !matches!(&check.journal.view().start.target, crate::CheckTarget::Chatgpt { model: selected, effort: selected_effort, .. } if selected == model && *selected_effort == effort)
     {
         return Err(ProviderError::Rejected);
     }
     let client = client()?;
     let endpoint = Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint");
-    probe_model_at(&client, endpoint, access_token, (model, effort), journal).await
+    probe_model_at(&client, endpoint, access_token, (model, effort), check).await
 }
 
 async fn probe_model_at(
@@ -182,7 +182,7 @@ async fn probe_model_at(
     endpoint: Url,
     access_token: &str,
     selection: (&str, Effort),
-    journal: &mut crate::CheckJournal,
+    check: &mut crate::ChatGptCheck,
 ) -> Result<(), ProviderError> {
     let (model, effort) = selection;
     if !valid_model_id(model)
@@ -194,7 +194,7 @@ async fn probe_model_at(
     }
     let direct = probe_request(model);
     let session_id = direct.session_id;
-    let direct_id = journal_probe(journal, crate::CheckCallKind::Answer, async {
+    let direct_id = journal_probe(check, crate::CheckCallKind::Answer, async {
         let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
         if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !value.text.trim().is_empty() && value.text.len() <= 8 * 1024) {
             return Err(ProviderError::InvalidOutcome);
@@ -209,7 +209,7 @@ async fn probe_model_at(
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
         ..direct
     };
-    let delegate_id = journal_probe(journal, crate::CheckCallKind::Delegate, async {
+    let delegate_id = journal_probe(check, crate::CheckCallKind::Delegate, async {
         let response = invoke_at(client, endpoint.clone(), access_token, &delegate, effort).await?;
         if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none()) {
             return Err(ProviderError::InvalidOutcome);
@@ -230,7 +230,7 @@ async fn probe_model_at(
         })],
         max_output_tokens: PROBE_OUTPUT_CAP,
     };
-    journal_probe(journal, crate::CheckCallKind::Compaction, async {
+    journal_probe(check, crate::CheckCallKind::Compaction, async {
         let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
         if response.summary.trim().is_empty()
             || response.summary.len() > 8 * 1024
@@ -260,22 +260,26 @@ fn probe_request(model: &str) -> ProviderRequest {
 }
 
 async fn journal_probe<T>(
-    journal: &mut crate::CheckJournal,
+    check: &mut crate::ChatGptCheck,
     kind: crate::CheckCallKind,
     call: impl std::future::Future<Output = Result<(T, Usage), ProviderError>>,
 ) -> Result<T, ProviderError> {
-    let token = journal
-        .call_started(kind)
+    let token = check
+        .begin_call(kind)
         .await
         .map_err(|_| ProviderError::Unavailable)?;
-    let result = call.await;
+    let result = check
+        .await_response(&token, call)
+        .await
+        .unwrap_or(Err(ProviderError::CallTimedOut));
     let usage = result.as_ref().ok().and_then(|(_, usage)| {
         Some(crate::CheckUsage {
             input_tokens: usage.input_tokens?,
             output_tokens: usage.output_tokens?,
         })
     });
-    journal
+    check
+        .journal
         .call_finished(
             token,
             match &result {
