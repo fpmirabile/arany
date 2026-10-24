@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use super::composer::{MAX_DRAFT_BYTES, MAX_PASTE_BYTES};
+use super::composer::{MAX_DRAFT_BYTES, MAX_PASTE_BYTES, MAX_PRIMARY_DRAFT_BYTES};
 use super::{NewlineShortcut, TerminalError};
 #[cfg(not(unix))]
 use crossterm::event;
@@ -144,8 +144,14 @@ impl TerminalReader {
     pub(super) fn set_chat_input(&mut self, chat: bool, child: bool) {
         #[cfg(unix)]
         if let Self::Lines(reader) = self {
+            let leaving_child = reader.child && !child;
             reader.chat = chat;
             reader.child = child;
+            if child {
+                reader.remaining_bytes = reader.remaining_bytes.min(MAX_DRAFT_BYTES);
+            } else if leaving_child {
+                reader.remaining_bytes = MAX_PRIMARY_DRAFT_BYTES;
+            }
         }
         #[cfg(not(unix))]
         let _ = (chat, child);
@@ -230,7 +236,7 @@ impl TerminalReader {
     pub(super) fn restore_input_capacity(&mut self, capacity: usize) -> io::Result<()> {
         #[cfg(unix)]
         {
-            if capacity > MAX_DRAFT_BYTES {
+            if capacity > MAX_PRIMARY_DRAFT_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "input capacity too large",
@@ -318,7 +324,7 @@ impl LineReader {
             shutdown,
             thread: Some(thread),
             pending: VecDeque::new(),
-            remaining_bytes: MAX_DRAFT_BYTES,
+            remaining_bytes: MAX_PRIMARY_DRAFT_BYTES,
             chat: false,
             child: false,
             epoch: 0,
@@ -367,7 +373,11 @@ impl LineReader {
         }
         let submitted = submitted && !continued;
         self.remaining_bytes = if submitted {
-            MAX_DRAFT_BYTES
+            if self.child {
+                MAX_DRAFT_BYTES
+            } else {
+                MAX_PRIMARY_DRAFT_BYTES
+            }
         } else {
             self.remaining_bytes - line.len()
         };
@@ -390,7 +400,11 @@ impl LineReader {
     }
 
     fn reset_draft(&mut self) {
-        self.remaining_bytes = MAX_DRAFT_BYTES;
+        self.remaining_bytes = if self.child {
+            MAX_DRAFT_BYTES
+        } else {
+            MAX_PRIMARY_DRAFT_BYTES
+        };
         self.pending.clear();
     }
 
@@ -1072,7 +1086,7 @@ mod tests {
                 shutdown: Arc::new(AtomicBool::new(false)),
                 thread: None,
                 pending: VecDeque::new(),
-                remaining_bytes: MAX_DRAFT_BYTES,
+                remaining_bytes: MAX_PRIMARY_DRAFT_BYTES,
                 chat: false,
                 child: false,
                 epoch: 1,
@@ -1102,10 +1116,10 @@ mod tests {
     fn canonical_text_beside_chips_rejects_whole_segments_at_either_limit() {
         use crate::terminal::{Composer, ComposerEdit};
         for (paste_bytes, prefix_bytes, capacity, continued) in [
-            (9600, 0, MAX_DRAFT_BYTES, false),
-            (9600, 0, MAX_DRAFT_BYTES, true),
-            (9600, MAX_DRAFT_BYTES - 5, 5, false),
-            (9600, MAX_DRAFT_BYTES - 5, 5, true),
+            (9600, 0, MAX_PRIMARY_DRAFT_BYTES - 9600, false),
+            (9600, 0, MAX_PRIMARY_DRAFT_BYTES - 9600, true),
+            (9600, MAX_PRIMARY_DRAFT_BYTES - 9600 - 5, 5, false),
+            (9600, MAX_PRIMARY_DRAFT_BYTES - 9600 - 5, 5, true),
             (MAX_PASTE_BYTES - 5, 0, 5, false),
             (MAX_PASTE_BYTES - 5, 0, 5, true),
         ] {
@@ -1227,7 +1241,7 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             thread: None,
             pending: VecDeque::new(),
-            remaining_bytes: MAX_DRAFT_BYTES,
+            remaining_bytes: MAX_PRIMARY_DRAFT_BYTES,
             chat: false,
             child: false,
             epoch: 0,
@@ -1266,15 +1280,46 @@ mod tests {
                 })
                 .collect();
             assert_eq!(text, expected);
+            let limit = if child {
+                MAX_DRAFT_BYTES
+            } else {
+                MAX_PRIMARY_DRAFT_BYTES
+            };
             assert_eq!(
                 reader.remaining_bytes,
                 if submitted {
-                    MAX_DRAFT_BYTES
+                    limit
                 } else {
-                    MAX_DRAFT_BYTES - expected.len()
+                    limit - expected.len()
                 }
             );
         }
+        reader.chat = false;
+        reader.child = true;
+        reader.reset_draft();
+        let child_boundary = MAX_DRAFT_BYTES % MAX_LINEAR_LINE_BYTES;
+        while reader.remaining_bytes > child_boundary {
+            let segment_bytes =
+                (reader.remaining_bytes - child_boundary).min(MAX_LINEAR_LINE_BYTES);
+            reader
+                .accept_segment(vec![b'x'; segment_bytes], false)
+                .unwrap();
+            reader.pending.clear();
+        }
+        assert_eq!(reader.remaining_bytes, child_boundary);
+        assert_eq!(
+            reader
+                .accept_segment(vec![b'x'; child_boundary + 1], true)
+                .unwrap(),
+            TerminalInput::LineRejected
+        );
+        assert_eq!(
+            reader
+                .accept_segment(vec![b'x'; child_boundary], true)
+                .unwrap(),
+            TerminalInput::Character('x')
+        );
+        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES);
         reader.reset_draft();
         reader.chat = true;
         reader.child = false;
@@ -1291,8 +1336,14 @@ mod tests {
         assert_eq!(reader.remaining_bytes, 0);
         reader.reset_draft();
         reader.chat = false;
-        for expected in [MAX_DRAFT_BYTES - 3000, MAX_DRAFT_BYTES - 6000] {
-            let first = reader.accept_segment(vec![b'x'; 3000], false).unwrap();
+        let handoff_segment_bytes = MAX_LINEAR_LINE_BYTES.min(3000);
+        for expected in [
+            MAX_PRIMARY_DRAFT_BYTES - handoff_segment_bytes,
+            MAX_PRIMARY_DRAFT_BYTES - 2 * handoff_segment_bytes,
+        ] {
+            let first = reader
+                .accept_segment(vec![b'x'; handoff_segment_bytes], false)
+                .unwrap();
             assert_eq!(first, TerminalInput::Character('x'));
             assert_eq!(reader.remaining_bytes, expected);
             assert_eq!(reader.pending.back(), Some(&TerminalInput::LineContinued));
@@ -1308,11 +1359,11 @@ mod tests {
             }
             assert_eq!(
                 delivered.len(),
-                3001,
+                handoff_segment_bytes + 1,
                 "handoff waits for the entire accepted segment"
             );
             assert!(
-                delivered[..3000]
+                delivered[..handoff_segment_bytes]
                     .iter()
                     .all(|event| *event == TerminalInput::Character('x'))
             );
@@ -1322,17 +1373,31 @@ mod tests {
             };
             reader = drained;
         }
+        let primary_boundary = MAX_LINEAR_LINE_BYTES / 2;
+        while reader.remaining_bytes > primary_boundary {
+            let segment_bytes =
+                (reader.remaining_bytes - primary_boundary).min(MAX_LINEAR_LINE_BYTES);
+            reader
+                .accept_segment(vec![b'x'; segment_bytes], false)
+                .unwrap();
+            reader.pending.clear();
+        }
+        assert_eq!(reader.remaining_bytes, primary_boundary);
         assert_eq!(
-            reader.accept_segment(vec![b'x'; 2193], true).unwrap(),
+            reader
+                .accept_segment(vec![b'x'; primary_boundary + 1], true)
+                .unwrap(),
             TerminalInput::LineRejected
         );
-        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES - 6000);
+        assert_eq!(reader.remaining_bytes, primary_boundary);
         assert!(reader.pending.is_empty());
         assert_eq!(
-            reader.accept_segment(vec![b'x'; 2192], true).unwrap(),
+            reader
+                .accept_segment(vec![b'x'; primary_boundary], true)
+                .unwrap(),
             TerminalInput::Character('x')
         );
-        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES);
+        assert_eq!(reader.remaining_bytes, MAX_PRIMARY_DRAFT_BYTES);
         assert_eq!(reader.pending.back(), Some(&TerminalInput::Submit));
         reader.pending.clear();
         let mut terminal_reader = TerminalReader::Lines(reader);
@@ -1348,7 +1413,7 @@ mod tests {
         reader.reset_draft();
         reader.accept_segment(b"draft".to_vec(), true).unwrap();
         reader.reset_draft();
-        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES);
+        assert_eq!(reader.remaining_bytes, MAX_PRIMARY_DRAFT_BYTES);
         assert!(reader.pending.is_empty());
 
         let mut terminal_reader = TerminalReader::Lines(reader);
@@ -1361,22 +1426,23 @@ mod tests {
         );
         assert!(
             terminal_reader
-                .restore_input_capacity(MAX_DRAFT_BYTES + 1)
+                .restore_input_capacity(MAX_PRIMARY_DRAFT_BYTES + 1)
                 .is_err()
         );
         terminal_reader
-            .restore_input_capacity(MAX_DRAFT_BYTES - 6000)
+            .restore_input_capacity(primary_boundary)
             .unwrap();
         let TerminalReader::Lines(mut resumed_reader) = terminal_reader else {
             unreachable!("Unix line reader")
         };
-        assert_eq!(resumed_reader.remaining_bytes, MAX_DRAFT_BYTES - 6000);
+        assert_eq!(resumed_reader.remaining_bytes, primary_boundary);
         assert_eq!(
             resumed_reader
-                .accept_segment(vec![b'x'; 2193], true)
+                .accept_segment(vec![b'x'; primary_boundary + 1], true)
                 .unwrap(),
             TerminalInput::LineRejected
         );
+        assert_eq!(resumed_reader.remaining_bytes, primary_boundary);
     }
 
     #[test]

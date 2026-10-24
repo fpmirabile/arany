@@ -28,7 +28,6 @@ mod startup;
 use models::ModelBrowse;
 use picker::{PickerChoice, pick_session};
 
-const MAX_ATTACHED_DRAFT_BYTES: usize = 8 * 1024;
 const EMPTY_INTERRUPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
@@ -211,7 +210,7 @@ impl AttachedArgs {
             return Err("invalid model".into());
         }
         if self.prompt.as_ref().is_some_and(|prompt| {
-            prompt.trim().is_empty() || prompt.len() > MAX_ATTACHED_DRAFT_BYTES
+            prompt.trim().is_empty() || prompt.len() > crate::terminal::MAX_PRIMARY_DRAFT_BYTES
         }) {
             return Err("invalid objective".into());
         }

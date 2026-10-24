@@ -72,18 +72,15 @@ pub(super) async fn open(
                     None => new_conversation(conversation.defaults),
                 };
                 let mut notice = notice;
-                if let Some(prompt) = conversation.prompt {
-                    if !matches!(
+                if let Some(prompt) = conversation.prompt
+                    && !matches!(
                         composer.restore_prompt(&prompt),
                         Ok(crate::terminal::ComposerEdit::Changed
                             | crate::terminal::ComposerEdit::Unchanged)
-                    ) {
-                        notice.push_str(
-                            "; prompt could not fit safely in the draft and was not copied",
-                        );
-                    }
-                } else {
-                    notice.push_str("; prompt exceeds 8.0 KB and was not copied");
+                    )
+                {
+                    notice
+                        .push_str("; prompt could not fit safely in the draft and was not copied");
                 }
                 if conversation.images_omitted {
                     notice.push_str("; images were not copied; attach them again");
