@@ -809,6 +809,10 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     let observation = tool.observation.as_ref().unwrap();
     assert_eq!(tool.intent.limits.runtime_ms, 2_000);
     assert_eq!(observation.disposition, ToolDisposition::Limit);
+    assert_eq!(
+        observation.limit_cause,
+        Some(arany::LimitCause::RequestedTime)
+    );
     assert!(observation.attestation.is_none());
     assert_eq!(observation.cache_update, arany::CacheUpdate::NotApplicable);
     assert!(

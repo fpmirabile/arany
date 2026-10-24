@@ -76,7 +76,7 @@ impl CommandSelection {
             return Err(ToolError::Limit);
         }
         let selection: Self = serde_json::from_slice(bytes).map_err(|_| ToolError::Path)?;
-        if selection.omitted.len() + selection.pruned.len() > MAX_SNAPSHOT_FILES * 4
+        if selection.omitted.len() + selection.pruned.len() > COMMAND_SCAN_ENTRIES
             || selection.calls > crate::tools::selection::COMMAND_CALLS
             || selection.controls.len() > crate::tools::selection::CONTROL_FILES
             || selection
@@ -89,8 +89,8 @@ impl CommandSelection {
                 .summary
                 .ignored_entries
                 .checked_add(selection.summary.oversized_inputs)
-                .is_none_or(|count| count > (MAX_SNAPSHOT_FILES * 4) as u64)
-            || selection.summary.discarded_outputs > (MAX_SNAPSHOT_FILES * 4) as u64
+                .is_none_or(|count| count > COMMAND_SCAN_ENTRIES as u64)
+            || selection.summary.discarded_outputs > COMMAND_SCAN_ENTRIES as u64
         {
             return Err(ToolError::Limit);
         }
@@ -110,12 +110,12 @@ impl CommandSelection {
         if selection
             .controls
             .keys()
-            .any(|path| !path.is_empty() && path.split('/').count() + 1 > 16)
+            .any(|path| !path.is_empty() && path.split('/').count() + 1 > COMMAND_SNAPSHOT_DEPTH)
             || selection
                 .omitted
                 .iter()
                 .chain(&selection.pruned)
-                .any(|path| path.split('/').count() > 16)
+                .any(|path| path.split('/').count() > COMMAND_SNAPSHOT_DEPTH)
         {
             return Err(ToolError::Limit);
         }
@@ -137,7 +137,7 @@ struct Inputs<'a> {
     config: &'a Config,
     selection: CommandSelection,
     selector: Selector,
-    budget: ScanBudget,
+    budget: CommandScanBudget,
     retained: usize,
     controls: BTreeMap<String, Option<(std::fs::Metadata, Vec<u8>)>>,
 }
@@ -156,7 +156,7 @@ pub(in crate::tools) fn prepare_command(
         config,
         selection: CommandSelection::default(),
         selector: Selector::new(0, deadline),
-        budget: ScanBudget::default(),
+        budget: CommandScanBudget::default(),
         retained: 0,
         controls: BTreeMap::new(),
     };
@@ -229,6 +229,17 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     }
 }
 
+fn command_metadata(file: &File) -> Result<std::fs::Metadata, ToolError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if file.metadata().map_err(|_| ToolError::Path)?.mode() & 0o6000 != 0 {
+            return Err(ToolError::FilesystemDenied);
+        }
+    }
+    safe_metadata(file)
+}
+
 fn safe_metadata(file: &File) -> Result<std::fs::Metadata, ToolError> {
     let metadata = file.metadata().map_err(|_| ToolError::Path)?;
     if !metadata.is_dir() && !metadata.is_file() {
@@ -262,7 +273,7 @@ impl Inputs<'_> {
             }
             Err(error) => return Err(error),
         };
-        if path.split('/').count() > 16 {
+        if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
             return Err(ToolError::Limit);
         }
         if !self
@@ -294,18 +305,20 @@ impl Inputs<'_> {
         let mut names = Vec::new();
         for entry in directory.entries().map_err(|_| ToolError::Path)? {
             self.selector.check_time()?;
-            self.budget.entry()?;
             let name = entry
                 .map_err(|_| ToolError::Path)?
                 .file_name()
                 .into_string()
                 .map_err(|_| ToolError::Path)?;
-            if valid_relative(&name, false) {
-                names.push(if path.is_empty() {
-                    name
-                } else {
-                    format!("{path}/{name}")
-                });
+            let valid_name = valid_relative(&name, false);
+            let selected = if path.is_empty() {
+                name
+            } else {
+                format!("{path}/{name}")
+            };
+            self.budget.entry(&selected)?;
+            if valid_name {
+                names.push(selected);
             }
         }
         names.sort();
@@ -322,23 +335,29 @@ impl Inputs<'_> {
         if names.is_empty() && !path.is_empty() {
             self.retain()?;
         }
+        drop(directory);
         for name in names {
-            self.entry(&name)?;
+            self.entry_scanned(&name)?;
         }
         Ok(())
     }
 
     fn retain(&mut self) -> Result<(), ToolError> {
         self.retained += 1;
-        if self.retained > MAX_SNAPSHOT_FILES {
+        if self.retained > COMMAND_SNAPSHOT_FILES {
             return Err(ToolError::Limit);
         }
         Ok(())
     }
 
     fn entry(&mut self, path: &str) -> Result<(), ToolError> {
+        self.budget.entry(path)?;
+        self.entry_scanned(path)
+    }
+
+    fn entry_scanned(&mut self, path: &str) -> Result<(), ToolError> {
         self.selector.check_time()?;
-        if !valid_relative(path, false) || path.split('/').count() > 16 {
+        if !valid_relative(path, false) || path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
             return Err(ToolError::Limit);
         }
         let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
@@ -346,6 +365,7 @@ impl Inputs<'_> {
         let link = directory
             .symlink_metadata(name)
             .map_err(|_| ToolError::Path)?;
+        drop(directory);
         if path.split('/').any(ignored_directory) || self.selector.excluded(path, link.is_dir())? {
             self.selection.summary.ignored_entries += 1;
             self.selection.summary.pruned_directories += u64::from(link.is_dir());
@@ -358,11 +378,12 @@ impl Inputs<'_> {
             return Err(ToolError::Path);
         }
         let file = open_file(self.source, path)?;
-        let metadata = safe_metadata(&file)?;
+        let metadata = command_metadata(&file)?;
         if metadata.is_dir() != link.is_dir() {
             return Err(ToolError::ChangedInput);
         }
         if metadata.is_dir() {
+            drop(file);
             return self.directory(path);
         }
         if metadata.len() > MAX_FILE_BYTES as u64 {
@@ -371,14 +392,7 @@ impl Inputs<'_> {
             return Ok(());
         }
         let content = read_regular(file, MAX_FILE_BYTES)?;
-        self.budget.bytes = self
-            .budget
-            .bytes
-            .checked_add(content.len())
-            .ok_or(ToolError::Limit)?;
-        if self.budget.bytes > MAX_SNAPSHOT_BYTES {
-            return Err(ToolError::Limit);
-        }
+        self.budget.content(content.len())?;
         self.retain()?;
         #[cfg(unix)]
         let executable = {
@@ -405,103 +419,199 @@ pub(in crate::tools) fn selected_command_changeset(
     deadline: Instant,
 ) -> Result<(CommandChangeset, CommandSelectionSummary), ToolError> {
     let root = open_directory(workspace)?;
-    let mut after = CommandSnapshot {
-        root_identity: workspace_identity(&root)?,
-        entries: BTreeMap::new(),
+    if workspace_identity(&root)? != before.root_identity {
+        return Err(ToolError::ChangedInput);
+    }
+    let mut capture = CommandCapture {
+        root: &root,
+        before,
+        selection,
+        selector: selection.selector(deadline)?,
+        budget: CommandScanBudget::default(),
+        summary: selection.summary,
+        tree: OutputTree::default(),
+        retained: 0,
+        changes: ChangesetCapture::default(),
     };
-    let mut selector = selection.selector(deadline)?;
-    let mut budget = ScanBudget::default();
-    let mut summary = selection.summary;
-    let mut pending = vec![String::new()];
-    let mut files = Vec::new();
-    let mut retained = 0;
-    while let Some(path) = pending.pop() {
-        selector.check_time()?;
-        let directory = if path.is_empty() {
-            root.try_clone().map_err(|_| ToolError::Path)?
-        } else {
-            Dir::from_std_file(open_file(&root, &path)?)
-        };
-        let mut empty = true;
+    capture.scan()?;
+    capture.finish()
+}
+
+#[derive(Default)]
+struct OutputTree {
+    directories: BTreeSet<String>,
+    files: BTreeMap<String, std::fs::Metadata>,
+}
+
+struct CommandCapture<'a> {
+    root: &'a Dir,
+    before: &'a CommandSnapshot,
+    selection: &'a CommandSelection,
+    selector: Selector,
+    budget: CommandScanBudget,
+    summary: CommandSelectionSummary,
+    tree: OutputTree,
+    retained: usize,
+    changes: ChangesetCapture,
+}
+
+#[derive(Default)]
+struct ChangesetCapture {
+    files: Vec<FileChange>,
+    bytes: usize,
+}
+
+impl ChangesetCapture {
+    fn push(
+        &mut self,
+        path: &str,
+        old: Option<&Entry>,
+        after: Option<FileVersion>,
+        bytes: usize,
+    ) -> Result<(), ToolError> {
+        self.bytes = self.bytes.checked_add(bytes).ok_or(ToolError::Limit)?;
+        if self.bytes > MAX_CHANGESET_BYTES || self.files.len() >= MAX_CHANGESET_FILES {
+            return Err(ToolError::Limit);
+        }
+        let before = old.and_then(|entry| {
+            entry
+                .content
+                .as_ref()
+                .map(|content| FileVersion::from_bytes(content, entry.executable))
+        });
+        self.files.push(FileChange {
+            path: path.into(),
+            before,
+            after,
+        });
+        Ok(())
+    }
+}
+
+impl CommandCapture<'_> {
+    fn scan(&mut self) -> Result<(), ToolError> {
+        let mut pending = vec![String::new()];
+        while let Some(path) = pending.pop() {
+            self.selector.check_time()?;
+            let directory = if path.is_empty() {
+                self.root.try_clone().map_err(|_| ToolError::Path)?
+            } else {
+                Dir::from_std_file(open_file(self.root, &path)?)
+            };
+            let mut children = self.children(&directory, &path)?;
+            if children.is_empty() && !path.is_empty() {
+                self.retain()?;
+            }
+            children.reverse();
+            for child in children {
+                self.scan_entry(child, &mut pending)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn children(&mut self, directory: &Dir, parent: &str) -> Result<Vec<String>, ToolError> {
+        let mut children = Vec::new();
         for entry in directory.entries().map_err(|_| ToolError::Path)? {
-            selector.check_time()?;
-            empty = false;
-            budget.entry()?;
+            self.selector.check_time()?;
             let name = entry
                 .map_err(|_| ToolError::Path)?
                 .file_name()
                 .into_string()
                 .map_err(|_| ToolError::Path)?;
-            let path = if path.is_empty() {
+            let path = if parent.is_empty() {
                 name
             } else {
-                format!("{path}/{name}")
+                format!("{parent}/{name}")
             };
-            if !valid_relative(&path, false) {
-                return Err(if path.split('/').any(forbidden) {
-                    ToolError::FilesystemDenied
-                } else {
-                    ToolError::Path
-                });
-            }
-            if path.split('/').count() > 16 {
-                return Err(ToolError::Limit);
-            }
-            let file = open_file(&root, &path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if file.metadata().map_err(|_| ToolError::Path)?.mode() & 0o6000 != 0 {
-                    return Err(ToolError::FilesystemDenied);
-                }
-            }
-            let metadata = safe_metadata(&file)?;
-            if selection.omitted.contains(&path) {
-                return Err(ToolError::Conflict);
-            }
-            if metadata.is_dir() {
-                pending.push(path.clone());
-                after.entries.insert(
-                    path.clone(),
-                    Entry {
-                        path,
-                        content: None,
-                        executable: false,
-                    },
-                );
-            } else {
-                files.push((path, metadata));
-            }
+            self.budget.entry(&path)?;
+            children.push(path);
         }
-        if empty && !path.is_empty() {
-            retained += 1;
-            if retained > MAX_SNAPSHOT_FILES {
-                return Err(ToolError::Limit);
-            }
-        }
+        children.sort();
+        Ok(children)
     }
-    // Validate the complete tree before reading any publishable content.
-    for (path, metadata) in files {
-        selector.check_time()?;
-        if !before.entries.contains_key(&path)
-            && (path.split('/').any(ignored_directory) || selector.excluded(&path, false)?)
-        {
-            summary.discarded_outputs += 1;
-            continue;
+
+    fn scan_entry(&mut self, path: String, pending: &mut Vec<String>) -> Result<(), ToolError> {
+        if !valid_relative(&path, false) {
+            return Err(if path.split('/').any(forbidden) {
+                ToolError::FilesystemDenied
+            } else {
+                ToolError::Path
+            });
         }
-        let file = open_file(&root, &path)?;
-        if !same_file(&metadata, &safe_metadata(&file)?) {
-            return Err(ToolError::ChangedInput);
-        }
-        let content = read_regular(file, MAX_FILE_BYTES)?;
-        budget.bytes = budget
-            .bytes
-            .checked_add(content.len())
-            .ok_or(ToolError::Limit)?;
-        retained += 1;
-        if budget.bytes > MAX_SNAPSHOT_BYTES || retained > MAX_SNAPSHOT_FILES {
+        if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
             return Err(ToolError::Limit);
         }
+        if self.selection.omitted.contains(&path) {
+            return Err(ToolError::Conflict);
+        }
+        let file = open_file(self.root, &path)?;
+        let metadata = command_metadata(&file)?;
+        self.validate_type(&path, metadata.is_dir())?;
+        if metadata.is_dir() {
+            self.tree.directories.insert(path.clone());
+            pending.push(path);
+        } else {
+            self.tree.files.insert(path, metadata);
+        }
+        Ok(())
+    }
+
+    fn validate_type(&self, path: &str, directory: bool) -> Result<(), ToolError> {
+        let Some(before) = self.before.entries.get(path) else {
+            return Ok(());
+        };
+        if before.content.is_none() != directory {
+            return Err(ToolError::Path);
+        }
+        Ok(())
+    }
+
+    fn retain(&mut self) -> Result<(), ToolError> {
+        self.retained += 1;
+        if self.retained > COMMAND_SNAPSHOT_FILES {
+            return Err(ToolError::Limit);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(CommandChangeset, CommandSelectionSummary), ToolError> {
+        let tree = std::mem::take(&mut self.tree);
+        for (path, metadata) in &tree.files {
+            self.capture_file(path, metadata)?;
+        }
+        self.tree = tree;
+        self.capture_deletions()?;
+        self.changes
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        let changeset = CommandChangeset {
+            files: self.changes.files,
+        };
+        if !changeset.valid() {
+            return Err(ToolError::Limit);
+        }
+        self.selector.check_time()?;
+        Ok((changeset, self.summary))
+    }
+
+    fn capture_file(&mut self, path: &str, metadata: &std::fs::Metadata) -> Result<(), ToolError> {
+        self.selector.check_time()?;
+        let old = self.before.entries.get(path);
+        if old.is_none()
+            && (path.split('/').any(ignored_directory) || self.selector.excluded(path, false)?)
+        {
+            self.summary.discarded_outputs += 1;
+            return Ok(());
+        }
+        self.retain()?;
+        let file = open_file(self.root, path)?;
+        if !same_file(metadata, &command_metadata(&file)?) {
+            return Err(ToolError::ChangedInput);
+        }
+        let remaining = COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget_bytes());
+        let content = read_regular(file, MAX_FILE_BYTES.min(remaining))?;
+        self.budget.content(content.len())?;
         #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
@@ -509,18 +619,38 @@ pub(in crate::tools) fn selected_command_changeset(
         };
         #[cfg(not(unix))]
         let executable = false;
-        after.entries.insert(
-            path.clone(),
-            Entry {
-                path,
-                content: Some(content),
-                executable,
-            },
-        );
+        if old.is_some_and(|entry| {
+            entry.content.as_deref() == Some(content.as_slice()) && entry.executable == executable
+        }) {
+            return Ok(());
+        }
+        let old_bytes = old
+            .and_then(|entry| entry.content.as_ref())
+            .map_or(0, Vec::len);
+        self.changes.push(
+            path,
+            old,
+            Some(FileVersion::from_bytes(&content, executable)),
+            old_bytes + content.len(),
+        )
     }
-    let changeset = compare_command_snapshots(before, &after)?;
-    selector.check_time()?;
-    Ok((changeset, summary))
+
+    fn capture_deletions(&mut self) -> Result<(), ToolError> {
+        for (path, entry) in &self.before.entries {
+            let Some(content) = &entry.content else {
+                continue;
+            };
+            if self.tree.files.contains_key(path) || self.tree.directories.contains(path) {
+                continue;
+            }
+            self.changes.push(path, Some(entry), None, content.len())?;
+        }
+        Ok(())
+    }
+
+    fn budget_bytes(&self) -> usize {
+        self.budget.bytes
+    }
 }
 
 #[cfg(test)]
@@ -539,13 +669,13 @@ mod tests {
             ("omitted", serde_json::json!([""]), false),
             (
                 "omitted",
-                serde_json::json!([vec!["deep"; 17].join("/")]),
+                serde_json::json!([vec!["deep"; COMMAND_SNAPSHOT_DEPTH + 1].join("/")]),
                 true,
             ),
             ("controls", serde_json::json!({"../outside":"x"}), false),
             (
                 "controls",
-                serde_json::json!({vec!["deep"; 16].join("/"):"x"}),
+                serde_json::json!({vec!["deep"; COMMAND_SNAPSHOT_DEPTH].join("/"):"x"}),
                 true,
             ),
             (
