@@ -8693,10 +8693,10 @@ async fn primary_fallback_chain_pins_its_smallest_window_or_none() {
 #[tokio::test]
 async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let temp = tempfile::tempdir().expect("temporary root");
-    let page = format!("{}\n", "x".repeat(99)).repeat(130);
+    let page = format!("{}\n", "x".repeat(99)).repeat(125);
     let workspace = facts_workspace(temp.path(), &page);
     for name in ["big1.txt", "big2.txt"] {
-        std::fs::write(workspace.join(name), "b".repeat(68 * 1024)).expect("include");
+        std::fs::write(workspace.join(name), "b".repeat(47 * 1024)).expect("include");
     }
     let state_path = temp.path().join("state");
     let command = arany::ToolCall::Command {
@@ -8743,7 +8743,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         .as_ref()
         .unwrap()
         .max_context_bytes;
-    assert!((228 * 1024..=232 * 1024).contains(&allowance));
+    assert!((270 * 1024..=274 * 1024).contains(&allowance));
     assert_eq!(run.tools.len(), 5);
     assert_eq!(run.tools[4].intent.call, command);
     assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
@@ -8767,8 +8767,8 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let mut uncleared = context.clone();
     uncleared.steps[0].cleared = false;
     let used = arany::test_support::tool_context_bytes(&uncleared);
-    assert!((52 * 1024..=64 * 1024).contains(&used));
-    let reserve = 64 * 1024 + 96 * 1024 + 512 + 16 * 1024 + 128 * 6 + 512;
+    assert!((48 * 1024..=60 * 1024).contains(&used));
+    let reserve = 64 * 1024 + 96 * 1024 + 512 + 64 * 1024 + 128 * 6 + 512;
     let margin = 2 * 1024;
     assert!(used + reserve > allowance as usize + margin);
     assert!(
@@ -8813,6 +8813,56 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     assert!(events[..reservation].iter().all(|event| !matches!(
         &event.event, Event::ToolStarted { intent, .. } if intent.call == command
     )));
+}
+
+#[tokio::test]
+async fn near_full_context_refuses_command_before_dispatch() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "original");
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(32 * 1024)).expect("instructions");
+    for name in ["big1.txt", "big2.txt"] {
+        std::fs::write(workspace.join(name), "b".repeat(127 * 1024)).expect("include");
+    }
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
+    let command = arany::ToolCall::Command {
+        program: "unconfigured".into(),
+        args: Vec::new(),
+        cwd: "".into(),
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(command)]));
+    let mut input = request(&workspace, &"x".repeat(60 * 1024));
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("context refusal");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert!(run.tools.is_empty(), "no command intent was dispatched");
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolStarted { .. } | Event::ToolFinished { .. }
+    )));
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("unchanged file"),
+        "original"
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
 }
 
 #[tokio::test]
