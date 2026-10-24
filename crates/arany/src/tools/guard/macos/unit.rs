@@ -1132,6 +1132,9 @@ pub(super) async fn execute(
                         }
                         Ok((observation, candidate))
                     } else if runtime.worker.is_some() {
+                        if crate::tools::discovery::possible(&intent.call) {
+                            super::super::wait_discovery_completion(&mut stream, intent).await?;
+                        }
                         super::super::read_worker_observation(
                             &mut stream,
                             runtime,
@@ -1142,6 +1145,12 @@ pub(super) async fn execute(
                         )
                         .await
                         .map(|observation| (observation, super::super::CacheCandidate::Received))
+                    } else if crate::tools::discovery::possible(&intent.call) {
+                        super::super::read_discovery_report(&mut stream, intent)
+                            .await
+                            .map(|observation| {
+                                (observation, super::super::CacheCandidate::Received)
+                            })
                     } else {
                         super::super::read_worker_report(&mut stream, intent)
                             .await
@@ -1152,7 +1161,7 @@ pub(super) async fn execute(
                 };
                 capture_result.await
             };
-            let observation = super::super::discovery_work(intent, observation).await;
+            let observation = observation.await;
             capture.complete();
             observation
         };

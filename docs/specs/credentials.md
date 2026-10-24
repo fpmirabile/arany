@@ -122,4 +122,4 @@ A successful read-only store probe does not prove later writes will succeed. Lin
 | Real native store lifecycle | Isolated synthetic items must prove save/read/replacement, item authorization and failure/deletion without accessing the user's live account store. | [`crates/arany-cli/src/accounts/credentials.rs::native_store_round_trips_an_isolated_synthetic_account`](../../crates/arany-cli/src/accounts/credentials.rs); `macOS Tests (debug)` (debug Keychain fixture); [isolated Linux keyring lifecycle][native-checks], [macOS optimized account isolation][native-checks] and [item 8: Native macOS stores and clipboard][user-checks] |
 
 [native-checks]: ../../NEXT_STEPS.md#beta-2-and-broader-release
-[user-checks]: ../../NEXT_STEPS.md#beta-1-final-user-owned-checks
+[user-checks]: ../../NEXT_STEPS.md#beta-2-and-broader-release

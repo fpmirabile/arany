@@ -81,6 +81,6 @@ Native and live gates run in CI or stay listed in [next steps](../../NEXT_STEPS.
 
 Offline proof establishes no live browser, live account, native keyring setup or paid Run.
 
-[user-checks]: ../../NEXT_STEPS.md#beta-1-final-user-owned-checks
+[user-checks]: ../../NEXT_STEPS.md#beta-2-and-broader-release
 
 The [offline HTTPS checked-turn journey](../../crates/arany-cli/tests/session_run/setup/offline_https/chatgpt/checked_turn.rs) owns passive header facts on accepted and rejected Runs through real account admission, response parsing, committed history and reopen. Synthetic availability establishes no live quota capability.
