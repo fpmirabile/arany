@@ -78,6 +78,13 @@ pub(super) struct HotSession {
     global_sequence: u64,
 }
 
+pub(super) struct Admission {
+    pub(super) session_id: SessionId,
+    pub(super) event_slots: usize,
+    pub(super) tool_observations: usize,
+    pub(super) kind: AdmissionKind,
+}
+
 fn begin_write<'a>(
     connection: &'a mut Connection,
     cached: Option<&HotSession>,
@@ -101,18 +108,16 @@ fn begin_write<'a>(
 
 pub(super) fn admit(
     connection: &mut Connection,
-    session_id: SessionId,
-    event_slots: usize,
-    tool_observations: usize,
-    kind: AdmissionKind,
+    cached: Option<&HotSession>,
+    admission: Admission,
 ) -> Result<(), StoreError> {
-    let transaction = begin_write(connection, None)?;
+    let transaction = begin_write(connection, cached)?;
     admit_in_transaction(
         &transaction,
-        session_id,
-        event_slots,
-        tool_observations,
-        kind,
+        admission.session_id,
+        admission.event_slots,
+        admission.tool_observations,
+        admission.kind,
     )?;
     transaction.commit()?;
     Ok(())
@@ -417,10 +422,11 @@ fn bounded_payload_bytes(events: &[EventEnvelope]) -> Result<Option<usize>, Stor
 
 pub(super) fn prepare_fork(
     connection: &mut Connection,
+    cached: Option<&HotSession>,
     source_session_id: SessionId,
     source_sequence: Option<u64>,
 ) -> Result<ForkLineage, StoreError> {
-    let transaction = begin_write(connection, None)?;
+    let transaction = begin_write(connection, cached)?;
     let (mut events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
     let view = view.ok_or(StoreError::InvalidHistory)?;
     let (owner, run_id, sequence) = if let Some(sequence) = source_sequence {
@@ -500,10 +506,11 @@ fn fork_event(boundary: ForkLineage, title: String) -> Event {
 
 pub(super) fn fork_at(
     connection: &mut Connection,
+    cached: Option<&HotSession>,
     boundary: ForkLineage,
     title: String,
 ) -> Result<SessionId, StoreError> {
-    let transaction = begin_write(connection, None)?;
+    let transaction = begin_write(connection, cached)?;
     validate_fork(&transaction, boundary)?;
     let id = SessionId::new();
     append_in_transaction(&transaction, None, id, fork_event(boundary, title))?;
@@ -512,11 +519,12 @@ pub(super) fn fork_at(
     Ok(id)
 }
 
+#[cfg(test)]
 pub(super) fn fork_session(
     connection: &mut Connection,
     source_session_id: SessionId,
     title: String,
 ) -> Result<SessionId, StoreError> {
-    let boundary = prepare_fork(connection, source_session_id, None)?;
-    fork_at(connection, boundary, title)
+    let boundary = prepare_fork(connection, None, source_session_id, None)?;
+    fork_at(connection, None, boundary, title)
 }

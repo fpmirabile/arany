@@ -61,20 +61,17 @@ fn append_refuses_event_past_replay_limit() {
     assert_eq!(count, MAX_SESSION_EVENTS as i64);
 }
 
-#[test]
-fn other_connection_changes_invalidate_hot_history() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let path = temp.path().join(DATABASE_FILE);
-    let mut connection = Connection::open(&path).expect("file-backed store");
+fn hot_history(path: &std::path::Path) -> (Connection, Option<HotSession>, SessionId) {
+    let mut connection = Connection::open(path).expect("file-backed store");
     connection
         .execute_batch(SCHEMA_SQL)
         .expect("journal schema");
-    let mut hot_session = None;
-    let session_id = SessionId::new();
+    let mut hot = None;
+    let session = SessionId::new();
     append(
         &mut connection,
-        &mut hot_session,
-        session_id,
+        &mut hot,
+        session,
         Event::SessionStarted {
             title: "Session".into(),
             workspace_identity: WorkspaceIdentity {
@@ -84,34 +81,39 @@ fn other_connection_changes_invalidate_hot_history() {
         },
     )
     .expect("first Event");
-    assert!(hot_session.is_some());
+    assert!(hot.is_some());
+    (connection, hot, session)
+}
 
-    let second = Connection::open(&path).expect("second connection");
-    let other_id = SessionId::new();
-    let other_start = Event::SessionStarted {
-        title: "Other".into(),
-        workspace_identity: WorkspaceIdentity {
-            device: 1,
-            inode: 1,
+fn admit_one(
+    connection: &mut Connection,
+    cached: Option<&HotSession>,
+    session_id: SessionId,
+) -> Result<(), StoreError> {
+    admit(
+        connection,
+        cached,
+        Admission {
+            session_id,
+            event_slots: 1,
+            tool_observations: 0,
+            kind: AdmissionKind::Operation,
         },
-    };
-    second
-        .execute(
-            "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-             VALUES (2, ?1, ?2, ?3, ?4, 0)",
-            params![
-                other_id.to_string(),
-                other_start.kind(),
-                other_start.version(),
-                other_start.payload().expect("other start payload"),
-            ],
-        )
-        .expect("other committed Session");
+    )
+}
+
+fn write_racing_commit<T>(
+    connection: &mut Connection,
+    second: Connection,
+    write: impl FnOnce(&mut Connection) -> Result<T, StoreError>,
+) -> Connection {
     thread_local! {
         static WRITER: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
     }
     second
-        .execute_batch("BEGIN IMMEDIATE; UPDATE events SET created_at_ms=1 WHERE sequence=2;")
+        .execute_batch(
+            "BEGIN IMMEDIATE; UPDATE events SET created_at_ms=created_at_ms+1 WHERE sequence=2;",
+        )
         .expect("pending other writer");
     WRITER.with(|writer| *writer.borrow_mut() = Some(second));
     connection
@@ -127,65 +129,230 @@ fn other_connection_changes_invalidate_hot_history() {
                 })
         }))
         .expect("commit other writer when BEGIN IMMEDIATE blocks");
-    let refused = append(
-        &mut connection,
-        &mut hot_session,
-        session_id,
-        Event::SessionRenamed {
-            title: "Racing".into(),
-        },
-    );
+    let refused = write(connection);
     connection.busy_handler(None).expect("remove test handler");
     let second = WRITER.with(|writer| writer.borrow_mut().take()).unwrap();
     assert!(
-        matches!(refused, Err(StoreError::HistoryChanged)),
-        "expected HistoryChanged, got {refused:?}"
+        matches!(&refused, Err(StoreError::HistoryChanged)),
+        "expected HistoryChanged, got {:?}",
+        refused.err()
     );
-    assert!(hot_session.is_none());
     assert!(connection.is_autocommit());
+    second
+}
+
+#[test]
+fn other_connection_changes_invalidate_hot_history() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let path = temp.path().join(DATABASE_FILE);
+    let (mut connection, mut hot, session) = hot_history(&path);
+    admit_one(&mut connection, hot.as_ref(), session).expect("cached admission");
+    let mut second = Connection::open(&path).expect("second connection");
+    seed_session(
+        &mut second,
+        &mut None,
+        WorkspaceIdentity {
+            device: 1,
+            inode: 1,
+        },
+        0,
+    );
+    admit_one(&mut connection, hot.as_ref(), session).expect("admit after version drift");
+    let second = write_racing_commit(&mut connection, second, |connection| {
+        append(
+            connection,
+            &mut hot,
+            session,
+            Event::SessionRenamed {
+                title: "Racing".into(),
+            },
+        )
+    });
+    assert!(hot.is_none());
     let committed = append(
         &mut connection,
-        &mut hot_session,
-        session_id,
+        &mut hot,
+        session,
         Event::SessionRenamed {
             title: "Updated".into(),
         },
     )
     .expect("append after another writer");
     assert_eq!(committed.sequence, 3);
-    assert!(hot_session.is_some());
+    assert!(hot.is_some());
+    let second = write_racing_commit(&mut connection, second, |connection| {
+        admit_one(connection, hot.as_ref(), session)
+    });
+    recover_after_unrelated_corruption(&mut connection, &mut hot, session, second);
+}
 
+fn recover_after_unrelated_corruption(
+    connection: &mut Connection,
+    hot: &mut Option<HotSession>,
+    session: SessionId,
+    second: Connection,
+) {
     second
         .execute("UPDATE events SET kind='UnknownKind' WHERE sequence=2", [])
         .expect("corrupt unrelated committed Event");
     assert!(matches!(
+        admit_one(connection, hot.as_ref(), session),
+        Err(StoreError::InvalidHistory)
+    ));
+    assert!(matches!(
         append(
-            &mut connection,
-            &mut hot_session,
-            session_id,
+            connection,
+            hot,
+            session,
             Event::SessionRenamed {
-                title: "Rejected".into(),
-            },
+                title: "Rejected".into()
+            }
         ),
         Err(StoreError::InvalidHistory)
     ));
-    assert!(hot_session.is_none());
+    assert!(hot.is_none());
     second
         .execute(
-            "UPDATE events SET kind=?1 WHERE sequence=2",
-            [other_start.kind()],
+            "UPDATE events SET kind='SessionStarted' WHERE sequence=2",
+            [],
         )
         .expect("restore test-owned Event");
     let recovered = append(
-        &mut connection,
-        &mut hot_session,
-        session_id,
+        connection,
+        hot,
+        session,
         Event::SessionRenamed {
             title: "Recovered".into(),
         },
     )
     .expect("full replay after invalidation");
     assert_eq!(recovered.sequence, 4);
+}
+
+#[test]
+fn cached_admission_defers_unrelated_corruption_until_invalidation() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let (mut connection, mut hot, session) = hot_history(&temp.path().join(DATABASE_FILE));
+    seed_session(
+        &mut connection,
+        &mut None,
+        WorkspaceIdentity {
+            device: 1,
+            inode: 1,
+        },
+        0,
+    );
+    append(
+        &mut connection,
+        &mut hot,
+        session,
+        Event::SessionRenamed {
+            title: "Updated".into(),
+        },
+    )
+    .expect("cache current global sequence");
+    connection
+        .execute("UPDATE events SET kind='UnknownKind' WHERE sequence=2", [])
+        .expect("corrupt unrelated Event without changing version or sequence");
+    admit_one(&mut connection, hot.as_ref(), session).expect("unchanged cache skips global scan");
+    assert!(matches!(
+        admit_one(&mut connection, None, session),
+        Err(StoreError::InvalidHistory)
+    ));
+    let cache = hot.as_mut().unwrap();
+    cache.data_version -= 1;
+    assert!(matches!(
+        admit_one(&mut connection, hot.as_ref(), session),
+        Err(StoreError::InvalidHistory)
+    ));
+    let cache = hot.as_mut().unwrap();
+    cache.data_version += 1;
+    connection
+        .execute("DELETE FROM events WHERE sequence=3", [])
+        .expect("global sequence drift");
+    assert!(matches!(
+        admit_one(&mut connection, hot.as_ref(), session),
+        Err(StoreError::InvalidHistory)
+    ));
+    connection
+        .execute(
+            "UPDATE events SET kind='SessionStarted' WHERE sequence=2",
+            [],
+        )
+        .expect("restore unrelated Event");
+    admit_one(&mut connection, None, session).expect("cold validation after repair");
+}
+
+#[test]
+fn cached_forks_defer_unrelated_corruption_but_validate_the_source() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let mut connection = Connection::open(temp.path().join(DATABASE_FILE)).unwrap();
+    connection.execute_batch(SCHEMA_SQL).unwrap();
+    let mut hot = None;
+    let fixture = crate::session::worker_protocol_fixture();
+    for event in &fixture.events {
+        append(&mut connection, &mut hot, fixture.session, event.clone()).unwrap();
+    }
+    let other = seed_session(
+        &mut connection,
+        &mut None,
+        WorkspaceIdentity {
+            device: 1,
+            inode: 1,
+        },
+        0,
+    );
+    append(
+        &mut connection,
+        &mut hot,
+        fixture.session,
+        Event::SessionRenamed {
+            title: "Source".into(),
+        },
+    )
+    .unwrap();
+    let boundary = prepare_fork(&mut connection, hot.as_ref(), fixture.session, None).unwrap();
+    connection
+        .execute(
+            "UPDATE events SET kind='UnknownKind' WHERE session_id=?1",
+            [other.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        prepare_fork(&mut connection, hot.as_ref(), fixture.session, None).unwrap(),
+        boundary
+    );
+    assert!(matches!(
+        prepare_fork(&mut connection, None, fixture.session, None),
+        Err(StoreError::InvalidHistory)
+    ));
+    assert!(matches!(
+        fork_at(&mut connection, None, boundary, "Cold".into()),
+        Err(StoreError::InvalidHistory)
+    ));
+    let mut forged = boundary;
+    forged.prefix_digest[0] ^= 1;
+    assert!(matches!(
+        fork_at(&mut connection, hot.as_ref(), forged, "Forged".into()),
+        Err(StoreError::InvalidHistory)
+    ));
+    let child = fork_at(&mut connection, hot.as_ref(), boundary, "Cached".into()).unwrap();
+    assert!(matches!(
+        resolve_view(&connection, child, 0, &mut 0),
+        Err(StoreError::InvalidHistory)
+    ));
+    assert!(matches!(
+        prepare_fork(&mut connection, hot.as_ref(), fixture.session, None),
+        Err(StoreError::InvalidHistory)
+    ));
+    connection
+        .execute(
+            "UPDATE events SET kind='SessionStarted' WHERE session_id=?1",
+            [other.to_string()],
+        )
+        .unwrap();
+    let (_, view) = resolve_view(&connection, child, 0, &mut 0).unwrap();
+    assert_eq!(view.unwrap().lineage, Some(boundary));
 }
 
 #[test]
@@ -1240,7 +1407,7 @@ fn fork_rejects_ambiguous_run_owners() {
     let run = view.unwrap().runs.last().unwrap().clone();
     let sequence = run.finished_sequence.unwrap();
     assert_eq!(
-        prepare_fork(&mut connection, f.session, Some(sequence))
+        prepare_fork(&mut connection, hot.as_ref(), f.session, Some(sequence))
             .unwrap()
             .source_session_id,
         f.session
@@ -1255,7 +1422,7 @@ fn fork_rejects_ambiguous_run_owners() {
         )
         .unwrap();
     assert!(matches!(
-        prepare_fork(&mut connection, f.session, Some(sequence)),
+        prepare_fork(&mut connection, hot.as_ref(), f.session, Some(sequence)),
         Err(StoreError::InvalidHistory)
     ));
 }
@@ -1278,7 +1445,7 @@ fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() 
         .unwrap()
         .finished_sequence
         .unwrap();
-    let boundary = prepare_fork(&mut connection, f.session, Some(sequence)).unwrap();
+    let boundary = prepare_fork(&mut connection, hot.as_ref(), f.session, Some(sequence)).unwrap();
     let count = || {
         connection
             .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
@@ -1292,7 +1459,7 @@ fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() 
         )
         .unwrap();
     assert!(matches!(
-        fork_at(&mut connection, boundary, "Refused".into()),
+        fork_at(&mut connection, hot.as_ref(), boundary, "Refused".into()),
         Err(StoreError::InvalidHistory)
     ));
     assert_eq!(
@@ -1320,17 +1487,17 @@ fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() 
     }
     transaction.commit().unwrap();
     assert_eq!(
-        prepare_fork(&mut connection, f.session, Some(sequence)).unwrap(),
+        prepare_fork(&mut connection, hot.as_ref(), f.session, Some(sequence)).unwrap(),
         boundary,
         "exactly one fork Event fits"
     );
     append(&mut connection, &mut hot, f.session, rename).unwrap();
     assert!(matches!(
-        prepare_fork(&mut connection, f.session, Some(sequence)),
+        prepare_fork(&mut connection, hot.as_ref(), f.session, Some(sequence)),
         Err(StoreError::ReplayLimit)
     ));
     assert!(matches!(
-        fork_at(&mut connection, boundary, "Refused".into()),
+        fork_at(&mut connection, hot.as_ref(), boundary, "Refused".into()),
         Err(StoreError::ReplayLimit)
     ));
     assert_eq!(
@@ -1366,9 +1533,15 @@ fn listing_reads_earlier_boundary_forks_at_the_watermark() {
         .first()
         .and_then(|run| run.finished_sequence)
         .expect("finished Run");
-    let boundary =
-        prepare_fork(&mut connection, fixture.session, Some(boundary_sequence)).expect("boundary");
-    let child = fork_at(&mut connection, boundary, "Earlier".into()).expect("earlier fork");
+    let boundary = prepare_fork(
+        &mut connection,
+        hot.as_ref(),
+        fixture.session,
+        Some(boundary_sequence),
+    )
+    .expect("boundary");
+    let child =
+        fork_at(&mut connection, hot.as_ref(), boundary, "Earlier".into()).expect("earlier fork");
     let reader = open_connection(&root, true).expect("read-only store");
     let writer_root = root.try_clone().expect("state clone");
     let source = fixture.session;
