@@ -104,7 +104,12 @@ pub(super) fn apply(
             agent_run_id,
             outcome,
         } => hook::finished(current, *run_id, *agent_run_id, outcome, prior)?,
-        Event::ToolStarted { .. } => lifecycle::started(current, event)?,
+        Event::ToolStarted {
+            run_id,
+            agent_run_id,
+            intent,
+            active_ceiling_ms,
+        } => lifecycle::started(current, *run_id, *agent_run_id, intent, *active_ceiling_ms)?,
         Event::ToolFinished {
             checkpoint,
             run_id,
