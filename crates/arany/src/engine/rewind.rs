@@ -526,7 +526,7 @@ impl Engine {
         };
         Ok(ToolRuntime::admit(
             config,
-            ToolRuntime::load_permissions(&self.state)?,
+            crate::tools::load_permissions(&self.state)?,
             ToolRuntime::load_exact_command_rules(&self.state)?,
             &request.workspace,
             &self.state,

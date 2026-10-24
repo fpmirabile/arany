@@ -4619,3 +4619,199 @@ mod lifecycle_hooks {
         ));
     }
 }
+
+fn guarded_discovery_fixture(whole: bool) -> Fixture {
+    let fixture = Fixture::new(None, false);
+    if whole {
+        let path = fixture.state.join("tools.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["workspace_paths"] = json!(["."]);
+        private_file(&path, &serde_json::to_vec(&config).unwrap());
+    }
+    std::fs::write(
+        fixture.workspace.join("notes/.gitignore"),
+        b"*.cache\n!.env\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("notes/ignored.cache"),
+        b"needle DISCOVERY_PAYLOAD_CANARY",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("notes/.ENV"),
+        b"PROTECTED_DISCOVERY_CANARY",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("notes/visible.txt"),
+        b"needle visible",
+    )
+    .unwrap();
+    fixture
+}
+
+#[tokio::test]
+async fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
+    for whole in [false, true] {
+        let fixture = guarded_discovery_fixture(whole);
+        let calls = [
+            arany::ToolCall::List {
+                path: "notes".into(),
+            },
+            arany::ToolCall::Glob {
+                pattern: "**".into(),
+                path: "notes".into(),
+                limit: 100,
+            },
+            arany::ToolCall::Search {
+                path: "notes".into(),
+                query: "needle".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
+            },
+        ];
+        let mut outcomes: Vec<_> = calls.iter().cloned().map(tool_outcome).collect();
+        outcomes.push(finish("answer"));
+        let (result, requests, humans) = fixture.run(outcomes, None, false).await;
+        assert_eq!(humans, 0);
+        assert_eq!(requests.len(), calls.len() + 1);
+        for request in &requests {
+            if let Some(tools) = &request.input.tools {
+                for observation in tools.steps.iter().flat_map(|step| &step.observations) {
+                    assert!(!observation.output.contains("DISCOVERY_PAYLOAD_CANARY"));
+                }
+            }
+        }
+        std::fs::write(fixture.workspace.join("notes/.gitignore"), b"*").unwrap();
+        fixture.engine.close().await.unwrap();
+        let bundle =
+            super::worker::closed_bundle(&fixture.state, result.session_id, &fixture.workspace)
+                .await;
+        assert_eq!(bundle.exit, Some(0));
+        assert!(bundle.stderr.is_empty());
+        assert!(!String::from_utf8_lossy(&bundle.stdout).contains("CANARY"));
+        let (events, view) = (bundle.events, bundle.view);
+        for (tool, visible) in
+            view.runs[0]
+                .tools
+                .iter()
+                .zip(["facts.txt", "facts.txt", "visible.txt"])
+        {
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Guard(_))
+            ));
+            assert!(observation.output.contains(visible));
+            assert!(!observation.output.contains("ignored.cache"));
+            assert!(!observation.output.contains("CANARY"));
+        }
+        assert_eq!(view.runs[0].tools.len(), calls.len());
+        assert!(!render_session(&view, &events, Output::Jsonl).contains("CANARY"));
+    }
+}
+
+#[tokio::test]
+async fn ignored_exact_file_access_retains_read_permission_decisions() {
+    for deny in [false, true] {
+        let settings = json!({"permissions":{"deny": if deny { vec!["Read(./notes/ignored.cache)"] } else { Vec::new() }}});
+        let fixture = Fixture::new(Some(&settings), false);
+        std::fs::write(fixture.workspace.join("notes/.gitignore"), b"*.cache").unwrap();
+        std::fs::write(
+            fixture.workspace.join("notes/ignored.cache"),
+            b"explicit synthetic payload",
+        )
+        .unwrap();
+        let calls = [
+            arany::ToolCall::Read {
+                path: "notes/ignored.cache".into(),
+                offset: None,
+                limit: None,
+            },
+            arany::ToolCall::Search {
+                path: "notes/ignored.cache".into(),
+                query: "synthetic".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
+            },
+        ];
+        let mut outcomes: Vec<_> = calls.into_iter().map(tool_outcome).collect();
+        outcomes.push(finish("answer"));
+        let (result, _, _) = fixture.run(outcomes, None, false).await;
+        let (_, view) = fixture.reopen(result.session_id).await;
+        for tool in &view.runs[0].tools {
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(
+                observation.disposition,
+                if deny {
+                    arany::ToolDisposition::Denied
+                } else {
+                    arany::ToolDisposition::Succeeded
+                }
+            );
+            assert_eq!(
+                observation.output.contains("explicit synthetic payload"),
+                !deny
+            );
+            if !deny {
+                assert!(matches!(
+                    observation.attestation,
+                    Some(arany::Attestation::InProcess { .. })
+                ));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn suggestion_admission_does_not_prompt_or_bypass_broad_read_restrictions() {
+    for decision in ["deny", "ask"] {
+        let settings = json!({"permissions":{(decision):["Read"]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let source = arany::FileSuggestionSource::new(
+            StateRoot::open_existing(&fixture.state).unwrap(),
+            &fixture.workspace,
+            ToolGrant::Configured,
+        )
+        .unwrap();
+        let generation = source.generation().unwrap();
+        let result = source.read(String::new(), generation, RunCancellation::new());
+        assert!(matches!(result, Err(arany::ToolError::FilesystemDenied)));
+        fixture.engine.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn suggestion_admission_never_loads_skill_or_definition_payloads() {
+    let fixture = Fixture::new(None, false);
+    let directory = fixture.workspace.join(".agents/skills/synthetic");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("SKILL.md"),
+        b"---\nname: invalid syntax [\n---\nSKILL_PAYLOAD_CANARY",
+    )
+    .unwrap();
+    let source = arany::FileSuggestionSource::new(
+        StateRoot::open_existing(&fixture.state).unwrap(),
+        &fixture.workspace,
+        ToolGrant::None,
+    )
+    .unwrap();
+    let generation = source.generation().unwrap();
+    let index = source
+        .read(String::new(), generation, RunCancellation::new())
+        .unwrap();
+    assert_eq!(
+        index.refine("", "SKILL.md").unwrap(),
+        [".agents/skills/synthetic/SKILL.md"]
+    );
+    fixture.engine.close().await.unwrap();
+}

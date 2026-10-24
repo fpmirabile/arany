@@ -1045,24 +1045,10 @@ channel = "stable"
             for index in 0..8193 {
                 std::fs::write(large.join(format!("item-{index:05}.md")), b"synthetic").unwrap();
             }
-            let partial = fs::workspace_entries(&workspace, "large", "").unwrap();
-            assert_eq!(partial.len(), 64);
-            assert!(partial.windows(2).all(|pair| pair[0] < pair[1]));
-            assert!(partial.iter().all(|path| path.starts_with("large/item-")));
-            let deep = std::iter::repeat_n("level", 16)
-                .collect::<Vec<_>>()
-                .join("/");
-            std::fs::create_dir_all(workspace.join(&deep)).unwrap();
-            std::fs::write(
-                workspace.join(&deep).join("depth-canary.md"),
-                "synthetic file",
-            )
-            .unwrap();
-            assert!(
-                fs::workspace_entries(&workspace, "", "depth-canary")
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(matches!(
+                fs::workspace_entries(&workspace, "large", ""),
+                Err(ToolError::Limit)
+            ));
             for folder in ["../", "outside", ".git", ".env"] {
                 assert!(fs::workspace_entries(&workspace, folder, "").is_err());
             }

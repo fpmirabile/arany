@@ -9,6 +9,8 @@ pub(super) const RULES: usize = 4096;
 const LINE_BYTES: usize = 4096;
 const EXPANDED_LINE_BYTES: usize = 64 * 1024;
 const EXPANDED_BYTES: usize = 1024 * 1024;
+pub(super) const DISCOVERY_CALLS: u64 = 1_048_576;
+pub(super) const DISCOVERY_TIME: Duration = Duration::from_secs(2);
 pub(super) const COMMAND_CALLS: u64 = 8_388_608;
 pub(super) const PHASE_TIME: Duration = Duration::from_secs(5);
 
@@ -18,6 +20,7 @@ pub(super) struct Selector {
     rules: usize,
     expanded: usize,
     calls: u64,
+    max_calls: u64,
     deadline: Instant,
     #[cfg(test)]
     pub(super) in_progress: Option<Box<dyn FnOnce() + Send>>,
@@ -31,9 +34,17 @@ impl Selector {
             rules: 0,
             expanded: 0,
             calls,
+            max_calls: COMMAND_CALLS,
             deadline: deadline.min(Instant::now() + PHASE_TIME),
             #[cfg(test)]
             in_progress: None,
+        }
+    }
+
+    pub(super) fn discovery(deadline: Instant) -> Self {
+        Self {
+            max_calls: DISCOVERY_CALLS,
+            ..Self::new(0, deadline.min(Instant::now() + DISCOVERY_TIME))
         }
     }
 
@@ -131,7 +142,7 @@ impl Selector {
                 continue;
             }
             self.calls = self.calls.checked_add(1).ok_or(ToolError::Limit)?;
-            if self.calls > COMMAND_CALLS {
+            if self.calls > self.max_calls {
                 return Err(ToolError::Limit);
             }
             self.check_time()?;
@@ -149,6 +160,25 @@ impl Selector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_keeps_its_smaller_work_and_time_budgets() {
+        let now = Instant::now();
+        let mut selector = Selector::discovery(now + PHASE_TIME);
+        assert!(selector.deadline <= Instant::now() + DISCOVERY_TIME);
+        selector.add("", b"ignored").unwrap();
+        selector.calls = DISCOVERY_CALLS - 1;
+        assert!(selector.excluded("ignored", false).unwrap());
+        assert!(matches!(
+            selector.excluded("visible", false),
+            Err(ToolError::Limit)
+        ));
+        let mut expired = Selector::discovery(now);
+        assert!(matches!(
+            expired.add("", b"ignored"),
+            Err(ToolError::Timeout(_))
+        ));
+    }
 
     #[test]
     fn selection_uses_the_shorter_phase_or_action_deadline() {

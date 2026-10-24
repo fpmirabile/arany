@@ -17,6 +17,7 @@ use std::{
 mod active;
 mod agents;
 pub(crate) mod controls;
+mod files;
 pub(crate) mod models;
 mod permissions;
 mod picker;
