@@ -223,6 +223,45 @@ impl AccountIndex {
             .ok_or(AuthorizationError::InvalidIdentity)
     }
 
+    fn matching_account_position(
+        &self,
+        client_id: &str,
+        host_id: Uuid,
+        subject: &str,
+        storage: AccountStorage,
+    ) -> Result<Option<usize>, AuthorizationError> {
+        let Some(position) = self
+            .accounts
+            .iter()
+            .position(|entry| entry.client_id == client_id)
+        else {
+            return Ok(None);
+        };
+        let entry = &self.accounts[position];
+        if entry.subject != subject || entry.host_id != host_id || entry.storage != storage {
+            return Err(AuthorizationError::RegistrationConflict);
+        }
+        Ok(Some(position))
+    }
+
+    fn ensure_account_capacity(&self) -> Result<(), AuthorizationError> {
+        if self.accounts.len() == MAX_ACCOUNTS {
+            return Err(AuthorizationError::Unavailable);
+        }
+        Ok(())
+    }
+
+    fn push_account(&mut self, entry: AccountEntry) -> Uuid {
+        let id = entry.id;
+        self.accounts.push(entry);
+        id
+    }
+
+    fn select_account(&mut self, id: Uuid) {
+        self.model_checks.retain(|check| check.account_id != id);
+        self.selected = Some(id);
+    }
+
     fn empty() -> Self {
         Self {
             schema: 1,
@@ -734,18 +773,14 @@ fn save_without_plan_permission_at(
             if let Some(id) = expected_selected {
                 index.require_selected_client(id, &identity.client_id)?;
             }
-            let previous = index
-                .accounts
-                .iter()
-                .position(|entry| entry.client_id == identity.client_id);
+            let previous = index.matching_account_position(
+                &identity.client_id,
+                identity.host_id,
+                &identity.subject,
+                storage,
+            )?;
             let id = if let Some(position) = previous {
                 let entry = &mut index.accounts[position];
-                if entry.subject != identity.subject
-                    || entry.host_id != identity.host_id
-                    || entry.storage != storage
-                {
-                    return Err(AuthorizationError::RegistrationConflict);
-                }
                 entry.token = None;
                 entry.renewal_pending = false;
                 entry.signout_pending = false;
@@ -753,12 +788,9 @@ fn save_without_plan_permission_at(
                 entry.plan_permission_missing = true;
                 entry.id
             } else {
-                if index.accounts.len() == MAX_ACCOUNTS {
-                    return Err(AuthorizationError::Unavailable);
-                }
-                let id = Uuid::now_v7();
-                index.accounts.push(AccountEntry {
-                    id,
+                index.ensure_account_capacity()?;
+                index.push_account(AccountEntry {
+                    id: Uuid::now_v7(),
                     host_id: identity.host_id,
                     client_id: identity.client_id.clone(),
                     subject: identity.subject,
@@ -768,11 +800,9 @@ fn save_without_plan_permission_at(
                     disconnected: true,
                     plan_permission_missing: true,
                     token: None,
-                });
-                id
+                })
             };
-            index.model_checks.retain(|check| check.account_id != id);
-            index.selected = Some(id);
+            index.select_account(id);
             index.write(state)?;
             registration::complete_issued_client_at(state, &identity.client_id, identity.host_id)?;
             let local_cleared = storage != AccountStorage::Keyring
@@ -816,17 +846,14 @@ pub(super) fn save_private_file_at(
                 index.require_selected_client(expected_id, client_id)?;
             }
             let subject = &token.credentials.subject;
-            let id = if let Some(entry) = index
-                .accounts
-                .iter_mut()
-                .find(|entry| entry.client_id == *client_id)
-            {
-                if entry.subject != *subject
-                    || entry.host_id != host_id
-                    || entry.storage != AccountStorage::PrivateFile
-                {
-                    return Err(AuthorizationError::RegistrationConflict);
-                }
+            let position = index.matching_account_position(
+                client_id,
+                host_id,
+                subject,
+                AccountStorage::PrivateFile,
+            )?;
+            let id = if let Some(position) = position {
+                let entry = &mut index.accounts[position];
                 entry.token = Some(token);
                 entry.renewal_pending = false;
                 entry.signout_pending = false;
@@ -834,12 +861,9 @@ pub(super) fn save_private_file_at(
                 entry.plan_permission_missing = false;
                 entry.id
             } else {
-                if index.accounts.len() == MAX_ACCOUNTS {
-                    return Err(AuthorizationError::Unavailable);
-                }
-                let id = Uuid::now_v7();
-                index.accounts.push(AccountEntry {
-                    id,
+                index.ensure_account_capacity()?;
+                index.push_account(AccountEntry {
+                    id: Uuid::now_v7(),
                     host_id,
                     client_id: client_id.clone(),
                     subject: subject.clone(),
@@ -849,11 +873,9 @@ pub(super) fn save_private_file_at(
                     disconnected: false,
                     plan_permission_missing: false,
                     token: Some(token),
-                });
-                id
+                })
             };
-            index.model_checks.retain(|check| check.account_id != id);
-            index.selected = Some(id);
+            index.select_account(id);
             index.write(state)?;
             registration::complete_issued_client_at(state, &completed_client_id, host_id)?;
             Ok(id)
@@ -918,28 +940,22 @@ fn save_keyring_at_with(
                 index.require_selected_client(expected_id, client_id)?;
             }
             let subject = &token.credentials.subject;
-            let id = if let Some(entry) = index
-                .accounts
-                .iter_mut()
-                .find(|entry| entry.client_id == *client_id)
-            {
-                if entry.subject != *subject
-                    || entry.host_id != host_id
-                    || entry.storage != AccountStorage::Keyring
-                {
-                    return Err(AuthorizationError::RegistrationConflict);
-                }
+            let position = index.matching_account_position(
+                client_id,
+                host_id,
+                subject,
+                AccountStorage::Keyring,
+            )?;
+            let id = if let Some(position) = position {
+                let entry = &mut index.accounts[position];
                 let id = entry.id;
                 entry.renewal_pending = true;
                 index.write(state)?;
                 id
             } else {
-                if index.accounts.len() == MAX_ACCOUNTS {
-                    return Err(AuthorizationError::Unavailable);
-                }
-                let id = Uuid::now_v7();
-                index.accounts.push(AccountEntry {
-                    id,
+                index.ensure_account_capacity()?;
+                index.push_account(AccountEntry {
+                    id: Uuid::now_v7(),
                     host_id,
                     client_id: client_id.clone(),
                     subject: subject.clone(),
@@ -949,8 +965,7 @@ fn save_keyring_at_with(
                     disconnected: false,
                     plan_permission_missing: false,
                     token: None,
-                });
-                id
+                })
             };
             write(&keyring_slot(client_id), &record)?;
             let entry = index
@@ -962,8 +977,7 @@ fn save_keyring_at_with(
             entry.signout_pending = false;
             entry.disconnected = false;
             entry.plan_permission_missing = false;
-            index.model_checks.retain(|check| check.account_id != id);
-            index.selected = Some(id);
+            index.select_account(id);
             index.write(state)?;
             registration::complete_issued_client_at(state, &completed_client_id, host_id)?;
             Ok(id)
