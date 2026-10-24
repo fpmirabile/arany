@@ -1577,17 +1577,16 @@ impl ToolRuntime {
         if !discovery::possible(&intent.call) {
             return self.run_in_process(intent, cancellation).await;
         }
-        let exact = self
-            .pinned_root(&intent)
-            .and_then(|root| discovery::exact_search(&root, &intent.call));
-        match exact {
-            Ok(true) => self.run_in_process(intent, cancellation).await,
+        let root = match self.pinned_root(&intent) {
+            Ok(root) => root,
+            Err(error) => return unstarted_observation(intent, error),
+        };
+        match discovery::exact_search(&root, &intent.call) {
             Ok(false) => match guard::execute(self, &intent, cancellation).await {
                 Ok(observation) => observation,
                 Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
             },
-            Err(ToolError::NotFound) => self.run_in_process(intent, cancellation).await,
-            Err(error) => unstarted_observation(intent, error),
+            Ok(true) | Err(_) => self.run_in_process(intent, cancellation).await,
         }
     }
 

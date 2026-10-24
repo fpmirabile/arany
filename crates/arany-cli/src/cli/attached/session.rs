@@ -121,7 +121,7 @@ impl AttachedSession {
 
     async fn idle_loop(&mut self) -> Result<IdleAction, String> {
         loop {
-            self.refresh_composer();
+            self.refresh_composer().await;
             self.draw_idle().await?;
             let input = self.next_input().await?;
             let input = match self.route_input(input).await? {
@@ -174,12 +174,12 @@ impl AttachedSession {
                 input = self.terminal.next_chat_input() => input.map_err(|error| error.to_string())?,
                 notice = self.files.next_update() => {
                     if let Some(notice) = notice { append_notice(&mut self.ui.notice, &notice); }
-                    self.refresh_composer();
+                    self.refresh_composer().await;
                     self.draw_idle().await?;
                     continue;
                 }
             };
-            self.refresh_composer();
+            self.refresh_composer().await;
             self.composer.observe_input(input);
             if self.terminal.agent_chat_open() || self.terminal.help_open() {
                 self.composer.disarm_continuation();
@@ -982,7 +982,7 @@ impl AttachedSession {
         closed
     }
 
-    fn refresh_composer(&mut self) {
+    async fn refresh_composer(&mut self) {
         let supported = permissions::supports_tools(self.view.defaults.provider.as_deref());
         if supported != self.ui.skills_supported {
             refresh_runtime_skills(
@@ -999,7 +999,11 @@ impl AttachedSession {
             self.admission.tools,
             self.admission.workspace_permissions.as_ref(),
         );
-        if let Some(error) = self.files.refresh(&self.admission, &mut self.composer) {
+        if let Some(error) = self
+            .files
+            .refresh(&self.admission, &mut self.composer)
+            .await
+        {
             append_notice(&mut self.ui.notice, &error);
         }
         self.composer.set_completion_selection(

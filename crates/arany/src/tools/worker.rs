@@ -1970,7 +1970,8 @@ mod tests {
         );
         // Glob sees only this assignment's image, including its acknowledged edit.
         for (actor, bytes) in [(&view, 7), (&sibling, 8)] {
-            let found = actor.read(
+            let found = read_discovery(
+                actor,
                 intent(
                     &runtime,
                     actor,

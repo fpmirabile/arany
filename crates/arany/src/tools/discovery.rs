@@ -165,59 +165,68 @@ struct Node {
 }
 
 pub(super) fn inspect(request: Request<'_>) -> Result<String, ToolError> {
-    let path = match request.call {
-        ToolCall::List { path } | ToolCall::Search { path, .. } | ToolCall::Glob { path, .. } => {
-            path
-        }
-        _ => return Err(ToolError::Operation),
-    };
-    let path = if path == "." { "" } else { path.as_str() };
-    let query = match request.call {
-        ToolCall::List { .. } => Query::List,
-        ToolCall::Glob { pattern, limit, .. } => Query::Glob {
-            matcher: super::glob::matcher(pattern).map_err(|_| ToolError::Operation)?,
-            depth: (!pattern.split('/').any(|part| part == "**"))
-                .then(|| pattern.split('/').count()),
-            limit: *limit,
-        },
-        ToolCall::Search { .. } => {
-            Query::Search(super::search::Search::new(request.call, request.deadline)?)
-        }
-        _ => return Err(ToolError::Operation),
-    };
-    let device = fs::identity(request.root)?.0;
-    let mut walk = Walk {
-        selector: Selector::discovery(request.deadline),
-        request,
-        controls: BTreeMap::new(),
-        visited: BTreeSet::new(),
-        entries: BTreeMap::new(),
-        scanned: 0,
-        device,
-        query,
-        base: path.into(),
-    };
-    walk.check_time()?;
-    walk.control("")?;
-    for selected in &walk.request.config.workspace_paths {
-        let root = if selected == "."
-            || !path.is_empty() && std::path::Path::new(path).starts_with(selected)
-        {
-            path
-        } else if path.is_empty() || std::path::Path::new(selected).starts_with(path) {
-            selected
-        } else {
-            continue;
-        };
-        walk.start(root)?;
-    }
-    walk.verify_controls()?;
-    let output = walk.render()?;
-    walk.check_time()?;
-    Ok(output)
+    Walk::new(request)?.inspect()
 }
 
-impl Walk<'_> {
+impl<'a> Walk<'a> {
+    fn new(request: Request<'a>) -> Result<Self, ToolError> {
+        let path = match request.call {
+            ToolCall::List { path }
+            | ToolCall::Search { path, .. }
+            | ToolCall::Glob { path, .. } => path,
+            _ => return Err(ToolError::Operation),
+        };
+        let path = if path == "." { "" } else { path.as_str() };
+        let query = match request.call {
+            ToolCall::List { .. } => Query::List,
+            ToolCall::Glob { pattern, limit, .. } => Query::Glob {
+                matcher: super::glob::matcher(pattern).map_err(|_| ToolError::Operation)?,
+                depth: (!pattern.split('/').any(|part| part == "**"))
+                    .then(|| pattern.split('/').count()),
+                limit: *limit,
+            },
+            ToolCall::Search { .. } => {
+                Query::Search(super::search::Search::new(request.call, request.deadline)?)
+            }
+            _ => return Err(ToolError::Operation),
+        };
+        let device = fs::identity(request.root)?.0;
+        Ok(Self {
+            selector: Selector::discovery(request.deadline),
+            request,
+            controls: BTreeMap::new(),
+            visited: BTreeSet::new(),
+            entries: BTreeMap::new(),
+            scanned: 0,
+            device,
+            query,
+            base: path.into(),
+        })
+    }
+
+    fn inspect(mut self) -> Result<String, ToolError> {
+        let base = self.base.clone();
+        let path = base.as_str();
+        self.check_time()?;
+        self.control("")?;
+        for selected in &self.request.config.workspace_paths {
+            let root = if selected == "."
+                || !path.is_empty() && std::path::Path::new(path).starts_with(selected)
+            {
+                path
+            } else if path.is_empty() || std::path::Path::new(selected).starts_with(path) {
+                selected
+            } else {
+                continue;
+            };
+            self.start(root)?;
+        }
+        self.verify_controls()?;
+        let output = self.render()?;
+        self.check_time()?;
+        Ok(output)
+    }
+
     fn check_time(&self) -> Result<(), ToolError> {
         if self
             .request
@@ -271,6 +280,14 @@ impl Walk<'_> {
     }
 
     fn start(&mut self, path: &str) -> Result<(), ToolError> {
+        if path != self.base
+            && matches!(
+                fs::open_file(self.request.root, path),
+                Err(ToolError::NotFound)
+            )
+        {
+            return Ok(());
+        }
         for (index, _) in path.match_indices('/') {
             let ancestor = &path[..index];
             if (self.request.hidden)(ancestor) || self.selector.excluded(ancestor, true)? {
@@ -294,14 +311,22 @@ impl Walk<'_> {
             return Err(ToolError::Limit);
         }
         let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
-        let directory = Dir::from_std_file(fs::open_file(self.request.root, parent)?);
-        let metadata = directory.symlink_metadata(name).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ToolError::NotFound
-            } else {
-                ToolError::Path
-            }
-        })?;
+        let metadata = fs::open_file(self.request.root, parent).and_then(|file| {
+            Dir::from_std_file(file)
+                .symlink_metadata(name)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        ToolError::NotFound
+                    } else {
+                        ToolError::Path
+                    }
+                })
+        });
+        let metadata = match metadata {
+            Ok(metadata) => metadata,
+            Err(ToolError::NotFound) if path != self.base => return Ok(()),
+            Err(error) => return Err(error),
+        };
         if path.split('/').any(fs::ignored_directory)
             || self.selector.excluded(path, metadata.is_dir())?
         {
@@ -543,7 +568,7 @@ impl Walk<'_> {
         if self.request.config.workspace_paths != ["."] && rows.len() > MAX_SNAPSHOT_FILES {
             return Err(ToolError::Limit);
         }
-        let truncated = rows.len() >= DISPLAY_NAMES;
+        let truncated = rows.len() > DISPLAY_NAMES;
         fs::fit_rows(
             rows.into_iter().take(DISPLAY_NAMES).collect(),
             truncated,
@@ -588,6 +613,112 @@ fn joined(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vanished_descendants_are_omitted_after_enumeration() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fs::open_directory(fixture.path()).unwrap();
+        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let calls = [
+            (json!({"operation":"list","path":"."}), Output::Tool),
+            (json!({"operation":"glob","pattern":"**"}), Output::Tool),
+            (
+                json!({"operation":"search","path":".","query":"needle"}),
+                Output::Tool,
+            ),
+            (json!({"operation":"list","path":"."}), Output::Suggestions),
+        ];
+        for (call, output) in calls {
+            std::fs::write(fixture.path().join("first-visible.txt"), b"needle").unwrap();
+            let removed = fixture.path().join("second-removed.txt");
+            std::fs::write(&removed, b"needle").unwrap();
+            let call = serde_json::from_value(call).unwrap();
+            let mut walk = Walk::new(Request {
+                root: &root,
+                call: &call,
+                config: &config,
+                hidden: fs::NONE,
+                result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
+                deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
+                output,
+                private_image: false,
+                cancellation: None,
+            })
+            .unwrap();
+            walk.selector.in_progress =
+                Some(Box::new(move || std::fs::remove_file(removed).unwrap()));
+            let result = walk.inspect().unwrap();
+            assert!(result.contains("first-visible.txt"));
+            assert!(!result.contains("second-removed.txt"));
+        }
+    }
+
+    #[test]
+    fn missing_requested_bases_fail_but_absent_scope_roots_are_omitted() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fs::open_directory(fixture.path()).unwrap();
+        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["missing/nested"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        for path in [".", "missing/nested"] {
+            let call = ToolCall::List { path: path.into() };
+            let result = inspect(Request {
+                root: &root,
+                call: &call,
+                config: &config,
+                hidden: fs::NONE,
+                result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
+                deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
+                output: Output::Tool,
+                private_image: false,
+                cancellation: None,
+            });
+            if path == "." {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&result.unwrap()).unwrap()["entries"],
+                    json!([])
+                );
+            } else {
+                assert!(matches!(result, Err(ToolError::NotFound)));
+            }
+        }
+    }
+
+    #[test]
+    fn listings_mark_truncation_only_when_a_row_is_omitted() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fixture.path().join("notes")).unwrap();
+        let root = fs::open_directory(fixture.path()).unwrap();
+        let call = ToolCall::List {
+            path: "notes".into(),
+        };
+        let mut created = 0;
+        for count in [DISPLAY_NAMES - 1, DISPLAY_NAMES, DISPLAY_NAMES + 1] {
+            while created < count {
+                std::fs::write(fixture.path().join(format!("notes/entry-{created}")), b"").unwrap();
+                created += 1;
+            }
+            for scope in [".", "notes"] {
+                let config = serde_json::from_value(json!({"version":1,"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+                let output = inspect(Request {
+                    root: &root,
+                    call: &call,
+                    config: &config,
+                    hidden: fs::NONE,
+                    result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
+                    deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
+                    output: Output::Tool,
+                    private_image: false,
+                    cancellation: None,
+                })
+                .unwrap();
+                let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+                assert_eq!(
+                    result["entries"].as_array().unwrap().len(),
+                    count.min(DISPLAY_NAMES)
+                );
+                assert_eq!(result["may_be_truncated"], count > DISPLAY_NAMES);
+            }
+        }
+    }
 
     #[test]
     fn private_discovery_refuses_unavailable_ancestor_controls() {

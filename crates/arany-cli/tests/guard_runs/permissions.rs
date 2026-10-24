@@ -4577,31 +4577,41 @@ mod lifecycle_hooks {
     }
 }
 
+fn guarded_discovery_fixture(whole: bool) -> Fixture {
+    let fixture = Fixture::new(None, false);
+    if whole {
+        let path = fixture.state.join("tools.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["workspace_paths"] = json!(["."]);
+        private_file(&path, &serde_json::to_vec(&config).unwrap());
+    }
+    std::fs::write(
+        fixture.workspace.join("notes/.gitignore"),
+        b"*.cache\n!.env\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("notes/ignored.cache"),
+        b"needle DISCOVERY_PAYLOAD_CANARY",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("notes/.ENV"),
+        b"PROTECTED_DISCOVERY_CANARY",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("notes/visible.txt"),
+        b"needle visible",
+    )
+    .unwrap();
+    fixture
+}
+
 #[tokio::test]
 async fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
     for whole in [false, true] {
-        let fixture = Fixture::new(None, false);
-        if whole {
-            let path = fixture.state.join("tools.json");
-            let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            config["workspace_paths"] = json!(["."]);
-            private_file(&path, &serde_json::to_vec(&config).unwrap());
-        }
-        std::fs::write(
-            fixture.workspace.join("notes/.gitignore"),
-            b"*.cache\n!.env\n",
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.workspace.join("notes/ignored.cache"),
-            b"needle DISCOVERY_PAYLOAD_CANARY",
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.workspace.join("notes/.ENV"),
-            b"PROTECTED_DISCOVERY_CANARY",
-        )
-        .unwrap();
+        let fixture = guarded_discovery_fixture(whole);
         let calls = [
             arany::ToolCall::List {
                 path: "notes".into(),
@@ -4642,13 +4652,19 @@ async fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
         assert!(bundle.stderr.is_empty());
         assert!(!String::from_utf8_lossy(&bundle.stdout).contains("CANARY"));
         let (events, view) = (bundle.events, bundle.view);
-        for tool in &view.runs[0].tools {
+        for (tool, visible) in
+            view.runs[0]
+                .tools
+                .iter()
+                .zip(["facts.txt", "facts.txt", "visible.txt"])
+        {
             let observation = tool.observation.as_ref().unwrap();
             assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
             assert!(matches!(
                 observation.attestation,
                 Some(arany::Attestation::Guard(_))
             ));
+            assert!(observation.output.contains(visible));
             assert!(!observation.output.contains("ignored.cache"));
             assert!(!observation.output.contains("CANARY"));
         }

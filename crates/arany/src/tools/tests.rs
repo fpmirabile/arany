@@ -2716,7 +2716,10 @@ fn old_host_rules_are_inactive_and_preserved() {
 }
 
 async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> ToolObservation {
-    if !runtime.config.allows(&intent.call) || !super::discovery::possible(&intent.call) {
+    if !runtime.guard_available
+        || !runtime.config.allows(&intent.call)
+        || !super::discovery::possible(&intent.call)
+    {
         return runtime.execute(intent, super::Cancellation::new()).await;
     }
     let root = match runtime.pinned_root(&intent) {
@@ -2915,6 +2918,47 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         replaced.output
     );
     assert!(!replaced.output.contains("replacement"));
+}
+
+#[tokio::test]
+async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(fixture.path().join("outside.txt"), b"outside payload").unwrap();
+    std::os::unix::fs::symlink(fixture.path().join("outside.txt"), workspace.join("link")).unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    for (path, disposition) in [
+        ("link", ToolDisposition::Denied),
+        ("missing", ToolDisposition::Failed),
+    ] {
+        let intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            search(path, "payload"),
+        );
+        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(observation.disposition, disposition);
+        assert!(observation.valid() && !observation.stops_run());
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::InProcess { .. })
+        ));
+        assert!(!observation.output.contains("outside payload"));
+    }
+    let intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        search("missing", "payload"),
+    );
+    std::fs::rename(&workspace, fixture.path().join("moved")).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    let observation = runtime.execute(intent, super::Cancellation::new()).await;
+    assert!(observation.stops_run() && observation.attestation.is_none());
+    assert!(observation.output.contains("pinned input"));
 }
 
 #[tokio::test]
@@ -4774,8 +4818,18 @@ async fn typed_discovery_prunes_ignored_payloads_and_preserves_explicit_access()
             search("notes", "hit"),
             search("notes/pruned", "hit"),
         ] {
+            let pruned_search =
+                matches!(&call, ToolCall::Search { path, .. } if path == "notes/pruned");
             let result = run_in_process(&runtime, call).await;
             assert_eq!(result.disposition, ToolDisposition::Succeeded);
+            if pruned_search {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&result.output).unwrap()["entries"],
+                    json!([])
+                );
+            } else {
+                assert!(result.output.contains("visible.txt"));
+            }
             for hidden in [
                 "ignored.cache",
                 "oversized.cache",

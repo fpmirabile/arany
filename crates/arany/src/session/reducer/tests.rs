@@ -7412,7 +7412,7 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn a_glob_replays_only_its_recorded_in_process_observation() {
+    fn a_glob_replays_its_recorded_guard_observation() {
         let (mut view, goal, run, agent) = primary_tool_session(false);
         let glob = child_intent(
             run,
@@ -7441,14 +7441,17 @@ mod goal_replay_tests {
             agent_run_id: agent,
             observation,
         };
-        assert!(rejected(&view, finished(guarded)));
-        let mut recorded = observation_for(glob.clone(), b"");
-        recorded.output =
+        let mut invalid = guarded.clone();
+        if let Some(crate::tools::Attestation::Guard(receipt)) = &mut invalid.attestation {
+            receipt.intent_digest = [0; 32];
+        }
+        assert!(rejected(&view, finished(invalid)));
+        guarded.output =
             r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false}"#
                 .into();
-        apply(&mut view, finished(recorded.clone())).expect("in-process attestation");
+        apply(&mut view, finished(guarded.clone())).expect("Guard attestation");
         let tool = view.runs[0].tools.last().unwrap();
-        assert_eq!(tool.observation.as_ref(), Some(&recorded));
+        assert_eq!(tool.observation.as_ref(), Some(&guarded));
     }
 
     #[test]

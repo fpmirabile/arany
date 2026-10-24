@@ -72,10 +72,11 @@ pub(super) struct Files {
     generation: u64,
     attempted: Option<(String, [u8; 32], String)>,
     query: Option<String>,
+    reported: Option<(Option<String>, String)>,
 }
 
 impl Files {
-    pub(super) fn refresh(
+    pub(super) async fn refresh(
         &mut self,
         admission: &Admission,
         composer: &mut Composer,
@@ -88,31 +89,29 @@ impl Files {
         }
         let changed = composer.file_query_changed();
         self.query = query.clone();
-        let result = self.update_source(admission).and_then(|()| {
-            let source = self
-                .source
-                .as_ref()
-                .ok_or(arany::ToolError::Configuration)?
-                .clone();
-            let authority = source.generation()?;
-            let query = query.as_deref().ok_or(arany::ToolError::Operation)?;
-            let (folder, prefix) = query_parts(query);
-            self.refresh_index(source, folder, query, authority)?;
-            if let Some(snapshot) = &mut self.snapshot
-                && (changed || snapshot.query.as_deref() != Some(query))
-            {
-                snapshot.query = Some(query.into());
-                let items = snapshot.index.refine(folder, prefix)?;
-                composer.set_file_candidates(Some(query.into()), items);
-            }
-            Ok(())
-        });
+        let result = self
+            .update_source(admission)
+            .await
+            .and_then(|(source, authority)| {
+                let query = query.as_deref().ok_or(arany::ToolError::Operation)?;
+                let (folder, prefix) = query_parts(query);
+                self.refresh_index(source, folder, query, authority)?;
+                if let Some(snapshot) = &mut self.snapshot
+                    && (changed || snapshot.query.as_deref() != Some(query))
+                {
+                    snapshot.query = Some(query.into());
+                    let items = snapshot.index.refine(folder, prefix)?;
+                    composer.set_file_candidates(Some(query.into()), items);
+                    self.reported = None;
+                }
+                Ok(())
+            });
         if let Err(error) = result {
             if !matches!(error, arany::ToolError::Timeout(_)) {
                 self.invalidate();
             }
             composer.set_file_candidates(query, Vec::new());
-            return Some(format!("File suggestions unavailable: {error}"));
+            return self.report_unavailable(error.to_string());
         }
         if self.snapshot.is_none() {
             composer.set_file_candidates(query, Vec::new());
@@ -120,18 +119,20 @@ impl Files {
         None
     }
 
-    fn update_source(&mut self, admission: &Admission) -> Result<(), arany::ToolError> {
+    async fn update_source(
+        &mut self,
+        admission: &Admission,
+    ) -> Result<(FileSuggestionSource, [u8; 32]), arany::ToolError> {
         let trusted = admission
             .workspace_permissions
             .as_ref()
             .is_some_and(arany::WorkspacePermissions::is_trusted);
-        if self.configured == Some(admission.tools)
-            && self.trusted == Some(trusted)
-            && self.source.is_some()
-        {
-            return Ok(());
-        }
-        self.invalidate();
+        let source = if self.configured == Some(admission.tools) && self.trusted == Some(trusted) {
+            self.source.clone()
+        } else {
+            self.invalidate();
+            None
+        };
         let grant = if admission.tools {
             ToolGrant::Configured
         } else {
@@ -142,15 +143,37 @@ impl Files {
                 .cloned()
                 .map_or(ToolGrant::None, ToolGrant::Trusted)
         };
-        self.source = Some(FileSuggestionSource::new(
-            arany::StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| arany::ToolError::Configuration)?,
-            &admission.workspace,
-            grant,
-        )?);
+        let state_dir = admission.state_dir.clone();
+        let workspace = admission.workspace.clone();
+        let (source, authority) = tokio::task::spawn_blocking(move || {
+            let source = match source {
+                Some(source) => source,
+                None => FileSuggestionSource::new(
+                    arany::StateRoot::open_existing(&state_dir)
+                        .map_err(|_| arany::ToolError::Configuration)?,
+                    &workspace,
+                    grant,
+                )?,
+            };
+            let authority = source.generation()?;
+            Ok::<_, arany::ToolError>((source, authority))
+        })
+        .await
+        .map_err(|_| arany::ToolError::Operation)??;
+        self.source = Some(source.clone());
         self.configured = Some(admission.tools);
         self.trusted = Some(trusted);
-        Ok(())
+        Ok((source, authority))
+    }
+
+    fn report_unavailable(&mut self, error: String) -> Option<String> {
+        let report = (self.query.clone(), error);
+        if self.reported.as_ref() == Some(&report) {
+            return None;
+        }
+        let notice = format!("File suggestions unavailable: {}", report.1);
+        self.reported = Some(report);
+        Some(notice)
     }
 
     fn refresh_index(
@@ -214,6 +237,7 @@ impl Files {
     pub(super) fn clear(&mut self) {
         self.invalidate();
         self.query = None;
+        self.reported = None;
     }
 
     pub(super) async fn next_update(&mut self) -> Option<String> {
@@ -246,6 +270,7 @@ impl Files {
         }
         match result {
             Ok(Ok(index)) => {
+                self.reported = None;
                 self.snapshot = Some(Snapshot {
                     folder: build.folder.clone(),
                     authority: build.authority,
@@ -255,8 +280,8 @@ impl Files {
                 });
                 None
             }
-            Ok(Err(error)) => Some(format!("File suggestions unavailable: {error}")),
-            Err(_) => Some("File suggestions unavailable: discovery stopped".into()),
+            Ok(Err(error)) => self.report_unavailable(error.to_string()),
+            Err(_) => self.report_unavailable("discovery stopped".into()),
         }
     }
 
@@ -296,6 +321,52 @@ mod tests {
             },
             release,
         )
+    }
+
+    #[tokio::test]
+    async fn repeated_admission_errors_are_reported_once_per_query_and_popup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let admission = Admission {
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: fixture.path().join("missing-state"),
+            explicit_state_dir: false,
+            roster: None,
+            workspace,
+            include_paths: Vec::new(),
+            tools: false,
+            workspace_permissions: None,
+            defaults: arany::SessionDefaults::default(),
+            screen_reader: false,
+            classic: false,
+            no_color: false,
+            setup_requested: false,
+            entry: super::super::EntryMode::New,
+            prompt: None,
+            resume_goal: None,
+        };
+        let mut files = Files::default();
+        let mut composer = Composer::default();
+        composer.insert_literal("@src").unwrap();
+        assert!(
+            files
+                .refresh(&admission, &mut composer)
+                .await
+                .unwrap()
+                .contains("unavailable")
+        );
+        for _ in 0..3 {
+            assert!(files.refresh(&admission, &mut composer).await.is_none());
+        }
+        composer.insert_literal("m").unwrap();
+        assert!(files.refresh(&admission, &mut composer).await.is_some());
+        assert!(files.refresh(&admission, &mut composer).await.is_none());
+        composer.take();
+        assert!(files.refresh(&admission, &mut composer).await.is_none());
+        composer.insert_literal("@srcm").unwrap();
+        assert!(files.refresh(&admission, &mut composer).await.is_some());
+        files.close().await;
     }
 
     #[tokio::test]
