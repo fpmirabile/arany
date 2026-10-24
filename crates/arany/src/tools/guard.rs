@@ -2237,7 +2237,7 @@ fn prepare_command_baseline(
                 .and_then(|()| stdout.flush())
                 .map_err(|_| ToolError::Operation)?;
             let selection = super::fs::CommandSelection::receive(stdin)?;
-            super::fs::copy_seed()?;
+            super::fs::copy_command_seed()?;
             Some((super::fs::command_snapshot(workspace)?, selection))
         } else {
             None

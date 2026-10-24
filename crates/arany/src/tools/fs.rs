@@ -181,29 +181,182 @@ pub(super) struct CommandSnapshot {
     entries: BTreeMap<String, Entry>,
 }
 
+#[derive(Default)]
+pub(super) struct CommandScanBudget {
+    bytes: usize,
+    entries: usize,
+    path_metadata_bytes: usize,
+}
+
+impl CommandScanBudget {
+    pub(super) fn entry(&mut self, path: &str) -> Result<(), ToolError> {
+        self.entries = self.entries.checked_add(1).ok_or(ToolError::Limit)?;
+        self.path_metadata_bytes = self
+            .path_metadata_bytes
+            .checked_add(path.len())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<std::fs::Metadata>()))
+            .ok_or(ToolError::Limit)?;
+        if self.entries > COMMAND_SCAN_ENTRIES
+            || self.path_metadata_bytes > COMMAND_PATH_METADATA_BYTES
+        {
+            return Err(ToolError::Limit);
+        }
+        Ok(())
+    }
+
+    pub(super) fn content(&mut self, bytes: usize) -> Result<(), ToolError> {
+        self.bytes = self.bytes.checked_add(bytes).ok_or(ToolError::Limit)?;
+        if self.bytes > COMMAND_SNAPSHOT_BYTES {
+            return Err(ToolError::Limit);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod command_budget_tests {
+    use super::*;
+
+    #[test]
+    fn command_scan_budget_enforces_each_exact_ceiling() {
+        let mut content = CommandScanBudget::default();
+        assert!(content.content(COMMAND_SNAPSHOT_BYTES).is_ok());
+        assert!(matches!(content.content(1), Err(ToolError::Limit)));
+
+        let mut entries = CommandScanBudget {
+            entries: COMMAND_SCAN_ENTRIES - 1,
+            ..CommandScanBudget::default()
+        };
+        assert!(entries.entry("").is_ok());
+        assert!(matches!(entries.entry(""), Err(ToolError::Limit)));
+
+        let mut paths = CommandScanBudget {
+            path_metadata_bytes: COMMAND_PATH_METADATA_BYTES
+                - std::mem::size_of::<std::fs::Metadata>(),
+            ..CommandScanBudget::default()
+        };
+        assert!(paths.entry("").is_ok());
+        assert!(matches!(paths.entry(""), Err(ToolError::Limit)));
+    }
+}
+
 pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, ToolError> {
     let root = open_directory(workspace)?;
     check_change_directory(&root, &root)?;
-    let mut entries = BTreeMap::new();
-    let mut budget = ScanBudget::default();
-    let mut retained = 0usize;
-    command_collect(
-        &root,
-        "",
-        &mut entries,
-        &mut budget,
-        &mut retained,
-        SnapshotKind::Command,
-    )?;
+    let mut builder = CommandSnapshotBuilder {
+        root: &root,
+        entries: BTreeMap::new(),
+        budget: CommandScanBudget::default(),
+        retained: 0,
+    };
+    builder.collect("")?;
     Ok(CommandSnapshot {
         root_identity: workspace_identity(&root)?,
-        entries,
+        entries: builder.entries,
     })
+}
+
+struct CommandSnapshotBuilder<'a> {
+    root: &'a Dir,
+    entries: BTreeMap<String, Entry>,
+    budget: CommandScanBudget,
+    retained: usize,
+}
+
+impl CommandSnapshotBuilder<'_> {
+    fn collect(&mut self, path: &str) -> Result<(), ToolError> {
+        let directory = if path.is_empty() {
+            self.root.try_clone().map_err(|_| ToolError::Path)?
+        } else {
+            Dir::from_std_file(open_file(self.root, path)?)
+        };
+        let mut names = Vec::new();
+        for entry in directory.entries().map_err(|_| ToolError::Path)? {
+            let name = entry
+                .map_err(|_| ToolError::Path)?
+                .file_name()
+                .into_string()
+                .map_err(|_| ToolError::Path)?;
+            let selected = if path.is_empty() {
+                name
+            } else {
+                format!("{path}/{name}")
+            };
+            self.budget.entry(&selected)?;
+            if !valid_relative(&selected, false) {
+                return Err(if selected.split('/').any(forbidden) {
+                    ToolError::FilesystemDenied
+                } else {
+                    ToolError::Path
+                });
+            }
+            if selected.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
+                return Err(ToolError::Limit);
+            }
+            names.push(selected);
+        }
+        names.sort();
+        if names.is_empty() && !path.is_empty() {
+            self.retain()?;
+        }
+        drop(directory);
+        for selected in names {
+            self.entry(selected)?;
+        }
+        Ok(())
+    }
+
+    fn entry(&mut self, path: String) -> Result<(), ToolError> {
+        let file = open_file(self.root, &path)?;
+        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o6000 != 0 {
+                return Err(ToolError::FilesystemDenied);
+            }
+        }
+        let entry = if metadata.is_dir() {
+            drop(file);
+            self.collect(&path)?;
+            Entry {
+                path: path.clone(),
+                content: None,
+                executable: false,
+            }
+        } else {
+            #[cfg(unix)]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            };
+            #[cfg(not(unix))]
+            let executable = false;
+            let cap = MAX_FILE_BYTES.min(COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget.bytes));
+            let content = read_regular(file, cap)?;
+            self.budget.content(content.len())?;
+            self.retain()?;
+            Entry {
+                path: path.clone(),
+                content: Some(content),
+                executable,
+            }
+        };
+        self.entries.insert(path, entry);
+        Ok(())
+    }
+
+    fn retain(&mut self) -> Result<(), ToolError> {
+        self.retained += 1;
+        if self.retained > COMMAND_SNAPSHOT_FILES {
+            return Err(ToolError::Limit);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotKind {
-    Command,
     Worker,
     WorkerCommand,
 }
@@ -224,7 +377,7 @@ fn command_collect(
     let mut names = Vec::new();
     for entry in directory.entries().map_err(|_| ToolError::Path)? {
         budget.entry()?;
-        if kind != SnapshotKind::Command && budget.entries > crate::session::worker::WORKER_FILES {
+        if budget.entries > crate::session::worker::WORKER_FILES {
             return Err(ToolError::Limit);
         }
         let name = entry
@@ -281,11 +434,7 @@ fn command_collect(
             };
             #[cfg(not(unix))]
             let executable = false;
-            let cap = if kind != SnapshotKind::Command {
-                MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes))
-            } else {
-                MAX_FILE_BYTES
-            };
+            let cap = MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes));
             let content = read_regular(file, cap)?;
             budget.bytes = budget
                 .bytes
@@ -318,6 +467,7 @@ pub(super) fn command_changeset(
     compare_command_snapshots(before, &after)
 }
 
+#[cfg(test)]
 fn compare_command_snapshots(
     before: &CommandSnapshot,
     after: &CommandSnapshot,
@@ -1000,6 +1150,122 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
         put_entry(&target, entry)?;
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn copy_command_seed() -> Result<(), ToolError> {
+    let root = open_directory(Path::new("/seed/workspace"))?;
+    let target = open_directory(Path::new("/workspace"))?;
+    CommandSeedCopy {
+        root: &root,
+        target: &target,
+        budget: CommandScanBudget::default(),
+        retained: 0,
+    }
+    .directory("")
+}
+
+#[cfg(not(target_os = "macos"))]
+struct CommandSeedCopy<'a> {
+    root: &'a Dir,
+    target: &'a Dir,
+    budget: CommandScanBudget,
+    retained: usize,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl CommandSeedCopy<'_> {
+    fn directory(&mut self, path: &str) -> Result<(), ToolError> {
+        let source = if path.is_empty() {
+            self.root.try_clone().map_err(|_| ToolError::Path)?
+        } else {
+            Dir::from_std_file(open_file(self.root, path)?)
+        };
+        let mut children = Vec::new();
+        for entry in source.entries().map_err(|_| ToolError::Path)? {
+            let name = entry
+                .map_err(|_| ToolError::Path)?
+                .file_name()
+                .into_string()
+                .map_err(|_| ToolError::Path)?;
+            let child = if path.is_empty() {
+                name
+            } else {
+                format!("{path}/{name}")
+            };
+            self.budget.entry(&child)?;
+            if !valid_relative(&child, false) {
+                return Err(ToolError::Path);
+            }
+            if child.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
+                return Err(ToolError::Limit);
+            }
+            children.push(child);
+        }
+        children.sort();
+        if children.is_empty() && !path.is_empty() {
+            self.retain()?;
+            put_entry(
+                self.target,
+                Entry {
+                    path: path.into(),
+                    content: None,
+                    executable: false,
+                },
+            )?;
+        }
+        drop(source);
+        for child in children {
+            self.entry(child)?;
+        }
+        Ok(())
+    }
+
+    fn entry(&mut self, path: String) -> Result<(), ToolError> {
+        let file = open_file(self.root, &path)?;
+        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o6000 != 0 {
+                return Err(ToolError::FilesystemDenied);
+            }
+        }
+        if metadata.is_dir() {
+            drop(file);
+            return self.directory(&path);
+        }
+        if !metadata.is_file() {
+            return Err(ToolError::Path);
+        }
+        let cap = MAX_FILE_BYTES.min(COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget.bytes));
+        let content = read_regular(file, cap)?;
+        self.budget.content(content.len())?;
+        self.retain()?;
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
+        put_entry(
+            self.target,
+            Entry {
+                path,
+                content: Some(content),
+                executable,
+            },
+        )
+    }
+
+    fn retain(&mut self) -> Result<(), ToolError> {
+        self.retained += 1;
+        if self.retained > COMMAND_SNAPSHOT_FILES {
+            return Err(ToolError::Limit);
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn read_page(

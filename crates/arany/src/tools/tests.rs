@@ -654,6 +654,49 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn command_snapshots_exceed_previous_capacity_and_reject_new_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    for index in 0..=MAX_SNAPSHOT_FILES {
+        std::fs::write(
+            workspace.join(format!("source-{index:04}")),
+            vec![b'x'; 16 * 1024],
+        )
+        .unwrap();
+    }
+    assert!(super::fs::command_snapshot(&workspace).is_ok());
+
+    let many = temp.path().join("many");
+    std::fs::create_dir(&many).unwrap();
+    for index in 0..COMMAND_SNAPSHOT_FILES {
+        std::fs::write(many.join(format!("entry-{index:05}")), b"").unwrap();
+    }
+    assert!(super::fs::command_snapshot(&many).is_ok());
+    std::fs::write(many.join("overflow"), b"").unwrap();
+    assert!(matches!(
+        super::fs::command_snapshot(&many),
+        Err(super::ToolError::Limit)
+    ));
+
+    let bytes = temp.path().join("bytes");
+    std::fs::create_dir(&bytes).unwrap();
+    for index in 0..COMMAND_SNAPSHOT_BYTES / MAX_FILE_BYTES {
+        std::fs::write(
+            bytes.join(format!("content-{index:03}")),
+            vec![b'x'; MAX_FILE_BYTES],
+        )
+        .unwrap();
+    }
+    assert!(super::fs::command_snapshot(&bytes).is_ok());
+    std::fs::write(bytes.join("overflow"), b"x").unwrap();
+    assert!(matches!(
+        super::fs::command_snapshot(&bytes),
+        Err(super::ToolError::Limit)
+    ));
+}
+
+#[test]
 fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() {
     use nix::{sys::stat::Mode, unistd::mkfifo};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1042,7 +1085,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 std::fs::write(command.join("target"), vec![0; MAX_FILE_BYTES + 1]).unwrap()
             }
             "snapshot-bytes-overflow" => {
-                for index in 0..MAX_SNAPSHOT_BYTES / MAX_FILE_BYTES {
+                for index in 0..=COMMAND_SNAPSHOT_BYTES / MAX_FILE_BYTES {
                     std::fs::write(
                         command.join(format!("file-{index:02}")),
                         vec![0; MAX_FILE_BYTES],
@@ -1052,7 +1095,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
             }
             "snapshot-count-overflow" | "changeset-count-limit" | "changeset-count-overflow" => {
                 let count = match case {
-                    "snapshot-count-overflow" => MAX_SNAPSHOT_FILES,
+                    "snapshot-count-overflow" => COMMAND_SNAPSHOT_FILES + 1,
                     "changeset-count-limit" => MAX_CHANGESET_FILES,
                     _ => MAX_CHANGESET_FILES + 1,
                 };
@@ -1065,7 +1108,15 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 std::fs::write(command.join("target"), vec![0; count]).unwrap();
             }
             "depth-limit" | "depth-overflow" => {
-                let path = vec!["d"; if case == "depth-limit" { 15 } else { 16 }].join("/");
+                let path = vec![
+                    "d";
+                    if case == "depth-limit" {
+                        COMMAND_SNAPSHOT_DEPTH - 1
+                    } else {
+                        COMMAND_SNAPSHOT_DEPTH
+                    }
+                ]
+                .join("/");
                 std::fs::create_dir_all(command.join(&path)).unwrap();
                 std::fs::write(command.join(path).join("target"), b"child").unwrap();
             }
@@ -4391,7 +4442,7 @@ fn command_selection_rejects_unsafe_or_unbounded_controls_before_copy() {
 
 #[test]
 fn command_controls_cannot_exceed_the_grant_or_path_depth() {
-    for case in ["grant", "depth"] {
+    for case in ["grant", "depth-limit", "depth-overflow"] {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -4406,7 +4457,8 @@ fn command_controls_cannot_exceed_the_grant_or_path_depth() {
             std::fs::write(source.join("visible"), b"x").unwrap();
             config["workspace_paths"] = json!(["visible"]);
         } else {
-            let deep = source.join(vec!["nested"; 16].join("/"));
+            let depth = COMMAND_SNAPSHOT_DEPTH - usize::from(case == "depth-limit");
+            let deep = source.join(vec!["nested"; depth].join("/"));
             std::fs::create_dir_all(&deep).unwrap();
             std::fs::write(deep.join(".gitignore"), b"ignored").unwrap();
         }
@@ -4420,10 +4472,39 @@ fn command_controls_cannot_exceed_the_grant_or_path_depth() {
         );
         if case == "grant" {
             assert!(matches!(result, Err(super::ToolError::FilesystemDenied)));
+        } else if case == "depth-limit" {
+            assert!(result.is_ok());
         } else {
             assert!(matches!(result, Err(super::ToolError::Limit)));
         }
     }
+}
+
+#[test]
+fn command_selection_rejects_an_overlong_relative_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    let resources = temp.path().join("resources");
+    for path in [&source, &target, &resources] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let deep = source.join(format!("{}/{}", "a".repeat(200), "b".repeat(200)));
+    std::fs::create_dir_all(deep.join("c".repeat(120))).unwrap();
+    std::fs::write(deep.join("c".repeat(120)).join("file"), b"x").unwrap();
+    let mut config = config_value();
+    config["workspace_paths"] = json!(["."]);
+    let config: Config = serde_json::from_value(config).unwrap();
+    assert!(matches!(
+        super::fs::prepare_command(
+            &super::fs::open_directory(&source).unwrap(),
+            &super::fs::open_directory(&target).unwrap(),
+            &super::fs::open_directory(&resources).unwrap(),
+            &config,
+            std::time::Instant::now() + super::selection::PHASE_TIME,
+        ),
+        Err(super::ToolError::Limit)
+    ));
 }
 
 #[test]
@@ -4961,4 +5042,30 @@ async fn discovery_control_failures_discard_results_and_do_not_taint_exact_reads
         let result = run_in_process(&runtime, search("notes/visible.txt", "hit")).await;
         assert_eq!(result.disposition, ToolDisposition::Succeeded, "{case}");
     }
+}
+
+#[test]
+fn undispatched_resource_limit_remains_a_stopping_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    let intent = runtime.intent(
+        crate::RunId::new(),
+        crate::AgentRunId::new(),
+        ToolCall::Command {
+            program: "script".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+    );
+    let mut observation = super::unstarted_observation(intent, super::ToolError::Limit);
+    assert_eq!(observation.disposition, ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
+    assert!(observation.attestation.is_none());
+    assert!(observation.valid());
+    assert!(observation.stops_run());
+    assert!(observation.output.contains("resource limit"));
+    assert!(observation.output.contains("no operation was dispatched"));
+    observation.limit_cause = Some(super::LimitCause::RequestedTime);
+    assert!(observation.valid());
+    assert!(!observation.stops_run());
 }

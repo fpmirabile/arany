@@ -25,6 +25,26 @@ pub(super) enum DispatchSite {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GuardCompletion {
+    Observed,
+    ActiveTime,
+}
+
+impl GuardCompletion {
+    pub(super) fn decide(
+        disposition: ToolDisposition,
+        attested: bool,
+        active_time_exhausted: bool,
+    ) -> Self {
+        if active_time_exhausted && (disposition != ToolDisposition::Limit || !attested) {
+            Self::ActiveTime
+        } else {
+            Self::Observed
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UnguardedRefusal {
     SettingsChanged,
     UnavailableProgram,
@@ -656,6 +676,47 @@ pub(super) fn undispatched(
 mod tests {
     use super::super::hooks::HookStop;
     use super::*;
+
+    #[test]
+    fn exhausted_active_time_replaces_unstarted_limits_but_preserves_attested_limits() {
+        for (disposition, attested, exhausted, expected) in [
+            (
+                ToolDisposition::Limit,
+                false,
+                true,
+                GuardCompletion::ActiveTime,
+            ),
+            (
+                ToolDisposition::Limit,
+                true,
+                true,
+                GuardCompletion::Observed,
+            ),
+            (
+                ToolDisposition::Limit,
+                false,
+                false,
+                GuardCompletion::Observed,
+            ),
+            (
+                ToolDisposition::Failed,
+                false,
+                true,
+                GuardCompletion::ActiveTime,
+            ),
+            (
+                ToolDisposition::Failed,
+                false,
+                false,
+                GuardCompletion::Observed,
+            ),
+        ] {
+            assert_eq!(
+                GuardCompletion::decide(disposition, attested, exhausted),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn refusals_keep_their_own_cause() {
