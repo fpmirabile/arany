@@ -76,6 +76,41 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn paused_and_cancelled_approval_rows_keep_their_distinct_causes() {
+        let mut tool = tool_fixture(
+            ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: None,
+            },
+            "",
+        );
+        for (cause, label, output) in [
+            (
+                arany::ApprovalCause::Paused,
+                "paused",
+                "Goal paused before this operation; no operation was dispatched",
+            ),
+            (
+                arany::ApprovalCause::Cancelled,
+                "cancelled",
+                "Run cancelled before this operation; no operation was dispatched",
+            ),
+        ] {
+            let observation = tool.observation.as_mut().unwrap();
+            observation.disposition = ToolDisposition::Denied;
+            observation.approval_cause = Some(cause);
+            observation.output = output.into();
+            assert_eq!(tool.model_denial_label(), Some(label));
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)),
+                format!("Read(notes/facts.txt)\nResult: denied: {label}")
+            );
+            assert!(tool_detail_text(&tool).ends_with(output));
+        }
+    }
+
+    #[test]
     fn historical_hook_denial_rows_hide_committed_reason_text() {
         let canary = "old hook reason";
         let mut tool = tool_fixture(

@@ -955,7 +955,13 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
         return;
     }
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        for scenario in ["success", "missing_human", "uncertain"] {
+        for (scenario, reply, authorized) in [
+            ("success", arany::ApprovalReply::AllowOnce, true),
+            ("missing_human", arany::ApprovalReply::AllowOnce, false),
+            ("unsupported_session", arany::ApprovalReply::AllowForSession, false),
+            ("unsupported_prefix", arany::ApprovalReply::AllowPrefixInFolder, false),
+            ("uncertain", arany::ApprovalReply::AllowOnce, true),
+        ] {
             let human = scenario != "missing_human";
             let success = scenario == "success";
             let repo = Repo::new();
@@ -968,7 +974,7 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
             repo.settings(json!({"permissions":{"defaultMode":"auto", "typedPrefixes":[{"prefix":["gh","pr","create"],"decision":"allow","workspace":null}]}}));
             let call = ToolCall::GhPrCreate { repository: "github.com/example/project".into(), base: "base".into(), head: "main".into(), title: "Synthetic PR".into(), body: "Synthetic body".into(), draft: true };
             let mut outcomes = vec![tool_outcome(call)];
-            if success { outcomes.push(ProviderOutcome::Answer(Answer { text: "PR created".into() })); }
+            if scenario != "uncertain" { outcomes.push(ProviderOutcome::Answer(Answer { text: if success { "PR created" } else { "Approval was unavailable; the PR was not created" }.into() })); }
             let provider = Arc::new(ScriptedProvider::new(outcomes));
             let engine = engine_support::open(StateRoot::open_existing(&repo.state).unwrap(), EngineConfig { guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()), ..Default::default() }).unwrap();
             let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Auto);
@@ -994,13 +1000,13 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
                             assert!(matches!(refused, Err(arany::EngineError::WorkspaceBusy)));
                             assert!(peer.requests.lock().unwrap().is_empty());
                             contender.close().await.unwrap();
-                            approval.decide(arany::ApprovalReply::AllowOnce);
+                            approval.decide(reply);
                         }
                     }
                 }
             };
             assert_eq!(asked, usize::from(human));
-            assert_eq!(provider.requests.lock().unwrap().len(), if success { 2 } else { 1 });
+            assert_eq!(provider.requests.lock().unwrap().len(), if scenario == "uncertain" { 1 } else { 2 });
             assert!(!format!("{:?}", provider.requests.lock().unwrap()).contains(CANARY));
             let session = match outcome {
                 Ok(outcome) => outcome.session_id,
@@ -1014,10 +1020,14 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
             let tool = view.runs[0].tools.iter().find(|tool| tool.intent.call.is_host()).unwrap();
             let verdict = tool.permission_verdict.as_ref().unwrap();
             let observation = tool.observation.as_ref().unwrap();
-            assert_eq!(verdict.approved, human);
-            assert_eq!(observation.disposition, if success { ToolDisposition::Succeeded } else if human { ToolDisposition::Uncertain } else { ToolDisposition::Denied });
-            assert_eq!(matches!(observation.attestation, Some(arany::Attestation::Host(_))), human);
-            if human { assert_eq!(verdict.source, PermissionSource::Human); }
+            assert_eq!(verdict.approved, authorized);
+            assert_eq!(observation.disposition, if success { ToolDisposition::Succeeded } else if scenario == "uncertain" { ToolDisposition::Uncertain } else { ToolDisposition::Denied });
+            assert_eq!(matches!(observation.attestation, Some(arany::Attestation::Host(_))), authorized);
+            assert_eq!(verdict.source, if authorized { PermissionSource::Human } else { PermissionSource::UnavailableApproval });
+            if !authorized {
+                assert_eq!(observation.approval_cause, Some(arany::ApprovalCause::ChannelUnavailable));
+                assert_eq!(tool.model_denial_output(), Some("channel_unavailable: no operation was dispatched"));
+            }
             assert_eq!(std::fs::read_dir(&repo.markers).unwrap().count(), 0);
             let shown = observe_process(std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
                 .env_clear().args(["show", "--state-dir"]).arg(&repo.state).args(["--output", "text"]).arg(session.to_string()), repo._temp.path(), 256 * 1024);

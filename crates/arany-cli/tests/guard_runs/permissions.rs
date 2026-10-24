@@ -362,7 +362,10 @@ async fn multiedit_content_ceiling_and_full_hook_input_refuse_overflow_without_p
                 }
             );
             if case == "hook" {
-                assert!(observation.output.contains("hook input exceeds its limit"));
+                assert_eq!(
+                    observation.output,
+                    "hook_denied: no operation was dispatched"
+                );
                 assert!(
                     !events
                         .iter()
@@ -1482,11 +1485,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
         if let Some(review) = review {
             outcomes.push(verdict(review));
         }
-        if approved {
-            outcomes.push(finish("answer"));
-        }
+        outcomes.push(finish("answer"));
         let (result, requests, humans) = fixture.run(outcomes, None, false).await;
         assert_eq!(humans, 0);
+        assert_eq!(requests.len(), 3 + usize::from(review.is_some()));
         assert_eq!(
             requests
                 .iter()
@@ -1523,11 +1525,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
             arany::test_support::scenario::plan_outcome(plan(&call)),
             tool_outcome(call.clone()),
         ];
-        if terminal.is_some() {
-            outcomes.push(finish("answer"));
-        }
+        outcomes.push(finish("answer"));
         let (result, requests, humans) = fixture.run(outcomes, terminal, true).await;
         assert_eq!(humans, usize::from(terminal.is_some()));
+        assert_eq!(requests.len(), 5);
         assert_eq!(requests[3].phase, AgentPhase::RootSynthesis);
         assert!(
             !requests
@@ -1553,17 +1554,20 @@ async fn human_denial_on_the_only_allowed_run_is_a_failure_not_a_budget_close() 
     let mut fixture = Fixture::new(None, true);
     fixture.deny_humans = true;
     let call = call("edit");
-    let (result, _, humans) = fixture
+    let (result, requests, humans) = fixture
         .run(
             vec![
                 arany::test_support::scenario::plan_outcome(plan(&call)),
                 tool_outcome(call.clone()),
+                finish("The proposed edit was declined"),
             ],
             Some(arany::ApprovalMode::Request),
             false,
         )
         .await;
     assert_eq!(humans, 1);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(result.run.failure, Some(arany::RunFailure::CriterionUnmet));
     assert_eq!(result.run.status, RunStatus::Failed);
     let (_, view) = fixture.reopen(result.session_id).await;
     let goal = view.goal(result.goal_id).unwrap();
@@ -1604,15 +1608,7 @@ async fn hook_case(
 ) -> HookCase {
     let mut fixture = Fixture::new(Some(&settings), true);
     fixture.deny_humans = deny_humans;
-    let mut outcomes = vec![tool_outcome(call("read"))];
-    // A refused Ask ends the Run before the model sees the result.
-    let continues = !(deny_humans
-        || mode.is_none()
-            && settings.to_string().contains("ask")
-            && !settings.to_string().contains("dontAsk"));
-    if continues {
-        outcomes.push(finish("answer"));
-    }
+    let outcomes = vec![tool_outcome(call("read")), finish("answer")];
     let (result, requests, humans) = fixture.run(outcomes, mode, false).await;
     let model_output = requests
         .get(1)
@@ -2156,17 +2152,16 @@ async fn hook_ask_over_an_auto_review_ask_goes_to_the_human() {
         });
         let mut fixture = Fixture::new(Some(&settings), true);
         fixture.restricted_approvals = restricted;
-        let mut outcomes = vec![
+        let outcomes = vec![
             arany::test_support::scenario::plan_outcome(plan(&call)),
             tool_outcome(call.clone()),
+            finish("answer"),
         ];
-        if !restricted {
-            outcomes.push(finish("answer"));
-        }
         let (result, requests, humans) = fixture
             .run(outcomes, Some(arany::ApprovalMode::Auto), false)
             .await;
         assert_eq!(humans, usize::from(!restricted));
+        assert_eq!(requests.len(), 3);
         assert!(
             !requests
                 .iter()
@@ -2724,12 +2719,9 @@ async fn agent_definition_guard_parsing_ignores_model_permission_rules_without_w
     for rule in ["deny", "ask"] {
         let fixture = Fixture::new(Some(&json!({"permissions":{ rule: ["*"]}})), false);
         agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
-        let mut outcomes = vec![tool_outcome(call("read"))];
-        if rule == "deny" {
-            outcomes.push(finish("answer"));
-        }
+        let outcomes = vec![tool_outcome(call("read")), finish("answer")];
         let (result, requests, humans) = fixture.run(outcomes, None, false).await;
-        assert_eq!(requests.len(), if rule == "deny" { 2 } else { 1 }, "{rule}");
+        assert_eq!(requests.len(), 2, "{rule}");
         assert_eq!(humans, 0);
         let (_, view) = fixture.reopen(result.session_id).await;
         let tools = &view.runs[0].tools;
@@ -3380,10 +3372,9 @@ async fn a_64_kib_write_and_edit_publish_unhooked_and_a_hook_that_cannot_receive
         );
         let observation = tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
-        assert!(
-            observation.output.contains("hook input exceeds its limit"),
-            "{event:?}: {}",
-            observation.output
+        assert_eq!(
+            observation.output, "hook_denied: no operation was dispatched",
+            "{event:?}"
         );
     }
 }

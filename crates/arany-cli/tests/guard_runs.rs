@@ -2165,6 +2165,7 @@ mod goals {
                 expected_digest: None,
                 content: "changed".into(),
             }),
+            arany::test_support::goals::finish_with("The proposed edit was declined"),
         ]);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
@@ -2210,6 +2211,8 @@ mod goals {
         );
         let outcome = run.expect("denied Run");
         assert_eq!(outcome.run.status, RunStatus::Failed);
+        assert_eq!(outcome.run.failure, Some(arany::RunFailure::CriterionUnmet));
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
         engine.close().await.expect("engine shutdown");
 
         let (events, _) = replayed(&state_path, outcome.session_id).await;

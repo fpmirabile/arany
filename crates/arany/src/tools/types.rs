@@ -1135,7 +1135,8 @@ impl DenialFeedback {
         match self {
             Self::UserDeclined => "user_declined",
             Self::ChannelUnavailable => "channel_unavailable",
-            Self::Cancelled | Self::Paused => "cancelled",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
             Self::ChildTimeout => "delegation_limit",
             Self::RuleDenied => "permission_rule_denied",
             Self::ModeDenied => "permission_mode_denied",

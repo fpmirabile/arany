@@ -443,6 +443,34 @@ async fn unguarded_rerun_is_never_ai_reviewed_and_dont_ask_or_deny_rules_refuse_
     }
 }
 
+fn assert_unmet_host_criterion(seen: &Seen) {
+    assert_eq!(
+        seen.unconsumed, 0,
+        "the explanatory Provider response is consumed"
+    );
+    assert_eq!(seen.outcome.run.status, RunStatus::Failed);
+    assert_eq!(
+        seen.outcome.run.failure,
+        Some(arany::RunFailure::CriterionUnmet)
+    );
+    assert!(seen.outcome.run.assistant_message.is_none());
+    let observations = seen
+        .calls
+        .last()
+        .unwrap()
+        .input
+        .tools
+        .as_ref()
+        .unwrap()
+        .observations();
+    let denied = last_tool(seen).observation.as_ref().unwrap();
+    assert_eq!(observations.last().copied(), Some(denied));
+    assert_eq!(
+        denied.approval_cause,
+        Some(arany::ApprovalCause::ChannelUnavailable)
+    );
+}
+
 fn write_rule(host: &Host, script: &str) {
     let metadata = std::fs::metadata(&host.workspace).unwrap();
     private_file(
@@ -487,10 +515,7 @@ async fn headless_host_commands_refuse_with_or_without_inactive_exact_rules() {
             .await;
         denied(&seen, "channel_unavailable");
         assert_eq!(seen.requests, 3);
-        assert_eq!(
-            seen.outcome.run.assistant_message.as_deref(),
-            Some("answer")
-        );
+        assert_unmet_host_criterion(&seen);
         assert!(seen.prompts.is_empty());
         assert!(!host.workspace.join("ran.txt").exists());
         assert_eq!(host.rules().is_some(), previous);
@@ -521,10 +546,7 @@ async fn restricted_approval_channels_never_dispatch_unguarded_even_with_an_exac
         assert_eq!(seen.requests, 4);
         assert!(seen.prompts.is_empty());
         denied(&seen, "channel_unavailable");
-        assert_eq!(
-            seen.outcome.run.assistant_message.as_deref(),
-            Some("answer")
-        );
+        assert_unmet_host_criterion(&seen);
         assert!(!host.workspace.join("ran.txt").exists());
         let session = seen.outcome.session_id;
         let (_, view) = host.reopen(session).await;
@@ -555,10 +577,7 @@ async fn an_ask_rule_still_denies_headless_unguarded_runs_with_an_exact_rule() {
         )
         .await;
     denied(&seen, "channel_unavailable");
-    assert_eq!(
-        seen.outcome.run.assistant_message.as_deref(),
-        Some("answer")
-    );
+    assert_unmet_host_criterion(&seen);
     assert!(!host.workspace.join("ran.txt").exists());
 }
 
@@ -971,6 +990,17 @@ async fn unsupported_host_prefix_reply_does_not_downgrade_to_once() {
         Some("refused")
     );
     assert_eq!(seen.outcome.run.unguarded_tools(), 0);
+    let session = seen.outcome.session_id;
+    let (_, view) = host.reopen(session).await;
+    let tool = view.runs[0].tools.last().unwrap();
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::UnavailableApproval
+    );
+    assert_eq!(
+        tool.observation.as_ref().unwrap().approval_cause,
+        Some(arany::ApprovalCause::ChannelUnavailable)
+    );
 }
 
 #[tokio::test]
