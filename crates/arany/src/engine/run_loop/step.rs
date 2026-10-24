@@ -2659,14 +2659,14 @@ mod tests {
             (
                 HostReuseFacts {
                     source: Some([1; 32]),
-                    grants: 128,
+                    grants: crate::session::MAX_HOST_SESSION_GRANTS,
                     ..baseline
                 },
                 HostReuse::Reuse([1; 32]),
             ),
             (
                 HostReuseFacts {
-                    grants: 128,
+                    grants: crate::session::MAX_HOST_SESSION_GRANTS,
                     ..baseline
                 },
                 HostReuse::OnceOnly,

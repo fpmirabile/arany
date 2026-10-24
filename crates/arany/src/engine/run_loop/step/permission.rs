@@ -73,7 +73,7 @@ pub(super) fn decide_host_reuse(facts: &HostReuseFacts) -> HostReuse {
     }
     match facts.source {
         Some(source) => HostReuse::Reuse(source),
-        None if facts.grants < 128
+        None if facts.grants < crate::session::MAX_HOST_SESSION_GRANTS
             && matches!(facts.mode, None | Some(PermissionMode::Default)) =>
         {
             HostReuse::OfferSession
