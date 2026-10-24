@@ -70,7 +70,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Git branch reads](./git-branch-reads/README.md) | In progress; S2 bounded range history and endpoint diffs remains on branch discovery S1 |
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Primary host commands](./primary-host-commands/README.md) | `Ready`: guarantee wording and H1 approved; S1 primary escalation, session approval and privilege-tool refusal, S2 user-owned host prefixes, S3 serve/ACP/exec |
-| [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Ready: three command slices; `ignore` 0.4.33 approved behind the dependency review gate |
+| [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | `In progress`: PR1 and PR2 are implemented; PR3 changeset capacity remains; `ignore` 0.4.33 is approved |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Ready: typed discovery/suggestions, then Git disclosure; depends on snapshot PR1 (selector and enforced preparation) |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 | [Linux Tool latency](./linux-tool-latency/README.md) | `In progress`: slice 2 extends the replay-audited Read report with guarded Edit and command rows; named-host evidence remains owner-run |

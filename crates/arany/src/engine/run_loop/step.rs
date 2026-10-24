@@ -687,6 +687,7 @@ impl RunLoop<'_> {
             self.ledger().requested_command_resources()?;
         if command {
             intent.limits.resource_class = resource_class;
+            intent.limits.project_bytes = crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES;
             let requested_cache_bytes = if resource_class == ToolResourceClass::Build {
                 resource_settings.build_cache_bytes
             } else {

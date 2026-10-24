@@ -30,6 +30,12 @@ pub(crate) const MIN_TOOL_CONTEXT_BYTES: usize = MAX_TOOL_CATALOG_BYTES + 512;
 pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
+pub(crate) const COMMAND_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const COMMAND_SNAPSHOT_FILES: usize = 16_384;
+pub(crate) const COMMAND_SCAN_ENTRIES: usize = 131_072;
+pub(crate) const COMMAND_SNAPSHOT_DEPTH: usize = 32;
+pub(crate) const COMMAND_PATH_METADATA_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_COMMAND_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
@@ -102,7 +108,7 @@ impl CommandChangeset {
         let mut bytes = 0usize;
         for (index, change) in self.files.iter().enumerate() {
             if !valid_relative(&change.path, false)
-                || change.path.split('/').count() > 16
+                || change.path.split('/').count() > COMMAND_SNAPSHOT_DEPTH
                 || change.before == change.after
                 || self.files[..index].iter().any(|other| {
                     other.path >= change.path || Path::new(&change.path).starts_with(&other.path)
@@ -163,7 +169,7 @@ pub struct CommandSelectionSummary {
 
 impl CommandSelectionSummary {
     pub(crate) fn valid(self) -> bool {
-        let scanned = (MAX_SNAPSHOT_FILES * 4) as u64;
+        let scanned = COMMAND_SCAN_ENTRIES as u64;
         self.pruned_directories <= self.ignored_entries
             && self
                 .ignored_entries
@@ -822,7 +828,10 @@ impl ToolLimits {
                 ToolResourceClass::Default => {
                     self.memory_bytes == MEMORY_BYTES
                         && self.max_processes == MAX_PROCESSES_OR_THREADS
-                        && self.project_bytes == SCRATCH_BYTES
+                        && matches!(
+                            self.project_bytes,
+                            SCRATCH_BYTES | DEFAULT_COMMAND_PROJECT_BYTES
+                        )
                         && self.cache_requested_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
                         && self.cache_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
                         && self.cache_bytes <= self.cache_requested_bytes
@@ -1184,10 +1193,14 @@ impl ToolObservation {
         matches!(
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
-        ) || (self.disposition == ToolDisposition::Failed
+        ) || (self.disposition == ToolDisposition::Limit
             && self.attestation.is_none()
-            && self.enforcement_cause != Some(EnforcementCause::GuardBootstrap)
-            && !matches!(&self.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == crate::session::worker::WorkerDataPurpose::Base))
+            && self.intent.target == EffectTarget::Workspace
+            && matches!(&self.intent.call, ToolCall::Command { .. }))
+            || (self.disposition == ToolDisposition::Failed
+                && self.attestation.is_none()
+                && self.enforcement_cause != Some(EnforcementCause::GuardBootstrap)
+                && !matches!(&self.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == crate::session::worker::WorkerDataPurpose::Base))
             || self.cache_update == CacheUpdate::Uncertain
     }
 
