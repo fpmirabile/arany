@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v37";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v38";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -530,6 +530,64 @@ mod tests {
         );
     }
 
+    async fn reject_superseded_native_evidence(root: StateRoot, key: &str, checked_at_ms: i64) {
+        for version in [
+            "native-goal-contract-outcome-conformance-v33",
+            "native-goal-contract-outcome-conformance-journal-v37",
+        ] {
+            let mut legacy = Vec::new();
+            for field in [
+                version,
+                env!("CARGO_PKG_VERSION"),
+                "https://api.anthropic.com/v1/messages;output_config.format",
+                "anthropic",
+                "example-model",
+                "high",
+                "three-probes-1024-output-tokens",
+                "sequential-concurrency-one",
+                "env",
+                "wrkspc_One",
+            ] {
+                legacy.extend_from_slice(&(field.len() as u64).to_be_bytes());
+                legacy.extend_from_slice(field.as_bytes());
+            }
+            let signing_key = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
+            let legacy = hmac::sign(&signing_key, &legacy)
+                .as_ref()
+                .try_into()
+                .unwrap();
+            let store = Store::open(root.try_clone().unwrap()).unwrap();
+            store
+                .record_native_evidence(NativeEvidenceRecord {
+                    fingerprint: legacy,
+                    checked_at_ms,
+                    expires_at_ms: checked_at_ms + 60_000,
+                })
+                .await
+                .unwrap();
+            store.close().await.unwrap();
+            assert!(
+                matches!(
+                    AnthropicProvider::from_checked_credentials_with_effort(
+                        root.try_clone().unwrap(),
+                        "example-model".into(),
+                        Effort::High,
+                        NativeApiCredentials::new(
+                            "anthropic",
+                            key.into(),
+                            Some("wrkspc_One".into())
+                        )
+                        .unwrap(),
+                        None,
+                    )
+                    .await,
+                    Err(ProviderError::Rejected)
+                ),
+                "superseded native check: {version}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn native_run_admission_rechecks_exact_private_evidence() {
         let temp = tempfile::tempdir().expect("private root");
@@ -642,48 +700,7 @@ mod tests {
         let credentials = || {
             NativeApiCredentials::new("anthropic", key.into(), Some("wrkspc_One".into())).unwrap()
         };
-        let mut legacy = Vec::new();
-        for field in [
-            "native-goal-contract-outcome-conformance-v33",
-            env!("CARGO_PKG_VERSION"),
-            "https://api.anthropic.com/v1/messages;output_config.format",
-            "anthropic",
-            "example-model",
-            "high",
-            "three-probes-1024-output-tokens",
-            "sequential-concurrency-one",
-            "env",
-            "wrkspc_One",
-        ] {
-            legacy.extend_from_slice(&u64::try_from(field.len()).unwrap().to_be_bytes());
-            legacy.extend_from_slice(field.as_bytes());
-        }
-        let signing_key = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
-        let legacy: [u8; 32] = hmac::sign(&signing_key, &legacy)
-            .as_ref()
-            .try_into()
-            .unwrap();
-        let store = Store::open(open()).expect("reopen Store");
-        store
-            .record_native_evidence(NativeEvidenceRecord {
-                fingerprint: legacy,
-                checked_at_ms,
-                expires_at_ms: checked_at_ms + 60_000,
-            })
-            .await
-            .unwrap();
-        store.close().await.unwrap();
-        assert!(matches!(
-            AnthropicProvider::from_checked_credentials_with_effort(
-                open(),
-                "example-model".into(),
-                Effort::High,
-                credentials(),
-                None,
-            )
-            .await,
-            Err(ProviderError::Rejected)
-        ));
+        reject_superseded_native_evidence(open(), key, checked_at_ms).await;
         let store = Store::open(open()).expect("reopen Store");
         store
             .record_native_evidence(NativeEvidenceRecord {

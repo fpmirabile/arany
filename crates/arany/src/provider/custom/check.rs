@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const CUSTOM_CHECK_VERSION: &str =
-    "custom-protocol-text-compaction-conformance-effort-stream-journal-v38";
+    "custom-protocol-text-compaction-conformance-effort-stream-journal-v39";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -458,7 +458,7 @@ mod tests {
         net::TcpListener,
     };
 
-    const CONTRACT_RESPONSE_BYTES: usize = 1024 * 1024;
+    const CONTRACT_RESPONSE_BYTES: usize = crate::provider::MAX_RESPONSE_BYTES;
 
     #[derive(Clone, Copy)]
     struct MessagesCase {
@@ -500,7 +500,7 @@ mod tests {
         auth: super::super::MessagesAuth::ApiKey,
     };
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum ProbeReply {
         Valid,
         ValidEfforts,
@@ -523,6 +523,32 @@ mod tests {
         MissingUsage,
         InputAtLimit,
         InputAboveLimit,
+    }
+
+    fn response_byte_limit(request: &serde_json::Value) -> usize {
+        if request["stream"] != true {
+            return CONTRACT_RESPONSE_BYTES;
+        }
+        let cap = request
+            .get("max_tokens")
+            .or_else(|| request.get("max_output_tokens"))
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+            .expect("stream request output cap");
+        crate::provider::max_stream_bytes(cap)
+    }
+
+    fn padded_event_stream(events: &str, target: usize) -> String {
+        let padding = target
+            .checked_sub(events.len() + 1)
+            .expect("stream padding");
+        let comment = format!(":{}\n", "x".repeat(CONTRACT_RESPONSE_BYTES - 2));
+        let mut body = comment.repeat(padding / comment.len());
+        body.push_str(&comment[..padding % comment.len()]);
+        body.push('\n');
+        body.push_str(events);
+        assert_eq!(body.len(), target);
+        body
     }
 
     async fn serve_probe(
@@ -768,7 +794,7 @@ mod tests {
                         )
                     {
                         response["padding"] = json!("");
-                        let target = CONTRACT_RESPONSE_BYTES
+                        let target = response_byte_limit(&body)
                             + usize::from(matches!(reply, ProbeReply::ChunkedOversize));
                         let padding = target - response.to_string().len();
                         response["padding"] = json!("x".repeat(padding));
@@ -785,12 +811,9 @@ mod tests {
                     assert!(messages.is_some());
                     let response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
                     let events = crate::provider::render::semantic::messages_stream(&response);
-                    let target = CONTRACT_RESPONSE_BYTES
+                    let target = response_byte_limit(&body)
                         + usize::from(matches!(reply, ProbeReply::ChunkedOversize));
-                    let padding = target - events.len() - 3;
-                    let body = format!(":{}\n\n{events}", "x".repeat(padding));
-                    assert_eq!(body.len(), target);
-                    body
+                    padded_event_stream(&events, target)
                 } else {
                     response_body
                 };
@@ -871,7 +894,7 @@ mod tests {
                 continue;
             }
             let declared_len = if matches!(reply, ProbeReply::Oversize) {
-                CONTRACT_RESPONSE_BYTES + 1
+                response_byte_limit(&body) + 1
             } else {
                 response_body.len()
             };
@@ -1073,10 +1096,13 @@ mod tests {
                 ProbeReply::EncodedBodyAfterIdentity,
                 ProbeReply::InputAboveLimit,
             ] {
-                assert!(matches!(
-                    run_transport_case(reply, false, true, streaming).await,
-                    Err(super::super::transport::TransportError::InvalidOutcome)
-                ));
+                assert!(
+                    matches!(
+                        run_transport_case(reply, false, true, streaming).await,
+                        Err(super::super::transport::TransportError::InvalidOutcome)
+                    ),
+                    "Messages reply={reply:?}, streaming={streaming}"
+                );
             }
         }
         assert!(
@@ -1109,6 +1135,74 @@ mod tests {
                 run_transport_case(reply, false, false, false).await,
                 Err(super::super::transport::TransportError::InvalidOutcome)
             ));
+        }
+    }
+
+    async fn reject_superseded_protocol_evidence(
+        root: &StateRoot,
+        profile: &CustomProfile,
+        evidence: &ProviderEvidenceRecord,
+    ) {
+        let (protocol, base, encoding, auth) = match &profile.protocol {
+            super::super::Protocol::OpenaiResponses => {
+                ("openai-responses", "", "json_schema", "bearer")
+            }
+            super::super::Protocol::AnthropicMessages { base_url, auth } => (
+                "anthropic-messages",
+                base_url.as_str(),
+                "native_tools",
+                match auth {
+                    super::super::MessagesAuth::Bearer => "bearer",
+                    super::super::MessagesAuth::ApiKey => "x-api-key",
+                },
+            ),
+        };
+        for version in [
+            "custom-protocol-schema-challenge-conformance-effort-stream-v34",
+            "custom-protocol-text-compaction-conformance-effort-stream-journal-v38",
+        ] {
+            let mut legacy = Sha256::new();
+            for field in [
+                env!("CARGO_PKG_VERSION"),
+                version,
+                profile.name(),
+                profile.endpoint(),
+                profile.model(),
+                profile.credential_env(),
+                "2",
+                protocol,
+                base,
+                encoding,
+                auth,
+                "user_authorized",
+                "4096",
+            ] {
+                legacy.update((field.len() as u64).to_be_bytes());
+                legacy.update(field.as_bytes());
+            }
+            legacy.update(2_u32.to_be_bytes());
+            let store = Store::open(root.try_clone().unwrap()).unwrap();
+            store
+                .record_provider_evidence(ProviderEvidenceRecord {
+                    digest: legacy.finalize().into(),
+                    ..evidence.clone()
+                })
+                .await
+                .unwrap();
+            store.close().await.unwrap();
+            assert!(
+                matches!(
+                    super::super::CustomProvider::admit(
+                        root,
+                        profile.name(),
+                        profile.model(),
+                        None
+                    )
+                    .await,
+                    Err(CustomProfileError::EvidenceUnavailable)
+                ),
+                "superseded custom check: {version}"
+            );
         }
     }
 
@@ -1156,39 +1250,7 @@ mod tests {
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
             Err(CustomProfileError::CredentialUnavailable)
         ));
-        let mut legacy = Sha256::new();
-        for field in [
-            env!("CARGO_PKG_VERSION"),
-            "custom-protocol-schema-challenge-conformance-effort-stream-v34",
-            profile.name(),
-            profile.endpoint(),
-            profile.model(),
-            profile.credential_env(),
-            "2",
-            "anthropic-messages",
-            "http://127.0.0.1:9321/anthropic",
-            "native_tools",
-            "x-api-key",
-            "user_authorized",
-            "4096",
-        ] {
-            legacy.update(u64::try_from(field.len()).unwrap().to_be_bytes());
-            legacy.update(field.as_bytes());
-        }
-        legacy.update(2_u32.to_be_bytes());
-        let store = Store::open(root.try_clone().unwrap()).unwrap();
-        store
-            .record_provider_evidence(ProviderEvidenceRecord {
-                digest: legacy.finalize().into(),
-                ..evidence.clone()
-            })
-            .await
-            .unwrap();
-        store.close().await.unwrap();
-        assert!(matches!(
-            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
-            Err(CustomProfileError::EvidenceUnavailable)
-        ));
+        reject_superseded_protocol_evidence(&root, &profile, &evidence).await;
         let store = Store::open(root.try_clone().unwrap()).unwrap();
         store
             .record_provider_evidence(evidence.clone())
@@ -1229,6 +1291,7 @@ mod tests {
             Err(CustomProfileError::EvidenceUnavailable)
         ));
         let responses_profile = CustomProfile::load_named(&root, "local").unwrap();
+        reject_superseded_protocol_evidence(&root, &responses_profile, &evidence).await;
         for fields in [
             vec![
                 env!("CARGO_PKG_VERSION"),
