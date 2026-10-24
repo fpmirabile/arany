@@ -1,7 +1,4 @@
-use super::{
-    GoalStatus, GoalUsage, GoalView, RunFailure, RunStatus, RunView, STORE_ACTION_OVERHEAD_MS,
-    SessionView,
-};
+use super::{GoalStatus, GoalUsage, GoalView, RunFailure, RunStatus, RunView, SessionView};
 use crate::tools::{CacheUpdate, ToolDisposition};
 
 /// The Goal budget dimension that admitted no next Run.
@@ -180,27 +177,23 @@ fn hook_unknown(hook: &super::reducer::HookView) -> bool {
 
 // Replay accepts `budget_closed` only on a spent budget, so the last dimension is the one left.
 fn exhausted_limit(goal: &GoalView) -> GoalLimit {
-    if let Some(refusal) = goal.budget_refusal {
-        return refusal.dimension;
-    }
     let budget = goal.effective_budget();
-    if budget
-        .max_tokens
-        .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
-    {
-        GoalLimit::Tokens
-    } else if budget
-        .max_provider_calls
-        .is_some_and(|limit| goal.provider_calls >= limit)
-    {
-        GoalLimit::Calls
-    } else if budget
-        .max_active_ms
-        .is_some_and(|limit| limit.saturating_sub(goal.active_ms) <= STORE_ACTION_OVERHEAD_MS)
-    {
-        GoalLimit::ActiveTime
-    } else {
-        GoalLimit::Runs
+    goal.budget_refusal
+        .map(|refusal| refusal.dimension)
+        .unwrap_or_else(|| {
+            budget
+                .exhausted_dimension(usage_of(goal))
+                .unwrap_or(GoalLimit::Runs)
+        })
+}
+
+fn usage_of(goal: &GoalView) -> GoalUsage {
+    GoalUsage {
+        runs: goal.run_ids.len(),
+        provider_calls: goal.provider_calls,
+        active_ms: goal.active_ms,
+        known_tokens: goal.known_tokens,
+        token_usage_unknown: goal.token_usage_unknown,
     }
 }
 

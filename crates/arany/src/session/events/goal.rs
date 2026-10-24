@@ -151,31 +151,49 @@ pub(crate) struct GoalUsage {
 }
 
 impl GoalBudget {
+    pub(crate) fn limit_for(&self, dimension: super::super::GoalLimit) -> Option<u64> {
+        use super::super::GoalLimit;
+        match dimension {
+            GoalLimit::Calls => self.max_provider_calls.map(u64::from),
+            GoalLimit::Runs => Some(u64::from(self.max_runs)),
+            GoalLimit::ActiveTime => self.max_active_ms,
+            GoalLimit::Tokens => self.max_tokens,
+        }
+    }
+
+    pub(crate) fn exhausted_dimension(&self, usage: GoalUsage) -> Option<super::super::GoalLimit> {
+        use super::super::GoalLimit;
+        if self
+            .max_tokens
+            .is_some_and(|limit| usage.token_usage_unknown || usage.known_tokens >= limit)
+        {
+            Some(GoalLimit::Tokens)
+        } else if self
+            .max_provider_calls
+            .is_some_and(|limit| usage.provider_calls >= limit)
+        {
+            Some(GoalLimit::Calls)
+        } else if self
+            .max_active_ms
+            .is_some_and(|limit| limit.saturating_sub(usage.active_ms) <= STORE_ACTION_OVERHEAD_MS)
+        {
+            Some(GoalLimit::ActiveTime)
+        } else if usage.runs >= usize::from(self.max_runs) {
+            Some(GoalLimit::Runs)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn refusal(&self, usage: GoalUsage, action: BudgetAction) -> Option<BudgetRefusal> {
         use super::super::GoalLimit;
-        let (dimension, used, limit) = if let Some(limit) = self
-            .max_tokens
-            .filter(|limit| usage.token_usage_unknown || usage.known_tokens >= *limit)
-        {
-            (GoalLimit::Tokens, usage.known_tokens, limit)
-        } else if let Some(limit) = self
-            .max_provider_calls
-            .filter(|limit| usage.provider_calls >= *limit)
-        {
-            (
-                GoalLimit::Calls,
-                u64::from(usage.provider_calls),
-                u64::from(limit),
-            )
-        } else if let Some(limit) = self
-            .max_active_ms
-            .filter(|limit| limit.saturating_sub(usage.active_ms) <= STORE_ACTION_OVERHEAD_MS)
-        {
-            (GoalLimit::ActiveTime, usage.active_ms, limit)
-        } else if usage.runs >= usize::from(self.max_runs) {
-            (GoalLimit::Runs, usage.runs as u64, u64::from(self.max_runs))
-        } else {
-            return None;
+        let dimension = self.exhausted_dimension(usage)?;
+        let limit = self.limit_for(dimension)?;
+        let used = match dimension {
+            GoalLimit::Tokens => usage.known_tokens,
+            GoalLimit::Calls => u64::from(usage.provider_calls),
+            GoalLimit::ActiveTime => usage.active_ms,
+            GoalLimit::Runs => usage.runs as u64,
         };
         let (cause, amount) = if dimension == GoalLimit::Tokens && usage.token_usage_unknown {
             (BudgetRefusalCause::UnknownUsage, None)
