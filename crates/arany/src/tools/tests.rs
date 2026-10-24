@@ -1,4 +1,4 @@
-use super::catalog::{call_schemas, catalog_call_schemas, plan_schema};
+use super::catalog::{Family, Site, call_schemas, catalog_call_schemas, plan_schema};
 use super::config::Config;
 use super::skills::parse_json;
 use super::types::*;
@@ -8,6 +8,168 @@ use serde_json::{Value, json};
 
 fn config_value() -> Value {
     json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
+}
+
+#[test]
+fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
+    use crate::session::worker::{ChangesetSource, WorkerDataPurpose, WorkerPreparation};
+    use crate::tools::types::CommandChangeset;
+
+    let path = || "src".to_owned();
+    let calls = [
+        ToolCall::ParseAgentDefinition {
+            index: 0,
+            raw_digest: [1; 32],
+        },
+        ToolCall::List { path: path() },
+        ToolCall::Read {
+            path: path(),
+            offset: None,
+            limit: Some(1),
+        },
+        ToolCall::Search {
+            path: path(),
+            query: "q".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: MAX_SEARCH_ROWS,
+        },
+        ToolCall::Mkdir { path: path() },
+        ToolCall::Write {
+            path: path(),
+            expected_digest: None,
+            content: String::new(),
+        },
+        ToolCall::Edit {
+            path: path(),
+            expected_digest: "0".repeat(64),
+            old: "a".into(),
+            new: "b".into(),
+        },
+        ToolCall::MultiEdit {
+            file_path: path(),
+            expected_digest: "0".repeat(64),
+            edits: Vec::new(),
+        },
+        ToolCall::Command {
+            program: "cargo".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+        ToolCall::CommandUnguarded {
+            program: "cargo".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+            justification: "Run the failed command once on the host".into(),
+        },
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::CommandReceipt {
+                source_intent_digest: [1; 32],
+                changeset: CommandChangeset::default(),
+            },
+        },
+        ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: crate::session::AgentRunId::new(),
+                purpose: WorkerDataPurpose::Base,
+                max_chunks: 1,
+                max_bytes: 1,
+            },
+        },
+        ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: crate::session::AgentRunId::new(),
+                purpose: WorkerDataPurpose::Handover,
+                max_chunks: 1,
+                max_bytes: 1,
+            },
+        },
+        ToolCall::Skill {
+            name: "guide".into(),
+            resource: None,
+        },
+        ToolCall::McpList {
+            server: "local".into(),
+        },
+        ToolCall::McpCall {
+            server: "local".into(),
+            tool: "t".into(),
+            schema_digest: "0".repeat(64),
+            arguments: "{}".into(),
+        },
+        ToolCall::GitStatus { path: path() },
+        ToolCall::GitDiff {
+            path: path(),
+            base: None,
+            head: None,
+            staged: false,
+        },
+        ToolCall::GitLog {
+            path: path(),
+            revision: None,
+            max_count: 1,
+        },
+        ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![path()],
+            staged: false,
+        },
+        ToolCall::GitBranch {
+            name: None,
+            start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
+        },
+        ToolCall::GitBranch {
+            name: Some("topic".into()),
+            start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
+        },
+        ToolCall::GitSwitch {
+            branch: "topic".into(),
+        },
+        ToolCall::GitPush {
+            remote: "https://github.com/o/r.git".into(),
+            branch: "topic".into(),
+        },
+        ToolCall::GhPrCreate {
+            repository: "github.com/o/r".into(),
+            base: "main".into(),
+            head: "topic".into(),
+            title: "T".into(),
+            body: String::new(),
+            draft: true,
+        },
+        ToolCall::Glob {
+            pattern: "**/*.rs".into(),
+            path: path(),
+            limit: 1,
+        },
+    ];
+
+    for call in calls {
+        let old_is_host = matches!(call, ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. });
+        let old_is_unguarded = matches!(call, ToolCall::CommandUnguarded { .. });
+        let old_is_internal = matches!(
+            call,
+            ToolCall::ParseAgentDefinition { .. } | ToolCall::PrepareWorker { .. }
+        );
+
+        assert_eq!(call.is_host(), call.facts().site == Site::Host);
+        assert_eq!(call.is_host(), old_is_host, "{call:?}");
+        assert_eq!(call.is_unguarded(), call.facts().site == Site::Unguarded);
+        assert_eq!(call.is_unguarded(), old_is_unguarded, "{call:?}");
+        assert_eq!(
+            call.is_internal(),
+            call.facts().family == Family::Preparation
+        );
+        assert_eq!(call.is_internal(), old_is_internal, "{call:?}");
+    }
 }
 
 #[test]
