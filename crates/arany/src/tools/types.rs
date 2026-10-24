@@ -458,19 +458,16 @@ impl ToolCall {
     }
 
     pub fn is_host(&self) -> bool {
-        matches!(self, Self::GitPush { .. } | Self::GhPrCreate { .. })
+        self.facts().site == Site::Host
     }
 
     pub fn is_unguarded(&self) -> bool {
-        matches!(self, Self::CommandUnguarded { .. })
+        self.facts().site == Site::Unguarded
     }
 
     // Engine preparation steps over snapshot-pinned input; never a model Tool, so no hook sees or narrows them.
     pub(crate) fn is_internal(&self) -> bool {
-        matches!(
-            self,
-            Self::ParseAgentDefinition { .. } | Self::PrepareWorker { .. }
-        )
+        self.facts().family == Family::Preparation
     }
 
     pub(crate) fn is_git(&self) -> bool {
