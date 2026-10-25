@@ -285,6 +285,12 @@ fn kitty_probe_enables_any_motion_and_a_burst_keeps_following_keys() {
     }
     let from = chat.send(b"x");
     chat.wait_for(from, &[b"x"], "key after motion burst");
+    chat.step(
+        "burst draft cleared",
+        b"\x7f",
+        &[EMPTY_COMPOSER],
+        &CAPTURE_WITH_MOTION,
+    );
     let modes = chat.exit();
     assert_eq!(modes.active, Vec::<u32>::new(), "motion mode restored");
     assert!(modes.enabled.contains(&1003));
@@ -879,9 +885,12 @@ fn tmux_suppresses_the_kitty_graphics_probe() {
     chat.wait_armed(0, "armed fullscreen picker inside tmux");
     assert_no_kitty_probe(&chat.transcript);
     chat.adopt_product(&state);
-    let from = chat.send(b"\x1b");
-    chat.wait_for(from, &[EMPTY_COMPOSER], "cancel startup picker");
-    chat.exit();
+    let modes = chat.exit_with(b"\x1b");
+    assert_eq!(
+        modes.active,
+        Vec::<u32>::new(),
+        "modes restored on cancellation"
+    );
 }
 
 #[test]
