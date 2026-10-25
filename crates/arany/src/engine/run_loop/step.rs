@@ -709,6 +709,7 @@ impl RunLoop<'_> {
                 }),
             });
         }
+        let runtime = runtime.clone();
         let runtime = if let ToolCall::ApplyChangeset {
             source: crate::session::worker::ChangesetSource::WorkerHandover { assignment_id, .. },
         } = &intent.call
@@ -722,7 +723,7 @@ impl RunLoop<'_> {
                 .ok_or(EngineError::CoordinatorFailed)?;
             runtime.with_handover(bytes)
         } else {
-            runtime.clone()
+            runtime
         };
         let runtime = &runtime;
         let (observation, segment, exhausted, checkpoint) =
@@ -779,12 +780,14 @@ impl RunLoop<'_> {
     > {
         let mut queue_pause = Some(queue_pause);
         let mut active_time_exhausted = false;
-        let runtime = runtime.with_queue_progress(self.hints.map(HintPublisher::tool_queue));
         let (active_sender, mut active_receiver) =
             tokio::sync::mpsc::channel::<ActiveActionRequest>(1);
-        let runtime = runtime.with_active_action_gate(active_sender);
         let (checkpoint_sender, mut checkpoint_receiver) = tokio::sync::mpsc::channel(1);
-        let runtime = runtime.with_checkpoint_gate(checkpoint_sender);
+        let runtime = runtime
+            .clone()
+            .with_queue_progress(self.hints.map(HintPublisher::tool_queue))
+            .with_active_action_gate(active_sender)
+            .with_checkpoint_gate(checkpoint_sender);
         let checkpoint_intent = intent.clone();
         let mut checkpoint = None;
         let mut _active_work = None;
