@@ -28,7 +28,12 @@ pub(super) fn validate_finished(
         .primary()
         .is_some_and(|primary| primary.id == *agent_run_id)
     {
-        pending_original_tool_requests(run) != Some(0)
+        !observation.intent.call.is_internal()
+            && !matches!(
+                observation.intent.call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+            )
+            && pending_original_tool_requests(run) != Some(0)
     } else {
         run.agents
             .iter()

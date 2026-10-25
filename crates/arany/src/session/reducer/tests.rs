@@ -6321,7 +6321,7 @@ mod goal_replay_tests {
             .unwrap()
             .permissions_digest = Some([3; 32]);
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         let (first, second) = (
             read_intent(run, agent, "src/lib.rs"),
             read_intent(run, agent, "src/lib.rs"),
@@ -6349,6 +6349,8 @@ mod goal_replay_tests {
         .unwrap();
         apply(&mut view, tool_finished(run, agent, &first, b"x")).unwrap();
         let mut settled = view.clone();
+        apply(&mut settled, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut settled, requesting_step(run, agent, 1)).unwrap();
         apply(&mut settled, tool_started(run, agent, &second)).unwrap();
         apply(
             &mut view,
@@ -6375,6 +6377,7 @@ mod goal_replay_tests {
             },
         )
         .unwrap();
+        assert!(rejected(&view, reserve_child_call(goal, run, agent)));
         assert!(rejected(&view, tool_started(run, agent, &second)));
     }
 
@@ -6414,11 +6417,7 @@ mod goal_replay_tests {
         policy.unguarded_rules_digest = rules_pinned.then_some([5; 32]);
         policy.host_epoch = Some(uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501));
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-        apply(
-            &mut view,
-            requesting_step(run, agent, 1 + u8::from(prior.is_some())),
-        )
-        .unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         if let Some((script, disposition, cause)) = prior {
             let guarded = child_intent(
                 run,
@@ -6491,6 +6490,10 @@ mod goal_replay_tests {
                 agent,
                 started: false,
             };
+        }
+        if prior.is_some() {
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         }
         apply(&mut view, start).expect("the start is always admitted");
         Unguarded {
@@ -8143,12 +8146,16 @@ mod goal_replay_tests {
         for size in [2, 1, 1, 1, 1] {
             apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
             apply(&mut view, requesting_step(run, agent, size)).unwrap();
-            for _ in 0..size {
-                let intent = read_intent(run, agent, "src/lib.rs");
-                apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let intents: Vec<_> = (0..size)
+                .map(|_| read_intent(run, agent, "src/lib.rs"))
+                .collect();
+            for intent in &intents {
+                apply(&mut view, tool_started(run, agent, intent)).unwrap();
+            }
+            for intent in &intents {
                 apply(
                     &mut view,
-                    tool_finished(run, agent, &intent, &vec![b'x'; 2048]),
+                    tool_finished(run, agent, intent, &vec![b'x'; 2048]),
                 )
                 .unwrap();
             }
@@ -8227,8 +8234,12 @@ mod goal_replay_tests {
         )
         .expect("first request starts");
         assert_exhausted_crash_receipt(&view);
-        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        assert!(
+            rejected(&view, tool_finished(run, agent, &first, b"one")),
+            "all declared intents must start before any observation"
+        );
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         assert!(
             rejected(&view, tool_started(run, agent, &third)),
@@ -8379,8 +8390,12 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
-        apply(&mut view, reserve_child_call(goal, run, agent)).expect("continuation call");
+        assert!(
+            rejected(&view, reserve_child_call(goal, run, agent)),
+            "no Provider dispatch with a pending observation"
+        );
         let continuation = Event::ProviderCallRecorded {
             run_id: run,
             agent_run_id: agent,
@@ -8394,8 +8409,8 @@ mod goal_replay_tests {
             rejected(&view, continuation.clone()),
             "the second declared request is unobserved"
         );
-        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("continuation call");
         apply(&mut view, continuation).expect("all declared requests observed");
     }
 
@@ -8464,8 +8479,8 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
-        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         apply(
             &mut view,
@@ -8806,27 +8821,29 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn child_tool_request_count_is_one() {
+    fn researcher_tool_request_count_is_bounded() {
         let (mut view, goal, run, child) = research_session();
         apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
-        let widened = Event::ProviderCallRecorded {
-            run_id: run,
-            agent_run_id: child,
-            record: ProviderCallRecord {
-                requested_tools: 2,
-                ..record(
-                    AgentPhase::ChildWork,
-                    ProviderCallDisposition::ToolRequested,
-                    Some(0),
-                )
-            },
-        };
-        assert!(rejected(&view, widened), "a child step declares one Tool");
-        apply(
-            &mut view,
-            child_record(run, child, ProviderCallDisposition::ToolRequested),
-        )
-        .expect("single child request");
+        for requested_tools in 0..=crate::session::MAX_STEP_TOOL_CALLS + 1 {
+            let event = Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: child,
+                record: ProviderCallRecord {
+                    requested_tools,
+                    ..record(
+                        AgentPhase::ChildWork,
+                        ProviderCallDisposition::ToolRequested,
+                        Some(0),
+                    )
+                },
+            };
+            let mut candidate = view.clone();
+            assert_eq!(
+                apply(&mut candidate, event).is_ok(),
+                (1..=crate::session::MAX_STEP_TOOL_CALLS).contains(&requested_tools),
+                "researcher request count {requested_tools}"
+            );
+        }
     }
 
     #[test]
