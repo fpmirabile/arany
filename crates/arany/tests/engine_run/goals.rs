@@ -9699,3 +9699,131 @@ async fn researcher_multi_call_steps_charge_each_call_and_keep_model_order() {
         }
     }
 }
+
+#[tokio::test]
+async fn researcher_deadline_records_every_batch_intent_before_non_dispatched_results() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+    const DELEGATION_ALLOWANCE: Duration = Duration::from_secs(20 * 60);
+    const REMAINING_TOOL_TIME: Duration = Duration::from_secs(5);
+    let _deadline = engine_support::deadline("researcher batch deadline", TEST_TIMEOUT);
+    for count in [1, 4] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "bounded facts");
+        let state = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let (entered, release) =
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::ProviderCallRecorded { record, .. }
+                if record.phase == AgentPhase::ChildWork
+                    && record.disposition == ProviderCallDisposition::ToolRequested)
+            });
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    objective: "Read the facts".into(),
+                    profile: None,
+                    editor: None,
+                }],
+            }),
+            ProviderOutcome::Tools(
+                (0..count)
+                    .map(|index| arany::ToolRequest {
+                        id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                        call: facts_read(),
+                    })
+                    .collect(),
+            ),
+        ]));
+        let mut input = request(&workspace, "Delegate the reading");
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let outcome = {
+            let running = run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(running);
+            tokio::select! {
+                result = &mut running => panic!("Run ended before child Tool preparation: {result:?}"),
+                result = entered => result.unwrap(),
+            }
+            tokio::time::pause();
+            tokio::time::advance(DELEGATION_ALLOWANCE - REMAINING_TOOL_TIME).await;
+            tokio::time::resume();
+            release.send(()).unwrap();
+            running.await.unwrap()
+        };
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state, session).await;
+        assert_eq!(view.runs[0], outcome.run);
+        assert_researcher_deadline_batch(&events, &view, count);
+    }
+}
+
+fn assert_researcher_deadline_batch(
+    events: &[arany::EventEnvelope],
+    view: &SessionView,
+    count: usize,
+) {
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolStopped));
+    assert!(!view.goals[0].budget_closed);
+    assert!(view.goals[0].budget_refusal.is_none());
+    assert!(run.tools.is_empty());
+    let child = &run.agents[1];
+    assert_eq!(child.tools.len(), count);
+    assert_eq!(child.provider_calls[0].requested_tools as usize, count);
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolStarted {
+                agent_run_id,
+                intent,
+                ..
+            } if *agent_run_id == child.id => Some((event.sequence, intent.id)),
+            _ => None,
+        })
+        .collect();
+    let finishes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolFinished {
+                agent_run_id,
+                observation,
+                ..
+            } if *agent_run_id == child.id => Some((event.sequence, observation.intent.id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), count);
+    assert_eq!(finishes.len(), count);
+    assert!(starts.last().unwrap().0 < finishes[0].0);
+    for (index, tool) in child.tools.iter().enumerate() {
+        assert_eq!(starts[index].1, finishes[index].1);
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+        assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+        assert_eq!(
+            observation.output,
+            "Delegation deadline reached; no operation was dispatched"
+        );
+        assert!(observation.attestation.is_none());
+        assert!(tool.hooks.is_empty());
+    }
+    assert_action_bounds(events, false, false);
+}

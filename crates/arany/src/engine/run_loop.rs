@@ -824,13 +824,15 @@ impl<'a> RunLoop<'a> {
             return Ok(tool_compaction::ContextCapacity::Fits);
         }
         let contract = self.ledger().plan_contract()?;
-        let mut refusal_index = None;
-        for (index, item) in requests.iter().enumerate() {
-            if self.check_tool(&item.call, contract.as_ref()).is_err()
-                || self.primary_lease_allows(&item.call)?.is_err()
-            {
-                refusal_index = Some(index);
-                break;
+        let mut refusal_index = requests
+            .iter()
+            .position(|item| self.check_tool(&item.call, contract.as_ref()).is_err());
+        if refusal_index.is_none() {
+            for (index, item) in requests.iter().enumerate() {
+                if self.primary_lease_allows(&item.call)?.is_err() {
+                    refusal_index = Some(index);
+                    break;
+                }
             }
         }
         let step = crate::tools::ToolStep {

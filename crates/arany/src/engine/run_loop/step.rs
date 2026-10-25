@@ -323,16 +323,27 @@ impl RunLoop<'_> {
     ) -> Result<Result<Vec<EffectIntent>, StopCause>, EngineError> {
         let mut intents = Vec::with_capacity(step.requests.len());
         for request in &step.requests {
-            let sized = if step.requests.len() == 1 {
-                self.prepare_step_intent(grant, runtime, step, request.call.clone(), &request.call)
-                    .await?
-            } else {
-                self.sized_intent(grant, runtime, step, request.call.clone(), &request.call)
-                    .await?
-                    .map_err(StopCause::from)
-            };
+            let sized = self
+                .sized_intent(grant, runtime, step, request.call.clone(), &request.call)
+                .await?
+                .map_err(StopCause::from);
             match sized {
                 Ok(intent) => intents.push(intent),
+                Err(StopCause::DelegationDeadline) => {
+                    let calls: Vec<_> = step
+                        .requests
+                        .iter()
+                        .map(|request| request.call.clone())
+                        .collect();
+                    let cause = match self
+                        .record_delegation_deadline(grant, runtime, &calls)
+                        .await?
+                    {
+                        Ok(()) => StopCause::DelegationDeadline,
+                        Err(refusal) => refusal.into(),
+                    };
+                    return Ok(Err(cause));
+                }
                 Err(cause) => {
                     if cause == StopCause::ActiveTime {
                         self.active_time_floor
@@ -393,6 +404,17 @@ impl RunLoop<'_> {
             {
                 return Ok(Err(StopCause::ContextFull));
             }
+        }
+        self.admit_step_journal(runtime, intents).await?;
+        Ok(Ok(()))
+    }
+
+    async fn admit_step_journal(
+        &self,
+        runtime: &ToolRuntime,
+        intents: &[EffectIntent],
+    ) -> Result<(), EngineError> {
+        if intents.len() > 1 {
             let action = crate::engine::ledger::Action::ToolStep {
                 calls: intents.len(),
             };
@@ -416,7 +438,7 @@ impl RunLoop<'_> {
                 )
                 .await?;
         }
-        Ok(Ok(()))
+        Ok(())
     }
 
     async fn finish_undispatched(

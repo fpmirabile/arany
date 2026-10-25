@@ -4344,6 +4344,8 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
 
 #[tokio::test]
 async fn narrowed_batch_stops_when_replacement_preparation_exhausts_active_time() {
+    const ACTIVE_ALLOWANCE_MS: u64 = 100_000;
+    const REMAINING_BEFORE_REPLACEMENT_MS: u64 = 5_000;
     let _deadline = engine_support::deadline("narrowed batch allowance", HOOK_CANCELLATION_TIMEOUT);
     let narrowed = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
@@ -4385,7 +4387,7 @@ async fn narrowed_batch_stops_when_replacement_preparation_exhausts_active_time(
     input.session_id = Some(session);
     input.title = None;
     input.goal.budget = Some(arany::GoalBudget {
-        max_active_ms: Some(100_000),
+        max_active_ms: Some(ACTIVE_ALLOWANCE_MS),
         ..budget()
     });
     let controls = RunControls {
@@ -4400,7 +4402,10 @@ async fn narrowed_batch_stops_when_replacement_preparation_exhausts_active_time(
             result = entered => result.unwrap(),
         }
         tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(95)).await;
+        tokio::time::advance(Duration::from_millis(
+            ACTIVE_ALLOWANCE_MS - REMAINING_BEFORE_REPLACEMENT_MS,
+        ))
+        .await;
         tokio::time::resume();
         release.send(()).unwrap();
         running

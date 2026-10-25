@@ -276,7 +276,7 @@ impl RunLoop<'_> {
             Ok(intent) => Ok(Ok(intent)),
             Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(
                 match self
-                    .record_delegation_deadline(grant, runtime, call)
+                    .record_delegation_deadline(grant, runtime, &[call])
                     .await?
                 {
                     Ok(()) => refusal.into(),
@@ -399,47 +399,58 @@ impl RunLoop<'_> {
         };
     }
 
-    async fn record_delegation_deadline(
+    pub(super) async fn record_delegation_deadline(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
-        call: ToolCall,
+        calls: &[ToolCall],
     ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
         let Grant::Researcher { child, .. } = grant else {
             return Err(EngineError::CoordinatorFailed);
         };
-        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        if child.kind.is_editor() {
-            self.shape_worker_intent(&mut intent, child.agent_run_id)?;
+        let mut intents = Vec::with_capacity(calls.len());
+        for call in calls {
+            let mut intent = runtime.intent(self.run_id, child.agent_run_id, call.clone());
+            if child.kind.is_editor() {
+                self.shape_worker_intent(&mut intent, child.agent_run_id)?;
+            }
+            let permission = self
+                .permission(grant, runtime, &intent.call)
+                .narrow_terminal(self.terminal_mode(), &intent.call);
+            if let Err(refusal) = self
+                .admit_tool(grant, runtime, &intent, permission, 0, false)
+                .await?
+            {
+                return Ok(Err(refusal));
+            }
+            intents.push(intent);
         }
+        self.admit_step_journal(runtime, &intents).await?;
+        for intent in &intents {
+            self.commit_intent(grant, runtime, intent, &intent.call)
+                .await?;
+        }
+        for intent in intents {
+            self.finish_delegation_deadline(grant, runtime, intent)
+                .await?;
+        }
+        Ok(Ok(()))
+    }
+
+    async fn finish_delegation_deadline(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+    ) -> Result<(), EngineError> {
         let permission = self
             .permission(grant, runtime, &intent.call)
             .narrow_terminal(self.terminal_mode(), &intent.call);
-        if let Err(refusal) = self
-            .admit_tool(grant, runtime, &intent, permission, 0, false)
-            .await?
-        {
-            return Ok(Err(refusal));
-        }
-        self.append(Event::ToolStarted {
-            run_id: self.run_id,
-            agent_run_id: child.agent_run_id,
-            intent: intent.clone().into(),
-            active_ceiling_ms: self.ledger().active_ceiling(0)?,
-        })
-        .await?;
-        if child.kind.is_editor() {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&child.agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
-        }
+        let agent_run_id = intent.agent_run_id;
         if let Some(mode) = effective_permission_mode(runtime.permissions(), grant) {
             self.append(Event::ToolPermissionDecided {
                 run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
+                agent_run_id,
                 verdict: PermissionVerdict {
                     host: None,
                     intent_digest: intent.digest(),
@@ -461,12 +472,12 @@ impl RunLoop<'_> {
         }
         self.append(Event::ToolFinished {
             run_id: self.run_id,
-            agent_run_id: child.agent_run_id,
+            agent_run_id,
             observation: not_dispatched(intent, &NotDispatched::DelegationDeadline),
             checkpoint: None,
         })
         .await?;
-        Ok(Ok(()))
+        Ok(())
     }
 }
 
