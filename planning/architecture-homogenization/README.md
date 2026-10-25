@@ -395,13 +395,13 @@ Batches are the sequencing for the protective subset. Each batch's slices share 
 - **Batch 1:** D2, A1, P3, E1a, E6, G1 and T1. D2 has no gate. P3 is one function and does not wait for P1 or P2. E1a and E6 are the single owners of the permission and facts-table edits that host-commands S2 and PR reads need.
 - **Batch 2:** V1 (after D2's Execution prose transfer), B8 and B6 (after P3 and B1's one-line provider/controls import edits, not the full B1 track), E1b (after E1a), S5a, R2a and R1a.
 - **Batch 3:** V2 (after V1 and reservation of its projection/test consumers), provider-setup-ui S1 (after P3, B8 and B6), E1c, B11, P1, S5b, R2b, R1b. B11 is the single owner of tool approval lines for host-commands S2 and PR reads.
-- **Batch 4:** provider-setup-ui S2, host-commands S2 (after E1c and B11), E7 (after E1c; it precedes failure-feedback C2), S5c (it precedes snapshot PR3), R2c, R1c.
-- **Batch 5:** provider-setup-ui S3, PR reads S1 (after E6, E1b and B11), real-scale snapshot PR3 (after S5c), failure-feedback C2 (after E7), P2a (after P1), R2d, R1d.
+- **Batch 4:** provider-setup-ui S2, host-commands S2 (after E1c and B11), E7 (after E1c), S5c (it precedes snapshot PR3), R2c, R1c.
+- **Batch 5:** provider-setup-ui S3, PR reads S1 (after E6, E1b and B11), real-scale snapshot PR3 (after S5c), P2a (after P1), R2d, R1d.
 - **Batch 6 and later:** PR reads S2, E2a → E2b → E2c (E2a after E7), E3a → E3b → E3c → E4a → E4b → E5a → E5b → G2, P2b, B2, B1, B3a → B3b → B3c → B3d → B3e → B3f → B7, B9a → B9b → B9c → B9d → B9e → B9f (B9a after B1), B12, B4 research, R2e. B8 never opens before B1's provider import lands.
 
 Within **Batch 6 and later**, the decision follow-ups drain as **V3 → J1 → J2 → K1 → K2**. V3 waits for V2, G2 and P1; J1 waits for E1–E4, G2 and R1d as well as V3. K1 waits for all P1–P3. Each opens only after the predecessor's files and any adapted evidence/consumer files are released; these slices do not run concurrently with overlapping Engine, Event, migration or setup work.
 
-Feature items interleave with these batches: provider-setup-ui S1–S3 (batches 3–5), host-commands S2 (batch 4), snapshot PR3, failure-feedback C2 and PR reads S1 (batch 5). E6 precedes PR reads, and E7 precedes failure-feedback C2; S5c precedes snapshot PR3.
+Feature items interleave with these batches: provider-setup-ui S1–S3 (batches 3–5), host-commands S2 (batch 4), snapshot PR3 and PR reads S1 (batch 5). E6 precedes PR reads; S5c precedes snapshot PR3.
 
 ## Exit criteria
 
