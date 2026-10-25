@@ -802,8 +802,9 @@ async fn run_signalled(
 mod tests {
     use super::*;
     use arany::{
-        AgentPhase, Answer, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-        RunId, RunStop, SessionView, Tapped,
+        AgentPhase, Answer, Event, ProviderError, ProviderOutcome, ProviderRequest,
+        ProviderResponse, RunId, RunStop, SessionView, Tapped,
+        test_support::scenario::ScriptedProvider,
     };
     use std::{
         collections::VecDeque,
@@ -1437,10 +1438,63 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
+    async fn run_with_budget_spent_after_answer(
+        exec: ExecArgs,
+        admission: Admission,
+        provider: ScriptedProvider,
+        active_time: std::time::Duration,
+    ) -> CommandOutput {
+        const ANSWER_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+        let requests = Arc::clone(&provider.requests);
+        let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
+        let provider = provider.with_before_call(1, move || {
+            let session = requests
+                .lock()
+                .expect("requests")
+                .last()
+                .expect("call")
+                .session_id;
+            let gate = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::MessageCommitted { .. })
+            });
+            gate_tx.try_send(gate).expect("one answer gate");
+        });
+        let run = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
+        tokio::pin!(run);
+        let answer_deadline = tokio::time::Instant::now() + ANSWER_GATE_TIMEOUT;
+        let gate = tokio::select! {
+            gate = tokio::time::timeout_at(answer_deadline, gate_rx.recv()) => gate,
+            result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
+        };
+        let (entered, release) = match gate {
+            Ok(Some(gate)) => gate,
+            _ => {
+                drop(gate_rx);
+                panic!("answer gate was not installed before the deadline");
+            }
+        };
+        let entered = tokio::select! {
+            entered = tokio::time::timeout_at(answer_deadline, entered) => entered,
+            result = &mut run => {
+                drop(release);
+                panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success));
+            }
+        };
+        if !matches!(entered, Ok(Ok(()))) {
+            drop(release);
+            panic!("committed answer gate failed: {entered:?}");
+        }
+        tokio::time::pause();
+        tokio::time::advance(active_time).await;
+        tokio::time::resume();
+        release.send(()).expect("release accepted answer");
+        run.await.expect("completed Run with an exhausted Goal")
+    }
+
     fn budget_feedback_fixture(
         temp: &std::path::Path,
         budget: GoalBudget,
-    ) -> (ExecArgs, arany::test_support::scenario::ScriptedProvider) {
+    ) -> (ExecArgs, ScriptedProvider) {
         use std::os::unix::fs::PermissionsExt;
         let workspace = arany::test_support::goals::facts_workspace(temp, "v1");
         let state_dir = temp.join("state");
@@ -1481,7 +1535,7 @@ mod tests {
                 content: "v2".into(),
             },
         };
-        let provider = arany::test_support::scenario::ScriptedProvider::new(vec![
+        let provider = ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
@@ -1491,7 +1545,6 @@ mod tests {
 
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
-        const ANSWER_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
         let temp = tempfile::tempdir().expect("private test root");
         let budget = GoalBudget {
             max_active_ms: Some(60_000),
@@ -1509,32 +1562,14 @@ mod tests {
             .expect("fixture Session");
         engine.close().await.expect("fixture Engine shutdown");
         exec.session_id = Some(session.to_string());
-        let (entered, release) =
-            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(event, arany::Event::MessageCommitted { .. })
-            });
         let admission = exec.admit().expect("valid autonomous command");
-        let running = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
-        tokio::pin!(running);
-        let entered = tokio::select! {
-            result = &mut running => {
-                drop(release);
-                panic!("Run ended before its answer committed: {:?}", result.map(|report| report.success));
-            }
-            entered = tokio::time::timeout(ANSWER_GATE_TIMEOUT, entered) => entered,
-        };
-        if !matches!(entered, Ok(Ok(()))) {
-            drop(release);
-            panic!("committed answer gate failed: {entered:?}");
-        }
-        tokio::time::pause();
-        tokio::time::advance(std::time::Duration::from_millis(
-            budget.max_active_ms.expect("finite active time"),
-        ))
+        let report = run_with_budget_spent_after_answer(
+            exec,
+            admission,
+            provider,
+            std::time::Duration::from_millis(budget.max_active_ms.expect("finite active time")),
+        )
         .await;
-        tokio::time::resume();
-        release.send(()).expect("acknowledge the committed answer");
-        let report = running.await.expect("completed Run with an exhausted Goal");
         let first_event: serde_json::Value =
             serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
                 .expect("JSONL Event");
