@@ -4,7 +4,10 @@ use ratatui::{
     buffer::Cell,
     layout::{Position, Rect, Size},
 };
-use std::{io, ops::Range};
+use std::{
+    io::{self, Write},
+    ops::Range,
+};
 
 pub(super) struct TerminalBackend {
     inner: CrosstermBackend<TerminalOutput>,
@@ -12,6 +15,10 @@ pub(super) struct TerminalBackend {
     mode: TerminalMode,
     area: Rect,
     position: Position,
+    #[cfg(test)]
+    test_size: Option<Size>,
+    #[cfg(test)]
+    fail_graphics_writes: bool,
 }
 
 impl TerminalBackend {
@@ -22,7 +29,20 @@ impl TerminalBackend {
             mode,
             area: Rect::default(),
             position: Position::default(),
+            #[cfg(test)]
+            test_size: None,
+            #[cfg(test)]
+            fail_graphics_writes: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn failing_graphics_writer(width: u16, height: u16) -> Self {
+        let mut backend = Self::new(TerminalMode::Fullscreen, None);
+        backend.inner = CrosstermBackend::new(TerminalOutput(None));
+        backend.test_size = Some(Size::new(width, height));
+        backend.fail_graphics_writes = true;
+        backend
     }
 
     pub(super) fn set_area(&mut self, area: Rect) {
@@ -31,6 +51,15 @@ impl TerminalBackend {
 
     pub(super) fn cursor_offset(&self) -> u16 {
         self.position.y.saturating_sub(self.area.y)
+    }
+
+    pub(super) fn write_graphics(&mut self, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_graphics_writes {
+            return Err(io::Error::other("injected graphics writer failure"));
+        }
+        self.inner.write_all(bytes)?;
+        Write::flush(&mut self.inner)
     }
 
     pub(super) fn clear_owned(&mut self) -> io::Result<()> {
@@ -120,6 +149,9 @@ impl Backend for TerminalBackend {
     }
 
     fn size(&self) -> io::Result<Size> {
+        #[cfg(test)]
+        let size = self.test_size.map_or_else(|| self.inner.size(), Ok)?;
+        #[cfg(not(test))]
         let size = self.inner.size()?;
         if size.width == 0
             || size.height == 0
@@ -139,7 +171,7 @@ impl Backend for TerminalBackend {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        Backend::flush(&mut self.inner)
     }
 
     fn scroll_region_up(&mut self, region: Range<u16>, count: u16) -> io::Result<()> {
