@@ -161,6 +161,11 @@ impl ToolApprovals {
         self
     }
 
+    pub fn without_prefix_rules(mut self) -> Self {
+        self.prefix_rules = false;
+        self
+    }
+
     pub(crate) fn admits_prefix_rules(&self) -> bool {
         self.human_only && self.prefix_rules
     }
