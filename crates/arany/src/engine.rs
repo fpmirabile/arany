@@ -40,6 +40,7 @@ pub(crate) use run_loop::MAX_DELEGATION_DEADLINE;
 #[cfg(test)]
 mod tests;
 pub use crate::tools::Cancellation as RunCancellation;
+pub use crate::tools::ToolGrant;
 use hints::HintPublisher;
 pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
@@ -314,17 +315,6 @@ pub struct EngineConfig {
     /// Launched by every Tool grant; a grant without one is refused at submission.
     pub guard_executable: Option<PathBuf>,
     pub worker_concurrency: Option<u8>,
-}
-
-/// The Tools one submission may use.
-#[derive(Clone, Default)]
-pub enum ToolGrant {
-    #[default]
-    None,
-    /// The State's private `tools.json`, loaded at submission.
-    Configured,
-    /// The trusted Workspace's built-in grant.
-    Trusted(crate::tools::WorkspacePermissions),
 }
 
 /// What the caller holds for one submission; every Run of its Goal loop uses them.

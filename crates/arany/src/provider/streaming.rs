@@ -472,14 +472,14 @@ impl<'a> ResponsesPreview<'a> {
 #[derive(Debug)]
 pub(super) struct StreamResponseError {
     pub(super) error: ProviderError,
-    pub(super) stage: crate::diagnostics::SubscriptionFailureStage,
+    pub(super) stage: crate::provider::diagnostics::SubscriptionFailureStage,
 }
 
 pub(super) fn validate_stream_response(
     response: &reqwest::Response,
     max_output_tokens: u32,
 ) -> Result<(), StreamResponseError> {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     use reqwest::header;
     let stage = if response
         .content_length()
