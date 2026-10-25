@@ -1,12 +1,12 @@
 use super::{
-    AgentRunId, PendingData, ReplayError, RunView, SealedWorkerData, integration_in_flight,
-    pending_command_capture, primary, private_criterion_evidence, tool, valid_delta, valid_discard,
+    AgentRunId, PendingData, ReplayError, RunView, SealedWorkerData, apply_command_capture,
+    integration_in_flight, primary, private_criterion_evidence, tool, valid_delta, valid_discard,
     verification_passed, worker, worker_mut,
 };
 use crate::session::GoalPlanContract;
 use crate::session::worker::{
-    ChangesetSource, EffectTarget, WORKER_CHUNK_BYTES, WORKER_FILES, WorkerDataChunk,
-    WorkerDataPurpose, WorkerDataSealed, WorkerDisposition, WorkerHandover, WorkerIntegration,
+    ChangesetSource, EffectTarget, WORKER_CHUNK_BYTES, WorkerDataChunk, WorkerDataPurpose,
+    WorkerDataSealed, WorkerDisposition, WorkerHandover, WorkerIntegration,
     WorkerIntegrationOutcome, WorkerSettlement, WorkerSettlementReason, WorkerStopRecord,
     WorkerVerification, decode_data,
 };
@@ -97,18 +97,15 @@ fn chunk_limits(
     c: &WorkerDataChunk,
     actor: AgentRunId,
 ) -> Result<(usize, usize), ReplayError> {
-    let command = pending_command_capture(run);
     let t = tool(run, actor)
         .filter(|t| {
             t.observation.is_none()
-                || command.as_ref().is_some_and(|(a, id, data)| {
+                || run.workers.capture.as_ref().is_some_and(|(a, id, data)| {
                     *a == actor && *id == t.intent.id && data.assignment_id == c.assignment_id
                 })
         })
         .ok_or(ReplayError::InvalidTransition)?;
-    if t.intent.id != c.tool_id
-        || matches!(t.intent.call, ToolCall::Command { .. }) && command.is_none()
-    {
+    if t.intent.id != c.tool_id {
         return Err(ReplayError::InvalidTransition);
     }
     let limits = if let ToolCall::PrepareWorker { preparation } = &t.intent.call {
@@ -158,7 +155,7 @@ pub(super) fn data_sealed(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    let command = pending_command_capture(run);
+    let command = run.workers.capture.clone();
     if let Some((a, id, data)) = &command
         && (*a != actor || *id != s.tool_id || data != &s.data)
     {
@@ -171,29 +168,9 @@ pub(super) fn data_sealed(
         facts,
     });
     run.workers.pending = None;
-    if command.is_some() {
+    if let Some(capture) = command {
+        apply_command_capture(run, &capture)?;
         run.workers.capture = None;
-        let changes = valid_delta(run, actor, &s.data, false)?;
-        if changes.is_empty() {
-            return Err(ReplayError::InvalidTransition);
-        }
-        let w = worker_mut(run, actor)?;
-        w.revision = w
-            .revision
-            .checked_add(1)
-            .filter(|r| *r <= 16)
-            .ok_or(ReplayError::InvalidTransition)?;
-        for change in changes {
-            if let Some(old) = w.overlay.iter_mut().find(|f| f.path == change.path) {
-                old.after = change.after;
-            } else {
-                w.overlay.push(change);
-            }
-        }
-        w.overlay.sort_by(|a, b| a.path.cmp(&b.path));
-        if w.overlay.len() > WORKER_FILES {
-            return Err(ReplayError::InvalidTransition);
-        }
     }
     Ok(())
 }
