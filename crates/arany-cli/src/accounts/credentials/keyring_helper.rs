@@ -312,18 +312,29 @@ mod tests {
             "synthetic-key".into(),
         )
         .unwrap();
-        let record = serde_json::to_string(&account).unwrap();
-        for (id, provider, accepted) in [
-            (account.id, "openai", true),
-            (Uuid::now_v7(), "openai", false),
-            (account.id, "anthropic", false),
+        let mut legacy = serde_json::to_value(&account).unwrap();
+        legacy["schema"] = 2.into();
+        legacy["provider"] = "openai".into();
+        for record in [
+            serde_json::to_string(&account).unwrap(),
+            serde_json::to_string(&legacy).unwrap(),
         ] {
-            assert_eq!(
-                valid_authorized_record(DEFAULT_ACCOUNT, &record, Some((id, provider.into()))),
-                accepted,
-                "native account identity boundary"
-            );
+            for (id, provider, accepted) in [
+                (account.id, "openai", true),
+                (Uuid::now_v7(), "openai", false),
+                (account.id, "anthropic", false),
+            ] {
+                assert_eq!(
+                    valid_authorized_record(DEFAULT_ACCOUNT, &record, Some((id, provider.into()))),
+                    accepted,
+                    "native account identity boundary"
+                );
+            }
         }
+        assert!(!valid_record(
+            DEFAULT_ACCOUNT,
+            &serde_json::to_vec(&legacy).unwrap()
+        ));
     }
 
     #[test]
@@ -734,11 +745,15 @@ fn valid_native_identity(slot: &str, id: Uuid, provider: &str) -> bool {
 
 fn valid_authorized_record(slot: &str, record: &str, expected: Option<(Uuid, String)>) -> bool {
     record.len() <= slot_record_limit(slot).unwrap_or(0)
-        && valid_record(slot, record.as_bytes())
-        && expected.is_none_or(|(id, provider)| {
-            serde_json::from_str::<SavedAccount>(record)
-                .is_ok_and(|account| account.id == id && account.provider == provider)
-        })
+        && if slot.starts_with("chatgpt-") {
+            valid_record(slot, record.as_bytes()) && expected.is_none()
+        } else {
+            super::decode_account(record.as_bytes()).is_ok_and(|account| {
+                expected.is_none_or(|(id, provider)| {
+                    account.id == id && account.provider.profile() == provider
+                })
+            })
+        }
 }
 
 pub(super) fn main() -> ExitCode {

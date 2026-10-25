@@ -2,7 +2,7 @@ use super::routing::{Route, RoutingError, admit};
 use super::select::{ProviderArg, Selection};
 use arany::{
     AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, ProviderKind,
-    Providers, RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
+    Providers, RecordFormat, RecordKind, RecordStep, RosterSnapshot, StateRoot, valid_profile_name,
 };
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
@@ -80,10 +80,23 @@ pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRoster,
     field: "version",
     floor: 1,
-    current: 1,
-    steps: &[],
+    current: 2,
+    steps: &[RecordStep {
+        from: 1,
+        transform: migrate_roster,
+    }],
     accepts: |bytes| presets(bytes).is_ok(),
 };
+
+fn migrate_roster(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    for profile in value.get_mut("profiles")?.as_array_mut()? {
+        for route in profile.get_mut("routes")?.as_array_mut()? {
+            super::routing::migrate_route(route)?;
+        }
+    }
+    value["version"] = PROVIDER_ROSTER.current.into();
+    Some(value)
+}
 
 pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<bool, String> {
     let state = StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable")?;
@@ -100,7 +113,7 @@ pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<
         .profiles
         .iter()
         .flat_map(|profile| &profile.routes)
-        .any(|route| route.provider == provider))
+        .any(|route| route.provider.profile() == provider))
 }
 
 fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
@@ -118,7 +131,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         return Err(INVALID.into());
     }
     let mut config: Config = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
-    if config.version != 1
+    if u64::from(config.version) != PROVIDER_ROSTER.current
         || config.profiles.is_empty()
         || config.profiles.len() > 32
         || config.presets.is_empty()
@@ -138,10 +151,10 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         for index in 0..profile.routes.len() {
             let route = &mut profile.routes[index];
             route.validate().map_err(|_| INVALID)?;
-            if ProviderKind::parse(&route.provider).is_some_and(ProviderKind::is_native_api) {
+            if route.provider.kind().is_native_api() {
                 route.effort = Some(
                     arany::resolve_native_effort_for_run(
-                        &route.provider,
+                        &route.provider.profile(),
                         &route.model,
                         route.effort,
                     )
@@ -250,7 +263,7 @@ impl SelectedRoster {
                 for route in &profile.routes {
                     if !super::select::authenticate(
                         state_dir,
-                        &route.provider,
+                        &route.provider.profile(),
                         &route.model,
                         route.effort,
                         route.account_id,
@@ -283,7 +296,7 @@ impl SelectedRoster {
         effort: Option<Effort>,
     ) -> Result<(), String> {
         let primary = self.primary();
-        if provider.is_some_and(|provider| provider.profile_label() != primary.provider)
+        if provider.is_some_and(|provider| provider.profile_label() != primary.provider.profile())
             || model.is_some_and(|model| model != primary.model)
             || effort.is_some_and(|effort| Some(effort) != primary.effort)
         {
@@ -307,7 +320,7 @@ impl SelectedRoster {
             } else {
                 selection.effort
             };
-        if selection.profile != primary.provider
+        if selection.profile != primary.provider.profile()
             || selection.model != primary.model
             || effort != primary.effort
             || selection.account_id != primary.account_id
@@ -329,18 +342,18 @@ impl SelectedRoster {
         );
         for profile in &self.profiles {
             for (index, route) in profile.routes.iter().enumerate() {
-                let billing = match ProviderKind::parse(&route.provider) {
-                    Some(ProviderKind::ChatGpt) => {
+                let billing = match route.provider.kind() {
+                    ProviderKind::ChatGpt => {
                         "ChatGPT plan; local-only output cap does not cap remote plan consumption"
                     }
-                    Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => "native API",
-                    Some(ProviderKind::Custom) | None => "exact custom; unknown pricing",
+                    ProviderKind::OpenAi | ProviderKind::Anthropic => "native API",
+                    ProviderKind::Custom => "exact custom; unknown pricing",
                 };
                 text.push_str(&format!(
                     "  {}[{}]: {}/{} effort={} ({})\n",
                     profile.name,
                     index,
-                    route.provider,
+                    route.provider.profile(),
                     crate::presentation::escape_terminal(&route.model),
                     route
                         .effort
@@ -451,7 +464,7 @@ pub(crate) async fn pinned_compaction(
     let mut chain = Vec::new();
     for identity in routes {
         let route = Route {
-            provider: identity.profile.clone(),
+            provider: arany::ProviderRecord::parse(&identity.profile).ok_or(INVALID)?,
             model: identity.model.clone(),
             effort: identity.effort,
             account_id: match &identity.provenance {
@@ -479,7 +492,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn record() -> Value {
-        json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
+        json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
     }
 
     #[test]
@@ -494,7 +507,7 @@ mod tests {
         let mut config = record();
         config["profiles"].as_array_mut().unwrap().push(json!({
             "name": "alternative",
-            "routes": [{"provider":"custom:example-route","model":"example-model","effort":null,"account_id":null}]
+            "routes": [{"provider":{"kind":"custom","custom_name":"example-route"},"model":"example-model","effort":null,"account_id":null}]
         }));
         for selected in [false, true] {
             if selected {
@@ -522,7 +535,7 @@ mod tests {
         assert!(parse(&bytes, "coding").is_ok());
         assert!(parse(&bytes, "missing").is_err());
         for (pointer, value) in [
-            ("/version", json!(2)),
+            ("/version", json!(3)),
             ("/extra", json!(true)),
             ("/profiles/0/extra", json!(true)),
             ("/profiles/0/name", json!("../main")),
@@ -574,7 +587,7 @@ mod tests {
         }
         let source = String::from_utf8(bytes.clone()).unwrap();
         for (from, to) in [
-            ("\"version\":1", "\"version\":1,\"version\":1"),
+            ("\"version\":2", "\"version\":2,\"version\":2"),
             ("\"name\":\"main\"", "\"name\":\"main\",\"name\":\"main\""),
             ("\"child\":null", "\"child\":null,\"child\":null"),
             ("\"effort\":null", "\"effort\":null,\"effort\":null"),
@@ -639,7 +652,7 @@ mod tests {
         }
         for count in [3, 4] {
             let mut chained = valid.clone();
-            chained["profiles"][0]["routes"] = json!((0..count).map(|index| json!({"provider":"openai","model":format!("model-{index}"),"effort":"low","account_id":null})).collect::<Vec<_>>());
+            chained["profiles"][0]["routes"] = json!((0..count).map(|index| json!({"provider":{"kind":"openai","custom_name":null},"model":format!("model-{index}"),"effort":"low","account_id":null})).collect::<Vec<_>>());
             assert_eq!(
                 parse(&serde_json::to_vec(&chained).unwrap(), "coding").is_ok(),
                 count == 3
@@ -684,7 +697,7 @@ mod tests {
                 .unwrap()
                 .primary()
         );
-        metadata["profiles"][0]["routes"][0] = json!({"provider":"chatgpt","model":"visible-model","effort":"high","account_id":uuid::Uuid::now_v7()});
+        metadata["profiles"][0]["routes"][0] = json!({"provider":{"kind":"chatgpt","custom_name":null},"model":"visible-model","effort":"high","account_id":uuid::Uuid::now_v7()});
         let subscription = parse(&serde_json::to_vec(&metadata).unwrap(), "coding").unwrap();
         assert_eq!(
             subscription.manifest().unwrap(),
@@ -693,7 +706,7 @@ mod tests {
         let names: Vec<_> = (0..8)
             .map(|index| format!("{}{index}", "a".repeat(63)))
             .collect();
-        metadata["profiles"] = json!(names.iter().map(|name| json!({"name":name,"routes":(0..3).map(|index| json!({"provider":format!("custom:{}", "a".repeat(64)),"model":format!("{}{index:02}", "\u{202e}".repeat(42)),"effort":null,"account_id":null})).collect::<Vec<_>>()})).collect::<Vec<_>>());
+        metadata["profiles"] = json!(names.iter().map(|name| json!({"name":name,"routes":(0..3).map(|index| json!({"provider":{"kind":"custom","custom_name":"a".repeat(64)},"model":format!("{}{index:02}", "\u{202e}".repeat(42)),"effort":null,"account_id":null})).collect::<Vec<_>>()})).collect::<Vec<_>>());
         metadata["presets"][0]["providers"]["primary"] = json!(names[0]);
         metadata["presets"][0]["child_profiles"] = json!(names);
         let maximum = parse(&serde_json::to_vec(&metadata).unwrap(), "coding")

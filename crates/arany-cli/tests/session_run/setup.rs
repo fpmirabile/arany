@@ -4248,9 +4248,9 @@ fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
     let slot = format!("native-test-{}", Uuid::now_v7());
     let _cleanup = Cleanup(slot.clone());
     let account = serde_json::to_vec(&serde_json::json!({
-        "schema": 2,
+        "schema": 3,
         "id": Uuid::now_v7(),
-        "provider": "openai",
+        "provider": {"kind": "openai", "custom_name": null},
         "model": "gpt-5.4",
         "effort": null,
         "api_key": "synthetic-native-helper-key", "anthropic_workspace_id": null

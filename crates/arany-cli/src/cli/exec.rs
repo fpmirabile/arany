@@ -194,7 +194,8 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
         let selected = super::provider::roster::load(&state_dir, &workspace, name)?;
         selected.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
         let primary = selected.primary();
-        args.provider = Some(ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?);
+        args.provider =
+            Some(ProviderArg::from_str(&primary.provider.profile()).map_err(str::to_owned)?);
         args.model = Some(primary.model.clone());
         args.effort = primary.effort;
         let admission = args.admit().map_err(str::to_owned)?;
@@ -430,11 +431,14 @@ async fn classify_submission(submission: Submission) -> Result<ClassifiedSubmiss
                     .map_err(|_| "Session history unavailable or invalid")?;
                 store.close().await.map_err(|_| "store shutdown failed")?;
                 if let Some(view) = view
-                    && let Some(run) = view.runs.iter().rev().find(|run| {
-                        view.budget_stop_goal(run)
-                            .is_some_and(|goal| goal.id == goal_id)
+                    && let Some(feedback) = crate::presentation::budget_refusal_feedback(
+                        &view,
+                        Some(goal_id),
+                    )
+                    .or_else(|| {
+                        crate::presentation::budget_stop_run(&view, Some(goal_id))
+                            .and_then(|run| crate::presentation::session_run_feedback(&view, run))
                     })
-                    && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
                 {
                     return Err(feedback);
                 }
