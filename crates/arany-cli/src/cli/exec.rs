@@ -1538,7 +1538,7 @@ mod tests {
         tokio::time::advance(active_time).await;
         tokio::time::resume();
         release.send(()).expect("release accepted answer");
-        tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, run)
+        tokio::time::timeout(ANSWER_GATE_TIMEOUT, run)
             .await
             .expect("Goal settlement deadline")
             .expect("completed Run with an exhausted Goal")
