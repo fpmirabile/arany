@@ -4795,6 +4795,8 @@ mod goal_replay_tests {
                 changeset: Default::default(),
             })
             .unwrap()
+        } else if matches!(intent.call, ToolCall::GhPrList { .. }) {
+            String::from_utf8(content.to_vec()).unwrap()
         } else {
             serde_json::json!({ "sha256": crate::validate::hex_digest(content) }).to_string()
         };
