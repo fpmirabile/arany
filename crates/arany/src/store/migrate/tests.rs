@@ -2747,15 +2747,20 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
     host["intent"]["limits"]["network"] = serde_json::json!("host");
     let expiry = REGISTRY.event_step("ToolFinished", 24).unwrap();
     assert!((expiry.canonical)(&host.to_string()).is_some());
+    let mut forged_cause = host.clone();
+    forged_cause["approval_cause"] = serde_json::json!("declined");
+    assert!((expiry.canonical)(&forged_cause.to_string()).is_none());
+    assert!((expiry.transform)(forged_cause).is_none());
     let migrated = (expiry.transform)(host.clone()).unwrap();
     assert!(migrated["intent"].get("expires_at_ms").is_none());
     host["intent"]
         .as_object_mut()
         .unwrap()
         .remove("expires_at_ms");
+    host["approval_cause"] = Value::Null;
     assert_eq!(
         migrated, host,
-        "host approval loses only the shared clock expiry"
+        "expiry removal preserves host facts and records unknown approval cause"
     );
     let removal = REGISTRY.event_step("ToolFinished", 26).unwrap();
     assert!((removal.canonical)(&migrated.to_string()).is_some());

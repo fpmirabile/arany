@@ -607,6 +607,36 @@ fn tool_admission_near_capacity_reserves_the_largest_intent_and_its_completion()
     }
 }
 
+const CAPACITY_PADDING_DIVISOR: i64 = 2;
+
+fn pad_capacity(transaction: &Transaction<'_>, rows: i64, page_size: i64) {
+    transaction.execute(
+        "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n < ?1) INSERT INTO capacity_padding SELECT zeroblob(?2) FROM rows",
+        params![rows, page_size / CAPACITY_PADDING_DIVISOR],
+    ).unwrap();
+}
+
+fn fill_admitted_capacity(
+    transaction: &Transaction<'_>,
+    page_size: i64,
+    admits: impl Fn(&Transaction<'_>) -> bool,
+) {
+    assert!(admits(transaction));
+    let mut batch = (ADMISSION_HEADROOM_BYTES / page_size / CAPACITY_PADDING_DIVISOR).max(1);
+    while batch > 0 {
+        transaction.execute_batch("SAVEPOINT step").unwrap();
+        pad_capacity(transaction, batch, page_size);
+        if admits(transaction) {
+            transaction.execute_batch("RELEASE step").unwrap();
+        } else {
+            transaction
+                .execute_batch("ROLLBACK TO step; RELEASE step")
+                .unwrap();
+            batch /= CAPACITY_PADDING_DIVISOR;
+        }
+    }
+}
+
 fn assert_tool_tail_capacity(prepared: bool) {
     let temp = tempfile::tempdir().expect("private test root");
     let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
@@ -616,7 +646,9 @@ fn assert_tool_tail_capacity(prepared: bool) {
     let mut proposal: serde_json::Value = serde_json::from_str(&started).unwrap();
     proposal.as_object_mut().unwrap().remove("verdict");
     let proposal = proposal.to_string();
-    let tail_slots = 2 + usize::from(prepared);
+    let completion_observations = 1;
+    let intent_records = 1 + usize::from(prepared);
+    let tail_slots = completion_observations + intent_records;
     let finished = format!(
         "\"{}\"",
         "x".repeat(crate::store::MAX_TOOL_FINISHED_BYTES - 2)
@@ -655,47 +687,22 @@ fn assert_tool_tail_capacity(prepared: bool) {
         t.execute_batch("ROLLBACK TO pair; RELEASE pair").unwrap();
         room >= ADMISSION_HEADROOM_BYTES
     };
-    // Pad, then step one page at a time to the last page count each reservation admits.
-    let pad = |t: &Transaction<'_>, rows: i64| {
-        t.execute(
-            "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n < ?1) INSERT INTO capacity_padding SELECT zeroblob(3000) FROM rows",
-            [rows],
-        )
-        .unwrap();
-    };
-    let last_admitted = |t: &Transaction<'_>, observations: usize| {
-        assert!(admits(t, observations));
-        loop {
-            t.execute_batch("SAVEPOINT step").unwrap();
-            pad(t, 1);
-            if !admits(t, observations) {
-                t.execute_batch("ROLLBACK TO step; RELEASE step").unwrap();
-                return;
-            }
-            t.execute_batch("RELEASE step").unwrap();
-        }
-    };
     transaction
         .execute_batch("CREATE TABLE capacity_padding(value BLOB NOT NULL) STRICT;")
         .unwrap();
-    let floor = (MAX_DATABASE_BYTES - ADMISSION_HEADROOM_BYTES) / page_size;
-    pad(
-        &transaction,
-        floor
-            - pages(&transaction)
-            - (tail_slots as i64 + 1) * crate::store::MAX_TOOL_FINISHED_BYTES as i64 / page_size,
-    );
-    last_admitted(&transaction, tail_slots);
+    fill_admitted_capacity(&transaction, page_size, |t| admits(t, tail_slots));
     assert!(tail_commits(&transaction));
-    pad(&transaction, 1);
+    pad_capacity(&transaction, 1, page_size);
     assert!(
         !admits(&transaction, tail_slots),
         "the intent is refused before dispatch"
     );
-    last_admitted(&transaction, tail_slots - 1);
+    fill_admitted_capacity(&transaction, page_size, |t| {
+        admits(t, completion_observations)
+    });
     assert!(
         !tail_commits(&transaction),
-        "omitting an intent record from admission would strand the step"
+        "omitting intent records from admission would strand the step"
     );
 }
 
