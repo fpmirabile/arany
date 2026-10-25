@@ -9468,13 +9468,15 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
                 },
             })
             .collect();
-        let provider = Arc::new(
-            ScriptedProvider::new(vec![
-                ProviderOutcome::Tools(requests),
-                finish_with("Read step settled"),
-            ])
-            .with_context_window_snapshots(vec![window]),
-        );
+        let mut provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Tools(requests),
+            finish_with("Read step settled"),
+        ])
+        .with_context_window_snapshots(vec![window]);
+        if window.is_some() {
+            provider = provider.with_chatgpt_account(Uuid::now_v7(), [7; 32]);
+        }
+        let provider = Arc::new(provider);
         let mut input = request(&workspace, "Read the facts in one step");
         input.include_paths.clear();
         let outcome = run_with(
