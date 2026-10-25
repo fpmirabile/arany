@@ -594,7 +594,7 @@ mod tests {
         draft.profiles.push(Profile {
             name: "main".into(),
             routes: vec![Route {
-                provider: "openai".into(),
+                provider: arany::ProviderRecord::parse("openai").unwrap(),
                 model: "gpt-5.4".into(),
                 effort: None,
                 account_id: None,
@@ -636,6 +636,15 @@ mod tests {
                 .contains("coding, research")
         );
         let bytes = draft.encode().unwrap().unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            record["version"],
+            crate::cli::provider::roster::PROVIDER_ROSTER.current
+        );
+        assert_eq!(
+            record["profiles"][0]["routes"][0]["provider"],
+            serde_json::json!({"kind":"openai","custom_name":null})
+        );
         let preview = draft.preview().unwrap();
         for expected in [
             "arany --profile coding",
