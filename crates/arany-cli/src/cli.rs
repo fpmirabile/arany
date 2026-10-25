@@ -3,6 +3,27 @@ use arany::{Effort, ProviderError, ProviderKind, StateRoot, resolve_native_effor
 use clap::ValueEnum;
 use std::path::PathBuf;
 
+pub(crate) fn admit_workspace_identity(
+    workspace: &std::path::Path,
+) -> Result<arany::WorkspaceIdentity, &'static str> {
+    use rustix::fs::{Mode, OFlags, fstat, open};
+
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| "Workspace unavailable")?;
+    let directory = open(
+        workspace,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|_| "Workspace unavailable")?;
+    let metadata = fstat(&directory).map_err(|_| "Workspace unavailable")?;
+    Ok(arany::WorkspaceIdentity {
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino as u64,
+    })
+}
+
 pub(crate) mod acp;
 pub(crate) mod attached;
 pub(crate) mod exec;

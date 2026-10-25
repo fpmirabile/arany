@@ -82,8 +82,8 @@ pub(super) async fn open(
                     notice
                         .push_str("; prompt could not fit safely in the draft and was not copied");
                 }
-                if conversation.images_omitted {
-                    notice.push_str("; images were not copied; attach them again");
+                if let Err(error) = composer.restore_images(conversation.images) {
+                    notice.push_str(&format!("; image restoration failed: {error}"));
                 }
                 next.defaults = view.defaults.clone();
                 *session_id = next.id;
