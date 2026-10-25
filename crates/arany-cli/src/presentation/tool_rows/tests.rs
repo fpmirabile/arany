@@ -405,6 +405,31 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn host_pr_view_summary_and_approval_preserve_disclosure() {
+        let tool = tool_fixture(
+            ToolCall::GhPrView {
+                repository: "github.com/example/project".into(),
+                number: 17,
+            },
+            "host: pull request inspected.",
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            "⏺ host PR view #17(github.com/example/project)\n  ⎿ host: pull request inspected."
+        );
+        assert_eq!(
+            tool_approval_lines(&tool.intent),
+            [
+                "Proposed action",
+                "host · remote operation · no automatic retry",
+                "Private GitHub PR data may be sent to the current Provider.",
+                "Repository: github.com/example/project",
+                "Pull request: #17",
+            ]
+        );
+    }
+
+    #[test]
     fn host_pr_list_approval_escapes_branch_filters() {
         let tool = tool_fixture(
             arany::ToolCall::GhPrList {
