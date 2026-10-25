@@ -8354,6 +8354,67 @@ fn clearings(events: &[arany::EventEnvelope]) -> Vec<(usize, u32)> {
 }
 
 #[tokio::test]
+async fn anthropic_evidence_refreshes_between_runs_and_replays_each_window() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts\n");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            finish_with("Checked the facts"),
+            finish_with("Checked the facts again"),
+        ])
+        .with_profile("anthropic", "claude-sonnet-5")
+        .with_context_window_snapshots(vec![Some(100_000), None]),
+    );
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut first_input = request(&workspace, "Check the facts");
+    first_input.include_paths.clear();
+    let first = run_with(&engine, &provider, first_input, RunControls::default())
+        .await
+        .expect("Anthropic context window admitted");
+    assert_eq!(first.run.status, RunStatus::Finished);
+    let mut second_input = request(&workspace, "Check the facts again");
+    second_input.include_paths.clear();
+    let second = run_with(&engine, &provider, second_input, RunControls::default())
+        .await
+        .expect("Anthropic context window revalidated");
+    assert_eq!(second.run.status, RunStatus::Finished);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests[0].input.context_window_tokens, Some(100_000));
+        assert_eq!(requests[1].input.context_window_tokens, None);
+    }
+    engine.close().await.expect("engine shutdown");
+
+    let (first_events, first_view) = replayed(&state_path, first.session_id).await;
+    let (second_events, second_view) = replayed(&state_path, second.session_id).await;
+    assert_eq!(
+        first_view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .context_window_tokens,
+        Some(100_000)
+    );
+    assert_eq!(
+        second_view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .context_window_tokens,
+        None
+    );
+    assert!(first_events.iter().any(|event| matches!(
+        &event.event,
+        Event::RunStarted { config, .. } if config.context_window_tokens == Some(100_000)
+    )));
+    assert!(second_events.iter().any(|event| matches!(
+        &event.event,
+        Event::RunStarted { config, .. } if config.context_window_tokens.is_none()
+    )));
+}
+
+#[tokio::test]
 async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_before_the_next_call() {
     let default = window_run(None, 8, &[(7, 244_800)]).await;
     let pressure = window_run(Some(272_000), 8, &[(7, 244_800)]).await;

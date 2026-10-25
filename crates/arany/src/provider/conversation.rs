@@ -37,6 +37,8 @@ pub struct ProviderRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunInput {
     pub role: PromptRole,
+    /// Engine-pinned adapter ceiling; never rendered into model input.
+    pub context_window_tokens: Option<u32>,
     pub assignment_profiles: Vec<String>,
     pub objective: String,
     pub images: Vec<ProviderImage>,
@@ -84,6 +86,7 @@ impl RunInput {
     pub fn new(role: PromptRole, objective: String) -> Self {
         Self {
             role,
+            context_window_tokens: None,
             assignment_profiles: Vec::new(),
             objective,
             images: Vec::new(),

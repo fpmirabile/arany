@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v39";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v40";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -113,6 +113,7 @@ pub async fn check_native_model(
         .map_err(|error| NativeCheckError::Journal(Box::new(error)))?;
     let deadline =
         (tokio::time::Instant::now() + PROBE_TOTAL_DEADLINE).min(journal.request_deadline());
+    let mut context_window_tokens = None;
     let mut cancelled = false;
     let result = tokio::select! {
         biased;
@@ -122,9 +123,10 @@ pub async fn check_native_model(
             super::catalog::list_native_models_checked(profile, &credentials, &mut journal)
                 .await
                 .map_err(|_| NativeCheckError::CatalogUnavailable)?;
-        if !catalog.iter().any(|entry| entry.id == model) {
+        let Some(model_entry) = catalog.iter().find(|entry| entry.id == model) else {
             return Err(NativeCheckError::ModelUnavailable);
-        }
+        };
+        context_window_tokens = model_entry.context_window_tokens;
         match profile {
             "openai" => {
                 let provider = OpenAiProvider::for_conformance(
@@ -149,6 +151,7 @@ pub async fn check_native_model(
             crate::journal::check::now_ms().map_err(|_| NativeCheckError::EvidenceUnavailable)?;
         let record = NativeEvidenceRecord {
             fingerprint,
+            context_window_tokens,
             checked_at_ms,
             expires_at_ms: checked_at_ms
                 .checked_add(EVIDENCE_AGE_MS)
@@ -275,7 +278,9 @@ pub(super) async fn verify_for_run(
     account_id: Option<Uuid>,
 ) -> Result<(), ProviderError> {
     let credentials = NativeApiCredentials::new(profile, key.to_owned(), None)?;
-    verify_credentials_for_run(root, profile, model, effort, &credentials, account_id).await
+    verify_credentials_for_run(root, profile, model, effort, &credentials, account_id)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn verify_credentials_for_run(
@@ -285,7 +290,7 @@ pub(super) async fn verify_credentials_for_run(
     effort: Effort,
     credentials: &NativeApiCredentials,
     account_id: Option<Uuid>,
-) -> Result<(), ProviderError> {
+) -> Result<Option<u32>, ProviderError> {
     let fingerprint = fingerprint_credentials(profile, model, effort, credentials, account_id)
         .map_err(|error| {
             if matches!(error, NativeCheckError::InvalidSelection) {
@@ -299,10 +304,31 @@ pub(super) async fn verify_credentials_for_run(
         .load_native_evidence(fingerprint)
         .await
         .map_err(|_| ProviderError::Unavailable)?
-        .ok_or(ProviderError::Rejected);
+        .ok_or(ProviderError::Rejected)
+        .map(|record| record.context_window_tokens);
     let closed = store.close().await;
-    result?;
-    closed.map_err(|_| ProviderError::Unavailable)
+    closed.map_err(|_| ProviderError::Unavailable)?;
+    result
+}
+
+pub(crate) async fn context_window_for_run(
+    root: &StateRoot,
+    profile: &str,
+    model: &str,
+    effort: Effort,
+    credentials: &NativeApiCredentials,
+    account_id: Option<Uuid>,
+) -> Option<u32> {
+    let fingerprint =
+        fingerprint_credentials(profile, model, effort, credentials, account_id).ok()?;
+    let store = Store::open_read_only(root.try_clone().ok()?).ok()?;
+    let window = store
+        .load_native_evidence(fingerprint)
+        .await
+        .ok()?
+        .and_then(|record| record.context_window_tokens);
+    store.close().await.ok()?;
+    window
 }
 
 async fn probe<P: Provider>(
@@ -560,6 +586,7 @@ mod tests {
             store
                 .record_native_evidence(NativeEvidenceRecord {
                     fingerprint: legacy,
+                    context_window_tokens: None,
                     checked_at_ms,
                     expires_at_ms: checked_at_ms + 60_000,
                 })
@@ -605,6 +632,7 @@ mod tests {
             .record_native_evidence(NativeEvidenceRecord {
                 fingerprint: fingerprint("openai", "example-model", Effort::High, key, None)
                     .unwrap(),
+                context_window_tokens: None,
                 checked_at_ms,
                 expires_at_ms: checked_at_ms + 60_000,
             })
@@ -667,6 +695,7 @@ mod tests {
                     Some(saved_account_id),
                 )
                 .unwrap(),
+                context_window_tokens: None,
                 checked_at_ms,
                 expires_at_ms: checked_at_ms + 60_000,
             })
@@ -701,17 +730,19 @@ mod tests {
             NativeApiCredentials::new("anthropic", key.into(), Some("wrkspc_One".into())).unwrap()
         };
         reject_superseded_native_evidence(open(), key, checked_at_ms).await;
+        let fingerprint = fingerprint_credentials(
+            "anthropic",
+            "example-model",
+            Effort::High,
+            &credentials(),
+            None,
+        )
+        .unwrap();
         let store = Store::open(open()).expect("reopen Store");
         store
             .record_native_evidence(NativeEvidenceRecord {
-                fingerprint: fingerprint_credentials(
-                    "anthropic",
-                    "example-model",
-                    Effort::High,
-                    &credentials(),
-                    None,
-                )
-                .unwrap(),
+                fingerprint,
+                context_window_tokens: Some(100_000),
                 checked_at_ms,
                 expires_at_ms: checked_at_ms + 60_000,
             })
@@ -728,6 +759,17 @@ mod tests {
         .await
         .expect("same workspace evidence");
         assert_eq!(selected.identity().limits.concurrency, 1);
+        assert_eq!(
+            selected.context_window_tokens_for_run().await,
+            Some(100_000)
+        );
+        let store = Store::open(open()).expect("reopen Store");
+        store
+            .clear_native_evidence(fingerprint)
+            .await
+            .expect("invalidate evidence");
+        store.close().await.expect("close Store");
+        assert_eq!(selected.context_window_tokens_for_run().await, None);
         for workspace in [None, Some("wrkspc_Two")] {
             let credentials =
                 NativeApiCredentials::new("anthropic", key.into(), workspace.map(str::to_owned))

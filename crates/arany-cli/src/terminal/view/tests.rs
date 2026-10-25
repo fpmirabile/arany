@@ -1872,6 +1872,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         "openai",
         &[ModelEntry {
             id: "gpt-5.4".into(),
+            context_window_tokens: None,
             runnable: true,
             efforts: vec![Effort::Medium],
         }],
@@ -1894,6 +1895,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         "openai",
         &[ModelEntry {
             id: "gpt-[alpha]".into(),
+            context_window_tokens: None,
             runnable: true,
             efforts: vec![Effort::Medium],
         }],
@@ -2146,6 +2148,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
             profile,
             &[ModelEntry {
                 id: "pending-model".into(),
+                context_window_tokens: None,
                 runnable: false,
                 efforts: vec![],
             }],
@@ -2877,6 +2880,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
             } else {
                 format!("same-long-prefix-model-{index}")
             },
+            context_window_tokens: None,
             runnable: index == 1,
             efforts: Vec::new(),
         })
@@ -3015,6 +3019,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
 fn inline_custom_model_catalog_shows_declared_efforts() {
     let items = vec![ModelEntry {
         id: "same-long-prefix-model-alpha".into(),
+        context_window_tokens: None,
         runnable: true,
         efforts: vec![Effort::Low, Effort::High],
     }];

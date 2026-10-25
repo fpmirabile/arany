@@ -149,12 +149,13 @@ impl AdmittedProviders {
     }
 
     // Every primary route must carry a window, so a fallback never receives a request above its own ceiling.
-    pub(crate) fn context_window_tokens(&self) -> Option<u32> {
-        self.primary
-            .iter()
-            .map(|provider| provider.context_window_tokens())
-            .min()
-            .flatten()
+    pub(crate) async fn context_window_tokens_for_run(&self) -> Option<u32> {
+        let mut window = None;
+        for provider in &self.primary {
+            let current = provider.context_window_tokens_for_run().await?;
+            window = Some(window.map_or(current, |window: u32| window.min(current)));
+        }
+        window
     }
 
     pub(crate) fn identities(&self) -> ProviderRoutes {

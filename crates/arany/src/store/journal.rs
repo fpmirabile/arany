@@ -44,6 +44,7 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
                 fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
                 checked_at_ms INTEGER NOT NULL,
                 expires_at_ms INTEGER NOT NULL,
+                context_window_tokens INTEGER CHECK(context_window_tokens IS NULL OR context_window_tokens BETWEEN 32768 AND 2000000),
                 check_id TEXT NOT NULL
             ) STRICT;
             CREATE TABLE provider_check_events (
@@ -65,9 +66,9 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
                 backup TEXT NOT NULL,
                 recorded_at_ms INTEGER NOT NULL
             ) STRICT;
-            PRAGMA user_version=6;
+            PRAGMA user_version=7;
             COMMIT;";
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 
 pub(super) struct HotSession {
     session_id: SessionId,

@@ -213,7 +213,10 @@ impl CustomTransport {
     fn request(&self, request: &Value) -> Result<reqwest::RequestBuilder, TransportError> {
         let body = match &self.protocol {
             Protocol::OpenaiResponses => wire::encode_request(request),
-            Protocol::AnthropicMessages { .. } => messages::encode_request(request),
+            Protocol::AnthropicMessages { .. } => messages::encode_request_within(
+                request,
+                crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+            ),
         }
         .map_err(|_| TransportError::InvalidOutcome)?;
         let request = self
