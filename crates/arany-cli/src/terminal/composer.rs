@@ -1195,6 +1195,7 @@ impl Composer {
         let mut deselected = false;
         if let Some(selected) = self.selected_image() {
             match input {
+                TerminalInput::Submit => return ComposerEdit::Unchanged,
                 TerminalInput::Backspace | TerminalInput::Delete => {
                     self.remove_selected_image();
                     return ComposerEdit::Changed;
@@ -1410,7 +1411,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_deselection_requests_redraw_without_text_or_caret_changes() {
+    fn image_focus_changes_redraw_and_submission_retains_the_selected_attachment() {
         let draft = "draft";
         let end = draft.len();
         for (input, cursor) in [
@@ -1435,6 +1436,21 @@ mod tests {
             assert_eq!(composer.cursor_byte_offset(), cursor);
             assert_eq!(composer.images().len(), 1);
             assert_eq!(composer.apply(input), ComposerEdit::Unchanged, "{input:?}");
+        }
+        for draft in ["", "draft"] {
+            let mut composer = Composer::default();
+            composer.insert_literal(draft).unwrap();
+            composer
+                .attach_image(arany::test_support::test_image())
+                .unwrap();
+            assert_eq!(
+                composer.apply(TerminalInput::Submit),
+                ComposerEdit::Unchanged
+            );
+            assert_eq!(composer.selected_image(), Some(0));
+            assert_eq!(composer.images().len(), 1);
+            assert_eq!(composer.text(), draft);
+            assert_eq!(composer.submission(), Ok(Submission::Objective(draft)));
         }
     }
 
