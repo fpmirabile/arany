@@ -90,6 +90,8 @@ Fullscreen selection follows Claude Code fullscreen and Codex. With [mouse captu
 
 Fullscreen inline text panels, including `/usage`, `/settings`, `/help` and quick actions, also support click-drag selection while mouse capture is enabled. The visible panel text highlights in inverse video and underline, so selection stays distinct from a focused row; release copies when Copy on select is enabled, and Ctrl+Shift+C copies an existing selection. Copy uses the rendered, escaped panel text, joins selected rows with line breaks and obeys the same clipboard size limit. A bounded success or failure cue appears in the panel while it remains open; failed copies retain the selection. Moving or resizing the panel clears its selection before the next frame. Escape clears a selection; a later Escape closes the panel. Interactive picker rows keep their existing mouse behavior.
 
+The attached terminal keeps panel selection, copy, cues, picker geometry and help state together. This ownership group does not change terminal behavior or output.
+
 | Work state | Activity |
 |---|---|
 | Idle | No empty agent dashboard |

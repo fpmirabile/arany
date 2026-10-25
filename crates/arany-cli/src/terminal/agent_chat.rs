@@ -1097,7 +1097,7 @@ impl AttachedTerminal {
             self.history.record_notice(TerminalNotice::History(text));
         }
         let palette = self.palette();
-        let armed = self.dialog_armed;
+        let armed = self.panels.dialog_armed;
         let target = self.agent_chat.as_ref().and_then(AgentChat::target);
         let draft = target
             .and_then(|target| {
@@ -1145,7 +1145,7 @@ impl AttachedTerminal {
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
         // The child view offers no selection, so pointer gestures never reach the primary History.
-        self.history_area = None;
+        self.panels.history_area = None;
         Ok(())
     }
 
