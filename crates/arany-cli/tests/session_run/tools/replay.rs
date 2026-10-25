@@ -287,6 +287,11 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
                         agent_run_id,
                         ..
                     }
+                    | Event::ToolActiveTimeReserved {
+                        run_id,
+                        agent_run_id,
+                        ..
+                    }
                     | Event::ToolFinished {
                         run_id,
                         agent_run_id,
@@ -2398,7 +2403,10 @@ async fn four_call_step_show_bytes_survive_engine_close_and_store_reopen() {
             let feedback = arany_cli::presentation::run_feedback(&view.runs[0]).unwrap();
             assert!(feedback.contains("Workspace read stopped before it started"));
             assert!(!feedback.contains("/permissions"));
-            assert!(String::from_utf8(after.stdout).unwrap().contains(&feedback));
+            assert_eq!(
+                arany_cli::presentation::run_feedback(&outcome.run).as_ref(),
+                Some(&feedback)
+            );
         }
     }
 }
