@@ -778,12 +778,8 @@ impl ServerLoop {
             let mut fault = Fault::engine(error);
             if committed_budget
                 && let Ok(view) = threads::load_view(state, turn.thread_id).await
-                && let Some(run) = view.runs.iter().rev().find(|run| {
-                    view.budget_stop_goal(run).is_some_and(|goal| {
-                        Some(goal.id) == turn.state.goal_id && goal.budget_refusal.is_some()
-                    })
-                })
-                && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
+                && let Some(feedback) =
+                    crate::presentation::budget_refusal_feedback(&view, turn.state.goal_id)
             {
                 fault.message = feedback;
             }
