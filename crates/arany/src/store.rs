@@ -29,11 +29,12 @@ pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
-pub use state::{ArchivedHistory, HistoryReset};
 pub(crate) use state::{
-    BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, ProviderCheckLock,
-    SessionRunLock, WorkspaceRunLock, archive_size_with_limit,
+    AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
+    MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
+    archive_size_with_limit,
 };
+pub use state::{ArchivedHistory, HistoryReset};
 pub use state::{ProviderRecordEdit, ProviderRecordTarget, Record, RecordKind, StateRoot};
 #[cfg(target_os = "macos")]
 pub(crate) use state::{capture_archive_async_with_limit, restore_archive_async_with_limit};
