@@ -208,6 +208,104 @@ impl RunProgress<'_> {
         })
     }
 
+    pub(super) async fn composer_input(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        Ok(match input {
+            TerminalInput::Escape if ui.terminal.clipboard_loading() => {
+                ui.terminal.cancel_clipboard_paste();
+                Some(Feedback::Transient(
+                    "Clipboard read cancelled; draft retained".into(),
+                ))
+            }
+            TerminalInput::CycleApprovalMode => {
+                Some(Feedback::History(self.cycle_approval(ui.composer)))
+            }
+            TerminalInput::ClipboardPaste => Some(match ui.terminal.request_clipboard_paste() {
+                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
+            }),
+            TerminalInput::Paste => match ui.terminal.paste_into(ui.composer) {
+                Err(error) => Some(Feedback::History(format!(
+                    "Error: {error}; draft unchanged"
+                ))),
+                Ok(ComposerEdit::Changed) => {
+                    if self.draw(ui, None).is_err() {
+                        return Err(InputFailure::Shutdown(
+                            "terminal rendering failed".to_owned(),
+                        ));
+                    }
+                    None
+                }
+                Ok(ComposerEdit::AtCapacity | ComposerEdit::Unchanged) => None,
+            },
+            input @ (TerminalInput::Character(_)
+            | TerminalInput::Newline
+            | TerminalInput::Backspace
+            | TerminalInput::Delete
+            | TerminalInput::Left
+            | TerminalInput::Right
+            | TerminalInput::WordLeft
+            | TerminalInput::WordRight
+            | TerminalInput::BackspaceWord
+            | TerminalInput::Up
+            | TerminalInput::Down
+            | TerminalInput::Home
+            | TerminalInput::End
+            | TerminalInput::Tab
+            | TerminalInput::Escape) => return self.edit_composer(ui, input),
+            TerminalInput::LineRejected => Some(Feedback::History(
+                "Error: invalid or overlong terminal line; draft unchanged".into(),
+            )),
+            TerminalInput::LineContinued => return self.continued_line(ui),
+            TerminalInput::QuickActions => Some(Feedback::History(
+                "Quick actions are unavailable during a Run; /agents opens details".into(),
+            )),
+            TerminalInput::Submit => return self.submit_input(ui).await,
+            _ => return self.control_input(ui, input),
+        })
+    }
+
+    fn continued_line(&self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+        if self.held.is_some() {
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|_| InputFailure::Shutdown("terminal input failed".to_owned()))?;
+            Ok(Some(Feedback::Transient(
+                "Both drafts retained; wait for the Run to finish".into(),
+            )))
+        } else {
+            Ok(Some(Feedback::History(format!(
+                "Draft: {} characters; Enter offers it as a steering note",
+                ui.composer.character_count()
+            ))))
+        }
+    }
+
+    fn edit_composer(
+        &self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        Ok(match ui.composer.apply(input) {
+            ComposerEdit::AtCapacity => Some(Feedback::History(
+                "Error: message is too long; shorten it; draft unchanged".into(),
+            )),
+            ComposerEdit::Changed if !ui.terminal.is_linear() => {
+                if self.draw(ui, None).is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ComposerEdit::Unchanged => None,
+            ComposerEdit::Changed => None,
+        })
+    }
+
     pub(super) async fn on_input(
         &mut self,
         ui: &mut RunUi<'_>,
