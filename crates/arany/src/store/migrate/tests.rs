@@ -1519,6 +1519,23 @@ fn schema_of(sql: &str) -> Vec<[String; 4]> {
     schema_objects(&connection).unwrap()
 }
 
+fn assert_decodes_after_migration(kind: &str, from: i64, value: &Value) {
+    let payload = value.to_string();
+    let payload = REGISTRY
+        .upgrade_payload(kind, from, &payload)
+        .unwrap()
+        .unwrap_or(payload);
+    let (run, agent) = intent_scope(value).unwrap();
+    Event::decode(
+        kind,
+        payload_version(kind).unwrap(),
+        &payload,
+        Some(run),
+        Some(agent),
+    )
+    .unwrap();
+}
+
 #[test]
 fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() {
     for (kind, version, expiring, input, expected) in [
@@ -1548,15 +1565,7 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
         );
         let migrated = (step.transform)(without_expiry).unwrap();
         assert_eq!(migrated, serde_json::from_str::<Value>(expected).unwrap());
-        let (run, agent) = intent_scope(&migrated).unwrap();
-        Event::decode(
-            kind,
-            version + 1,
-            &migrated.to_string(),
-            Some(run),
-            Some(agent),
-        )
-        .unwrap();
+        assert_decodes_after_migration(kind, version + 1, &migrated);
         let observation = if kind == "HookFinished" {
             &migrated["observation"]
         } else {
@@ -1684,15 +1693,7 @@ fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceil
             if shape == "asymmetric" {
                 assert_eq!(result.stdout.split_once("]…\n").unwrap().1, "suffix");
             }
-            let (run, agent) = intent_scope(&migrated).unwrap();
-            Event::decode(
-                kind,
-                version + 1,
-                &migrated.to_string(),
-                Some(run),
-                Some(agent),
-            )
-            .unwrap();
+            assert_decodes_after_migration(kind, version + 1, &migrated);
         }
     }
 }

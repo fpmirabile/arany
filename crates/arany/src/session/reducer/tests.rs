@@ -7254,7 +7254,9 @@ mod goal_replay_tests {
             .events
             .iter_mut()
             .find_map(|event| match event {
-                Event::ToolStarted { intent, .. } => {
+                Event::ToolStarted { intent, .. }
+                    if matches!(intent.call, ToolCall::GitPush { .. }) =>
+                {
                     intent.call = ToolCall::GhPrList {
                         repository: "github.com/o/r".into(),
                         state: crate::tools::types::DEFAULT_PR_STATE,
@@ -7329,7 +7331,14 @@ mod goal_replay_tests {
             .expect("narrowed Tool result replays")
             .expect("fixture Session");
         assert_eq!(
-            view.runs[0].tools[0].observation.as_ref().unwrap().output,
+            view.runs[0]
+                .tools
+                .last()
+                .unwrap()
+                .observation
+                .as_ref()
+                .unwrap()
+                .output,
             output
         );
     }
@@ -7342,7 +7351,9 @@ mod goal_replay_tests {
             .events
             .iter_mut()
             .find_map(|event| match event {
-                Event::ToolStarted { intent, .. } => {
+                Event::ToolStarted { intent, .. }
+                    if matches!(intent.call, ToolCall::GitPush { .. }) =>
+                {
                     intent.call = ToolCall::GhPrList {
                         repository: "github.com/o/r".into(),
                         state: crate::tools::types::DEFAULT_PR_STATE,
@@ -7386,7 +7397,13 @@ mod goal_replay_tests {
         let view = SessionView::replay_open(fixture.session, &fixture.envelopes())
             .expect("minimum-budget refusal replays")
             .expect("fixture Session");
-        let result = view.runs[0].tools[0].observation.as_ref().unwrap();
+        let result = view.runs[0]
+            .tools
+            .last()
+            .unwrap()
+            .observation
+            .as_ref()
+            .unwrap();
         assert_eq!(result.disposition, ToolDisposition::Denied);
         assert_eq!(result.output, "host: refused; nothing dispatched.");
     }

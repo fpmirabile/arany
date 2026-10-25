@@ -213,11 +213,13 @@ mod tests {
 
     #[test]
     fn command_git_guidance_names_only_cataloged_git_reads() {
+        let offered_git = catalog()["git"].clone();
         for (git, operations, offered) in [
-            (json!({}), Value::Null, true),
+            (offered_git.clone(), Value::Null, true),
+            (json!({}), Value::Null, false),
             (json!("unavailable"), Value::Null, false),
             (
-                json!({}),
+                offered_git,
                 json!(["command", "git_status", "git_diff"]),
                 false,
             ),
