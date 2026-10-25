@@ -1829,7 +1829,7 @@ mod usage_tests {
         group.input = known(999);
         view.usage.groups.push(group);
         view.usage.pending.push((view.id, run_id, None));
-        let pages = crate::presentation::usage::usage_pages(&view, true, None);
+        let pages = crate::presentation::usage::usage_pages(&view, false, None);
         assert!(pages.len() > 2);
         for page in &pages {
             assert!(page.len() <= crate::presentation::usage::MAX_USAGE_PAGE_BYTES);

@@ -1704,7 +1704,7 @@ mod tests {
         assert!(
             crate::presentation::usage_pages(&view, true, Some(starting_sequence))
                 .concat()
-                .contains("Task: working · 1 agent · details: /agents")
+                .contains("Context left: unknown (not reported)")
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
             supervisor: None,
@@ -1743,14 +1743,13 @@ mod tests {
         });
         let notice =
             crate::presentation::usage_pages(&view, true, Some(starting_sequence)).concat();
-        assert!(notice.contains("Request: 49% of local request budget; not model tokens"));
-        assert!(notice.contains("not model tokens"));
+        assert!(notice.contains("Context left: 32.8 KB (Arany request budget at admission)"));
         assert!(!notice.contains(&run_id.to_string()));
         for status in [RunStatus::Finished, RunStatus::Failed, RunStatus::Cancelled] {
             view.runs.last_mut().expect("latest Run").status = status;
             let report =
                 crate::presentation::usage_pages(&view, true, Some(starting_sequence)).concat();
-            assert!(report.contains(&format!("Task: {status} · 1 agent · details: /agents")));
+            assert!(report.contains("Model: gpt-5.4"));
             assert!(!report.contains("Request:"));
             assert_eq!(
                 active_command_notice(&view, InteractiveCommand::Model, starting_sequence),
@@ -1812,8 +1811,11 @@ mod tests {
                 report.contains("Preparing message · Ctrl+C cancels"),
                 expected_status
             );
-            assert!(!report.contains("Task:"));
-            assert!(!report.contains("Request:"));
+            if expected_status {
+                assert!(!report.contains("Session totals"));
+            } else {
+                assert!(report.contains("Session totals: no calls yet"));
+            }
             assert!(composer.is_empty());
             assert_eq!(view.defaults, defaults);
         }
