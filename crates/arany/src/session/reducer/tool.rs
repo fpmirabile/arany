@@ -33,16 +33,11 @@ pub(super) fn apply(
                 .primary()
                 .is_none_or(|primary| primary.id != *agent_run_id)
                 || super::pending_tool_requests(run) != Some(0)
+                || run.tools.iter().any(ToolView::dispatch_in_progress)
             {
                 return Err(ReplayError::InvalidTransition);
             }
             let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
-            if tool.active_time_reserved
-                || tool.permission_verdict.is_some()
-                || !tool.hooks.is_empty()
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
             tool.active_time_reserved = true;
             record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
         }

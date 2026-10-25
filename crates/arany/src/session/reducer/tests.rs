@@ -8385,6 +8385,8 @@ mod goal_replay_tests {
 
     #[test]
     fn tool_started_requires_pending_request() {
+        const FIRST_ACTIVE_CEILING_MS: u64 = 1000;
+        const SECOND_ACTIVE_CEILING_MS: u64 = 500;
         let (mut view, goal, run, agent) = primary_tool_session(false);
         let (first, second, third) = (
             read_intent(run, agent, "src/lib.rs"),
@@ -8403,7 +8405,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 intent: first.clone().into(),
-                active_ceiling_ms: 1000,
+                active_ceiling_ms: FIRST_ACTIVE_CEILING_MS,
             },
         )
         .expect("first request starts");
@@ -8426,7 +8428,21 @@ mod goal_replay_tests {
             );
         }
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        let reservation =
+            |intent: &EffectIntent, active_ceiling_ms| Event::ToolActiveTimeReserved {
+                run_id: run,
+                agent_run_id: agent,
+                intent_digest: intent.digest(),
+                active_ceiling_ms,
+            };
+        apply(&mut view, reservation(&first, FIRST_ACTIVE_CEILING_MS)).expect("first reserved");
+        assert!(
+            rejected(&view, reservation(&second, SECOND_ACTIVE_CEILING_MS)),
+            "an open action's ceiling cannot be replaced by another intent"
+        );
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, reservation(&second, SECOND_ACTIVE_CEILING_MS))
+            .expect("second reserved after the first observation");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         assert!(
             rejected(&view, tool_started(run, agent, &third)),

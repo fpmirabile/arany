@@ -475,6 +475,14 @@ pub struct HookView {
 }
 
 impl ToolView {
+    fn dispatch_in_progress(&self) -> bool {
+        self.observation.is_none()
+            && (self.active_time_reserved
+                || self.permission_verdict.is_some()
+                || !self.hooks.is_empty()
+                || self.review_call_index.is_some())
+    }
+
     pub fn model_denial_label(&self) -> Option<&'static str> {
         self.denial_feedback()
             .map(crate::tools::types::DenialFeedback::label)

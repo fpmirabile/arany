@@ -209,10 +209,7 @@ fn primary_intents_idle(run: &RunView) -> bool {
             })
             && run.tools.iter().all(|tool| {
                 tool.observation.is_some()
-                    || !tool.active_time_reserved
-                        && tool.permission_verdict.is_none()
-                        && tool.hooks.is_empty()
-                        && tool.review_call_index.is_none()
+                    || !tool.dispatch_in_progress()
                         && tool.narrowing_source.is_none()
                         && !tool.intent.call.is_internal()
                         && !matches!(tool.intent.call, ToolCall::ApplyChangeset { .. })
