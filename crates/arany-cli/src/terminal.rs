@@ -114,7 +114,7 @@ fn open_pinned_workspace_png(
     relative: &std::path::Path,
     identity: arany::WorkspaceIdentity,
 ) -> Result<Option<std::fs::File>, &'static str> {
-    use rustix::fs::{Mode, OFlags, fstat, open, openat};
+    use rustix::fs::{Mode, OFlags, fstat, open};
     use std::os::unix::fs::MetadataExt;
 
     let workspace = workspace
@@ -130,46 +130,10 @@ fn open_pinned_workspace_png(
     if identity.device != root_stat.st_dev as u64 || identity.inode != root_stat.st_ino as u64 {
         return Err("Workspace identity changed; PNG was not read");
     }
-    let relative = relative.to_str().ok_or("PNG path must be valid UTF-8")?;
-    let components = relative.split('/').collect::<Vec<_>>();
-    let mut directory = std::fs::File::from(root);
-    for component in &components[..components.len() - 1] {
-        directory = std::fs::File::from(
-            match openat(
-                &directory,
-                *component,
-                OFlags::RDONLY
-                    | OFlags::DIRECTORY
-                    | OFlags::CLOEXEC
-                    | OFlags::NONBLOCK
-                    | OFlags::NOFOLLOW,
-                Mode::empty(),
-            ) {
-                Ok(directory) => directory,
-                Err(rustix::io::Errno::NOENT) => return Ok(None),
-                Err(_) => return Err("PNG path is unavailable or unsafe"),
-            },
-        );
-        if fstat(&directory)
-            .map_err(|_| "PNG path is unavailable")?
-            .st_dev
-            != root_stat.st_dev
-        {
-            return Err("PNG path crosses a filesystem boundary");
-        }
-    }
-    let file = std::fs::File::from(
-        match openat(
-            &directory,
-            components[components.len() - 1],
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
-            Mode::empty(),
-        ) {
-            Ok(file) => file,
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            Err(_) => return Err("PNG path is unavailable or unsafe"),
-        },
-    );
+    let file = open_workspace_png(root, relative, root_stat.st_dev as u64)?;
+    let Some(file) = file else {
+        return Ok(None);
+    };
     let metadata = file.metadata().map_err(|_| "PNG file is unavailable")?;
     if !metadata.is_file() || metadata.dev() != root_stat.st_dev as u64 || metadata.nlink() != 1 {
         return Err("PNG path must be a regular Workspace file without hard links");
@@ -180,11 +144,153 @@ fn open_pinned_workspace_png(
     Ok(Some(file))
 }
 
+fn open_workspace_png(
+    root: rustix::fd::OwnedFd,
+    relative: &std::path::Path,
+    device: u64,
+) -> Result<Option<std::fs::File>, &'static str> {
+    use rustix::fs::{Mode, OFlags};
+    let flags =
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY;
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{ResolveFlags, openat2};
+        let _ = device;
+        match openat2(
+            &root,
+            relative,
+            flags,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        ) {
+            Ok(file) => Ok(Some(std::fs::File::from(file))),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(_) => Err("PNG path is unavailable or unsafe"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use rustix::fs::openat;
+        use std::os::unix::fs::MetadataExt;
+        let relative = relative.to_str().ok_or("PNG path must be valid UTF-8")?;
+        let components = relative.split('/').collect::<Vec<_>>();
+        let mut file = std::fs::File::from(root);
+        for (index, component) in components.iter().enumerate() {
+            let flags = if index + 1 < components.len() {
+                flags | OFlags::DIRECTORY
+            } else {
+                flags
+            };
+            file = match openat(&file, *component, flags, Mode::empty()) {
+                Ok(file) => std::fs::File::from(file),
+                Err(rustix::io::Errno::NOENT) => return Ok(None),
+                Err(_) => return Err("PNG path is unavailable or unsafe"),
+            };
+            if file
+                .metadata()
+                .map_err(|_| "PNG path is unavailable")?
+                .dev()
+                != device
+            {
+                return Err("PNG path crosses a filesystem boundary");
+            }
+        }
+        Ok(Some(file))
+    }
+}
+
 #[cfg(test)]
 mod workspace_image_tests {
     use super::read_pasted_workspace_image;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use std::os::unix::fs::MetadataExt;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[cfg_attr(not(arany_ci), ignore = "native Linux PNG bind-mount gate")]
+    fn pasted_png_rejects_same_device_directory_and_file_mounts() {
+        use arany::test_support::process::{BoundedOutput, assert_single_test_completed};
+        const CHILD: &str = "terminal::workspace_image_tests::mounted_workspace_png_child";
+        let _gate = arany::test_support::process::NATIVE_GATE.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(workspace.join("mounted")).unwrap();
+        let bytes = STANDARD
+            .decode(arany::test_support::test_image().base64())
+            .unwrap();
+        std::fs::write(outside.join("photo.png"), &bytes).unwrap();
+        std::fs::write(workspace.join("photo.png"), &bytes).unwrap();
+        std::fs::write(workspace.join("leaf.png"), &bytes).unwrap();
+        let output = std::process::Command::new("/usr/bin/bwrap")
+            .env_clear()
+            .env("ARANY_TEST_PNG_WORKSPACE", &workspace)
+            .current_dir(&workspace)
+            .args([
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-net",
+                "--die-with-parent",
+                "--ro-bind",
+                "/",
+                "/",
+                "--bind",
+            ])
+            .arg(&outside)
+            .arg(workspace.join("mounted"))
+            .arg("--bind")
+            .arg(outside.join("photo.png"))
+            .arg(workspace.join("leaf.png"))
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", CHILD, "--ignored", "--nocapture"])
+            .bounded_output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mount fixture: {:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_single_test_completed(&output.stdout, CHILD);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "helper-only: activated by the PNG bind-mount gate"]
+    fn mounted_workspace_png_child() {
+        let workspace =
+            std::path::PathBuf::from(std::env::var_os("ARANY_TEST_PNG_WORKSPACE").unwrap());
+        let metadata = std::fs::metadata(&workspace).unwrap();
+        let identity = arany::WorkspaceIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        assert!(
+            read_pasted_workspace_image("photo.png", &workspace, identity)
+                .unwrap()
+                .is_some()
+        );
+        for path in ["mounted/photo.png", "mounted/missing.png", "leaf.png"] {
+            let mounted = workspace.join(if path == "mounted/missing.png" {
+                "mounted"
+            } else {
+                path
+            });
+            assert_eq!(std::fs::metadata(mounted).unwrap().dev(), identity.device);
+            assert_eq!(
+                read_pasted_workspace_image(path, &workspace, identity),
+                Err("PNG path is unavailable or unsafe"),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn pasted_png_reads_only_a_pinned_regular_workspace_file() {
