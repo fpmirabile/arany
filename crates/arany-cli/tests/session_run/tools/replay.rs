@@ -397,6 +397,10 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             assert_eq!(tool.observation.as_ref(), Some(observation));
         }
     }
+    const ACTIVE_TIME_LIMIT_MS: u64 = 100_000;
+    const COMMAND_ACTIVE_CEILING_MS: u64 = 70_000;
+    const QUEUED_READ_ACTIVE_CEILING_MS: u64 = 15_000;
+    const DISPATCHED_READ_ACTIVE_CEILING_MS: u64 = 65_000;
     for after_first in [false, true] {
         let mut accounting = all[..TOOL_STARTED].to_vec();
         if let Event::ProviderCallRecorded { record, .. } = &mut accounting[TOOL_STARTED - 1] {
@@ -404,13 +408,15 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         }
         for event in &mut accounting {
             match event {
-                Event::GoalStarted { budget, .. } => budget.max_active_ms = Some(100_000),
+                Event::GoalStarted { budget, .. } => {
+                    budget.max_active_ms = Some(ACTIVE_TIME_LIMIT_MS)
+                }
                 Event::GoalPlanContractRecorded { contract, .. } => {
-                    contract.budget.max_active_ms = Some(100_000)
+                    contract.budget.max_active_ms = Some(ACTIVE_TIME_LIMIT_MS)
                 }
                 Event::RunStarted {
                     active_deadline_ms, ..
-                } => *active_deadline_ms = Some(100_000),
+                } => *active_deadline_ms = Some(ACTIVE_TIME_LIMIT_MS),
                 _ => {}
             }
         }
@@ -428,7 +434,10 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             limit: None,
         };
         read.limits.runtime_ms = 5_000;
-        for (intent, ceiling) in [(&command.intent, 70_000), (&read, 15_000)] {
+        for (intent, ceiling) in [
+            (&command.intent, COMMAND_ACTIVE_CEILING_MS),
+            (&read, QUEUED_READ_ACTIVE_CEILING_MS),
+        ] {
             accounting.push(Event::ToolStarted {
                 run_id: run,
                 agent_run_id: primary,
@@ -440,14 +449,14 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             run_id: run,
             agent_run_id: primary,
             intent_digest: Sha256::digest(serde_json::to_vec(&command.intent).unwrap()).into(),
-            active_ceiling_ms: 70_000,
+            active_ceiling_ms: COMMAND_ACTIVE_CEILING_MS,
         };
         let mut unmatched = accounting.clone();
         unmatched.push(Event::ToolActiveTimeReserved {
             run_id: run,
             agent_run_id: primary,
             intent_digest: [9; 32],
-            active_ceiling_ms: 70_000,
+            active_ceiling_ms: COMMAND_ACTIVE_CEILING_MS,
         });
         assert!(
             replay(unmatched).is_err(),
@@ -471,10 +480,14 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
                 run_id: run,
                 agent_run_id: primary,
                 intent_digest: Sha256::digest(serde_json::to_vec(&read).unwrap()).into(),
-                active_ceiling_ms: 65_000,
+                active_ceiling_ms: DISPATCHED_READ_ACTIVE_CEILING_MS,
             });
         }
-        let expected = if after_first { 65_000 } else { 70_000 };
+        let expected = if after_first {
+            DISPATCHED_READ_ACTIVE_CEILING_MS
+        } else {
+            COMMAND_ACTIVE_CEILING_MS
+        };
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("state");
         let store = arany::Store::open(StateRoot::admit(&state).unwrap()).unwrap();
