@@ -4056,6 +4056,7 @@ mod tests {
                 args,
                 cwd: String::new(),
                 justification: "Run the failed command once".into(),
+                prefix_rule: None,
             })),
             Err(ToolError::Configuration)
         ));

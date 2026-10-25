@@ -484,6 +484,16 @@
           "justification": {
             "type": "string"
           },
+          "prefix_rule": {
+            "description": "Optional literal argv prefix including the executable; at least 2 tokens. Suggest remembrance only for a narrow eligible command, never scripts, interpreters, wrappers, Git/gh or rm.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "program": {
             "type": "string"
           }
@@ -492,7 +502,8 @@
           "program",
           "args",
           "cwd",
-          "justification"
+          "justification",
+          "prefix_rule"
         ],
         "type": "object"
       },
@@ -1073,6 +1084,16 @@
                             ],
                             "type": "string"
                           },
+                          "prefix_rule": {
+                            "description": "Optional literal argv prefix including the executable; at least 2 tokens. Suggest remembrance only for a narrow eligible command, never scripts, interpreters, wrappers, Git/gh or rm.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": [
+                              "array",
+                              "null"
+                            ]
+                          },
                           "program": {
                             "type": "string"
                           }
@@ -1082,7 +1103,8 @@
                           "program",
                           "args",
                           "cwd",
-                          "justification"
+                          "justification",
+                          "prefix_rule"
                         ],
                         "type": "object"
                       },

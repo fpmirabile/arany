@@ -422,7 +422,7 @@ impl RunLoop<'_> {
         self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: child.agent_run_id,
-            intent: intent.clone(),
+            intent: intent.clone().into(),
             active_ceiling_ms: self.ledger().active_ceiling(0)?,
         })
         .await?;
@@ -508,7 +508,7 @@ impl RunLoop<'_> {
         self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id,
-            intent: intent.clone(),
+            intent: intent.clone().into(),
             active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;

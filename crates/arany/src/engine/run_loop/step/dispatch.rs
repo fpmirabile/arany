@@ -272,9 +272,9 @@ impl<'a> DispatchFacts<'a> {
                 self.hooks.refusal(self.site)
             } else {
                 let reason = match basis {
-                    PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
-                        NotDispatched::DenyRule
-                    }
+                    PermissionSource::Rule
+                    | PermissionSource::TypedPrefixRule
+                    | PermissionSource::HostPrefixRule => NotDispatched::DenyRule,
                     PermissionSource::PinnedGrant if self.host_unpinned => {
                         NotDispatched::HostSourceUnavailable
                     }
@@ -874,6 +874,7 @@ mod tests {
             executable: "/bin/make".into(),
             attribution: None,
             remember: true,
+            prefix: false,
         })
     }
 
@@ -1095,9 +1096,11 @@ mod tests {
             (decide(Primary, asks(Request), &none, &[UnavailableProgram], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::UnavailableProgram), None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[InterpreterNotAdmitted], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::InterpreterNotAdmitted), None), ask_, S::UnavailableApproval),
             (decide(Primary, allow(S::SessionApproval), &none, &[Offered, InProcess], None), None, Ok(Dispatch::Direct), allow_, S::SessionApproval),
+            (decide(Primary, allow(S::HostPrefixRule), &none, &[Offered, InProcess], None), None, Ok(Dispatch::Direct), allow_, S::HostPrefixRule),
             (decide(Primary, allow(S::Rule), &none, &[Timeout], None), None, no(timeout(), None), allow_, S::Rule),
             (decide(Researcher, asks(Request), &none, &[Timeout], None), None, no(timeout(), None), ask_, S::UnavailableApproval),
             (decide(Primary, deny(S::Rule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::Rule),
+            (decide(Primary, deny(S::HostPrefixRule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::HostPrefixRule),
             (decide(Researcher, deny(S::PinnedGrant), &none, &[], None), None, no(N::OutsideGrant, None), deny_, S::PinnedGrant),
             (decide(Primary, deny(S::PinnedGrant), &none, &[HostUnpinned], None), None, no(N::HostSourceUnavailable, None), deny_, S::PinnedGrant),
             (decide(Primary, deny(S::Hook), &denied, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),

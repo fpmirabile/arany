@@ -299,6 +299,7 @@ mod goal_replay_tests {
             compaction_content_digest: None,
             tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
                 host_epoch: None,
+                host_prefixes: Vec::new(),
                 permissions_digest: None,
                 contract_version: 1,
                 config_digest: [1; 32],
@@ -1528,7 +1529,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read.clone(),
+                intent: read.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -1578,7 +1579,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read,
+                intent: read.into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -3549,7 +3550,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id,
                 agent_run_id,
-                intent,
+                intent: intent.into(),
                 active_ceiling_ms: 46_000,
             },
         ]);
@@ -4223,7 +4224,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: actor,
-                    intent: intent.clone(),
+                    intent: intent.clone().into(),
                     active_ceiling_ms: 0,
                 },
             );
@@ -4550,7 +4551,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read.clone(),
+                intent: read.clone().into(),
                 active_ceiling_ms: 0,
             }
         ));
@@ -4582,7 +4583,7 @@ mod goal_replay_tests {
         let started = Event::ToolStarted {
             run_id: run,
             agent_run_id: child,
-            intent: read.clone(),
+            intent: read.clone().into(),
             active_ceiling_ms: 0,
         };
         let finished = Event::ToolFinished {
@@ -4606,7 +4607,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: write,
+                intent: write.into(),
                 active_ceiling_ms: 0,
             }
         ));
@@ -4625,7 +4626,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: mcp,
+                intent: mcp.into(),
                 active_ceiling_ms: 0,
             }
         ));
@@ -4643,7 +4644,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: child,
-                    intent,
+                    intent: intent.into(),
                     active_ceiling_ms: 0,
                 }
             ));
@@ -4739,7 +4740,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: intent.clone(),
+                intent: intent.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -4796,7 +4797,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: outside.clone(),
+                intent: outside.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -4857,7 +4858,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: child,
-                    intent: read.clone(),
+                    intent: read.clone().into(),
                     active_ceiling_ms: 0,
                 },
             )
@@ -4908,7 +4909,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read.clone(),
+                intent: read.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -5495,7 +5496,7 @@ mod goal_replay_tests {
                         run_id: run,
                         agent_run_id: agent,
                         active_ceiling_ms: 0,
-                        intent: read_intent(run, agent, "src/main.rs")
+                        intent: read_intent(run, agent, "src/main.rs").into()
                     }
                 ));
             }
@@ -6453,6 +6454,7 @@ mod goal_replay_tests {
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
                 justification: "Run the failed command once".into(),
+                prefix_rule: None,
             },
         );
         let start = tool_started(run, agent, &host);
@@ -6589,6 +6591,7 @@ mod goal_replay_tests {
                     args: vec!["-c".into(), "exit 0".into()],
                     cwd: String::new(),
                     justification: "Run a primary host command".into(),
+                    prefix_rule: None,
                 },
             );
             apply(&mut view, tool_started(run, agent, &host)).unwrap();
@@ -6721,6 +6724,7 @@ mod goal_replay_tests {
             verdict: crate::tools::permissions::PermissionVerdict {
                 host: (approved && intent.call.is_unguarded()).then_some(
                     crate::tools::permissions::HostApproval {
+                        rule: None,
                         epoch: uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501),
                         session: false,
                         source_intent: None,
@@ -7082,7 +7086,8 @@ mod goal_replay_tests {
                         changeset: crate::tools::CommandChangeset { files: Vec::new() },
                     },
                 },
-            ),
+            )
+            .into(),
             active_ceiling_ms: 0,
         };
         assert!(rejected(&approved, integration));
@@ -7110,9 +7115,165 @@ mod goal_replay_tests {
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
                 justification: "Run the failed command once".into(),
+                prefix_rule: None,
             },
         );
         assert!(rejected(&child, tool_started(run, researcher, &forged)));
+    }
+
+    fn host_prefix_scenario() -> (Unguarded, crate::tools::permissions::PermissionVerdict) {
+        use crate::tools::permissions::{
+            Decision, HostPrefixRule, PermissionMode, PermissionSource,
+        };
+        let mut scenario = unguarded_scenario(None, true, false);
+        scenario.host.call = ToolCall::CommandUnguarded {
+            program: "printf".into(),
+            args: vec!["value".into(), "first".into()],
+            cwd: String::new(),
+            justification: "Inspect synthetic host data".into(),
+            prefix_rule: Some(vec!["printf".into(), "value".into()]),
+        };
+        let pin = scenario.host.host_command.as_mut().unwrap();
+        pin.executable = "/usr/bin/printf".into();
+        pin.permissions_digest = Some([3; 32]);
+        let rule = HostPrefixRule::from_intent(&scenario.host, 2).unwrap();
+        let run = &mut scenario.view.runs[0];
+        run.tools.last_mut().unwrap().intent = scenario.host.clone();
+        run.config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .host_prefixes = vec![rule.clone()];
+        let Event::ToolPermissionDecided { mut verdict, .. } = verdict_event(
+            &scenario.host,
+            Some(PermissionMode::Default),
+            Decision::Allow,
+            PermissionSource::HostPrefixRule,
+            PermissionSource::HostPrefixRule,
+            true,
+        ) else {
+            unreachable!()
+        };
+        verdict.host.as_mut().unwrap().rule = Some(rule);
+        (scenario, verdict)
+    }
+
+    fn change_host_prefix_proof(
+        scenario: &mut Unguarded,
+        verdict: &mut crate::tools::permissions::PermissionVerdict,
+        change: &str,
+    ) {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let run = &mut scenario.view.runs[0];
+        let policy = run.config.as_mut().unwrap().tool_policy.as_mut().unwrap();
+        let host = verdict.host.as_mut().unwrap();
+        let pin = scenario.host.host_command.as_mut().unwrap();
+        match change {
+            "missing-rule" => host.rule = None,
+            "missing-policy" => policy.host_prefixes.clear(),
+            "matching-ask" | "matching-deny" => {
+                let mut rule = policy.host_prefixes[0].clone();
+                rule.decision = if change == "matching-ask" {
+                    Decision::Ask
+                } else {
+                    Decision::Deny
+                };
+                policy.host_prefixes.push(rule);
+            }
+            "session" => host.session = true,
+            "reference" => host.source_intent = Some([6; 32]),
+            "digest" => pin.permissions_digest = Some([4; 32]),
+            "unpinned" => policy.permissions_digest = None,
+            "auto" => verdict.mode = Some(PermissionMode::Auto),
+            "edits" => verdict.mode = Some(PermissionMode::AcceptEdits),
+            "plan" => verdict.mode = Some(PermissionMode::Plan),
+            "no-mode" => verdict.mode = None,
+            "hook" => verdict.hook_restriction = Some(Decision::Ask),
+            "basis" => verdict.basis = PermissionSource::Mode,
+            "decision" => verdict.decision = Decision::Deny,
+            "rule-deny" => {
+                host.rule.as_mut().unwrap().decision = Decision::Deny;
+                policy.host_prefixes[0].decision = Decision::Deny;
+            }
+            "scope" => scenario.host.workspace_inode += 1,
+            "workspace" => pin.workspace = "/other-workspace".into(),
+            "executable" => pin.sha256 = "b".repeat(64),
+            "environment" => pin.environment_digest = [5; 32],
+            "cwd" | "argv" | "state" => {
+                let ToolCall::CommandUnguarded { args, cwd, .. } = &mut scenario.host.call else {
+                    unreachable!()
+                };
+                match change {
+                    "cwd" => *cwd = "nested".into(),
+                    "argv" => args[0] = "different".into(),
+                    "state" => args[1] = format!("{}/permissions.json", pin.state_roots[0]),
+                    _ => unreachable!(),
+                }
+            }
+            "child" => {
+                run.agents
+                    .iter_mut()
+                    .find(|agent| agent.id == scenario.agent)
+                    .unwrap()
+                    .role = AgentRole::Child
+            }
+            _ => unreachable!(),
+        }
+        run.tools.last_mut().unwrap().intent = scenario.host.clone();
+        verdict.intent_digest = scenario.host.digest();
+    }
+
+    #[test]
+    fn host_prefix_replay_checks_each_approval_proof() {
+        use crate::tools::permissions::PermissionMode;
+        let event = |scenario: &Unguarded, verdict| Event::ToolPermissionDecided {
+            run_id: scenario.run,
+            agent_run_id: scenario.agent,
+            verdict,
+        };
+        for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
+            let (scenario, mut verdict) = host_prefix_scenario();
+            verdict.mode = Some(mode);
+            assert!(
+                !rejected(&scenario.view, event(&scenario, verdict)),
+                "{mode:?}"
+            );
+        }
+        for change in [
+            "missing-rule",
+            "missing-policy",
+            "matching-ask",
+            "matching-deny",
+            "session",
+            "reference",
+            "digest",
+            "unpinned",
+            "auto",
+            "edits",
+            "plan",
+            "no-mode",
+            "hook",
+            "basis",
+            "decision",
+            "rule-deny",
+            "scope",
+            "workspace",
+            "executable",
+            "environment",
+            "cwd",
+            "argv",
+            "state",
+            "child",
+        ] {
+            let (mut scenario, mut verdict) = host_prefix_scenario();
+            change_host_prefix_proof(&mut scenario, &mut verdict, change);
+            assert!(
+                rejected(&scenario.view, event(&scenario, verdict)),
+                "{change}"
+            );
+        }
     }
 
     #[test]
@@ -7512,6 +7673,7 @@ mod goal_replay_tests {
                 _ => None,
             })
             .expect("pending host read");
+        let intent = crate::tools::EffectIntent::from(intent);
         for event in &mut fixture.events {
             if let Event::ToolPermissionDecided { verdict, .. } = event {
                 verdict.intent_digest = intent.digest();
@@ -7609,6 +7771,7 @@ mod goal_replay_tests {
                 _ => None,
             })
             .expect("pending host read");
+        let intent = crate::tools::EffectIntent::from(intent);
         for event in &mut fixture.events {
             if let Event::ToolPermissionDecided { verdict, .. } = event {
                 verdict.intent_digest = intent.digest();
@@ -7853,7 +8016,7 @@ mod goal_replay_tests {
         Event::ToolStarted {
             run_id: run,
             agent_run_id: agent,
-            intent: intent.clone(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 0,
         }
     }
@@ -8042,7 +8205,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: agent,
-                intent: first.clone(),
+                intent: first.clone().into(),
                 active_ceiling_ms: 1000,
             },
         )
@@ -8680,7 +8843,7 @@ mod goal_replay_tests {
         let start = |intent: EffectIntent| Event::ToolStarted {
             run_id: run,
             agent_run_id: actor,
-            intent,
+            intent: intent.into(),
             active_ceiling_ms: 0,
         };
         assert!(rejected(&view, reserve_child_call(goal, run, actor)));
@@ -8843,7 +9006,7 @@ mod goal_replay_tests {
         let start = |intent: EffectIntent| Event::ToolStarted {
             run_id: intent.run_id,
             agent_run_id: intent.agent_run_id,
-            intent,
+            intent: intent.into(),
             active_ceiling_ms: 0,
         };
         for changed in [
@@ -8937,7 +9100,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: intent.run_id,
                     agent_run_id: intent.agent_run_id,
-                    intent: intent.clone(),
+                    intent: intent.clone().into(),
                     active_ceiling_ms: 0,
                 },
             )

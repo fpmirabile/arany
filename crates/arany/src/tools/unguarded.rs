@@ -31,7 +31,7 @@ pub(crate) const PRIVILEGE_TOOLS: &[&str] = &[
     "dzdo",
     "authopen",
 ];
-const WRAPPERS: &[&str] = &[
+pub(crate) const WRAPPERS: &[&str] = &[
     "env",
     "xargs",
     "find",
@@ -62,7 +62,7 @@ const WRAPPERS: &[&str] = &[
     "firejail",
     "bwrap",
 ];
-const INTERPRETERS: &[&str] = &[
+pub(crate) const INTERPRETERS: &[&str] = &[
     "awk",
     "gawk",
     "mawk",
@@ -186,7 +186,7 @@ fn lexical_tokens(text: &str) -> impl Iterator<Item = &str> {
     .filter(|token| !token.is_empty())
 }
 
-fn inline_option(arg: &str) -> bool {
+pub(crate) fn inline_option(arg: &str) -> bool {
     let option = arg.split('=').next().unwrap_or(arg);
     [
         "-c",
@@ -516,7 +516,7 @@ pub fn tool_host_main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
     let Ok(args) = args
-        .take(65)
+        .take(super::process::MAX_COMMAND_ARGS + 1)
         .map(std::ffi::OsString::into_string)
         .collect::<Result<Vec<_>, _>>()
     else {
@@ -943,6 +943,7 @@ mod tests {
             args: args.iter().map(|arg| (*arg).into()).collect(),
             cwd: "sub".into(),
             justification: "Inspect requested paths".into(),
+            prefix_rule: None,
         }
     }
 
@@ -984,6 +985,7 @@ mod tests {
                 args: vec![candidate.into(), "-c".into(), "printf inspected".into()],
                 cwd: "sub".into(),
                 justification: "Inspect through the declared interpreter".into(),
+                prefix_rule: None,
             };
             for (command, expected) in [
                 (None, false),

@@ -625,6 +625,7 @@ fn command_git_hint_uses_kept_stderr_and_cataloged_tools_and_survives_replay() {
         args: vec!["git".into()],
         cwd: ".".into(),
         justification: "Retry the failed command?".into(),
+        prefix_rule: None,
     };
     unguarded.requests[0].call = call.clone();
     unguarded.observations[0] = observation(call, &unguarded.observations[0].output);

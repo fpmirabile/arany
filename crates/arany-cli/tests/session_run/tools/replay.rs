@@ -31,6 +31,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     const INTEGRATED_NEXT_CALL_RESERVED: usize = TOOL_STARTED + 4;
     let policy = arany::ToolPolicyReceipt {
         host_epoch: None,
+        host_prefixes: Vec::new(),
         permissions_digest: None,
         contract_version: 1,
         config_digest: [1; 32],
@@ -213,7 +214,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::ToolStarted {
             run_id: run,
             agent_run_id: primary,
-            intent,
+            intent: intent.into(),
             active_ceiling_ms: 0,
         },
         Event::ToolFinished {
@@ -703,7 +704,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             active_ceiling_ms: 0,
         },
         observed(
-            command_intent.clone(),
+            command_intent.clone().into(),
             ToolDisposition::Failed,
             command_result.clone(),
         ),
@@ -714,7 +715,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             active_ceiling_ms: 0,
         },
         observed(
-            integration_intent.clone(),
+            integration_intent.clone().into(),
             ToolDisposition::Succeeded,
             "{\"applied\":1}".into(),
         ),
@@ -897,7 +898,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 let Event::ToolFinished { observation, .. } = &mut row[INTEGRATION_FINISHED] else {
                     unreachable!()
                 };
-                observation.intent = altered;
+                observation.intent = altered.into();
                 let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
                     unreachable!()
                 };
@@ -927,7 +928,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 let Event::ToolFinished { observation, .. } = &mut reuse[1] else {
                     unreachable!()
                 };
-                observation.intent = altered;
+                observation.intent = altered.into();
                 let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
                     unreachable!()
                 };
@@ -1004,7 +1005,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     } = &mut out_of_plan_integration[INTEGRATION_FINISHED]
     {
         *checkpoint = None;
-        observation.intent = out_of_plan_intent.clone();
+        observation.intent = out_of_plan_intent.clone().into();
         observation.disposition = ToolDisposition::Denied;
         observation.output = "The effect is outside the active Goal plan".into();
         observation.attestation = None;
@@ -1090,7 +1091,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             let Event::ToolFinished { observation, .. } = &mut result else {
                 unreachable!()
             };
-            observation.intent = intent.clone();
+            observation.intent = intent.clone().into();
             let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
                 unreachable!()
             };

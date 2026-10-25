@@ -2956,6 +2956,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         args: vec![],
         cwd: ".".into(),
         justification: "untrusted".into(),
+        prefix_rule: None,
     });
     adapter.permission(&unguarded, 101).await;
     let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =

@@ -553,6 +553,7 @@ impl ForegroundWorkerProvider {
                     args,
                     cwd,
                     justification: "sandbox failed".into(),
+                    prefix_rule: None,
                 });
             }
             if self.case == "command_stale" && step == 4 {

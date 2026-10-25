@@ -810,6 +810,7 @@ async fn goal_continuations_readmit_saved_typed_rules_but_latch_external_drift()
                     args: vec![".".into()],
                     cwd: String::new(),
                     justification: "Inspect after saving the approved typed rule".into(),
+                    prefix_rule: None,
                 }),
                 answer(),
             ])
@@ -898,6 +899,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
                     args: vec![".".into()],
                     cwd: String::new(),
                     justification: "Inspect after saving the approved typed rule".into(),
+                    prefix_rule: None,
                 }),
                 tool_outcome(commit("again")),
                 answer(),
@@ -944,6 +946,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
                 ],
                 cwd: String::new(),
                 justification: "Inspect the repository after saving the approved typed rule".into(),
+                prefix_rule: None,
             }),
             answer(),
         ]));
