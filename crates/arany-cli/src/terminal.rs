@@ -105,51 +105,21 @@ pub enum TerminalMode {
     Fullscreen,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MouseMode {
-    #[default]
-    WheelAndClicks,
-    WheelOnly,
-    Off,
-}
-
-impl MouseMode {
-    pub const ALL: [Self; 3] = [Self::WheelAndClicks, Self::WheelOnly, Self::Off];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::WheelAndClicks => "wheel and clicks",
-            Self::WheelOnly => "wheel only",
-            Self::Off => "off",
-        }
-    }
-
-    // `ARANY_DISABLE_MOUSE` turns capture off whatever the saved preference says.
-    fn effective(self) -> Self {
-        if std::env::var_os("ARANY_DISABLE_MOUSE")
-            .is_some_and(|value| !value.is_empty() && value != "0")
-        {
-            Self::Off
-        } else {
-            self
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PointerSettings {
-    pub mouse: MouseMode,
     pub copy_on_select: bool,
 }
 
 impl Default for PointerSettings {
     fn default() -> Self {
         Self {
-            mouse: MouseMode::default(),
             copy_on_select: true,
         }
     }
+}
+
+fn mouse_capture_enabled() -> bool {
+    !std::env::var_os("ARANY_DISABLE_MOUSE").is_some_and(|value| value != "0")
 }
 
 impl TerminalMode {
@@ -426,15 +396,15 @@ impl Drop for ModeGuard {
 fn pointer_modes(
     mode: TerminalMode,
     linear: bool,
-    mouse: MouseMode,
+    mouse_enabled: bool,
 ) -> io::Result<Option<ModeGuard>> {
     if linear || mode == TerminalMode::Classic {
         return Ok(None);
     }
-    ModeGuard::acquire(if mouse == MouseMode::Off {
-        ALTERNATE_SCROLL
-    } else {
+    ModeGuard::acquire(if mouse_enabled {
         MOUSE_CAPTURE
+    } else {
+        ALTERNATE_SCROLL
     })
     .map(Some)
 }
@@ -777,7 +747,7 @@ impl AttachedTerminal {
             .is_none()
             .then(|| ModeGuard::acquire(BRACKETED_PASTE))
             .transpose()?;
-        let pointer_modes = pointer_modes(mode, mode_label.is_some(), pointer.mouse.effective())?;
+        let pointer_modes = pointer_modes(mode, mode_label.is_some(), mouse_capture_enabled())?;
         #[cfg(unix)]
         let keyboard = keyboard_mode(&input)?;
         Ok(Self {
@@ -1149,7 +1119,7 @@ impl AttachedTerminal {
         {
             self.keyboard = keyboard_mode(self.reader())?;
         }
-        self.pointer_modes = pointer_modes(self.mode, false, self.pointer.mouse.effective())?;
+        self.pointer_modes = pointer_modes(self.mode, false, mouse_capture_enabled())?;
         // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
         let terminal = self.owned();
         let area = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
@@ -1330,8 +1300,8 @@ impl AttachedTerminal {
         view: &SessionView,
         composer: &Composer,
     ) -> Option<bool> {
-        let mouse = self.pointer.mouse.effective();
-        let selects = mouse == MouseMode::WheelAndClicks;
+        let mouse_enabled = mouse_capture_enabled();
+        let selects = mouse_enabled;
         match input {
             TerminalInput::PointerClick {
                 column,
@@ -1377,7 +1347,7 @@ impl AttachedTerminal {
                 Some(self.history.clear_selection())
             }
             TerminalInput::Up | TerminalInput::Down
-                if mouse == MouseMode::Off
+                if !mouse_enabled
                     && composer.is_empty()
                     && !composer.has_open_menu()
                     && !composer.recall_pending() =>
@@ -1390,9 +1360,8 @@ impl AttachedTerminal {
 
     // Pointer input with nothing to do, discarded while chat waits so it causes no redraw.
     pub fn ignores_pointer(&mut self, input: TerminalInput) -> bool {
-        let selects = !self.is_linear()
-            && self.mode == TerminalMode::Fullscreen
-            && self.pointer.mouse.effective() == MouseMode::WheelAndClicks;
+        let selects =
+            !self.is_linear() && self.mode == TerminalMode::Fullscreen && mouse_capture_enabled();
         match input {
             TerminalInput::PointerMove { .. } => true,
             TerminalInput::PointerClick { column, row, .. } => {
@@ -1445,10 +1414,7 @@ impl AttachedTerminal {
 
     #[must_use]
     pub fn empty_interrupt_hint(&self) -> String {
-        if !self.is_linear()
-            && self.mode == TerminalMode::Fullscreen
-            && self.pointer.mouse.effective() == MouseMode::WheelAndClicks
-        {
+        if !self.is_linear() && self.mode == TerminalMode::Fullscreen && mouse_capture_enabled() {
             format!(
                 "Select text with the mouse to copy; {} for terminal selection.\nCtrl+C again exits.",
                 clipboard::native_selection_gesture(&|name| std::env::var_os(name))
@@ -1458,21 +1424,8 @@ impl AttachedTerminal {
         }
     }
 
-    pub fn set_pointer(&mut self, pointer: PointerSettings) -> Result<(), TerminalError> {
-        let captured = |pointer: PointerSettings| pointer.mouse.effective() != MouseMode::Off;
-        let changed = captured(pointer) != captured(self.pointer);
+    pub fn set_pointer(&mut self, pointer: PointerSettings) {
         self.pointer = pointer;
-        if pointer.mouse.effective() != MouseMode::WheelAndClicks {
-            self.history.clear_selection();
-        }
-        if !changed || self.input.is_none() {
-            return Ok(());
-        }
-        if let Some(mut modes) = self.pointer_modes.take() {
-            modes.release()?;
-        }
-        self.pointer_modes = pointer_modes(self.mode, self.is_linear(), pointer.mouse.effective())?;
-        Ok(())
     }
 
     pub fn discard_draft_input(&mut self) {

@@ -1225,10 +1225,10 @@ mod tests {
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
                 .expect("private config");
             if finite {
-                let preferences = serde_json::json!({"version":5,"preferences":{
+                let preferences = serde_json::json!({"version":6,"preferences":{
                     "completion":"tabs","view":"fullscreen",
                     "goal_budget":GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-                    "resources":arany::ToolResourceSettings::default(),"mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"
+                    "resources":arany::ToolResourceSettings::default(),"copy_on_select":true,"newline":"shift_enter"
                 }});
                 root.record(arany::RecordKind::UiPreferences)
                     .replace(&serde_json::to_vec(&preferences).expect("settings"))
