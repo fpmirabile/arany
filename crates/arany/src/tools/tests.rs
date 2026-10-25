@@ -2963,14 +2963,30 @@ fn old_host_rules_are_inactive_and_preserved() {
     runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(&state).unwrap();
     assert!(runtime.has_inactive_host_rules());
     assert_eq!(runtime.receipt().unguarded_rules_digest, None);
-    assert_eq!(
+    assert!(
         state
             .record(crate::store::RecordKind::UnguardedCommands)
             .read()
             .unwrap()
-            .unwrap(),
-        bytes
+            .is_none()
     );
+    let archive = state
+        .path()
+        .join("archive/inactive-host-commands/unguarded-commands.json");
+    assert_eq!(std::fs::read(&archive).unwrap(), bytes);
+    drop(state);
+    let reopened = crate::store::StateRoot::open_existing(&temp.path().join("state")).unwrap();
+    runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(&reopened).unwrap();
+    assert!(runtime.has_inactive_host_rules());
+    assert_eq!(runtime.receipt().unguarded_rules_digest, None);
+    assert!(
+        reopened
+            .record(crate::store::RecordKind::UnguardedCommands)
+            .read()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(std::fs::read(archive).unwrap(), bytes);
 }
 
 async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> ToolObservation {
