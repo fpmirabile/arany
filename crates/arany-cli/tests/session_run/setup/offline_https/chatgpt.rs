@@ -592,7 +592,7 @@ fn isolated_stage(checked_turn: bool) {
             &mut transcript,
             &mut answered,
             0,
-            b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
             None,
         );
         let accounts_at = transcript.len();

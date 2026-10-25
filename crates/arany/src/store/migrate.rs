@@ -165,6 +165,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!(
+            "ProviderSetupEditStarted",
+            1,
+            crate::session::pre_role_routing_payload
+        ),
         variant_step!("ToolStarted", 19, crate::session::pre_file_removal_payload),
         variant_step!("ToolFinished", 26, crate::session::pre_file_removal_payload),
         variant_step!("HookStarted", 9, crate::session::pre_file_removal_payload),
