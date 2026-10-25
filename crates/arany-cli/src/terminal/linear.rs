@@ -1690,6 +1690,7 @@ mod tests {
                 } else {
                     format!("model-{index}")
                 },
+                context_window_tokens: None,
                 runnable: index == 1,
                 efforts: if index == 1 {
                     vec![arany::Effort::Low]
