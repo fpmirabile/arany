@@ -34,6 +34,8 @@ pub use inventory::{
     collect_storage,
 };
 pub(crate) use lock::{HistoryLock, ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
+#[cfg(unix)]
+pub(crate) use lock::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
