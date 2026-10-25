@@ -101,6 +101,19 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
                 .child[0],
             child.identity
         );
+        let pinned = view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .providers
+            .as_ref()
+            .unwrap();
+        assert_eq!(pinned.primary[0], primary.identity);
+        assert_eq!(
+            pinned.review, pinned.primary,
+            "review inherits the whole admitted primary chain"
+        );
+        assert_eq!(pinned.compaction[0], compact.identity);
         assert_eq!(
             primary
                 .requests

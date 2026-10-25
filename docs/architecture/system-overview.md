@@ -66,6 +66,8 @@ The Engine owns admission, scheduling, context, Goal accounting and Run
 transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
 `GoalView`, with `Action::max_events` owning Event headroom. Primary, researcher and editor Tool steps share `execute_step`: reservation, committed intent,
 approval, dispatch, committed observation and continuation have one owner.
+Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
+it during admission, so the source dependency points from Engine to Tools.
 Engine permission selection, host session reuse and remembering eligibility live
 in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
 shared ask and dispatch flow.
@@ -128,6 +130,8 @@ flowchart LR
 
 Provider is the substitutable semantic inference interface. Wire adapters stay
 behind it; SQLite, replay, reducers and Tool dispatch remain concrete owners.
+`ProviderKind` owns native profile names and custom-profile syntax; telemetry
+maps those closed categories to its existing fixed labels.
 The CLI depends on `arany`; the library never depends on CLI, terminal,
 presentation or accounts, and has no ratatui, crossterm or keyring dependency.
 `accounts/` owns ChatGPT OAuth, saved API accounts and the credential helper.

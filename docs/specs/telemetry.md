@@ -10,6 +10,7 @@ Editing constraints: [security rules](../../agents/security.md).
 
 - Telemetry initializes from `--otlp-endpoint` or the supported OTLP variables before the Tokio runtime and Workspace admission. Invalid explicit configuration exits 2 without state creation. An explicit numeric-loopback HTTP endpoint is admitted before Workspace input. The local Collector owns remote routing and authentication. The exporter uses no ambient proxy, redirect, header, resource detector or SDK default destination.
 - Only closed typed identifiers, role, phase and outcome enums, bounded model metadata, counts and acknowledged Event sequence and kind cross the trace interface. Prompts, results, summaries, paths, payloads, credentials and raw errors never do.
+- Provider categories use the closed `ProviderKind` classification. Native exported names remain `openai`, `anthropic` and `chatgpt`; custom profiles export only `custom`, and unrecognized profiles export `other`.
 
 ## Spans
 
