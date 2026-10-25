@@ -94,6 +94,7 @@ fn image_preview_cells_are_hidden_and_skipped_for_terminal_graphics() {
             hidden = frame.buffer_mut()[(3, 4)]
                 .modifier
                 .contains(Modifier::HIDDEN);
+            assert_eq!(frame.buffer_mut()[(3, 4)].diff_option, CellDiffOption::Skip);
         })
         .unwrap();
     assert!(hidden);
