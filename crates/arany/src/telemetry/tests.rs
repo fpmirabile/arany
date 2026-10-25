@@ -736,7 +736,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
         segment.commit(Event::ToolStarted {
             run_id: segment.run_id,
             agent_run_id,
-            intent: intent.clone(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 1,
         });
         assert_eq!(segment.trace.unguarded_effects(), 0);

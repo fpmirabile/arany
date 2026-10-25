@@ -25,7 +25,7 @@ pub use records::{
     DisplayChunk, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
     MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunFailure,
-    SessionDefaults,
+    SessionDefaults, ToolIntentRecord,
 };
 use validate::bounded;
 
@@ -379,7 +379,7 @@ pub enum Event {
     ToolStarted {
         run_id: RunId,
         agent_run_id: AgentRunId,
-        intent: crate::tools::EffectIntent,
+        intent: ToolIntentRecord,
         active_ceiling_ms: u64,
     },
     SupervisorVerdictRecorded {
@@ -623,7 +623,7 @@ struct ToolFinishedPayload {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolStartedPayload {
-    intent: crate::tools::EffectIntent,
+    intent: ToolIntentRecord,
     active_ceiling_ms: u64,
 }
 #[derive(Serialize, Deserialize)]
@@ -1736,9 +1736,9 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
                     && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
             })
         }),
-        "ToolStarted" => {
-            expiring_again::<ToolStartedPayload>(kind, payload, |data| intent_allowed(&data.intent))
-        }
+        "ToolStarted" => expiring_again::<ToolStartedPayload>(kind, payload, |data| {
+            intent_allowed(&data.intent.clone().into())
+        }),
         "ToolFinished" => expiring_again::<ToolFinishedPayload>(kind, payload, |data| {
             observation_allowed(&data.observation)
         }),

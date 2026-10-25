@@ -36,7 +36,13 @@ pub(super) fn apply(
             agent_run_id,
             intent,
             active_ceiling_ms,
-        } => lifecycle::started(current, *run_id, *agent_run_id, intent, *active_ceiling_ms)?,
+        } => lifecycle::started(
+            current,
+            *run_id,
+            *agent_run_id,
+            &intent.clone().into(),
+            *active_ceiling_ms,
+        )?,
         Event::ToolFinished { .. } => lifecycle::finished(current, event, prior)?,
         _ => return Err(ReplayError::InvalidTransition),
     }

@@ -1785,7 +1785,7 @@ mod payload_version_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: agent,
-                intent: observation.intent.clone(),
+                intent: observation.intent.clone().into(),
                 active_ceiling_ms: 1,
             },
             Event::ToolFinished {
@@ -1805,19 +1805,20 @@ mod payload_version_tests {
         for mut event in events {
             let mut payload: serde_json::Value =
                 serde_json::from_str(&event.payload().unwrap()).unwrap();
-            let intent = match &mut event {
+            let intent_valid = match &mut event {
                 Event::ToolStarted { intent, .. } => {
                     payload["intent"]["call"] = serde_json::to_value(&call).unwrap();
-                    intent
+                    intent.call = call.clone();
+                    crate::tools::EffectIntent::from(intent.clone()).valid()
                 }
                 Event::ToolFinished { observation, .. } => {
                     payload["observation"]["intent"]["call"] = serde_json::to_value(&call).unwrap();
-                    &mut observation.intent
+                    observation.intent.call = call.clone();
+                    observation.intent.valid()
                 }
                 _ => unreachable!(),
             };
-            intent.call = call.clone();
-            assert!(intent.valid());
+            assert!(intent_valid);
             if let Event::ToolFinished { observation, .. } = &event {
                 assert!(observation.valid());
             }
@@ -1962,7 +1963,7 @@ mod payload_version_tests {
         let started = Event::ToolStarted {
             run_id: run,
             agent_run_id: agent,
-            intent,
+            intent: intent.into(),
             active_ceiling_ms: 1,
         };
         let verdict = Event::ToolPermissionDecided {
@@ -2134,7 +2135,7 @@ mod payload_version_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: agent,
-                intent: read_observation(run, agent).intent,
+                intent: read_observation(run, agent).intent.into(),
                 active_ceiling_ms: 610_000,
             },
         ];

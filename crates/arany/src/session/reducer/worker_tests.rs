@@ -71,7 +71,7 @@ impl Fixture {
         self.push(Event::ToolStarted {
             run_id: self.run,
             agent_run_id: intent.agent_run_id,
-            intent: intent.clone(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 0,
         });
     }
@@ -1242,7 +1242,7 @@ fn worker_protocol_refuses_widened_stale_and_unsettled_transitions() {
             Event::ToolStarted {
                 run_id: f.run,
                 agent_run_id: f.child,
-                intent: f.intent(f.child, call, target),
+                intent: f.intent(f.child, call, target).into(),
                 active_ceiling_ms: 0,
             },
             case,
@@ -2023,8 +2023,8 @@ fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
         Some(ToolDisposition::Denied),
     ] {
         let mut f = host_protocol_fixture();
-        let intent = match &f.events[f.events.len() - 2] {
-            Event::ToolStarted { intent, .. } => intent.clone(),
+        let intent: EffectIntent = match &f.events[f.events.len() - 2] {
+            Event::ToolStarted { intent, .. } => intent.clone().into(),
             _ => unreachable!(),
         };
         if let Some(disposition) = outcome {
@@ -2225,7 +2225,7 @@ fn worker_protocol_nonoverlap_and_completion_order() {
         Event::ToolStarted {
             run_id: f.run,
             agent_run_id: f.primary,
-            intent: out_of_order,
+            intent: out_of_order.into(),
             active_ceiling_ms: 0,
         },
         "completion-order queue",
@@ -4112,7 +4112,7 @@ fn supervisor_handover_verdict_preserves_the_original_integration_subject() {
         Event::ToolStarted {
             run_id: f.run,
             agent_run_id: f.primary,
-            intent: wrong,
+            intent: wrong.into(),
             active_ceiling_ms: 0,
         },
         "verdict is not a handover",
@@ -4614,7 +4614,9 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
                 let Event::ToolStarted { intent, .. } = &mut f.events[start] else {
                     unreachable!()
                 };
-                mutate(intent);
+                let mut runtime = crate::tools::EffectIntent::from(intent.clone());
+                mutate(&mut runtime);
+                *intent = runtime.into();
                 let Event::ToolFinished { observation, .. } = &mut f.events[observed] else {
                     unreachable!()
                 };

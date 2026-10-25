@@ -53,7 +53,7 @@ pub use events::{
     MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
     ProviderCallRecord, ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind,
     ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults, SessionId,
-    WorkspaceIdentity,
+    ToolIntentRecord, WorkspaceIdentity,
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,

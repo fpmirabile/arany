@@ -9,7 +9,7 @@ impl Event {
                 intent,
                 ..
             } => {
-                if intent.valid()
+                if crate::tools::EffectIntent::from(intent.clone()).valid()
                     && !matches!(
                         intent.call,
                         crate::tools::ToolCall::ApplyChangeset {
