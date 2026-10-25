@@ -119,13 +119,10 @@ impl RunLoop<'_> {
         for resolver in chain {
             match resolver {
                 Resolver::AiReview { objective } => {
-                    let reviewed = self
-                        .resolve_review(objective, intent, &site, initial_mode)
-                        .await?;
-                    resolution.approved = reviewed.approved;
-                    resolution.source = reviewed.source;
-                    resolution.active_time_exhausted = reviewed.active_time_exhausted;
-                    match reviewed.progress {
+                    match self
+                        .resolve_ai_review(objective, intent, &site, initial_mode, &mut resolution)
+                        .await?
+                    {
                         ReviewProgress::Continue => {}
                         ReviewProgress::Finish => break,
                         ReviewProgress::Exhausted => return Ok(Admission::Exhausted),
@@ -133,35 +130,16 @@ impl RunLoop<'_> {
                 }
                 Resolver::Human => match &site {
                     AskSite::Delegated { active_deadline } => {
-                        let Some(approvals) = self.controls.approvals else {
-                            return Ok(Admission::Reserved(resolution));
-                        };
-                        let (reply, withdrawal) = self
-                            .delegated_human_reply(intent, active_deadline.as_ref(), approvals)
-                            .await?;
-                        resolution.withdrawal = withdrawal;
-                        resolution.approved = matches!(
-                            reply,
-                            ApprovalReply::AllowOnce
-                                | ApprovalReply::AllowForSession
-                                | ApprovalReply::AllowPrefixInFolder
-                        ) && !self.pause_requested()
-                            && !self.controls.cancellation.is_cancelled();
-                        resolution.source = if reply == ApprovalReply::Unavailable {
-                            PermissionSource::UnavailableApproval
-                        } else {
-                            PermissionSource::Human
-                        };
-                        resolution.active_time_exhausted =
-                            active_deadline.as_ref().is_some_and(|deadline| {
-                                deadline.reached()
-                                    && deadline.cause
-                                        == crate::engine::ledger::ActiveDeadlineCause::Goal
-                            });
+                        self.resolve_delegated_human(
+                            intent,
+                            active_deadline.as_ref(),
+                            &mut resolution,
+                        )
+                        .await?
                     }
                     AskSite::Primary(options) => {
                         self.resolve_primary_human(intent, options, &mut resolution)
-                            .await?;
+                            .await?
                     }
                 },
             }
@@ -170,6 +148,54 @@ impl RunLoop<'_> {
             }
         }
         Ok(Admission::Reserved(resolution))
+    }
+
+    async fn resolve_ai_review(
+        &self,
+        objective: &str,
+        intent: &EffectIntent,
+        site: &AskSite,
+        initial_mode: Option<ApprovalMode>,
+        resolution: &mut Resolution,
+    ) -> Result<ReviewProgress, EngineError> {
+        let reviewed = self
+            .resolve_review(objective, intent, site, initial_mode)
+            .await?;
+        resolution.approved = reviewed.approved;
+        resolution.source = reviewed.source;
+        resolution.active_time_exhausted = reviewed.active_time_exhausted;
+        Ok(reviewed.progress)
+    }
+
+    async fn resolve_delegated_human(
+        &self,
+        intent: &EffectIntent,
+        active_deadline: Option<&crate::engine::ledger::ActiveDeadline>,
+        resolution: &mut Resolution,
+    ) -> Result<(), EngineError> {
+        let Some(approvals) = self.controls.approvals else {
+            return Ok(());
+        };
+        let (reply, withdrawal) = self
+            .delegated_human_reply(intent, active_deadline, approvals)
+            .await?;
+        resolution.withdrawal = withdrawal;
+        resolution.approved = matches!(
+            reply,
+            ApprovalReply::AllowOnce
+                | ApprovalReply::AllowForSession
+                | ApprovalReply::AllowPrefixInFolder
+        ) && !self.pause_requested()
+            && !self.controls.cancellation.is_cancelled();
+        resolution.source = if reply == ApprovalReply::Unavailable {
+            PermissionSource::UnavailableApproval
+        } else {
+            PermissionSource::Human
+        };
+        resolution.active_time_exhausted = active_deadline.is_some_and(|deadline| {
+            deadline.reached() && deadline.cause == crate::engine::ledger::ActiveDeadlineCause::Goal
+        });
+        Ok(())
     }
 
     pub(super) async fn approval_paused(&self) {

@@ -599,20 +599,10 @@ impl<'a> RunProgress<'a> {
                 arany::EngineError::GoalBudgetExhausted,
             ))) => {
                 let reloaded = super::load_view(&self.admission.state_dir, ui.view.id).await?;
-                let feedback = reloaded
-                    .runs
-                    .iter()
-                    .rev()
-                    .find(|run| {
-                        reloaded.budget_stop_goal(run).is_some_and(|goal| {
-                            Some(goal.id) == self.submitted_goal && goal.budget_refusal.is_some()
-                        })
-                    })
-                    .and_then(|run| crate::presentation::session_run_feedback(&reloaded, run));
-                Err(feedback.unwrap_or_else(|| {
-                    "Goal budget admission refused (uncommitted); no Goal receipt is available"
-                        .into()
-                }))
+                let feedback =
+                    crate::presentation::budget_refusal_feedback(&reloaded, self.submitted_goal);
+                Err(feedback
+                    .unwrap_or_else(|| crate::presentation::BUDGET_REFUSAL_UNCOMMITTED.into()))
             }
             Err(RunAttemptError::Failed(error)) => Err(error.to_string()),
         }

@@ -439,9 +439,7 @@ async fn classify_submission(submission: Submission) -> Result<ClassifiedSubmiss
                     return Err(feedback);
                 }
             }
-            return Err(
-                "Goal budget admission refused (uncommitted); no Goal receipt is available".into(),
-            );
+            return Err(crate::presentation::BUDGET_REFUSAL_UNCOMMITTED.into());
         }
         Err(error) => return Err(error.to_string()),
     };
