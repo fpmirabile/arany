@@ -44,11 +44,11 @@ pub(crate) use events::PAYLOAD_VERSIONS;
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal,
     BudgetRefusalCause, ChildGrant, CollaborationPolicy, CompactionFailure, CompactionRecord,
-    CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory, DisplayChunk, Event,
-    EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase, GoalPlanContract,
-    GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion, InstructionFile,
-    InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
-    MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS,
+    CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory, DisplayChunk,
+    EffectTarget, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase,
+    GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
+    InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_DISPLAY_CHUNK_BYTES,
+    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS,
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
     ProviderCallRecord, ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind,
@@ -65,10 +65,11 @@ pub(crate) use events::{
     goal_started_v7_to_v8, intent_without_expiry, pre_command_selection_payload,
     pre_file_removal_payload, pre_gh_pr_list_payload, pre_git_write_payload, pre_glob_payload,
     pre_host_git_payload, pre_host_payload, pre_host_prefix_payload, pre_multiedit_payload,
-    pre_typed_prefix_payload, provider_call_v18_payload, provider_call_v18_to_v19,
-    provider_call_v19_payload, provider_call_v19_to_v20, rebind_intent_pins, replace_intent_pin,
-    rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
-    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
+    pre_role_routing_payload, pre_typed_prefix_payload, provider_call_v18_payload,
+    provider_call_v18_to_v19, provider_call_v19_payload, provider_call_v19_to_v20,
+    rebind_intent_pins, replace_intent_pin, rewind_started_v1_payload, rewind_started_v1_to_v2,
+    run_started_fits, run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]
