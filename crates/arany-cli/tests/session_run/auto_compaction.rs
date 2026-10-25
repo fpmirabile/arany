@@ -74,8 +74,14 @@ enum CompactionCase {
     Interrupted,
 }
 
+const COMPACTION_SUMMARY_MARKER: &str = "DERIVED_SUMMARY_CANARY";
+
 fn compaction_summary() -> String {
-    "D".repeat(16 * 1024)
+    let bytes: usize = 16 * 1024;
+    let mut summary =
+        COMPACTION_SUMMARY_MARKER.repeat(bytes.div_ceil(COMPACTION_SUMMARY_MARKER.len()));
+    summary.truncate(bytes);
+    summary
 }
 
 fn synthetic_server(
@@ -704,7 +710,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             1
         );
     }
-    assert!(!transcript.contains(&compaction_summary()));
+    assert!(!transcript.contains(COMPACTION_SUMMARY_MARKER));
     assert!(!transcript.contains("test-key"));
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains('\x1b'), "linear output stays unstyled");
