@@ -8,10 +8,10 @@ use rusqlite::{Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-pub(super) const MAX_SESSION_EVENTS: usize = 10_000;
+pub(crate) const MAX_SESSION_EVENTS: usize = 10_000;
 const MAX_FORK_DEPTH: usize = 8;
-const MAX_DISCOVERED_SESSIONS: usize = 65_536;
-pub(super) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
+pub(crate) const MAX_DISCOVERED_SESSIONS: usize = 65_536;
+pub(crate) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
 const LIST_HEAD_CHUNK: usize = 1024;
 const MAX_LIST_BUSY_RETRIES: usize = 3;
 pub(super) const WATERMARK_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) FROM events";

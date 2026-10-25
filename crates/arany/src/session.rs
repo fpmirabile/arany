@@ -34,9 +34,10 @@ pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
-    COMPACTION_COMPILER_VERSION, CompactionInputError, MAX_COMPACTION_INPUT_BYTES,
-    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
-    MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, validate_compaction_references,
+    AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, CompactionInputError,
+    MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
+    MAX_COMPACTION_TURNS, MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction,
+    validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
