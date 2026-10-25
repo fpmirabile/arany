@@ -16,7 +16,6 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
-const INVOKED_SKILL_ENVELOPE_BYTES: usize = 1024;
 mod ask;
 mod checkpoint;
 mod dispatch;
@@ -24,6 +23,7 @@ pub(super) mod hooks;
 mod intent;
 mod permission;
 mod review;
+mod skills;
 
 use ask::{AskOptions, AskSite, Resolution, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
@@ -36,6 +36,7 @@ use intent::{
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
+pub(super) use skills::SkillInitialization;
 
 use hooks::{HookFold, HookStop};
 
@@ -939,151 +940,6 @@ pub(super) enum HookDenial {
 }
 
 #[must_use]
-#[derive(Debug, Eq, PartialEq)]
-pub(super) enum SkillInitialization {
-    Ready,
-    Stopped,
-    Failed(crate::session::RunFailure),
-}
-
-#[must_use]
-#[derive(Debug, Eq, PartialEq)]
-enum SkillReadPlan {
-    Skip,
-    Stop,
-    Read(String),
-}
-
-fn skill_read_plan(name: Option<String>, stopping: bool) -> SkillReadPlan {
-    match (name, stopping) {
-        (_, true) => SkillReadPlan::Stop,
-        (None, false) => SkillReadPlan::Skip,
-        (Some(name), false) => SkillReadPlan::Read(name),
-    }
-}
-
-fn skill_read_decision(
-    disposition: ToolDisposition,
-    attested: bool,
-    context_bytes: usize,
-    context_limit: usize,
-) -> SkillInitialization {
-    match disposition {
-        ToolDisposition::Succeeded if attested => {
-            if context_bytes <= context_limit {
-                SkillInitialization::Ready
-            } else {
-                SkillInitialization::Failed(crate::session::RunFailure::ToolContextFull)
-            }
-        }
-        ToolDisposition::Cancelled | ToolDisposition::Uncertain => SkillInitialization::Stopped,
-        ToolDisposition::Succeeded
-        | ToolDisposition::Denied
-        | ToolDisposition::Failed
-        | ToolDisposition::Conflict
-        | ToolDisposition::Limit => {
-            SkillInitialization::Failed(crate::session::RunFailure::ToolStopped)
-        }
-    }
-}
-
-impl RunLoop<'_> {
-    pub(super) async fn initialize_skill(
-        &self,
-        request: &mut ProviderRequest,
-    ) -> Result<RunProgress<SkillInitialization>, EngineError> {
-        let name = self
-            .ledger()
-            .view(|view| view.runs.last().and_then(|run| run.skill.clone()))?;
-        let name = match skill_read_plan(
-            name,
-            self.pause_at_boundary() || self.controls.cancellation.is_cancelled(),
-        ) {
-            SkillReadPlan::Skip => return Ok(RunProgress::Ready(SkillInitialization::Ready)),
-            SkillReadPlan::Stop => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),
-            SkillReadPlan::Read(name) => name,
-        };
-        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let call = ToolCall::Skill {
-            name,
-            resource: None,
-        };
-        if !self.ledger().allows_tool(&call) {
-            return Ok(RunProgress::Ready(SkillInitialization::Failed(
-                crate::session::RunFailure::ToolStopped,
-            )));
-        }
-        let mut intent = match self.primary_intent(runtime, call.clone()).await? {
-            None => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),
-            Some(intent) => intent,
-        };
-        let tools = request
-            .input
-            .tools
-            .as_ref()
-            .ok_or(EngineError::InvalidRequest)?;
-        let Some(capacity) =
-            runtime.result_capacity(tools.rendered_len(), INVOKED_SKILL_ENVELOPE_BYTES)
-        else {
-            return Ok(RunProgress::Ready(SkillInitialization::Failed(
-                crate::session::RunFailure::ToolContextFull,
-            )));
-        };
-        intent.limits.result_bytes = capacity.min(MAX_TOOL_RESULT_BYTES) as u32;
-        let grant = Grant::Primary {
-            request,
-            review_allowed: false,
-        };
-        let observation = match self
-            .run_intent(&grant, runtime, intent, &call, false)
-            .await?
-        {
-            Ok((observation, _)) => observation,
-            Err(StopCause::ActiveTime) => return Ok(RunProgress::Stopped(RunRefusal::Budget)),
-            Err(StopCause::Capacity) => return Ok(RunProgress::Stopped(RunRefusal::Capacity)),
-            Err(
-                StopCause::Uncertain
-                | StopCause::Cancelled
-                | StopCause::HookStop
-                | StopCause::Paused
-                | StopCause::Budget
-                | StopCause::ContextFull
-                | StopCause::DelegationDeadline
-                | StopCause::Refused(_)
-                | StopCause::ToolStopped
-                | StopCause::InvalidCommandResult,
-            ) => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),
-        };
-        self.apply_invoked_skill(request, runtime, observation)
-            .map(RunProgress::Ready)
-    }
-
-    fn apply_invoked_skill(
-        &self,
-        request: &mut ProviderRequest,
-        runtime: &ToolRuntime,
-        observation: ToolObservation,
-    ) -> Result<SkillInitialization, EngineError> {
-        let tools = request
-            .input
-            .tools
-            .as_mut()
-            .ok_or(EngineError::InvalidRequest)?;
-        let decision = skill_read_decision(
-            observation.disposition,
-            observation.attestation.is_some(),
-            tools.with_invoked_skill_len(&observation),
-            runtime.context_limit_bytes(),
-        );
-        match decision {
-            SkillInitialization::Ready => tools.invoked_skill = Some(observation),
-            SkillInitialization::Stopped | SkillInitialization::Failed(_) => {}
-        }
-        Ok(decision)
-    }
-}
-
-#[must_use]
 pub(super) enum DefinitionInitialization {
     Ready,
     Stopped,
@@ -1329,66 +1185,6 @@ mod tests {
                 "review resolution row {index}"
             );
         }
-    }
-
-    #[test]
-    fn skill_read_outcomes_are_closed_before_egress() {
-        for (name, stopping, expected) in [
-            (None, false, SkillReadPlan::Skip),
-            (None, true, SkillReadPlan::Stop),
-            (Some("guide".into()), true, SkillReadPlan::Stop),
-            (
-                Some("guide".into()),
-                false,
-                SkillReadPlan::Read("guide".into()),
-            ),
-        ] {
-            assert_eq!(skill_read_plan(name, stopping), expected);
-        }
-        for (disposition, attested, expected) in [
-            (ToolDisposition::Succeeded, true, SkillInitialization::Ready),
-            (
-                ToolDisposition::Succeeded,
-                false,
-                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
-            ),
-            (
-                ToolDisposition::Denied,
-                false,
-                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
-            ),
-            (
-                ToolDisposition::Failed,
-                false,
-                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
-            ),
-            (
-                ToolDisposition::Conflict,
-                true,
-                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
-            ),
-            (
-                ToolDisposition::Limit,
-                true,
-                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
-            ),
-            (
-                ToolDisposition::Cancelled,
-                false,
-                SkillInitialization::Stopped,
-            ),
-            (
-                ToolDisposition::Uncertain,
-                true,
-                SkillInitialization::Stopped,
-            ),
-        ] {
-            assert_eq!(skill_read_decision(disposition, attested, 64, 64), expected);
-        }
-        assert_eq!(
-            skill_read_decision(ToolDisposition::Succeeded, true, 65, 64),
-            SkillInitialization::Failed(crate::session::RunFailure::ToolContextFull)
-        );
     }
 
     #[test]
