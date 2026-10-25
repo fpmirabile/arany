@@ -2081,7 +2081,7 @@ pub(crate) fn compacted_fixture(compacted: bool) -> Fixture {
 #[test]
 fn forged_invalid_editor_delegations_reject_before_child_work() {
     use crate::test_support::worker_teams::{INVALID_EDITOR_CASES, invalidate_editor};
-    for (case, _) in INVALID_EDITOR_CASES {
+    for (case, cause) in INVALID_EDITOR_CASES {
         let mut f = fixture();
         let delegation = f
             .events
@@ -2106,6 +2106,18 @@ fn forged_invalid_editor_delegations_reject_before_child_work() {
             }
         }
         f.events.truncate(delegation);
+        let view = f.view();
+        let Event::ProviderCallRecorded { record, .. } = &event else {
+            unreachable!()
+        };
+        let ChildAssignment::Editor { assignment } = &record.delegation.as_ref().unwrap()[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            super::worker::validate_request(&view, &view.runs[0], assignment, None),
+            Err(*cause),
+            "{case}"
+        );
         refused(&f, event, case);
     }
 }

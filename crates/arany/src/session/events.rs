@@ -150,7 +150,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 15),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 22),
+    ("ProviderCallRecorded", 23),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -1884,6 +1884,33 @@ pub(crate) fn provider_call_v19_payload(payload: &str) -> Option<String> {
 pub(crate) fn provider_call_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
     let canonical = provider_call_v19_payload(&value.to_string())?;
     serde_json::from_str(&canonical).ok()
+}
+
+pub(crate) fn provider_call_v22_payload(payload: &str) -> Option<String> {
+    use ProposalRefusalCause::*;
+    let record: ProviderCallRecord = parse(payload).ok()?;
+    if record.refusal.as_ref().is_some_and(|refusal| {
+        !matches!(
+            refusal.cause,
+            InvalidArguments
+                | InvalidPath
+                | Phase
+                | PlanInvalid
+                | PlanBudgetOutsideGoal
+                | PlanBudgetSpent
+                | PlanScopeExcludesCall
+                | PlanOutsideGrant
+                | ArgumentBytes
+                | LeaseOverlap
+                | NotOffered
+                | AnswerInvalid
+                | DelegateInvalid
+        )
+    }) {
+        return None;
+    }
+    record.validate().ok()?;
+    serialize(&record).ok()
 }
 
 pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<String> {

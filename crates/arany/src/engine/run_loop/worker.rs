@@ -277,14 +277,20 @@ impl RunLoop<'_> {
             && agent
                 .is_none_or(|name| self.definitions.get().is_some_and(|r| r.contains_key(name)))
             && attempts + children.len() <= usize::from(self.controls.policy.max_children())
-            && self.wave_settled()?
-            && children.iter().enumerate().all(|(index, child)| {
-                child.editor.as_ref().map_or_else(
-                    || self.valid_research_assignment(child, agent),
-                    |a| self.valid_live_editor(a, &children[..index], wave, runtime),
-                )
-            });
-        Ok(if valid { Ok(()) } else { Err(DelegateInvalid) })
+            && self.wave_settled()?;
+        if !valid {
+            return Ok(Err(DelegateInvalid));
+        }
+        for (index, child) in children.iter().enumerate() {
+            let valid = match &child.editor {
+                Some(a) => self.valid_live_editor(a, &children[..index], wave, runtime)?,
+                None => self.valid_research_assignment(child, agent),
+            };
+            if !valid {
+                return Ok(Err(DelegateInvalid));
+            }
+        }
+        Ok(Ok(()))
     }
 
     fn valid_live_editor(
@@ -293,37 +299,37 @@ impl RunLoop<'_> {
         previous: &[ChildAssignment],
         wave: usize,
         runtime: &ToolRuntime,
-    ) -> bool {
-        usize::from(a.wave) == wave
-            && a.supersedes.is_none_or(|id| {
-                self.ledger()
-                    .view(|v| {
-                        v.runs.last().is_some_and(|r| {
-                            r.agents.iter().any(|prior| {
-                                prior.id == id
-                                    && prior.status != crate::session::AgentStatus::Active
-                                    && prior
-                                        .assignment
-                                        .as_ref()
-                                        .is_some_and(|w| w.released.is_some())
-                            })
-                        })
+    ) -> Result<bool, EngineError> {
+        if usize::from(a.wave) != wave {
+            return Ok(false);
+        }
+        if let Some(id) = a.supersedes
+            && !self.ledger().view(|v| {
+                v.runs.last().is_some_and(|r| {
+                    r.agents.iter().any(|prior| {
+                        prior.id == id
+                            && prior.status != crate::session::AgentStatus::Active
+                            && prior
+                                .assignment
+                                .as_ref()
+                                .is_some_and(|w| w.released.is_some())
                     })
-                    .unwrap_or(false)
-            })
-            && !previous.iter().filter_map(|c| c.editor.as_ref()).any(|b| {
-                a.lease
-                    .iter()
-                    .any(|p| b.lease.iter().any(|q| overlaps(p, q)))
-            })
-            && match &a.criterion {
-                crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                    runtime.allows(call)
-                }
-                crate::session::GoalSuccessCriterion::WorkspaceFileContent { .. }
-                | crate::session::GoalSuccessCriterion::WorkspaceFileDigest { .. } => true,
+                })
+            })?
+        {
+            return Ok(false);
+        }
+        Ok(!previous.iter().filter_map(|c| c.editor.as_ref()).any(|b| {
+            a.lease
+                .iter()
+                .any(|p| b.lease.iter().any(|q| overlaps(p, q)))
+        }) && match &a.criterion {
+            crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                runtime.allows(call)
             }
-            && self.editor_grant(a).is_ok_and(|g| g.valid())
+            crate::session::GoalSuccessCriterion::WorkspaceFileContent { .. }
+            | crate::session::GoalSuccessCriterion::WorkspaceFileDigest { .. } => true,
+        } && self.editor_grant(a)?.valid())
     }
 
     pub(super) fn wave_settled(&self) -> Result<bool, EngineError> {
@@ -749,8 +755,7 @@ impl RunLoop<'_> {
         assignment: Box<EditorAssignment>,
     ) -> Result<WorkerAdmission, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        if self
-            .ledger()
+        self.ledger()
             .view(|v| {
                 crate::session::validate_editor_request(
                     v,
@@ -759,10 +764,7 @@ impl RunLoop<'_> {
                     None,
                 )
             })?
-            .is_err()
-        {
-            return Ok(WorkerAdmission::Refused);
-        }
+            .map_err(|_| EngineError::InvalidHistory)?;
         if !self.ledger().admits(Action::Delegation {
             children: 1,
             research: true,
