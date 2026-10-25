@@ -304,18 +304,19 @@ impl Manager {
         loop {
             self.pump();
             let fresh = String::from_utf8_lossy(&self.transcript[self.cursor..]);
-            if fresh.contains("Input:\r\n") {
-                if fresh.contains(prompt) {
-                    self.cursor = self.transcript.len();
-                    self.input.write_all(choice).unwrap();
-                    return;
-                }
-                if fresh.contains("Page ") {
-                    pages += 1;
-                    assert!(pages <= MAX_PAGES);
-                    self.cursor = self.transcript.len();
-                    self.input.write_all(b"\r").unwrap();
-                }
+            if let Some(start) = fresh.find("Choose: Page ")
+                && let Some(end) = fresh[start..].find('\n')
+            {
+                pages += 1;
+                assert!(pages <= MAX_PAGES);
+                self.cursor += start + end + 1;
+                self.input.write_all(b"\r").unwrap();
+                continue;
+            }
+            if fresh.contains("Input:\r\n") && fresh.contains(prompt) {
+                self.cursor = self.transcript.len();
+                self.input.write_all(choice).unwrap();
+                return;
             }
             assert!(
                 Instant::now() < deadline,

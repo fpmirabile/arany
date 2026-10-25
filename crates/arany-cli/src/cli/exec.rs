@@ -1437,6 +1437,38 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
+    async fn run_spending_budget_after_answer(
+        exec: ExecArgs,
+        admission: Admission,
+        provider: Arc<dyn Provider>,
+        elapsed: std::time::Duration,
+    ) -> CommandOutput {
+        let session = admission.session_id.expect("existing Session");
+        let (entered, release) =
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, arany::Event::MessageCommitted { .. })
+            });
+        let run = run_with_provider(exec, admission, provider, Telemetry::disabled());
+        tokio::pin!(run);
+        const ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+        tokio::time::timeout(ACK_DEADLINE, async {
+            tokio::select! {
+                _ = &mut run => panic!("Run ended before answer acknowledgment"),
+                reached = entered => reached.expect("answer committed"),
+            }
+        })
+        .await
+        .expect("answer acknowledgment gate");
+        tokio::time::pause();
+        tokio::time::advance(elapsed).await;
+        tokio::time::resume();
+        release.send(()).expect("acknowledge committed answer");
+        tokio::time::timeout(ACK_DEADLINE, run)
+            .await
+            .expect("Goal settlement deadline")
+            .expect("completed Run with an exhausted Goal")
+    }
+
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
         use std::os::unix::fs::PermissionsExt;
@@ -1464,7 +1496,9 @@ mod tests {
         root.record(arany::RecordKind::UiPreferences)
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
             .expect("record settings");
-        drop(root);
+        let session_id = arany::create_session(root, workspace.clone(), None)
+            .await
+            .expect("known Session for acknowledgment gate");
 
         let contract = arany::GoalPlanContract {
             mission: "Inspect the notes and report the result".into(),
@@ -1484,23 +1518,21 @@ mod tests {
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
-        .with_profile("openai", "gpt-5.4")
-        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
+        .with_profile("openai", "gpt-5.4");
         let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
         exec.prompt = None;
+        exec.session_id = Some(session_id.to_string());
         exec.goal = Some("Inspect the notes".into());
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
         let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
-            .await
-            .expect("completed Run with an exhausted Goal");
-        let first_event: serde_json::Value =
-            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
-                .expect("JSONL Event");
-        let session_id =
-            SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
-                .expect("typed Session ID");
+        let report = run_spending_budget_after_answer(
+            exec,
+            admission,
+            Arc::new(provider),
+            std::time::Duration::from_millis(budget.max_active_ms.expect("finite active time")),
+        )
+        .await;
         let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
         let run = view.runs.last().expect("Finished Run");
         assert_eq!(run.status, RunStatus::Finished);

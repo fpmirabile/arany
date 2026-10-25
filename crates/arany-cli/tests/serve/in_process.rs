@@ -148,6 +148,9 @@ async fn setup_edits_block_loaded_thread_prompts_without_events_or_provider_call
     input.send(thread_start(&workspace)).await.unwrap();
     let thread: arany::SessionId =
         serde_json::from_value(next(&mut output).await["result"]["thread"]["id"].clone()).unwrap();
+    let started = next(&mut output).await;
+    assert_eq!(started["method"], "thread/started");
+    assert_eq!(started["params"]["thread"]["id"], thread.to_string());
     let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
     for uncertain in [false, true] {
         arany::test_support::record_setup_edit_state(&store, thread, uncertain).await;

@@ -1002,7 +1002,9 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
             Some(id),
             |_, _| Err(AuthorizationError::Unavailable),
         ),
-        Err(AuthorizationError::Unavailable)
+        Err(AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
+        ))
     ));
     let pending = AccountIndex::read(&state).unwrap();
     assert_eq!(pending.selected, Some(id));

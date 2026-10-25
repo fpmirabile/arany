@@ -1216,6 +1216,26 @@ mod budget_tests {
 #[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
 mod tests {
     use super::*;
+    #[cfg(debug_assertions)]
+    fn reviewed_setup_text(transcript: &str, title: &str) -> String {
+        let mut current = "";
+        let mut text = String::new();
+        for line in transcript.lines() {
+            if let Some(header) = line
+                .strip_prefix("Settings: ")
+                .or_else(|| line.strip_prefix("Setup: "))
+            {
+                current = header;
+            } else if current == title
+                && let Some(page) = line.strip_prefix("Choose: Page ")
+                && let Some((_, body)) = page.split_once("\\u{000a}")
+            {
+                text.push_str(body);
+            }
+        }
+        text
+    }
+
     #[cfg(target_os = "macos")]
     use crate::terminal::{AttachedTerminal, Composer};
 
@@ -1640,7 +1660,10 @@ mod tests {
                     } else {
                         assert!(transcript.contains("Reset deletes all conversations"));
                         assert!(transcript.contains("Reset history"));
-                        assert!(transcript.contains("This cannot be undone."));
+                        assert!(
+                            reviewed_setup_text(&transcript, "Reset history?")
+                                .contains("This cannot be undone.")
+                        );
                         assert!(transcript.contains("empty Enter selects 1. Back"));
                     }
                     let calls = std::fs::read_to_string(marker).unwrap_or_default();
