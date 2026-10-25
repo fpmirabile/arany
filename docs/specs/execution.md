@@ -28,6 +28,8 @@ A delegation abort preserves its original failure when sibling draining also fai
 
 A primary outcome-contract failure is committed as `ProviderCallRecorded` with `invalid_response` and `outcome_contract` before the [single corrective call](./provider.md#structured-outcomes-and-tool-encoding) can reserve and dispatch. Replay permits that same-phase continuation only after the first such failure, with settled Tools and hooks, and rejects another reservation after the second. Reservations and unknown usage remain charged normally; no effect is replayed. If correction also fails, the Run records `provider_call` and retains the final typed parse reason. Subsequent context uses the [committed failure projection](./session.md#context-and-compaction), never an invented causal explanation.
 
+A framed Provider response whose content cannot decode into an offered answer or typed proposal records `invalid_response` with the closed `outcome_decode` reason. It is distinct from `outcome_contract`, which permits one corrective call, and `response_contract`, which covers identity, usage and provenance after decoding.
+
 ## Researcher children
 
 One delegation active-time segment covers child calls and child Tools, including their shared Guard capacity waits. Transition-driven accounting charges overlapping Provider, effect, preparation and cleanup work once. A pending child Ask pauses this allowance while idle; sibling activity continues to consume it. Exhaustion withdraws the Ask before dispatch with its delegation or Goal cause. Pause also takes effect before each child step.
@@ -169,7 +171,7 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 | `ToolStarted` | 19 |
 | `AgentSpawned` | 14 |
 | `AgentFinished` | 10 |
-| `ProviderCallRecorded` | 19; the closed failure reasons include `rate_limited` |
+| `ProviderCallRecorded` | 20; the closed failure reasons include `rate_limited` and `outcome_decode` |
 | `RunFinished` | 9 |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalPlanContractRecorded` | 10 |
@@ -290,7 +292,8 @@ The current Tool and hook intent payloads omit absolute approval expiry. The exp
 
 `ToolFinished` 25 → 26 and `HookFinished` 14 → 15 add `selection: null` to prior complete command results because historical selection counts were not recorded. A near-limit result is refitted within its original `result_bytes` budget with explicit omission markers. The migration preserves output totals, exit status, changesets and hook verdicts. It refuses a result that already exceeds `result_bytes` or already contains `selection`, or whose converted result cannot fit or validate; non-command observations keep their bytes.
 
-`ProviderCallRecorded` 18 → 19 rewrites refusal records from `invalid_response` to `rejected`, preserving other records; a source refusal using `invalid_path` or any disposition other than `invalid_response` refuses.
+`ProviderCallRecorded` 18 → 19 rewrites refusal records from `invalid_response` to `rejected`, preserving other records; a source refusal using `invalid_path` or any disposition other than `invalid_response` refuses. Version 19 → 20 is an identity migration for the new `outcome_decode` failure reason: it preserves the old record's facts and uses its canonical v19 serialization for historical prefix digests. A source payload already naming the new reason refuses.
+
 
 `GoalFinished` 7 → 8 adds `budget_refusal: null`; version 7 did not record refused quantities. A source payload already containing that field refuses. No runtime compatibility reader or invented historical reservation is introduced.
 

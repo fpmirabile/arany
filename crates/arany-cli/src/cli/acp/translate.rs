@@ -813,6 +813,157 @@ async fn recover(
     }
 }
 
+struct ResponseContext<'a> {
+    state: &'a Shared,
+    outbound: &'a mpsc::Sender<Value>,
+}
+
+struct LoadResponse {
+    id: RequestId,
+    cwd: String,
+    replay: bool,
+    mode: PermissionMode,
+}
+
+async fn initialize_response(id: RequestId, context: &ResponseContext<'_>) -> Result<(), String> {
+    emit(context.outbound, wire::response(id, wire::initialized())).await
+}
+
+async fn new_session_response(
+    id: RequestId,
+    cwd: String,
+    mode: PermissionMode,
+    result: Value,
+    context: &ResponseContext<'_>,
+) -> Result<(), String> {
+    let result: ThreadResult =
+        serde_json::from_value(result).map_err(|_| "invalid serve thread")?;
+    {
+        let mut state = context.state.lock().expect("translator state");
+        state.sessions.insert(
+            result.thread.id,
+            Session {
+                sequence: 0,
+                cwd,
+                mode: mode.clone(),
+            },
+        );
+        state.authenticated = true;
+    }
+    emit(
+        context.outbound,
+        wire::response(id, {
+            let mut settings = wire::mode_state(&mode);
+            settings["sessionId"] = json!(result.thread.id);
+            settings
+        }),
+    )
+    .await
+}
+
+async fn load_session_response(
+    response: LoadResponse,
+    result: Value,
+    context: &ResponseContext<'_>,
+) -> Result<(), String> {
+    let result: ThreadResumeResult =
+        serde_json::from_value(result).map_err(|_| "invalid serve history")?;
+    if response.replay {
+        for update in history_updates(&result, &response.cwd) {
+            emit_answer(context.outbound, update).await?;
+        }
+    }
+    {
+        let mut state = context.state.lock().expect("translator state");
+        state.sessions.insert(
+            result.thread.id,
+            Session {
+                sequence: 0,
+                cwd: response.cwd,
+                mode: response.mode.clone(),
+            },
+        );
+        state.authenticated = true;
+    }
+    emit(
+        context.outbound,
+        wire::response(response.id, wire::mode_state(&response.mode)),
+    )
+    .await
+}
+
+async fn mode_response(
+    id: RequestId,
+    session: SessionId,
+    config: bool,
+    result: Value,
+    context: &ResponseContext<'_>,
+) -> Result<(), String> {
+    let result: ThreadSettingsUpdateResult =
+        serde_json::from_value(result).map_err(|_| "invalid serve settings")?;
+    context
+        .state
+        .lock()
+        .expect("translator state")
+        .sessions
+        .get_mut(&session)
+        .ok_or("no loaded ACP Session")?
+        .mode = result.permission_mode.clone();
+    for update in wire::mode_updates(session, &result.permission_mode) {
+        emit(context.outbound, update).await?;
+    }
+    let response = if config {
+        json!({"configOptions":wire::mode_state(&result.permission_mode)["configOptions"]})
+    } else {
+        json!({})
+    };
+    emit(context.outbound, wire::response(id, response)).await
+}
+
+async fn close_session_response(
+    id: RequestId,
+    session: SessionId,
+    context: &ResponseContext<'_>,
+) -> Result<(), String> {
+    {
+        let mut state = context.state.lock().expect("translator state");
+        state.sessions.remove(&session);
+        state.closing.remove(&session);
+    }
+    emit(context.outbound, wire::response(id, json!({}))).await
+}
+
+async fn list_sessions_response(
+    id: RequestId,
+    result: Value,
+    context: &ResponseContext<'_>,
+) -> Result<(), String> {
+    let result: ThreadListResult =
+        serde_json::from_value(result).map_err(|_| "invalid serve Session list")?;
+    let sessions: Vec<_> = result
+        .data
+        .into_iter()
+        .map(|item| {
+            let mut session = json!({
+                "sessionId": item.id, "cwd": item.cwd,
+                "title": crate::presentation::escape_terminal(&item.title),
+            });
+            if item.updated_at != "Unknown" {
+                session["updatedAt"] = json!(item.updated_at);
+            }
+            session
+        })
+        .collect();
+    emit(
+        context.outbound,
+        wire::response(
+            id,
+            json!({"sessions": sessions, "nextCursor": result.next_cursor}),
+        ),
+    )
+    .await
+}
+
 async fn output_message(
     message: Message,
     serve: mpsc::Sender<ClientMessage>,
@@ -826,34 +977,14 @@ async fn output_message(
                 return Ok(());
             };
             let pending = state.lock().expect("translator state").pending.remove(&id);
+            let context = ResponseContext {
+                state: &state,
+                outbound: &outbound,
+            };
             match pending {
-                Some(Pending::Initialize(id)) => {
-                    emit(&outbound, wire::response(id, wire::initialized())).await?
-                }
+                Some(Pending::Initialize(id)) => initialize_response(id, &context).await?,
                 Some(Pending::New(id, cwd, mode)) => {
-                    let result: ThreadResult =
-                        serde_json::from_value(reply.result).map_err(|_| "invalid serve thread")?;
-                    {
-                        let mut state = state.lock().expect("translator state");
-                        state.sessions.insert(
-                            result.thread.id,
-                            Session {
-                                sequence: 0,
-                                cwd,
-                                mode: mode.clone(),
-                            },
-                        );
-                        state.authenticated = true;
-                    }
-                    emit(
-                        &outbound,
-                        wire::response(id, {
-                            let mut settings = wire::mode_state(&mode);
-                            settings["sessionId"] = json!(result.thread.id);
-                            settings
-                        }),
-                    )
-                    .await?;
+                    new_session_response(id, cwd, mode, reply.result, &context).await?
                 }
                 Some(Pending::Load {
                     id,
@@ -861,85 +992,30 @@ async fn output_message(
                     replay,
                     mode,
                 }) => {
-                    let result: ThreadResumeResult = serde_json::from_value(reply.result)
-                        .map_err(|_| "invalid serve history")?;
-                    if replay {
-                        for update in history_updates(&result, &cwd) {
-                            emit_answer(&outbound, update).await?;
-                        }
-                    }
-                    {
-                        let mut state = state.lock().expect("translator state");
-                        state.sessions.insert(
-                            result.thread.id,
-                            Session {
-                                sequence: 0,
-                                cwd,
-                                mode: mode.clone(),
-                            },
-                        );
-                        state.authenticated = true;
-                    }
-                    emit(&outbound, wire::response(id, wire::mode_state(&mode))).await?;
+                    load_session_response(
+                        LoadResponse {
+                            id,
+                            cwd,
+                            replay,
+                            mode,
+                        },
+                        reply.result,
+                        &context,
+                    )
+                    .await?;
                 }
                 Some(Pending::Mode {
                     id,
                     session,
                     config,
                 }) => {
-                    let result: ThreadSettingsUpdateResult =
-                        serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve settings")?;
-                    state
-                        .lock()
-                        .expect("translator state")
-                        .sessions
-                        .get_mut(&session)
-                        .ok_or("no loaded ACP Session")?
-                        .mode = result.permission_mode.clone();
-                    for update in wire::mode_updates(session, &result.permission_mode) {
-                        emit(&outbound, update).await?;
-                    }
-                    let result = if config {
-                        json!({"configOptions":wire::mode_state(&result.permission_mode)["configOptions"]})
-                    } else {
-                        json!({})
-                    };
-                    emit(&outbound, wire::response(id, result)).await?;
+                    mode_response(id, session, config, reply.result, &context).await?;
                 }
                 Some(Pending::Close(id, session)) => {
-                    {
-                        let mut state = state.lock().expect("translator state");
-                        state.sessions.remove(&session);
-                        state.closing.remove(&session);
-                    }
-                    emit(&outbound, wire::response(id, json!({}))).await?;
+                    close_session_response(id, session, &context).await?
                 }
                 Some(Pending::List(id)) => {
-                    let result: ThreadListResult = serde_json::from_value(reply.result)
-                        .map_err(|_| "invalid serve Session list")?;
-                    let sessions: Vec<_> = result
-                        .data
-                        .into_iter()
-                        .map(|item| {
-                            let mut session = json!({
-                                "sessionId": item.id, "cwd": item.cwd,
-                                "title": crate::presentation::escape_terminal(&item.title),
-                            });
-                            if item.updated_at != "Unknown" {
-                                session["updatedAt"] = json!(item.updated_at);
-                            }
-                            session
-                        })
-                        .collect();
-                    emit(
-                        &outbound,
-                        wire::response(
-                            id,
-                            json!({"sessions": sessions, "nextCursor": result.next_cursor}),
-                        ),
-                    )
-                    .await?;
+                    list_sessions_response(id, reply.result, &context).await?
                 }
                 Some(Pending::Start) => {
                     let result: TurnResult =

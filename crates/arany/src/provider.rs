@@ -1101,6 +1101,7 @@ pub enum ProviderFailureReason {
     UsageTemporarilyUnavailable,
     ServiceUnavailable,
     StreamProtocol,
+    OutcomeDecode,
     ResponseContract,
     OutcomeContract,
     LocalOutputLimit,
@@ -1137,6 +1138,7 @@ impl ProviderError {
     pub(crate) fn failure_reason(&self) -> Option<ProviderFailureReason> {
         match self {
             Self::InvalidStream | Self::StreamEnded => Some(ProviderFailureReason::StreamProtocol),
+            Self::InvalidOutcome => Some(ProviderFailureReason::OutcomeDecode),
             Self::InvalidResponseContract => Some(ProviderFailureReason::ResponseContract),
             Self::InvalidOutcomeContract => Some(ProviderFailureReason::OutcomeContract),
             Self::LocalOutputLimit => Some(ProviderFailureReason::LocalOutputLimit),
@@ -1693,7 +1695,6 @@ mod tests {
         for error in [
             ProviderError::Rejected,
             ProviderError::Unavailable,
-            ProviderError::InvalidOutcome,
             ProviderError::RemoteStreamCode("unknown_code".into()),
             ProviderError::RemoteStreamCode("subscription_sharing_usage_unavailable\n".into()),
             ProviderError::RemoteStreamCode("subscription_sharing_usage_limit_exceeded".into()),
@@ -1704,6 +1705,10 @@ mod tests {
             (
                 ProviderError::InvalidStream,
                 ProviderFailureReason::StreamProtocol,
+            ),
+            (
+                ProviderError::InvalidOutcome,
+                ProviderFailureReason::OutcomeDecode,
             ),
             (
                 ProviderError::InvalidResponseContract,

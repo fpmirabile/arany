@@ -148,7 +148,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 14),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 19),
+    ("ProviderCallRecorded", 20),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -1750,6 +1750,21 @@ pub(crate) fn provider_call_v18_to_v19(value: serde_json::Value) -> Option<serde
         record.disposition = ProviderCallDisposition::Rejected;
     }
     serde_json::to_value(record).ok()
+}
+
+pub(crate) fn provider_call_v19_payload(payload: &str) -> Option<String> {
+    let record: ProviderCallRecord = parse(payload).ok()?;
+    (record.failure_reason != Some(crate::provider::ProviderFailureReason::OutcomeDecode)).then(
+        || {
+            record.validate().ok()?;
+            serialize(&record).ok()
+        },
+    )?
+}
+
+pub(crate) fn provider_call_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
+    let canonical = provider_call_v19_payload(&value.to_string())?;
+    serde_json::from_str(&canonical).ok()
 }
 
 pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String> {

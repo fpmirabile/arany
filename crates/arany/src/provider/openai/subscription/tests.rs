@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
+use crate::provider::{DEFAULT_OUTPUT_TOKEN_CAP, MAX_RESPONSE_BYTES};
 use crate::{
     provider::{
         AgentPhase, CompactionItem, HistoryTurn, ProviderFailureClass, ProviderOutcome,
@@ -627,7 +627,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             "reflected token" => Stage::CredentialReflection,
             _ => Stage::EventType,
         };
-        assert_eq!(decoder.stage, stage, "{label}");
+        assert_eq!(decoder.stage(), stage, "{label}");
     }
     let mut failed = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
     let failure = failed
@@ -710,7 +710,7 @@ fn created_event_echoing_a_large_tool_catalog_is_admitted_within_the_byte_bound(
     );
     let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
     assert!(decoder.feed(flood.as_bytes()).is_err());
-    assert_eq!(decoder.stage, Stage::EventJson);
+    assert_eq!(decoder.stage(), Stage::EventJson);
 }
 
 // A response.created event echoes the whole request; half-cap headroom makes catalog growth fail here before it fails users.
@@ -1301,7 +1301,7 @@ async fn completed_response_header_rejections_log_the_validation_stage() {
             .send()
             .await
             .expect("synthetic response headers");
-        let error = read_completed_response(
+        let error = super::super::responses::read_completed_response(
             &mut response,
             TOKEN,
             "model-a",
@@ -2258,7 +2258,7 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
     }
     let slot = RateLimitSlot::default();
     let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
-    decoder.limits = slot.clone();
+    decoder.set_limits(slot.clone());
     let event = json!({"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":23,"window_minutes":10080,"reset_at":2000}},"plan_type":"DO_NOT_KEEP_PLAN","account_id":"DO_NOT_KEEP_ACCOUNT"});
     assert!(
         decoder
@@ -2335,7 +2335,7 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
             assert!(decoder.feed(frame).unwrap().is_none());
         }
         let error = decoder.feed(frame).unwrap_err();
-        assert_eq!(decoder.stage, Stage::StreamLimit);
+        assert_eq!(decoder.stage(), Stage::StreamLimit);
         assert_eq!(
             error.failure_reason(),
             Some(crate::ProviderFailureReason::StreamProtocol)
@@ -2354,7 +2354,7 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
                 .is_none()
         );
         let error = decoder.feed(b":").unwrap_err();
-        assert_eq!(decoder.stage, Stage::StreamLimit);
+        assert_eq!(decoder.stage(), Stage::StreamLimit);
         assert_eq!(
             error.failure_reason(),
             Some(crate::ProviderFailureReason::StreamProtocol)
