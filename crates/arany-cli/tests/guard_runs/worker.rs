@@ -1257,7 +1257,13 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "hook_uncertain_sibling",
         "turn_limit",
         "resume_unknown",
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        arany::test_support::worker_teams::INVALID_EDITOR_CASES
+            .iter()
+            .map(|(case, _)| *case),
+    ) {
         tokio::time::timeout(
             Duration::from_secs(180),
             arany::test_support::worker_teams::run_case(
