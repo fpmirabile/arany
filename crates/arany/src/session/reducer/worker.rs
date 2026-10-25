@@ -1008,9 +1008,11 @@ pub(super) fn apply(
     let run = active_run(current, run_id.ok_or(ReplayError::InvalidTransition)?)?;
     let actor = actor.ok_or(ReplayError::InvalidTransition)?;
     match event {
-        Event::WorkerStopObserved { .. }
-        | Event::WorkerDataChunk { .. }
-        | Event::WorkerDataSealed { .. } => apply::data(run, event, actor, sequence)?,
+        Event::WorkerStopObserved { record, .. } => {
+            apply::stop_observed(run, record, actor, sequence)?
+        }
+        Event::WorkerDataChunk { record, .. } => apply::data_chunk(run, record, actor, sequence)?,
+        Event::WorkerDataSealed { record, .. } => apply::data_sealed(run, record, actor, sequence)?,
         Event::WorkerHandoverRecorded { record: h, .. } => {
             let w = worker(run, h.assignment_id)?;
             if actor != h.assignment_id
