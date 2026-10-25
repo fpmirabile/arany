@@ -238,12 +238,20 @@ impl RunLoop<'_> {
                     } => true,
                     ToolCall::Write { path, .. }
                     | ToolCall::Edit { path, .. }
+                    | ToolCall::Delete { path, .. }
                     | ToolCall::MultiEdit {
                         file_path: path, ..
                     }
                     | ToolCall::Mkdir { path } => {
                         !leases.iter().any(|l| crate::worker::overlaps(l, path))
                     }
+                    ToolCall::Move {
+                        source,
+                        destination,
+                        ..
+                    } => ![source, destination]
+                        .iter()
+                        .any(|p| leases.iter().any(|l| crate::worker::overlaps(l, p))),
                     ToolCall::ParseAgentDefinition { .. }
                     | ToolCall::List { .. }
                     | ToolCall::Read { .. }

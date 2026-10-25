@@ -160,6 +160,22 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("ToolStarted", 19, crate::session::pre_file_removal_payload),
+        variant_step!("ToolFinished", 26, crate::session::pre_file_removal_payload),
+        variant_step!("HookStarted", 9, crate::session::pre_file_removal_payload),
+        variant_step!("HookFinished", 15, crate::session::pre_file_removal_payload),
+        variant_step!(
+            "GoalPlanContractRecorded",
+            10,
+            crate::session::pre_file_removal_payload
+        ),
+        variant_step!(
+            "ProviderCallRecorded",
+            20,
+            crate::session::pre_file_removal_payload
+        ),
+        variant_step!("RunStarted", 22, crate::session::pre_file_removal_payload),
+        variant_step!("AgentSpawned", 14, crate::session::pre_file_removal_payload),
         EventStep {
             kind: "WorkspaceRewindStarted",
             from: 1,

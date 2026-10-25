@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 57] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -29,6 +29,44 @@ const EVENT_FIXTURES: [EventFixture<'static>; 57] = [
     ),
     ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
     ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    (
+        "ToolStarted",
+        19,
+        include_str!("toolstarted-without-expiry.json"),
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        26,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        9,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        15,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        10,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        20,
+        PROVIDER_CALL_V19,
+        PROVIDER_CALL_V19,
+    ),
+    ("RunStarted", 22, HOST_RUNSTARTED, HOST_RUNSTARTED),
+    ("AgentSpawned", 14, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("GoalStarted", 7, GOAL_STARTED_V7, GOAL_STARTED_V8),
     ("ToolStarted", 16, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 22, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
@@ -154,37 +192,37 @@ const EVENT_FIXTURES: [EventFixture<'static>; 57] = [
     ),
     (
         "ToolStarted",
-        19,
+        20,
         include_str!("toolstarted-without-expiry.json"),
         include_str!("toolstarted-without-expiry.json"),
     ),
     (
         "ToolFinished",
-        26,
+        27,
         include_str!("toolfinished-without-expiry.json"),
         include_str!("toolfinished-without-expiry.json"),
     ),
     (
         "HookStarted",
-        9,
+        10,
         include_str!("hookstarted-without-expiry.json"),
         include_str!("hookstarted-without-expiry.json"),
     ),
     (
         "HookFinished",
-        15,
-        include_str!("hookfinished-without-expiry.json"),
-        include_str!("hookfinished-without-expiry.json"),
+        16,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
     ),
     (
         "GoalPlanContractRecorded",
-        10,
+        11,
         GLOB_GOALPLANCONTRACTRECORDED,
         GLOB_GOALPLANCONTRACTRECORDED,
     ),
     (
         "ProviderCallRecorded",
-        20,
+        21,
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
@@ -257,8 +295,8 @@ fn provider_call_v19_identity_migration_preserves_bytes_and_rejects_new_reason()
     assert!((step.canonical)(&forged).is_none());
     assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
     let list_step = REGISTRY
-        .event_step("ProviderCallRecorded", 20)
-        .expect("PR-list migration follows outcome decoding");
+        .event_step("ProviderCallRecorded", 21)
+        .expect("PR-list migration follows file removal");
     assert_eq!(
         (list_step.canonical)(&forged).as_deref(),
         Some(forged.as_str())
@@ -2600,7 +2638,10 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
         migrated, host,
         "host approval loses only the shared clock expiry"
     );
-    let list_step = REGISTRY.event_step("ToolStarted", 19).unwrap();
+    let removal = REGISTRY.event_step("ToolStarted", 19).unwrap();
+    assert!((removal.canonical)(&migrated.to_string()).is_some());
+    assert_eq!((removal.transform)(migrated.clone()), Some(migrated));
+    let list_step = REGISTRY.event_step("ToolStarted", 20).unwrap();
     let no_expiry = include_str!("toolstarted-without-expiry.json");
     assert_eq!((list_step.canonical)(no_expiry).as_deref(), Some(no_expiry));
     assert_eq!(
@@ -2628,4 +2669,32 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
 fn source_for_tool_started() -> Value {
     serde_json::from_str(include_str!("toolstarted-without-expiry.json"))
         .expect("expiry-free ToolStarted fixture")
+}
+
+#[test]
+fn file_removal_identity_steps_reject_new_calls_and_capabilities_in_old_payloads() {
+    for operation in ["delete", "move"] {
+        let call = if operation == "delete" {
+            serde_json::json!({"operation":operation,"path":"src/source","expected_digest":"0".repeat(64)})
+        } else {
+            serde_json::json!({"operation":operation,"source":"src/source","destination":"src/target","expected_digest":"0".repeat(64)})
+        };
+        let mut started: Value =
+            serde_json::from_str(include_str!("toolstarted-without-expiry.json")).unwrap();
+        started["intent"]["call"] = call;
+        let step = REGISTRY.event_step("ToolStarted", 19).unwrap();
+        assert!((step.canonical)(&started.to_string()).is_none());
+        assert!((step.transform)(started.clone()).is_none());
+        let list_step = REGISTRY.event_step("ToolStarted", 20).unwrap();
+        assert!((list_step.canonical)(&started.to_string()).is_some());
+        assert_eq!((list_step.transform)(started.clone()), Some(started));
+        let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
+        run["config"]["worker_policy"] = serde_json::json!({
+            "parent_grant":{"read_paths":["src"],"write_paths":["src"],"tools":[operation],"skills":[],"mcp_servers":[],"commands":[],"permission_mode":null},
+            "concurrency":1,"max_turns":4,"max_tools":3,"data_bytes":1024
+        });
+        let step = REGISTRY.event_step("RunStarted", 22).unwrap();
+        assert!((step.canonical)(&run.to_string()).is_none());
+        assert!((step.transform)(run).is_none());
+    }
 }

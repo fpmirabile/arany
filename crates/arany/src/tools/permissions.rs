@@ -836,6 +836,19 @@ impl Rule {
             return true;
         };
         match call {
+            ToolCall::Move {
+                source,
+                destination,
+                ..
+            } => {
+                let matched =
+                    [source, destination].map(|path| path_matches(pattern, path, decision));
+                if decision == Decision::Allow {
+                    matched.into_iter().all(|v| v)
+                } else {
+                    matched.into_iter().any(|v| v)
+                }
+            }
             ToolCall::Command { program, args, .. }
             | ToolCall::CommandUnguarded { program, args, .. } => {
                 if !std::iter::once(program).chain(args).all(|word| {
@@ -926,6 +939,7 @@ fn path_of(call: &ToolCall) -> Option<&str> {
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
+        | ToolCall::Delete { path, .. }
         | ToolCall::MultiEdit {
             file_path: path, ..
         }
@@ -951,7 +965,7 @@ fn peer_operation_name(name: &str) -> &str {
         "list" | "glob" => "Glob",
         "search" => "Grep",
         "write" => "Write",
-        "mkdir" | "edit" | "apply_changeset" => "Edit",
+        "mkdir" | "edit" | "delete" | "move" | "apply_changeset" => "Edit",
         "multiedit" => "MultiEdit",
         "skill" => "Skill",
         _ => name,

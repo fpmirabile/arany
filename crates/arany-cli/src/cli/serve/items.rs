@@ -328,6 +328,36 @@ fn tool_item_with_denial_output(
             disposition,
             output,
         },
+        ToolCall::Delete { path, .. } => Item::FileChange {
+            id,
+            changes: vec![FileChange {
+                path: path.clone(),
+                kind: FileChangeKind::Delete,
+            }],
+            status,
+            disposition,
+            output,
+        },
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => Item::FileChange {
+            id,
+            changes: vec![
+                FileChange {
+                    path: source.clone(),
+                    kind: FileChangeKind::Delete,
+                },
+                FileChange {
+                    path: destination.clone(),
+                    kind: FileChangeKind::Add,
+                },
+            ],
+            status,
+            disposition,
+            output,
+        },
         ToolCall::Edit { path, .. }
         | ToolCall::MultiEdit {
             file_path: path, ..

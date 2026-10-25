@@ -456,6 +456,8 @@ impl GoalPlanContract {
                         &observation.intent.call,
                         ToolCall::Write { .. }
                             | ToolCall::Edit { .. }
+                            | ToolCall::Delete { .. }
+                            | ToolCall::Move { .. }
                             | ToolCall::MultiEdit { .. }
                             | ToolCall::ApplyChangeset { .. }
                             | ToolCall::McpCall { .. }
@@ -522,6 +524,20 @@ fn file_observation_digest(
         } if observed == path => serde_json::from_str::<serde_json::Value>(&observation.output)
             .ok()
             .and_then(|value| value.get("sha256")?.as_str().map(str::to_owned)),
+        ToolCall::Delete { path: source, .. } if source == path => None,
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => {
+            if source == path {
+                None
+            } else if destination == path {
+                Some(expected_digest.clone())
+            } else {
+                return None;
+            }
+        }
         ToolCall::ApplyChangeset {
             source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
         } => changeset
@@ -577,12 +593,18 @@ impl GoalPlanContract {
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
             | ToolCall::Edit { path, .. }
+            | ToolCall::Delete { path, .. }
             | ToolCall::MultiEdit {
                 file_path: path, ..
             }
             | ToolCall::GitStatus { path }
             | ToolCall::GitDiff { path, .. }
             | ToolCall::GitLog { path, .. } => self.allows_path(path),
+            ToolCall::Move {
+                source,
+                destination,
+                ..
+            } => self.allows_path(source) && self.allows_path(destination),
             ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. } => {
                 self.commands.contains(program)
             }
