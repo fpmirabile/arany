@@ -230,21 +230,21 @@ impl AnthropicProvider {
             .await
             .map_err(|error| {
                 let stage = if error.is_timeout() {
-                    crate::diagnostics::SubscriptionFailureStage::Deadline
+                    crate::provider::diagnostics::SubscriptionFailureStage::Deadline
                 } else {
-                    crate::diagnostics::SubscriptionFailureStage::RequestTransport
+                    crate::provider::diagnostics::SubscriptionFailureStage::RequestTransport
                 };
                 crate::diagnostics::messages_failure(
                     stage,
-                    crate::diagnostics::StreamCounts::default(),
+                    crate::provider::diagnostics::StreamCounts::default(),
                 );
                 super::send_failure(&error)
             })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             crate::diagnostics::messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::HttpStatus,
-                crate::diagnostics::StreamCounts {
+                crate::provider::diagnostics::SubscriptionFailureStage::HttpStatus,
+                crate::provider::diagnostics::StreamCounts {
                     http_status: Some(status),
                     ..Default::default()
                 },
@@ -255,13 +255,13 @@ impl AnthropicProvider {
             .await
             .map_err(|error| {
                 let stage = if matches!(error, ProviderError::PartialTransport) {
-                    crate::diagnostics::SubscriptionFailureStage::ReadTransport
+                    crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
                 } else {
-                    crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope
                 };
                 crate::diagnostics::messages_failure(
                     stage,
-                    crate::diagnostics::StreamCounts {
+                    crate::provider::diagnostics::StreamCounts {
                         http_status: Some(status),
                         ..Default::default()
                     },
@@ -270,8 +270,8 @@ impl AnthropicProvider {
             })?;
         if super::raw_reflects_secret(&bytes, &self.key) {
             crate::diagnostics::messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                crate::diagnostics::StreamCounts {
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::provider::diagnostics::StreamCounts {
                     bytes: bytes.len(),
                     http_status: Some(status),
                     ..Default::default()
@@ -280,7 +280,7 @@ impl AnthropicProvider {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(wire::MessageReply {
-            counts: crate::diagnostics::StreamCounts {
+            counts: crate::provider::diagnostics::StreamCounts {
                 bytes: bytes.len(),
                 http_status: Some(status),
                 ..Default::default()
@@ -300,7 +300,7 @@ impl AnthropicProvider {
             bytes,
             request,
             conversation,
-            crate::diagnostics::StreamCounts {
+            crate::provider::diagnostics::StreamCounts {
                 bytes: bytes.len(),
                 ..Default::default()
             },
@@ -312,7 +312,7 @@ impl AnthropicProvider {
         bytes: &[u8],
         request: &ProviderRequest,
         conversation: &Conversation,
-        counts: crate::diagnostics::StreamCounts,
+        counts: crate::provider::diagnostics::StreamCounts,
     ) -> Result<ProviderResponse, ProviderError> {
         let response = wire::decode_run_with_counts(
             bytes,
@@ -333,8 +333,8 @@ impl AnthropicProvider {
         )?;
         if response.reflects_secret(&self.key) {
             crate::diagnostics::messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                crate::diagnostics::StreamCounts { ..counts },
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::provider::diagnostics::StreamCounts { ..counts },
             );
             return Err(ProviderError::InvalidOutcome);
         }
@@ -350,7 +350,7 @@ impl AnthropicProvider {
         self.decode_compaction_with_counts(
             bytes,
             output_cap,
-            crate::diagnostics::StreamCounts {
+            crate::provider::diagnostics::StreamCounts {
                 bytes: bytes.len(),
                 ..Default::default()
             },
@@ -361,14 +361,14 @@ impl AnthropicProvider {
         &self,
         bytes: &[u8],
         output_cap: u32,
-        counts: crate::diagnostics::StreamCounts,
+        counts: crate::provider::diagnostics::StreamCounts,
     ) -> Result<CompactionResponse, ProviderError> {
         let response =
             wire::decode_compaction_with_counts(bytes, &self.identity.model, output_cap, counts)?;
         if response.reflects_secret(&self.key) {
             crate::diagnostics::messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                crate::diagnostics::StreamCounts { ..counts },
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::provider::diagnostics::StreamCounts { ..counts },
             );
             return Err(ProviderError::InvalidOutcome);
         }
@@ -430,20 +430,20 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|error| {
                 let stage = if error.is_timeout() {
-                    crate::diagnostics::SubscriptionFailureStage::Deadline
+                    crate::provider::diagnostics::SubscriptionFailureStage::Deadline
                 } else {
-                    crate::diagnostics::SubscriptionFailureStage::RequestTransport
+                    crate::provider::diagnostics::SubscriptionFailureStage::RequestTransport
                 };
                 crate::diagnostics::messages_failure(
                     stage,
-                    crate::diagnostics::StreamCounts::default(),
+                    crate::provider::diagnostics::StreamCounts::default(),
                 );
                 super::send_failure(&error)
             })?;
         if !response.status().is_success() {
             crate::diagnostics::messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::HttpStatus,
-                crate::diagnostics::StreamCounts {
+                crate::provider::diagnostics::SubscriptionFailureStage::HttpStatus,
+                crate::provider::diagnostics::StreamCounts {
                     http_status: Some(response.status().as_u16()),
                     ..Default::default()
                 },
@@ -495,7 +495,7 @@ pub(super) async fn read_streamed_reply(
     if let Err(failure) = super::streaming::validate_stream_response(response, max_output_tokens) {
         crate::diagnostics::messages_failure(
             failure.stage,
-            crate::diagnostics::StreamCounts {
+            crate::provider::diagnostics::StreamCounts {
                 http_status: Some(status),
                 ..Default::default()
             },
@@ -512,13 +512,13 @@ pub(super) async fn read_streamed_reply(
     decoder.set_http_status(status);
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         let stage = if error.is_timeout() {
-            crate::diagnostics::SubscriptionFailureStage::Deadline
+            crate::provider::diagnostics::SubscriptionFailureStage::Deadline
         } else {
-            crate::diagnostics::SubscriptionFailureStage::ReadTransport
+            crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
         };
         crate::diagnostics::messages_failure(
             stage,
-            crate::diagnostics::StreamCounts {
+            crate::provider::diagnostics::StreamCounts {
                 bytes: decoder.counts().bytes,
                 events: decoder.counts().events,
                 http_status: Some(status),
@@ -536,7 +536,7 @@ pub(super) async fn read_streamed_reply(
     }
     let error = decoder.end_error();
     crate::diagnostics::messages_failure(
-        crate::diagnostics::SubscriptionFailureStage::EndBeforeCompleted,
+        crate::provider::diagnostics::SubscriptionFailureStage::EndBeforeCompleted,
         decoder.counts(),
     );
     Err(error)
