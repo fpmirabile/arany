@@ -73,6 +73,9 @@ it during admission, so the source dependency points from Engine to Tools.
 Engine permission selection, host session reuse and remembering eligibility live
 in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
 shared ask and dispatch flow.
+The Engine composes per-dispatch queue progress, active-action and checkpoint
+senders through consuming ToolRuntime builders; Guard dispatch makes one owned
+copy from its borrowed runtime before consuming that chain.
 Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file or command view and its private cache restore, attests private mutation/capture and publishes only the primary's eligible changeset. Editor commands use the shared permission and delegated hook path; the coordinator gates answer on private evidence before handover, while primary verification remains independent. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
@@ -317,6 +320,8 @@ The initial vocabulary is intentionally small:
 - `ToolStarted`, `ToolFinished`.
 
 All current Events use the payload version the [execution spec](../specs/execution.md#admission-persistence-and-recovery) owns. Goal Events pin the user-approved usage/resource settings and record call, active-time and compaction reservations alongside terminal reports. Tool Events correlate the exact Run, acting AgentRun, one-use intent, pinned policy/enforcement digest, Workspace identity and finite effective limits. A successful observation requires a matching Guard receipt. Unknown, duplicated, unmatched, over-budget or mismatched transitions reject; uncertainty/cancellation cannot be followed by successful Agent completion. Public typed replay validates payloads as well as SQL loading. A started attempt without a terminal observation remains a past interrupted/uncertain fact, never an approval or retry instruction.
+
+Event encoding borrows from in-memory facts; decoding retains owned, strict payload records. Both preserve the canonical serialized bytes and current payload versions described by the [execution contract](../specs/execution.md#admission-persistence-and-recovery).
 
 `SessionStarted` pins the admitted Workspace device and inode atomically with the title, including for an empty Session. Replay rejects a later Run or fork whose identity disagrees with the pinned Session. The SQLite owner admits only the current registered SQLite schema and Event payloads; unsupported formats and missing fields reject without conversion or deletion, and older supported journals are upgraded only by the startup [journal migration](../specs/execution.md#journal-migration).
 
