@@ -100,12 +100,18 @@ fn image_preview_cells_are_hidden_and_skipped_for_terminal_graphics() {
     assert!(hidden);
     assert_eq!(history_text(terminal.backend().buffer()), "History");
 
+    let graphics_cell = ratatui::buffer::Cell::new("█");
+    terminal
+        .backend_mut()
+        .draw([(3, 4, &graphics_cell), (3, 5, &graphics_cell)].into_iter())
+        .unwrap();
     terminal
         .draw(|frame| {
             frame.render_widget(Paragraph::new("History text"), Rect::new(3, 4, 8, 1));
         })
         .unwrap();
     assert_eq!(history_text(terminal.backend().buffer()), "History");
+    assert_eq!(terminal.backend().buffer()[(3, 5)].symbol(), " ");
 }
 
 #[test]
