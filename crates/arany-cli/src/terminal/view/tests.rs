@@ -2268,7 +2268,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         empty_chat: true,
         agent_switch: false,
     };
-    for width in [16, 28, 32, 40, 80] {
+    for width in [16, 28, 32, 34, 35, 40, 80] {
         for color in [true, false] {
             for action in [DraftAction::Submit, DraftAction::Retain] {
                 let mut model = model.clone();
@@ -2302,6 +2302,15 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                     .map(|y| buffer_row(terminal.backend().buffer(), y))
                     .collect::<Vec<_>>();
                 assert!(rows[3].contains(">[Image #4]"), "{width}: {rows:?}");
+                assert_eq!(
+                    rows[6].trim_matches('─'),
+                    if width >= 35 {
+                        " ←/→ select · Del/Backspace remove "
+                    } else {
+                        " Del remove "
+                    },
+                    "{width}: image selection footer"
+                );
                 assert!(rows[4].contains("alpha") && rows[5].contains('中'));
                 assert!(!rows.iter().any(|row| row.contains("iVBOR")));
                 assert_eq!(composer.apply(TerminalInput::Left), ComposerEdit::Changed);

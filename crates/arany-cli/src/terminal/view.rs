@@ -1766,8 +1766,9 @@ fn draw_composer(
         let command = model.draft_action != DraftAction::Retain
             && matches!(composer.submission(), Ok(Submission::Command { .. }));
         let hint = if composer.selected_image().is_some() {
-            if composer_area.width >= 28 {
-                " ←/→ select · Del/Backspace remove "
+            let image_hint = " ←/→ select · Del/Backspace remove ";
+            if usize::from(composer_area.width) >= UnicodeWidthStr::width(image_hint) {
+                image_hint
             } else {
                 " Del remove "
             }

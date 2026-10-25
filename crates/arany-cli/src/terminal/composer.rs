@@ -691,6 +691,14 @@ impl Composer {
             .filter(|index| *index < self.images.len())
     }
 
+    pub fn restore_images(&mut self, images: Vec<ImageAttachment>) -> Result<(), &'static str> {
+        let result = images
+            .into_iter()
+            .try_for_each(|image| self.attach_image(image));
+        self.selected_image = None;
+        result
+    }
+
     pub fn remove_selected_image(&mut self) -> bool {
         let Some(index) = self.selected_image() else {
             return false;
@@ -1705,6 +1713,7 @@ mod tests {
     #[test]
     fn rewind_restored_prompts_remain_objective_data_and_clear_is_recallable() {
         for prompt in [
+            "",
             "ordinary prompt",
             "/rewind",
             "/permissions",
@@ -1712,7 +1721,17 @@ mod tests {
             "first\nsecond",
         ] {
             let mut composer = Composer::default();
-            assert_eq!(composer.restore_prompt(prompt), Ok(ComposerEdit::Changed));
+            assert_eq!(
+                composer.restore_prompt(prompt),
+                Ok(if prompt.is_empty() {
+                    ComposerEdit::Unchanged
+                } else {
+                    ComposerEdit::Changed
+                })
+            );
+            let images = vec![arany::test_support::test_image(); MAX_MESSAGE_IMAGES];
+            composer.restore_images(images.clone()).unwrap();
+            assert_eq!(composer.selected_image(), None);
             assert_eq!(composer.submission(), Ok(Submission::Objective(prompt)));
             let draft = composer.text().to_owned();
             composer.remember_and_clear();
@@ -1720,6 +1739,10 @@ mod tests {
             composer.apply(TerminalInput::Up);
             assert_eq!(composer.text(), draft);
             assert_eq!(composer.submission(), Ok(Submission::Objective(prompt)));
+            assert_eq!(composer.selected_image(), None);
+            composer.apply(TerminalInput::Backspace);
+            assert_eq!(composer.text(), &draft[..draft.len().saturating_sub(1)]);
+            assert_eq!(composer.images(), images);
         }
         let mut composer = Composer::default();
         assert_eq!(
