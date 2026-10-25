@@ -705,6 +705,8 @@ fn unit_command(
     let native = matches!(
         intent.call,
         ToolCall::Write { .. }
+            | ToolCall::Delete { .. }
+            | ToolCall::Move { .. }
             | ToolCall::Edit { .. }
             | ToolCall::MultiEdit { .. }
             | ToolCall::Mkdir { .. }

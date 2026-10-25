@@ -36,6 +36,15 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
             offset: 0,
             limit: MAX_SEARCH_ROWS,
         },
+        ToolCall::Delete {
+            path: path(),
+            expected_digest: "0".repeat(64),
+        },
+        ToolCall::Move {
+            source: path(),
+            destination: "destination".into(),
+            expected_digest: "0".repeat(64),
+        },
         ToolCall::Mkdir { path: path() },
         ToolCall::Write {
             path: path(),
@@ -5308,4 +5317,158 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
     observation.limit_cause = Some(super::LimitCause::RequestedTime);
     assert!(observation.valid());
     assert!(!observation.stops_run());
+}
+
+#[test]
+fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let content = b"binary\0\xff\r\n";
+    let source = temp.path().join("source");
+    let destination = temp.path().join("nested/destination");
+    std::fs::write(&source, content).unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let move_call = ToolCall::Move {
+        source: "source".into(),
+        destination: "nested/destination".into(),
+        expected_digest: hex_digest(content),
+    };
+    let stale = ToolCall::Delete {
+        path: "source".into(),
+        expected_digest: hex_digest(b"stale"),
+    };
+    assert!(matches!(
+        super::fs::native(temp.path(), &stale, &config),
+        Err(super::ToolError::Conflict)
+    ));
+    let output = super::fs::native(temp.path(), &move_call, &config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&output).unwrap(),
+        json!({"removed":{"sha256":hex_digest(content),"bytes":content.len(),"executable":true}})
+    );
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), content);
+    assert_ne!(
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0
+    );
+    std::fs::write(&source, b"replacement").unwrap();
+    let occupied = ToolCall::Move {
+        source: "source".into(),
+        destination: "nested/destination".into(),
+        expected_digest: hex_digest(b"replacement"),
+    };
+    assert!(matches!(
+        super::fs::native(temp.path(), &occupied, &config),
+        Err(super::ToolError::Conflict)
+    ));
+    assert_eq!(std::fs::read(&source).unwrap(), b"replacement");
+    assert_eq!(std::fs::read(&destination).unwrap(), content);
+    let delete = ToolCall::Delete {
+        path: "nested/destination".into(),
+        expected_digest: hex_digest(content),
+    };
+    assert_eq!(
+        super::fs::native(temp.path(), &delete, &config).unwrap(),
+        output
+    );
+    assert!(!destination.exists());
+    assert!(matches!(
+        super::fs::native(temp.path(), &delete, &config),
+        Err(super::ToolError::NotFound)
+    ));
+}
+
+#[test]
+fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["owned"],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    std::fs::create_dir(temp.path().join("owned")).unwrap();
+    std::fs::write(temp.path().join("owned/source"), b"source").unwrap();
+    symlink("source", temp.path().join("owned/link")).unwrap();
+    std::fs::hard_link(
+        temp.path().join("owned/source"),
+        temp.path().join("owned/hardlink"),
+    )
+    .unwrap();
+    for path in ["owned/link", "owned/hardlink", "owned"] {
+        for call in [
+            ToolCall::Delete {
+                path: path.into(),
+                expected_digest: hex_digest(b"source"),
+            },
+            ToolCall::Move {
+                source: path.into(),
+                destination: "owned/new".into(),
+                expected_digest: hex_digest(b"source"),
+            },
+        ] {
+            assert!(
+                super::fs::native(temp.path(), &call, &config).is_err(),
+                "{call:?}"
+            );
+            assert!(!temp.path().join("owned/new").exists());
+        }
+    }
+    std::fs::remove_file(temp.path().join("owned/hardlink")).unwrap();
+    symlink("..", temp.path().join("owned/escape")).unwrap();
+    for destination in ["owned/link", "owned/escape/outside"] {
+        let call = ToolCall::Move {
+            source: "owned/source".into(),
+            destination: destination.into(),
+            expected_digest: hex_digest(b"source"),
+        };
+        assert!(super::fs::native(temp.path(), &call, &config).is_err());
+    }
+    assert!(!temp.path().join("outside").exists());
+    for (source, destination) in [
+        ("owned/source", "other/new"),
+        ("other/source", "owned/new"),
+        ("owned/source", "owned/.ssh/key"),
+        ("owned/source", "../new"),
+        ("owned/source", "owned/source"),
+        ("owned/source", "owned/SOURCE"),
+    ] {
+        let call = ToolCall::Move {
+            source: source.into(),
+            destination: destination.into(),
+            expected_digest: hex_digest(b"source"),
+        };
+        assert!(!config.allows(&call), "{call:?}");
+    }
+    for path in ["../source", "/source", "owned/.env", "owned/.git/config"] {
+        assert!(
+            !ToolCall::Delete {
+                path: path.into(),
+                expected_digest: hex_digest(b"source")
+            }
+            .valid()
+        );
+    }
+    let file = std::fs::File::create(temp.path().join("owned/large")).unwrap();
+    file.set_len(MAX_FILE_BYTES as u64 + 1).unwrap();
+    for call in [
+        ToolCall::Delete {
+            path: "owned/large".into(),
+            expected_digest: hex_digest(b""),
+        },
+        ToolCall::Move {
+            source: "owned/large".into(),
+            destination: "owned/new".into(),
+            expected_digest: hex_digest(b""),
+        },
+    ] {
+        assert!(matches!(
+            super::fs::native(temp.path(), &call, &config),
+            Err(super::ToolError::Limit)
+        ));
+    }
+    assert!(temp.path().join("owned/source").exists());
+    assert!(!temp.path().join("owned/new").exists());
 }

@@ -496,7 +496,11 @@ impl ToolRuntime {
             .try_acquire()
             .map_err(|_| ToolError::Operation)?;
         let files = match &intent.call {
-            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. } => paths
+            ToolCall::Write { .. }
+            | ToolCall::Edit { .. }
+            | ToolCall::MultiEdit { .. }
+            | ToolCall::Delete { .. }
+            | ToolCall::Move { .. } => paths
                 .iter()
                 .map(|(path, expected)| {
                     let bytes =
@@ -1129,6 +1133,8 @@ impl ToolRuntime {
                         WorkerTool::Write,
                         WorkerTool::Edit,
                         WorkerTool::MultiEdit,
+                        WorkerTool::Delete,
+                        WorkerTool::Move,
                         WorkerTool::Skill,
                         WorkerTool::McpList,
                         WorkerTool::Command,

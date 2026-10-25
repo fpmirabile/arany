@@ -356,6 +356,21 @@ pub(crate) struct FilePublicationResult {
     #[serde(deserialize_with = "Option::deserialize")]
     pub before: Option<FileState>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemovedFileResult {
+    pub removed: FileState,
+}
+
+fn removed_file(output: &str, expected: &str) -> Result<FileState, ReplayError> {
+    let result: RemovedFileResult =
+        serde_json::from_str(output).map_err(|_| ReplayError::InvalidPayload)?;
+    if !result.removed.valid() || result.removed.sha256 != expected {
+        return Err(ReplayError::InvalidPayload);
+    }
+    Ok(result.removed)
+}
+
 pub(crate) fn publication_files(
     run: &super::RunView,
     o: &crate::tools::ToolObservation,
@@ -378,6 +393,24 @@ pub(crate) fn publication_files(
         })
     };
     match &o.intent.call {
+        ToolCall::Delete {
+            path,
+            expected_digest,
+        } => {
+            let removed = removed_file(&o.output, expected_digest)?;
+            Ok(vec![file(path.clone(), Some(removed), None)])
+        }
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => {
+            let removed = removed_file(&o.output, expected_digest)?;
+            Ok(vec![
+                file(source.clone(), Some(removed.clone()), None),
+                file(destination.clone(), None, Some(removed)),
+            ])
+        }
         ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
         | ToolCall::MultiEdit {

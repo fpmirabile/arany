@@ -69,6 +69,176 @@ fn multiedit() -> arany::ToolCall {
     }
 }
 
+fn removal(move_file: bool) -> arany::ToolCall {
+    if move_file {
+        arany::ToolCall::Move {
+            source: "notes/facts.txt".into(),
+            destination: "notes/nested/moved.txt".into(),
+            expected_digest: hash(b"Fact"),
+        }
+    } else {
+        arany::ToolCall::Delete {
+            path: "notes/facts.txt".into(),
+            expected_digest: hash(b"Fact"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn delete_and_move_guard_publication_permissions_checkpoints_and_replay() {
+    for move_file in [false, true] {
+        for case in [
+            "success",
+            "stale",
+            "read_deny",
+            "destination_deny",
+            "hook_deny",
+            "grant",
+        ] {
+            if case == "destination_deny" && !move_file {
+                continue;
+            }
+            removal_journey(move_file, case).await;
+        }
+    }
+}
+
+async fn removal_journey(move_file: bool, case: &str) {
+    let mut settings = json!({"permissions":{"defaultMode":"acceptEdits"}});
+    if case == "read_deny" {
+        settings["permissions"]["deny"] = json!(["Read(./notes/facts.txt)"]);
+    }
+    if case == "destination_deny" {
+        settings["permissions"]["deny"] = json!(["Edit(./notes/nested/**)"]);
+    }
+    if case == "hook_deny" {
+        settings["hooks"] =
+            json!({"PreToolUse":[{"matcher":"Edit","hooks":[shell_hook("exit 2")]}]});
+    }
+    let fixture = Fixture::new(Some(&settings), case != "grant");
+    let mut call = removal(move_file);
+    if case == "stale" {
+        match &mut call {
+            arany::ToolCall::Delete {
+                expected_digest, ..
+            }
+            | arany::ToolCall::Move {
+                expected_digest, ..
+            } => *expected_digest = hash(b"stale"),
+            _ => unreachable!(),
+        }
+    }
+    let success = case == "success";
+    let (result, requests, humans) = fixture
+        .run(
+            if success {
+                vec![
+                    plan_outcome(plan(&call)),
+                    tool_outcome(call.clone()),
+                    finish("answer"),
+                ]
+            } else {
+                vec![tool_outcome(call.clone()), finish("answer")]
+            },
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(humans, 0);
+    assert_eq!(requests.len(), if success { 3 } else { 2 });
+    assert_eq!(fixture.workspace.join("notes/facts.txt").exists(), !success);
+    assert_eq!(
+        fixture.workspace.join("notes/nested/moved.txt").exists(),
+        success && move_file
+    );
+    if success && move_file {
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/nested/moved.txt")).unwrap(),
+            b"Fact"
+        );
+    }
+    let tool = &result.run.tools[0];
+    assert_eq!(tool.intent.call, call);
+    assert_eq!(
+        tool.observation.as_ref().unwrap().disposition,
+        match case {
+            "success" => arany::ToolDisposition::Succeeded,
+            "stale" => arany::ToolDisposition::Conflict,
+            _ => arany::ToolDisposition::Denied,
+        }
+    );
+    if success {
+        rewind_removal(&fixture, &result, move_file).await;
+    }
+    let (events, view) = fixture.reopen(result.session_id).await;
+    if success {
+        assert!(!view.goals[0].success_criterion_satisfied);
+    }
+    assert_removal_export(&view, &events);
+}
+
+async fn rewind_removal(fixture: &Fixture, result: &arany::RunOutcome, move_file: bool) {
+    assert_eq!(
+        result.run.tools[0].checkpoint.as_ref().unwrap().status,
+        arany::CheckpointStatus::Captured
+    );
+    let store = Store::open_read_only(StateRoot::open_existing(&fixture.state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert!(view.goals[0].success_criterion_satisfied);
+    let sequence = events
+        .iter()
+        .find(|e| matches!(e.event, Event::RunStarted { .. }))
+        .unwrap()
+        .sequence;
+    let preview = fixture
+        .engine
+        .rewind_preview(arany::RewindRequest {
+            session_id: result.session_id,
+            workspace: fixture.workspace.clone(),
+            target: arany::rewind::CheckpointTarget::Run {
+                run_id: result.run.id,
+                sequence,
+            },
+            tools: ToolGrant::Configured,
+            kept: vec![],
+            overwrite: vec![],
+        })
+        .await
+        .unwrap();
+    assert!(preview.can_restore());
+    assert_eq!(preview.files().len(), if move_file { 2 } else { 1 });
+    let restored = fixture
+        .engine
+        .rewind(preview, RunCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(restored.outcome, arany::rewind::RewindOutcome::Restored);
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
+        b"Fact"
+    );
+    assert!(!fixture.workspace.join("notes/nested/moved.txt").exists());
+}
+
+fn assert_removal_export(view: &SessionView, events: &[arany::EventEnvelope]) {
+    let jsonl = render_session(view, events, Output::Jsonl);
+    let exported: Vec<arany_cli::protocol::EventLine> = jsonl
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        exported,
+        events
+            .iter()
+            .map(arany_cli::protocol::EventLine::from)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn multiedit_guard_publication_denials_late_failure_and_closed_replay() {
     for case in [
@@ -181,73 +351,99 @@ async fn multiedit_guard_publication_denials_late_failure_and_closed_replay() {
 }
 
 #[tokio::test]
-async fn multiedit_cancelled_approval_and_lost_receipt_never_retry() {
-    for lost in [false, true] {
-        let fixture = Fixture::new(None, true);
-        let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(multiedit())]));
-        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-        let cancellation = RunCancellation::new();
-        let mut input = request(&fixture.workspace, "Make one atomic edit");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Single;
-        let mut asked = 0;
-        let outcome = {
-            let running = run_with(
-                &fixture.engine,
-                &provider,
-                input,
-                RunControls {
-                    tools: ToolGrant::Configured,
-                    approvals: Some(approvals),
-                    cancellation: cancellation.clone(),
-                    ..Default::default()
-                },
-            );
-            tokio::pin!(running);
-            loop {
-                tokio::select! {
-                    biased;
-                    result = &mut running => break result,
-                    Some(approval) = inbox.next() => {
-                        asked += 1;
-                        if lost { arany::FaultPlan::lose_guard_receipt(approval.intent.id); }
-                        else { cancellation.cancel(); }
-                        approval.decide(true);
-                    }
+async fn typed_mutations_cancelled_approval_and_lost_receipt_never_retry() {
+    for call in [multiedit(), removal(false), removal(true)] {
+        for lost in [false, true] {
+            cancelled_or_lost_mutation(call.clone(), lost).await;
+        }
+    }
+}
+
+async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
+    let fixture = Fixture::new(None, true);
+    let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(call.clone())]));
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let cancellation = RunCancellation::new();
+    let mut input = request(&fixture.workspace, "Make one file mutation");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Single;
+    let mut asked = 0;
+    let outcome = {
+        let running = run_with(
+            &fixture.engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals),
+                cancellation: cancellation.clone(),
+                ..Default::default()
+            },
+        );
+        tokio::pin!(running);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut running => break result,
+                Some(approval) = inbox.next() => {
+                    asked += 1;
+                    if lost { arany::FaultPlan::lose_guard_receipt(approval.intent.id); }
+                    else { cancellation.cancel(); }
+                    approval.decide(true);
                 }
             }
-        };
-        if lost {
-            assert!(matches!(
-                outcome,
-                Err(EngineError::Tool(arany::ToolError::Uncertain))
-            ));
-        } else {
-            assert_eq!(outcome.unwrap().run.status, RunStatus::Cancelled);
         }
-        assert_eq!(asked, 1);
-        let session = {
-            let requests = provider.requests.lock().unwrap();
-            assert_eq!(requests.len(), 1, "no continuation or automatic retry");
-            requests[0].session_id
-        };
-        let expected = if lost {
-            b"done".as_slice()
-        } else {
-            b"Fact".as_slice()
-        };
+    };
+    if lost {
+        assert!(matches!(
+            outcome,
+            Err(EngineError::Tool(arany::ToolError::Uncertain))
+        ));
+    } else {
+        assert_eq!(outcome.unwrap().run.status, RunStatus::Cancelled);
+    }
+    assert_eq!(asked, 1);
+    let session = {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "no continuation or automatic retry");
+        requests[0].session_id
+    };
+    assert_stopped_mutation(fixture, session, &call, lost).await;
+}
+
+async fn assert_stopped_mutation(
+    fixture: Fixture,
+    session: SessionId,
+    call: &arany::ToolCall,
+    lost: bool,
+) {
+    let removed = lost
+        && matches!(
+            call,
+            arany::ToolCall::Delete { .. } | arany::ToolCall::Move { .. }
+        );
+    assert_eq!(fixture.workspace.join("notes/facts.txt").exists(), !removed);
+    if !removed {
         assert_eq!(
             std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
-            expected
+            if lost {
+                b"done".as_slice()
+            } else {
+                b"Fact".as_slice()
+            }
         );
-        let (_, view) = fixture.reopen(session).await;
-        assert_eq!(view.runs[0].tools.len(), 1);
-        let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
-        if lost {
-            assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
-        } else {
-            assert!(observation.attestation.is_none());
-        }
+    }
+    assert_eq!(
+        fixture.workspace.join("notes/nested/moved.txt").exists(),
+        lost && matches!(call, arany::ToolCall::Move { .. })
+    );
+    let (_, view) = fixture.reopen(session).await;
+    assert_eq!(view.runs[0].tools.len(), 1);
+    let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+    if lost {
+        assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
+    } else {
+        assert!(observation.attestation.is_none());
     }
 }
 
