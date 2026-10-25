@@ -57,6 +57,8 @@ Native-account discovery without a remembered preference uses the same cancellab
 
 Interactive startup access has a supervised two-minute human-interaction deadline. Cancellation kills and reaps the helper and restores the terminal according to its contract. Denial, missing/invalid items, identity replacement and timeout report safe startup feedback without a Provider call, sign-in, automatic retry or fallback. Routine reads, writes and deletion retain five-second deadlines. On macOS the OS owns per-item permission persistence; Allow Once may require another prompt on later access.
 
+Attached setup converts native-account and saved-access failures through the shared setup error owner. The conversion preserves each existing recoverable message and does not change refusal, cancellation, uncertainty, retry or fallback behavior.
+
 The keyring helper is a short-lived copy of the same binary. It uses a fixed service, bounded private pipes, a cleared environment and `/` as its working directory. Startup authorization validates the identity inside the helper and returns no credential. Test builds require an absolute `ARANY_TEST_EXE`, and shipped binaries ignore it; synthetic input comes through a private file, not a parent pipe.
 
 ## Storage, replacement and recovery

@@ -1,13 +1,16 @@
+mod error;
 mod native;
 mod roster;
 mod routing;
+
+pub(super) use error::SetupError;
 
 use crate::accounts::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
 };
 use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
 use crate::presentation::{escape_terminal, format_duration};
-use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalError, TerminalInput};
+use crate::terminal::{AttachedTerminal, Composer, TerminalInput};
 #[cfg(all(test, unix, debug_assertions))]
 use arany::RecordKind;
 use arany::{
@@ -33,44 +36,6 @@ const MAX_SETUP_CHOICE_INPUT_BYTES: usize = 64;
 #[cfg(all(test, unix, debug_assertions))]
 #[path = "../../../tests/session_run/setup/removal.rs"]
 mod removal;
-
-pub(super) enum SetupError {
-    Recoverable(String),
-    Presentation(String),
-    Uncertain(String),
-    Shutdown(ShutdownSignal),
-}
-
-impl From<String> for SetupError {
-    fn from(message: String) -> Self {
-        arany::record_development_failure(arany::DevelopmentFailure::Setup);
-        Self::Recoverable(message)
-    }
-}
-
-impl From<&str> for SetupError {
-    fn from(message: &str) -> Self {
-        arany::record_development_failure(arany::DevelopmentFailure::Setup);
-        Self::Recoverable(message.to_owned())
-    }
-}
-
-impl From<TerminalError> for SetupError {
-    fn from(error: TerminalError) -> Self {
-        Self::Presentation(error.to_string())
-    }
-}
-
-impl From<SetupError> for String {
-    fn from(error: SetupError) -> Self {
-        match error {
-            SetupError::Recoverable(message)
-            | SetupError::Presentation(message)
-            | SetupError::Uncertain(message) => message,
-            SetupError::Shutdown(signal) => format!("terminated by {}", signal.name()),
-        }
-    }
-}
 
 pub(super) enum SetupSelection {
     Native {
@@ -149,7 +114,7 @@ impl SetupJournal {
                     .map_err(|_| "state directory unavailable or unsafe")?;
                 create_session(root, self.workspace.clone(), None)
                     .await
-                    .map_err(|error| error.to_string())?
+                    .map_err(SetupError::recoverable)?
             });
         }
         arany::start_provider_setup_edit(
@@ -197,7 +162,7 @@ impl SetupJournal {
                         "{label} publication is unknown; inspect saved state and start a new Session; no retry was attempted"
                     )))
                 } else {
-                    Err(error.to_string().into())
+                    Err(SetupError::recoverable(error))
                 }
             }
         }
@@ -394,7 +359,7 @@ pub(super) async fn saved_defaults(
             match chatgpt::selected_account_id() {
                 Ok(_) => false,
                 Err(chatgpt::AuthorizationError::NoSelectedAccount) => true,
-                Err(error) => return Err(error.to_string().into()),
+                Err(error) => return Err(SetupError::recoverable(error)),
             }
         } else {
             false
@@ -403,7 +368,7 @@ pub(super) async fn saved_defaults(
             return Ok(SavedDefaults::Selected(defaults));
         }
     }
-    let path = StateRoot::account_path().map_err(|error| error.to_string())?;
+    let path = StateRoot::account_path().map_err(SetupError::recoverable)?;
     let (native, chatgpt) = native::saved_account_presence(&path)?;
     match (native, chatgpt) {
         (true, true) => match choose(
@@ -416,12 +381,12 @@ pub(super) async fn saved_defaults(
         .await?
         {
             Some(b'1') => native::saved_native_defaults(terminal).await,
-            Some(b'2') => selected_chatgpt_defaults().map_err(Into::into),
+            Some(b'2') => selected_chatgpt_defaults(),
             Some(b'0') | None => Ok(SavedDefaults::Cancelled),
             _ => Err("invalid saved access choice".into()),
         },
         (true, false) => native::saved_native_defaults(terminal).await,
-        (false, true) => selected_chatgpt_defaults().map_err(Into::into),
+        (false, true) => selected_chatgpt_defaults(),
         (false, false) => Ok(SavedDefaults::Unconfigured),
     }
 }
@@ -450,7 +415,7 @@ pub(super) async fn authorize_saved_access(
     else {
         return Ok(false);
     };
-    if !result.map_err(|error| error.to_string())? {
+    if !result.map_err(SetupError::recoverable)? {
         return Err(
             "Saved sign-in is missing from the OS password store; use /setup to reconnect".into(),
         );
@@ -467,7 +432,7 @@ async fn selected_keyring_slot(defaults: &SessionDefaults) -> Result<Option<Stri
     };
     match defaults.provider.as_deref().and_then(ProviderKind::parse) {
         Some(ProviderKind::ChatGpt) => {
-            chatgpt::selected_keyring_slot(id).map_err(|error| error.to_string().into())
+            chatgpt::selected_keyring_slot(id).map_err(SetupError::recoverable)
         }
         Some(provider @ (ProviderKind::OpenAi | ProviderKind::Anthropic)) => {
             credentials::selected_keyring_slot(
@@ -475,17 +440,17 @@ async fn selected_keyring_slot(defaults: &SessionDefaults) -> Result<Option<Stri
                 provider.native_name().expect("native Provider name"),
             )
             .await
-            .map_err(|error| error.to_string().into())
+            .map_err(SetupError::recoverable)
         }
         Some(ProviderKind::Custom) | None => Ok(None),
     }
 }
 
-fn selected_chatgpt_defaults() -> Result<SavedDefaults, String> {
+fn selected_chatgpt_defaults() -> Result<SavedDefaults, SetupError> {
     match chatgpt::selected_account_id() {
         Ok(id) => Ok(SavedDefaults::Selected(chatgpt_defaults(id))),
         Err(chatgpt::AuthorizationError::NoSelectedAccount) => Ok(SavedDefaults::Unconfigured),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(SetupError::recoverable(error)),
     }
 }
 
@@ -645,7 +610,7 @@ async fn remove_native_saved_access(
     journal: &mut SetupJournal,
 ) -> Result<(), SetupError> {
     let removal =
-        credentials::NativeRemoval::prepare(workspace).map_err(|error| error.to_string())?;
+        credentials::NativeRemoval::prepare(workspace).map_err(SetupError::recoverable)?;
     let Some(removal) = removal else {
         await_setup_ack(terminal, "Native API account", "No saved account").await?;
         return Ok(());
@@ -717,7 +682,7 @@ async fn remove_chatgpt_saved_access(
             await_setup_ack(terminal, "ChatGPT account", "No saved account").await?;
             return Ok(());
         }
-        Err(error) => return Err(error.to_string().into()),
+        Err(error) => return Err(SetupError::recoverable(error)),
     };
     let Some(account) =
         choose_saved_chatgpt_id(terminal, Some(selected), &ids, "Select ChatGPT account").await?
@@ -789,7 +754,7 @@ fn chatgpt_removal_error(error: chatgpt::AuthorizationError) -> SetupError {
         error if chatgpt_edit_is_uncertain(&error) => SetupError::Presentation(
             "ChatGPT account cleanup is uncertain; restart setup and inspect saved access before continuing.".into(),
         ),
-        error => SetupError::Recoverable(error.to_string()),
+        error => SetupError::recoverable_unrecorded(error),
     }
 }
 
@@ -801,7 +766,7 @@ fn native_removal_error(error: CredentialError) -> SetupError {
                     .into(),
             )
         }
-        _ => SetupError::Recoverable(error.to_string()),
+        _ => SetupError::recoverable_unrecorded(error),
     }
 }
 
@@ -858,10 +823,10 @@ async fn custom_routes_setup(
             .or_else(|_| StateRoot::admit(state_dir))
             .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
         let (expected, profiles) =
-            CustomProfile::load_all_with_snapshot(&state).map_err(|error| error.to_string())?;
+            CustomProfile::load_all_with_snapshot(&state).map_err(SetupError::recoverable)?;
         let statuses = CustomProfile::check_statuses(&state, &profiles)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(SetupError::recoverable)?;
         let mut context = CustomRouteContext {
             state_dir,
             state: &state,
@@ -1137,7 +1102,7 @@ fn custom_write_error(error: CustomProfileError) -> SetupError {
                 .into(),
         )
     } else {
-        SetupError::Recoverable(error.to_string())
+        SetupError::recoverable_unrecorded(error)
     }
 }
 
@@ -1303,7 +1268,7 @@ async fn await_custom_check(
                 Err(error) => {
                     cancellation.cancel();
                     let _ = check.await;
-                    return Err(SetupError::Presentation(error.to_string()));
+                    return Err(SetupError::from(error));
                 }
             }
         }
@@ -1429,9 +1394,9 @@ fn safe_custom_check_error(error: &CustomProfileError) -> &'static str {
 fn custom_route_references(state_dir: &Path, name: &str) -> Result<bool, SetupError> {
     Ok(
         crate::cli::provider::routing::references_custom_profile(state_dir, name)
-            .map_err(|error| error.to_string())?
+            .map_err(SetupError::recoverable)?
             || crate::cli::provider::roster::references_custom_profile(state_dir, name)
-                .map_err(|error| error.to_string())?,
+                .map_err(SetupError::recoverable)?,
     )
 }
 
@@ -1766,7 +1731,7 @@ async fn chatgpt_setup(
                 return Ok(None);
             }
         }
-        Err(error) => return Err(error.to_string().into()),
+        Err(error) => return Err(SetupError::recoverable(error)),
     }
     let account = loop {
         let (saved, connected) = match chatgpt::selected_registration() {
@@ -1774,7 +1739,7 @@ async fn chatgpt_setup(
             Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
                 break connect_chatgpt(terminal, workspace, journal).await?;
             }
-            Err(error) => return Err(error.to_string().into()),
+            Err(error) => return Err(SetupError::recoverable(error)),
         };
         match chatgpt_account_action(terminal, saved, connected).await? {
             Some(ChatGptAccountAction::Inspect) => inspect_chatgpt_account(terminal).await?,
@@ -1783,7 +1748,7 @@ async fn chatgpt_setup(
             }
             Some(ChatGptAccountAction::Reconnect) => {
                 let target = chatgpt::selected_reauthorization_target(saved)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(SetupError::recoverable)?;
                 break reconnect_chatgpt(terminal, workspace, target, journal).await?;
             }
             Some(ChatGptAccountAction::ConnectNew) => {
@@ -1823,12 +1788,12 @@ async fn chatgpt_account_action(
             true,
         )
     } else {
-        let (_, accounts) = chatgpt::account_inspections().map_err(|error| error.to_string())?;
+        let (_, accounts) = chatgpt::account_inspections().map_err(SetupError::recoverable)?;
         let permission_missing = accounts
             .iter()
             .find(|account| account.id == saved)
             .is_some_and(|account| account.access == chatgpt::AccountAccess::PlanDisabled);
-        let (_, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
+        let (_, ids) = chatgpt::saved_account_ids().map_err(SetupError::recoverable)?;
         if permission_missing {
             (
                 "ChatGPT plan disabled",
@@ -1867,7 +1832,7 @@ async fn chatgpt_account_action(
 }
 
 async fn inspect_chatgpt_account(terminal: &mut AttachedTerminal) -> Result<(), SetupError> {
-    let (selected, accounts) = chatgpt::account_inspections().map_err(|error| error.to_string())?;
+    let (selected, accounts) = chatgpt::account_inspections().map_err(SetupError::recoverable)?;
     if accounts.is_empty() {
         await_setup_ack(terminal, "ChatGPT account", "No saved account").await?;
         return Ok(());
@@ -1915,16 +1880,16 @@ async fn native_setup(
             {
                 return Ok(None);
             }
-            inspect_or_file().await.map_err(|error| error.to_string())?
+            inspect_or_file().await.map_err(SetupError::recoverable)?
         }
-        Err(error) => return Err(error.to_string().into()),
+        Err(error) => return Err(SetupError::recoverable(error)),
     };
     let expected = inspected
         .account
         .as_ref()
         .map(SavedAccount::snapshot_digest)
         .transpose()
-        .map_err(|error| error.to_string())?;
+        .map_err(SetupError::recoverable)?;
     let storage = inspected.storage;
     if storage == AccountStorage::PrivateFile
         && choose(
@@ -2007,7 +1972,7 @@ async fn native_setup(
         credentials.into_api_key(),
     )
     .and_then(|account| account.with_anthropic_workspace(workspace_id))
-    .map_err(|error| error.to_string())?;
+    .map_err(SetupError::recoverable)?;
     let defaults = native::defaults(&account);
     terminal.draw_setup(
         0,
@@ -2073,7 +2038,7 @@ async fn settle_native_save(
                     "Native account storage is uncertain; restart setup and inspect saved access before continuing".into(),
                 ));
             }
-            return Err(error.to_string().into());
+            return Err(SetupError::recoverable(error));
         }
     }
     Ok(())
@@ -2086,7 +2051,7 @@ async fn reset_saved_setup(
     journal: &mut SetupJournal,
 ) -> Result<bool, SetupError> {
     let reset =
-        credentials::SetupReset::prepare(workspace, data).map_err(|error| error.to_string())?;
+        credentials::SetupReset::prepare(workspace, data).map_err(SetupError::recoverable)?;
     let (title, instruction) = match data {
         credentials::SetupData::Native => (
             "Reset API setup?",
@@ -2167,7 +2132,7 @@ async fn choose_saved_chatgpt(
     expected_selected: uuid::Uuid,
     journal: &mut SetupJournal,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
-    let (selected, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
+    let (selected, ids) = chatgpt::saved_account_ids().map_err(SetupError::recoverable)?;
     if selected != expected_selected {
         return Err("ChatGPT account changed during setup; use /setup again".into());
     }
@@ -2268,7 +2233,7 @@ async fn select_chatgpt_account(
                     "ChatGPT account selection is uncertain; restart setup and inspect saved access before continuing".into(),
                 ));
             }
-            Err(error.to_string().into())
+            Err(SetupError::recoverable(error))
         }
     }
 }
@@ -2504,7 +2469,7 @@ fn chatgpt_setup_error(error: chatgpt::AuthorizationError) -> SetupError {
     if chatgpt_edit_is_uncertain(&error) {
         SetupError::Uncertain(error.to_string())
     } else {
-        SetupError::from(error.to_string())
+        SetupError::recoverable(error)
     }
 }
 
@@ -2520,7 +2485,7 @@ fn chatgpt_edit_is_uncertain(error: &chatgpt::AuthorizationError) -> bool {
     )
 }
 
-fn chatgpt_keyring_available(probe: Result<(), CredentialError>) -> Result<bool, String> {
+fn chatgpt_keyring_available(probe: Result<(), CredentialError>) -> Result<bool, SetupError> {
     match probe {
         Ok(()) => Ok(true),
         Err(CredentialError::Unavailable | CredentialError::TimedOut) => Ok(false),
@@ -2528,7 +2493,7 @@ fn chatgpt_keyring_available(probe: Result<(), CredentialError>) -> Result<bool,
             "OS credential store is locked. Unlock your desktop password store, then retry /setup"
                 .into(),
         ),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(SetupError::recoverable(error)),
     }
 }
 
@@ -2627,7 +2592,7 @@ async fn review_chatgpt_risk(
         prompt
             .accept("Accept")
             .map(Some)
-            .map_err(|error| error.to_string().into())
+            .map_err(SetupError::recoverable)
     } else {
         Ok(None)
     }
@@ -3253,7 +3218,7 @@ async fn load_catalog(
     )
     .await?
     .transpose()
-    .map_err(|error| error.to_string().into())
+    .map_err(SetupError::recoverable)
 }
 
 #[cfg(test)]
@@ -3587,15 +3552,18 @@ pub(super) mod tests {
 
     #[test]
     fn chatgpt_file_fallback_never_treats_locked_keyring_as_missing() {
-        assert_eq!(chatgpt_keyring_available(Ok(())), Ok(true));
-        assert_eq!(
+        assert!(matches!(chatgpt_keyring_available(Ok(())), Ok(true)));
+        assert!(matches!(
             chatgpt_keyring_available(Err(CredentialError::Unavailable)),
             Ok(false)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             chatgpt_keyring_available(Err(CredentialError::TimedOut)),
             Ok(false)
-        );
-        assert!(chatgpt_keyring_available(Err(CredentialError::Locked)).is_err());
+        ));
+        assert!(matches!(
+            chatgpt_keyring_available(Err(CredentialError::Locked)),
+            Err(SetupError::Recoverable(_))
+        ));
     }
 }
