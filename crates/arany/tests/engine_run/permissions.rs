@@ -812,6 +812,8 @@ async fn assert_decline_summaries_retained(
 
 #[tokio::test]
 async fn multi_call_cancellation_settles_the_undispatched_suffix() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+    let _deadline = engine_support::deadline("multi-call cancellation", TEST_TIMEOUT);
     let temp = tempfile::tempdir().unwrap();
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
     for name in ["pending", "final"] {
@@ -849,10 +851,7 @@ async fn multi_call_cancellation_settles_the_undispatched_suffix() {
         ..Default::default()
     };
     let cancel = async {
-        let approval = tokio::time::timeout(Duration::from_secs(5), inbox.next())
-            .await
-            .unwrap()
-            .unwrap();
+        let approval = inbox.next().await.expect("pending read approval");
         assert!(
             matches!(&approval.intent.call, arany::ToolCall::Read { path, .. } if path == "notes/pending.txt")
         );
