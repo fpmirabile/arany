@@ -2628,7 +2628,8 @@ fn pre_host_migrations_never_create_live_authority() {
     let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
     assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_some());
     run["config"]["tool_policy"]["child_unguarded"] = serde_json::json!("human_only");
-    serde_json::from_value::<crate::session::RunConfig>(run["config"].clone()).unwrap();
+    let current = crate::session::run_started_v23_to_v24(run.clone()).unwrap();
+    serde_json::from_value::<crate::session::RunConfig>(current["config"].clone()).unwrap();
     assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_none());
 
     let control: PermissionVerdict = serde_json::from_str(VERDICT_V4).unwrap();
