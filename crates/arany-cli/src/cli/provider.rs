@@ -626,11 +626,13 @@ mod tests {
             &[
                 ModelEntry {
                     id: "gpt-5.4".into(),
+                    context_window_tokens: None,
                     runnable: true,
                     efforts: vec![arany::Effort::None, arany::Effort::Low],
                 },
                 ModelEntry {
                     id: "embedding-only".into(),
+                    context_window_tokens: None,
                     runnable: false,
                     efforts: vec![],
                 },

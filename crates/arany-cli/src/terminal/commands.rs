@@ -301,6 +301,7 @@ impl CommandChoices {
             .take(MAX_CATALOG_MODELS)
             .map(|item| ModelEntry {
                 id: item.id.clone(),
+                context_window_tokens: item.context_window_tokens,
                 runnable: item.runnable,
                 efforts: item
                     .efforts
@@ -1217,11 +1218,13 @@ mod tests {
         let entries = [
             ModelEntry {
                 id: "gpt-5.4".into(),
+                context_window_tokens: None,
                 runnable: true,
                 efforts: vec![Effort::Low, Effort::Medium],
             },
             ModelEntry {
                 id: "gpt-unreviewed".into(),
+                context_window_tokens: None,
                 runnable: false,
                 efforts: vec![],
             },
@@ -1248,6 +1251,7 @@ mod tests {
         choices.set_selection(Some("custom:local"), Some("owned-model"), None);
         let entries = [ModelEntry {
             id: "owned-model".into(),
+            context_window_tokens: None,
             runnable: false,
             efforts: vec![Effort::High],
         }];
@@ -1277,6 +1281,7 @@ mod tests {
         .into_iter()
         .map(|id| ModelEntry {
             id: id.into(),
+            context_window_tokens: None,
             runnable: false,
             efforts: vec![],
         })

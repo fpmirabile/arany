@@ -1927,6 +1927,8 @@ async fn a_new_native_attempt_invalidates_prior_credentials_for_the_same_target(
         fingerprint: [7; 32],
         checked_at_ms: now,
         expires_at_ms: now + 60_000,
+
+        context_window_tokens: None,
     };
     store.record_native_evidence(record.clone()).await.unwrap();
     let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
