@@ -7685,43 +7685,61 @@ mod goal_replay_tests {
 
     #[test]
     fn host_pr_view_failure_text_is_operation_specific_on_replay() {
-        let (mut view, run, agent, intent) = pending_host_pr_view();
-        let mut failure = observation_for(intent.clone(), b"view failed");
-        failure.disposition = crate::tools::ToolDisposition::Failed;
-        failure.output =
-            "host: GitHub pull request inspection failed; no result was reported.".into();
-        failure.attestation = Some(crate::tools::Attestation::Host(
-            crate::tools::UnguardedReceipt {
-                contract_version: 1,
-                intent_digest: intent.digest(),
-                executable_sha256: "a".repeat(64),
-                pid: 2,
-                exit_code: Some(7),
-                descendants_confirmed_stopped: true,
-            },
-        ));
-        let mut wrong_operation = failure.clone();
-        wrong_operation.output =
-            "host: GitHub pull request list failed; no result was reported.".into();
-        assert!(rejected(
-            &view,
-            Event::ToolFinished {
-                checkpoint: None,
-                run_id: run,
-                agent_run_id: agent,
-                observation: wrong_operation,
+        const RESULT_BUDGET: &str =
+            "host: pull request inspection did not fit the result budget; nothing was reported.";
+        for (output, exit_code, accepted) in [
+            (
+                "host: GitHub pull request inspection failed; no result was reported.",
+                7,
+                true,
+            ),
+            (
+                "host: GitHub pull request list failed; no result was reported.",
+                7,
+                false,
+            ),
+            (RESULT_BUDGET, 0, true),
+            (RESULT_BUDGET, 7, false),
+        ] {
+            let (mut view, run, agent, intent) = pending_host_pr_view();
+            let mut failure = observation_for(intent.clone(), b"view failed");
+            failure.disposition = crate::tools::ToolDisposition::Failed;
+            failure.output = output.into();
+            failure.attestation = Some(crate::tools::Attestation::Host(
+                crate::tools::UnguardedReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    executable_sha256: "a".repeat(64),
+                    pid: 2,
+                    exit_code: Some(exit_code),
+                    descendants_confirmed_stopped: true,
+                },
+            ));
+            if output == RESULT_BUDGET && accepted {
+                let mut missing_receipt = failure.clone();
+                missing_receipt.attestation = None;
+                assert!(rejected(
+                    &view,
+                    Event::ToolFinished {
+                        checkpoint: None,
+                        run_id: run,
+                        agent_run_id: agent,
+                        observation: missing_receipt,
+                    }
+                ));
             }
-        ));
-        apply(
-            &mut view,
-            Event::ToolFinished {
+            let event = Event::ToolFinished {
                 checkpoint: None,
                 run_id: run,
                 agent_run_id: agent,
                 observation: failure,
-            },
-        )
-        .expect("view-specific failure replays");
+            };
+            if accepted {
+                apply(&mut view, event).expect("view-specific failure replays");
+            } else {
+                assert!(rejected(&view, event), "{output}: exit {exit_code}");
+            }
+        }
     }
 
     #[test]

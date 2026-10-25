@@ -36,6 +36,8 @@ pub(crate) const PR_VIEW_CAPTURE_LIMIT: &str =
     "host: GitHub pull request inspection exceeded a capture limit.";
 pub(crate) const PR_VIEW_INVALID: &str =
     "host: GitHub returned invalid pull request inspection data.";
+pub(crate) const PR_VIEW_RESULT_BUDGET: &str =
+    "host: pull request inspection did not fit the result budget; nothing was reported.";
 const PR_VIEW_REFUSAL_BUDGET: &str = "host: refused; nothing dispatched.";
 pub(crate) const PR_LIST_TITLE_BYTES: usize = 256;
 pub(crate) const PR_LIST_TEXT_BYTES: usize = 2048;
@@ -1429,40 +1431,65 @@ pub(crate) struct PrViewIdentity {
     pub(crate) number: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrViewResultError {
+    Invalid,
+    Budget,
+}
+
+impl PrViewResultError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Invalid => PR_VIEW_INVALID,
+            Self::Budget => PR_VIEW_RESULT_BUDGET,
+        }
+    }
+}
+
 fn pr_view_result(
     scalar: &Value,
     graph_text: &str,
     identity: PrViewIdentity,
     result_bytes: usize,
-) -> Option<String> {
-    if scalar.get("number")?.as_u64()? != u64::from(identity.number) {
-        return None;
+) -> Result<String, PrViewResultError> {
+    let invalid = PrViewResultError::Invalid;
+    if scalar.get("number").and_then(Value::as_u64) != Some(u64::from(identity.number)) {
+        return Err(invalid);
     }
     if !valid_pr_view_url(
-        scalar.get("url")?.as_str()?,
+        scalar.get("url").and_then(Value::as_str).ok_or(invalid)?,
         &identity.repository,
         identity.number,
     ) {
-        return None;
+        return Err(invalid);
     }
-    let graph: Value = serde_json::from_str(graph_text).ok()?;
+    let graph: Value = serde_json::from_str(graph_text).map_err(|_| invalid)?;
     if let Some(errors) = graph.get("errors")
-        && !errors.as_array()?.is_empty()
+        && !errors.as_array().ok_or(invalid)?.is_empty()
     {
-        return None;
+        return Err(invalid);
     }
-    let pull = graph.get("data")?.get("repository")?.get("pullRequest")?;
+    let pull = graph
+        .pointer("/data/repository/pullRequest")
+        .ok_or(invalid)?;
     if pull.is_null() {
-        return None;
+        return Err(invalid);
     }
-    let graph_head = pull.get("headRefOid")?.as_str()?;
-    let scalar_head = scalar.get("headRefOid")?.as_str()?;
+    let graph_head = pull
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .ok_or(invalid)?;
+    let scalar_head = scalar
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .ok_or(invalid)?;
     if !valid_oid(graph_head) || !valid_oid(scalar_head) {
-        return None;
+        return Err(invalid);
     }
     let mut truncated_fields = Vec::new();
-    let result = pr_view_payload(scalar, pull, identity, graph_head, &mut truncated_fields)?;
-    fit_pr_view_result(result, result_bytes)
+    let result = pr_view_payload(scalar, pull, identity, graph_head, &mut truncated_fields)
+        .ok_or(invalid)?;
+    fit_pr_view_result(result, result_bytes).ok_or(PrViewResultError::Budget)
 }
 
 fn pr_view_payload(
@@ -2084,16 +2111,16 @@ async fn supervise_pr_view_details(details: PrViewDetails) -> ToolObservation {
         identity,
         intent.limits.result_bytes as usize,
     ) {
-        Some(output) => observation(
+        Ok(output) => observation(
             intent,
             ToolDisposition::Succeeded,
             &output,
             query.attestation.and_then(host_receipt),
         ),
-        None => observation(
+        Err(error) => observation(
             intent,
             ToolDisposition::Failed,
-            PR_VIEW_INVALID,
+            error.message(),
             query.attestation.and_then(host_receipt),
         ),
     }
@@ -2600,7 +2627,7 @@ mod tests {
                     pr_view_identity(),
                     crate::tools::types::MAX_TOOL_RESULT_BYTES,
                 )
-                .is_none(),
+                .is_err_and(|error| error == PrViewResultError::Invalid),
                 "accepted URL: {url}"
             );
         }
@@ -2614,7 +2641,7 @@ mod tests {
                 pr_view_identity(),
                 crate::tools::types::MAX_TOOL_RESULT_BYTES,
             )
-            .is_none()
+            .is_err_and(|error| error == PrViewResultError::Invalid)
         );
     }
 
@@ -3156,6 +3183,19 @@ mod tests {
         std::fs::rename(&parent.path, home.join("moved")).unwrap();
         std::os::unix::fs::symlink(home.join("moved"), &parent.path).unwrap();
         assert!(Scratch::acquire(&state).is_err());
+    }
+
+    fn synthetic_json_peer(prepared: &Command, value: &Value) -> Command {
+        synthetic_peer(
+            prepared,
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "printf '%s' \"$1\"".into(),
+                "peer".into(),
+                value.to_string().into(),
+            ],
+        )
     }
 
     fn synthetic_peer(prepared: &Command, program: &Path, args: &[std::ffi::OsString]) -> Command {
@@ -3957,6 +3997,67 @@ done
         let mut wrong_operation = observation;
         wrong_operation.output = PR_LIST_FAILED.into();
         assert!(!wrong_operation.valid());
+    }
+
+    #[tokio::test]
+    async fn host_gh_pr_view_small_result_budget_is_a_confirmed_local_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let private = Arc::new(tempfile::tempdir().unwrap());
+        let mut intent = intent(
+            &workspace,
+            ToolCall::GhPrView {
+                repository: "github.com/example/project".into(),
+                number: 17,
+            },
+        );
+        intent.limits.result_bytes = 128;
+        let (prepared, digest, environment) = prepare(
+            &config(),
+            &authentication(temp.path()),
+            &workspace,
+            &intent,
+            Arc::clone(&private),
+        )
+        .await
+        .unwrap();
+        let mut environment = environment.unwrap();
+        let head = "a".repeat(40);
+        let scalar_json = pr_view_scalar(&head);
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(u64::from(intent.effective_timeout_ms()));
+        let scalar = super::supervise(
+            deadline,
+            synthetic_json_peer(&prepared, &scalar_json),
+            intent.clone(),
+            digest.clone(),
+            Cancellation::new(),
+        )
+        .await;
+        assert_eq!(scalar.disposition, ToolDisposition::Succeeded);
+        environment.command =
+            synthetic_json_peer(&environment.command, &pr_view_graph(&head, "COMPLETED"));
+        environment.command.stdin(Stdio::piped());
+        let observation = supervise_pr_view_details(PrViewDetails {
+            deadline,
+            environment,
+            executable: digest,
+            intent,
+            scalar,
+            scalar_json,
+            identity: pr_view_identity(),
+            cancellation: Cancellation::new(),
+        })
+        .await;
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert_eq!(observation.output, PR_VIEW_RESULT_BUDGET);
+        assert!(observation.valid());
+        assert!(observation.output.len() <= observation.intent.limits.result_bytes as usize);
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::Host(ref receipt))
+                if receipt.exit_code == Some(0) && receipt.descendants_confirmed_stopped
+        ));
     }
 
     #[tokio::test]

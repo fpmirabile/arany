@@ -1458,7 +1458,11 @@ impl ToolObservation {
                                             _ => true,
                                         })
                         }
-                        None => self.disposition != ToolDisposition::Succeeded,
+                        None => {
+                            self.disposition != ToolDisposition::Succeeded
+                                && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
+                                    && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                        }
                         _ => false,
                     })
             && (!self.intent.call.is_unguarded()
@@ -1490,7 +1494,8 @@ fn valid_host_pr_read_failure(observation: &ToolObservation, receipt: &Unguarded
         ToolCall::GhPrView { .. } => {
             observation.output == super::git::host::PR_VIEW_CAPTURE_LIMIT
                 || observation.output == super::git::host::PR_VIEW_FAILED
-                || observation.output == super::git::host::PR_VIEW_INVALID
+                || (observation.output == super::git::host::PR_VIEW_INVALID
+                    || observation.output == super::git::host::PR_VIEW_RESULT_BUDGET)
                     && receipt.exit_code == Some(0)
         }
         _ => false,
