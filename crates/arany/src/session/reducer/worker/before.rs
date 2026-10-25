@@ -167,7 +167,8 @@ pub(super) fn primary_provider_call(
             })
             .collect();
         for request in &editors {
-            validate_request(view, run, request, None)?;
+            validate_request(view, run, request, None)
+                .map_err(|_| ReplayError::InvalidTransition)?;
         }
         if !editors.is_empty() && config.worker_policy.is_none() {
             return Err(ReplayError::InvalidTransition);

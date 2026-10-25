@@ -2079,6 +2079,50 @@ pub(crate) fn compacted_fixture(compacted: bool) -> Fixture {
 }
 
 #[test]
+fn forged_invalid_editor_delegations_reject_before_child_work() {
+    use crate::test_support::worker_teams::{INVALID_EDITOR_CASES, invalidate_editor};
+    for (case, cause) in INVALID_EDITOR_CASES {
+        let mut f = fixture();
+        let delegation = f
+            .events
+            .iter()
+            .position(|e| {
+                matches!(e,
+            Event::ProviderCallRecorded { record, .. } if record.delegation.is_some())
+            })
+            .unwrap();
+        let mut event = f.events[delegation].clone();
+        if let Event::ProviderCallRecorded { record, .. } = &mut event
+            && let ChildAssignment::Editor { assignment } =
+                &mut record.delegation.as_mut().unwrap()[0]
+        {
+            invalidate_editor(assignment, case);
+        }
+        if *case == "invalid_turns" {
+            for event in &mut f.events {
+                if let Event::RunStarted { config, .. } = event {
+                    config.worker_policy.as_mut().unwrap().max_turns = 1;
+                }
+            }
+        }
+        f.events.truncate(delegation);
+        let view = f.view();
+        let Event::ProviderCallRecorded { record, .. } = &event else {
+            unreachable!()
+        };
+        let ChildAssignment::Editor { assignment } = &record.delegation.as_ref().unwrap()[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            super::worker::validate_request(&view, &view.runs[0], assignment, None),
+            Err(*cause),
+            "{case}"
+        );
+        refused(&f, event, case);
+    }
+}
+
+#[test]
 fn worker_protocol_nonoverlap_and_completion_order() {
     let mut f = fixture();
     let first = f.child;

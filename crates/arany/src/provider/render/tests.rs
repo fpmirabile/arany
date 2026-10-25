@@ -1195,6 +1195,14 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
         NotOffered,
         AnswerInvalid,
         DelegateInvalid,
+        EditorDefinition,
+        EditorDigest,
+        EditorCommands,
+        EditorTurns,
+        EditorLease,
+        EditorCriterion,
+        EditorResume,
+        EditorGrant,
     ] {
         for tools_enabled in [false, true] {
             let mut request = request(vec![step("first", "src/lib.rs")]);

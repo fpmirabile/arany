@@ -792,7 +792,7 @@ impl EffectIntent {
 }
 
 pub(super) const GIT_TIMEOUT_MS: u32 = 20_000;
-pub(super) const MCP_TIMEOUT_MS: u32 = 40_000;
+pub(crate) const MCP_TIMEOUT_MS: u32 = 40_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -819,7 +819,7 @@ pub enum ToolResourceProfile {
     MacosSupervised,
 }
 
-const DEFAULT_COMMAND_TIMEOUT_MS: u32 = 120_000;
+pub(crate) const DEFAULT_COMMAND_TIMEOUT_MS: u32 = 120_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

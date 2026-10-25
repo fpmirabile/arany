@@ -11,7 +11,8 @@ mod worker;
 pub use worker::{WorkerState, WorkerView};
 pub(crate) use worker::{
     coordination_ready, criterion_unmet_in_view, evidence_admitted, private_criterion_evidence,
-    private_failure, verification_passed, wave_settled,
+    private_failure, validate_request as validate_editor_request, verification_passed,
+    wave_settled,
 };
 mod goal;
 mod rewind;

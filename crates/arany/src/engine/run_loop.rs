@@ -890,8 +890,7 @@ impl<'a> RunLoop<'a> {
                 if !planning && !self.wave_settled()? {
                     Ok(Err(ProposalRefusalCause::Phase))
                 } else {
-                    Ok(self
-                        .well_formed_delegation(&delegation.children, delegation.agent.as_deref()))
+                    self.well_formed_delegation(&delegation.children, delegation.agent.as_deref())
                 }
             }
             ProviderOutcome::Tools(requests) => self.well_formed_primary_tools(requests),
