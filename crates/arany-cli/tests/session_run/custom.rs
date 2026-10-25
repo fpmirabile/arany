@@ -754,7 +754,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     assert_eq!(no_key.stdout, b"");
     assert_eq!(
         no_key.stderr,
-        b"error: selected custom Provider credential is not set\n"
+        b"error: custom Provider credential unavailable\n"
     );
 
     let success = run_exec(case, &workspace, &state_path, Some(case.key), case.model);

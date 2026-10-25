@@ -257,7 +257,12 @@ fn perform_inspection(
     assert_details(&content, inspected, storage, access);
     presentation.menu(pty, returned, access.menu_title());
     let back = pty.transcript.len();
-    pty.input.write_all(b"\x1b").unwrap();
+    pty.input
+        .write_all(match presentation {
+            Presentation::ScreenReader => b"\x03",
+            Presentation::Inline => b"\x1b",
+        })
+        .unwrap();
     presentation.composer(pty, back);
 }
 

@@ -802,8 +802,9 @@ async fn run_signalled(
 mod tests {
     use super::*;
     use arany::{
-        AgentPhase, Answer, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-        RunId, RunStop, SessionView, Tapped,
+        AgentPhase, Answer, Event, ProviderError, ProviderOutcome, ProviderRequest,
+        ProviderResponse, RunId, RunStop, SessionView, Tapped,
+        test_support::scenario::ScriptedProvider,
     };
     use std::{
         collections::VecDeque,
@@ -1437,32 +1438,46 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
-    async fn run_spending_budget_after_answer(
+    async fn run_with_budget_spent_after_answer(
         exec: ExecArgs,
         admission: Admission,
-        provider: Arc<dyn Provider>,
-        elapsed: std::time::Duration,
+        provider: ScriptedProvider,
+        active_time: std::time::Duration,
     ) -> CommandOutput {
-        let session = admission.session_id.expect("existing Session");
-        let (entered, release) =
-            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(event, arany::Event::MessageCommitted { .. })
+        let requests = Arc::clone(&provider.requests);
+        let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
+        let provider = provider.with_before_call(1, move || {
+            let session = requests
+                .lock()
+                .expect("requests")
+                .last()
+                .expect("call")
+                .session_id;
+            let gate = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::MessageCommitted { .. })
             });
-        let run = run_with_provider(exec, admission, provider, Telemetry::disabled());
+            gate_tx.try_send(gate).expect("one answer gate");
+        });
+        let run = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
         tokio::pin!(run);
         const ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-        tokio::time::timeout(ACK_DEADLINE, async {
+        let release = tokio::time::timeout(ACK_DEADLINE, async {
+            let (entered, release) = tokio::select! {
+                gate = gate_rx.recv() => gate.expect("answer gate installed"),
+                result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
+            };
             tokio::select! {
-                _ = &mut run => panic!("Run ended before answer acknowledgment"),
-                reached = entered => reached.expect("answer committed"),
+                entered = entered => entered.expect("accepted answer committed"),
+                result = &mut run => panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success)),
             }
+            release
         })
         .await
         .expect("answer acknowledgment gate");
         tokio::time::pause();
-        tokio::time::advance(elapsed).await;
+        tokio::time::advance(active_time).await;
         tokio::time::resume();
-        release.send(()).expect("acknowledge committed answer");
+        release.send(()).expect("release accepted answer");
         tokio::time::timeout(ACK_DEADLINE, run)
             .await
             .expect("Goal settlement deadline")
@@ -1526,10 +1541,10 @@ mod tests {
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
         let admission = exec.admit().expect("valid autonomous command");
-        let report = run_spending_budget_after_answer(
+        let report = run_with_budget_spent_after_answer(
             exec,
             admission,
-            Arc::new(provider),
+            provider,
             std::time::Duration::from_millis(budget.max_active_ms.expect("finite active time")),
         )
         .await;
@@ -1594,7 +1609,7 @@ mod tests {
                 content: "v2".into(),
             },
         };
-        let provider = arany::test_support::scenario::ScriptedProvider::new(vec![
+        let provider = ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
@@ -1607,7 +1622,7 @@ mod tests {
         let admission = exec.admit().expect("valid autonomous command");
         let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
             .await
-            .expect("completed Run with an exhausted Goal");
+            .expect("failed Goal after a committed Run");
         let first_event: serde_json::Value =
             serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
                 .expect("JSONL Event");

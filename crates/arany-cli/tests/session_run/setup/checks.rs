@@ -1,5 +1,5 @@
 use super::*;
-use crate::loopback::{held_stream_provider, read_request, write_profile};
+use crate::loopback::{HeldResponseKind, held_provider, read_request, write_profile};
 use arany::{CheckDisposition, CheckEvent, CheckId, CheckView, CustomCheckStatus, CustomProfile};
 use std::net::TcpListener;
 
@@ -271,7 +271,11 @@ fn manager_check_acknowledgment_selects_verified_route_and_completes_a_turn() {
         let workspace = temp.path().join("workspace");
         let state = temp.path().join("state");
         std::fs::create_dir(&workspace).unwrap();
-        let provider = held_stream_provider(&state, "manager checked answer");
+        let kind = match presentation {
+            Presentation::ScreenReader => HeldResponseKind::Buffered,
+            Presentation::Inline => HeldResponseKind::Streamed,
+        };
+        let provider = held_provider(&state, "manager checked answer", kind);
         let mut pty = presentation.start(&temp, &workspace, &state, Some("test-key"));
         let warning = open_check(&mut pty, presentation);
         let checking = accept_check(&mut pty, presentation, warning);
@@ -530,11 +534,7 @@ fn interrupted_check(presentation: Presentation, interruption: InterruptedCheck)
     let mut pty = presentation.start(&temp, &workspace, &state, Some("test-key"));
     let warning = open_check(&mut pty, presentation);
     let checking = accept_check(&mut pty, presentation, warning);
-    let mut stream = crate::process::accept_with_deadline(
-        &listener,
-        Duration::from_secs(10),
-        "manager check dispatched",
-    );
+    let mut stream = wait_check_dispatch(&listener, &mut pty);
     read_request(&mut stream);
     match interruption {
         InterruptedCheck::Cancel => {
@@ -628,6 +628,29 @@ fn listener() -> TcpListener {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     listener
+}
+
+fn wait_check_dispatch(listener: &TcpListener, pty: &mut SetupPty) -> std::net::TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("manager check accept: {error}"),
+        }
+        pump(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+        );
+        assert!(
+            Instant::now() < deadline,
+            "manager check dispatched missing: {}",
+            tail(&pty.transcript)
+        );
+        thread::yield_now();
+    }
 }
 
 fn assert_no_egress(listener: &TcpListener) {

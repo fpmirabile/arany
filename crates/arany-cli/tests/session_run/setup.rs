@@ -2339,7 +2339,11 @@ fn configured_unsaved_conversation_survives_custom_save_and_back() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let provider = super::loopback::held_stream_provider(&state, "retained setup answer");
+    let provider = super::loopback::held_provider(
+        &state,
+        "retained setup answer",
+        super::loopback::HeldResponseKind::Buffered,
+    );
     super::loopback::check_profile(&workspace, &state);
     let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Configured);
     assert_retained_setup_conversation(&state, &workspace, None);

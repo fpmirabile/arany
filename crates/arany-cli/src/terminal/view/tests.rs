@@ -2737,6 +2737,21 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                                     frame, area, &agents, 0, armed, None, palette,
                                 ),
                             }
+                            if name == "settings" && width == 80 && height == 24 && armed {
+                                crate::terminal::PanelSelection {
+                                    area: Some(area),
+                                    anchor: Some((4, 2)),
+                                    head: Some((4, 3)),
+                                    ..crate::terminal::PanelSelection::default()
+                                }
+                                .render(frame, area);
+                                crate::terminal::draw_panel_feedback(
+                                    frame,
+                                    area,
+                                    "Copy unavailable: clipboard unavailable",
+                                    palette,
+                                );
+                            }
                         })
                         .expect("dialog frame");
                     let buffer = terminal.backend().buffer();
@@ -2745,10 +2760,20 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                         .collect::<Vec<_>>();
                     let context = format!("{name} armed {armed} at {width}x{height}: {rows:?}");
                     assert_eq!(area.bottom(), height, "{context}");
+                    if name == "settings" && width == 80 && height == 24 && armed {
+                        let buffer = terminal.backend().buffer();
+                        let focused_selection = &buffer[(area.x + 2, area.y + 4)];
+                        assert!(focused_selection.modifier.contains(Modifier::REVERSED));
+                        assert!(focused_selection.modifier.contains(Modifier::UNDERLINED));
+                        assert_eq!(
+                            rows[usize::from(height - 1)].trim_end(),
+                            "Copy unavailable: clipboard unavailable"
+                        );
+                    }
                     // The key hint is the arming cue.
                     assert_eq!(
                         rows[usize::from(height - 1)].contains("Esc"),
-                        armed,
+                        armed && !(name == "settings" && width == 80 && height == 24),
                         "{context}"
                     );
                     let dialog = &rows[usize::from(area.y)..];
