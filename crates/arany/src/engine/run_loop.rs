@@ -1262,6 +1262,8 @@ impl<'a> RunLoop<'a> {
             | crate::tools::ToolCall::Mkdir { .. }
             | crate::tools::ToolCall::Write { .. }
             | crate::tools::ToolCall::Edit { .. }
+            | crate::tools::ToolCall::Delete { .. }
+            | crate::tools::ToolCall::Move { .. }
             | crate::tools::ToolCall::MultiEdit { .. }
             | crate::tools::ToolCall::Command { .. }
             | crate::tools::ToolCall::CommandUnguarded { .. }

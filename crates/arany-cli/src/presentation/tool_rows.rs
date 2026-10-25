@@ -45,6 +45,12 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             format!("Search({query}, {path}{options})")
         }
         ToolCall::Glob { pattern, path, .. } => format!("Glob({pattern}, {path})"),
+        ToolCall::Delete { path, .. } => format!("Delete({path})"),
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => format!("Move({source} → {destination})"),
         ToolCall::Mkdir { path } => format!("Create folder({path})"),
         ToolCall::Write { path, .. } => format!("Write({path})"),
         ToolCall::Edit { path, .. } => format!("Edit({path})"),
@@ -93,6 +99,8 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
                 | ToolCall::MultiEdit { .. }
+                | ToolCall::Delete { .. }
+                | ToolCall::Move { .. }
                 | ToolCall::Mkdir { .. }
                 | ToolCall::ApplyChangeset { .. } => "applied".into(),
                 ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
@@ -564,6 +572,22 @@ fn approval_call_lines(call: &arany::ToolCall) -> Vec<String> {
                         .map(|line| format!("+ {}", escape_terminal(line))),
                 );
             }
+        }
+        ToolCall::Delete { path, .. } => lines.push(format!(
+            "Delete {} · only if the file is unchanged",
+            escape_terminal(path)
+        )),
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => {
+            lines.push(format!(
+                "Move {} → {}",
+                escape_terminal(source),
+                escape_terminal(destination)
+            ));
+            lines.push("Only if the source is unchanged and the destination is absent".into());
         }
         ToolCall::Mkdir { path } => lines.push(format!("Create folder {}", escape_terminal(path))),
         ToolCall::Command { program, args, cwd } => {

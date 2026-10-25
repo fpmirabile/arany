@@ -494,9 +494,15 @@ fn validate_request(
             .lease
             .iter()
             .any(|p| !within(p, &plan.paths) || !within(p, &policy.parent_grant.write_paths))
-        || ![WorkerTool::Write, WorkerTool::Edit, WorkerTool::MultiEdit]
-            .iter()
-            .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
+        || ![
+            WorkerTool::Write,
+            WorkerTool::Edit,
+            WorkerTool::MultiEdit,
+            WorkerTool::Delete,
+            WorkerTool::Move,
+        ]
+        .iter()
+        .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
         || match &request.criterion {
             GoalSuccessCriterion::ToolCallSucceeded { call } => {
                 !plan.allows_call(call)

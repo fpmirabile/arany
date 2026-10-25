@@ -1254,7 +1254,7 @@ fn native_explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
                     .expect("composer border");
                 super::assert_history_above(&screen, border, "idle Classic");
                 from = bytes.len();
-                input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
+                input.write_all(b"\x1b[5~\x1b[6~\x0f").unwrap();
                 stage = 1;
             } else if (4..=9).contains(&stage) {
                 let tail = &bytes[from..];

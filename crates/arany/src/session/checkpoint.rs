@@ -73,6 +73,8 @@ pub(crate) fn publication(intent: &EffectIntent) -> bool {
             intent.call,
             ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
+                | ToolCall::Delete { .. }
+                | ToolCall::Move { .. }
                 | ToolCall::MultiEdit { .. }
                 | ToolCall::ApplyChangeset { .. }
         )
@@ -85,6 +87,18 @@ pub(crate) fn before_versions(run: &RunView, call: &ToolCall) -> Vec<(String, Op
             expected_digest,
             ..
         } => vec![(path.clone(), expected_digest.clone())],
+        ToolCall::Delete {
+            path,
+            expected_digest,
+        } => vec![(path.clone(), Some(expected_digest.clone()))],
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => vec![
+            (source.clone(), Some(expected_digest.clone())),
+            (destination.clone(), None),
+        ],
         ToolCall::Edit {
             path,
             expected_digest,
@@ -153,6 +167,20 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
                         .and_then(|v| v.as_str())
                         .map(str::to_owned),
                 )
+            }
+            ToolCall::Delete { path: source, .. } if source == path => Some(None),
+            ToolCall::Move {
+                source,
+                destination,
+                expected_digest,
+            } => {
+                if source == path {
+                    Some(None)
+                } else if destination == path {
+                    Some(Some(expected_digest.clone()))
+                } else {
+                    None
+                }
             }
             ToolCall::ApplyChangeset {
                 source: ChangesetSource::CommandReceipt { changeset, .. },
