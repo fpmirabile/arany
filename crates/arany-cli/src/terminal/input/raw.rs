@@ -23,6 +23,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 const MAX_KEY_SEQUENCE_BYTES: usize = 64;
 // `ESC [ < 127 ; 65535 ; 65535 M` is 20 bytes; longer records are malformed.
 const MAX_MOUSE_RECORD_BYTES: usize = 32;
+const MAX_GRAPHICS_REPLY_BYTES: usize = 32;
 const RECORD_DEADLINE: Duration = Duration::from_secs(10);
 const OUTBOX_LIMIT: usize = 256;
 const READ_BUFFER_BYTES: usize = 4096;
@@ -222,6 +223,7 @@ fn read_ready(
         match decoder.feed(byte, now) {
             Some(ReaderEvent::CursorPosition(column, row)) => context.queries.respond(column, row),
             Some(ReaderEvent::KeyboardReply(reply)) => context.queries.keyboard_reply(reply),
+            Some(ReaderEvent::GraphicsReply) => context.queries.graphics_reply(),
             Some(event) => {
                 if !outbox.push(event, context.epoch)? {
                     return Ok(ReadProgress::Stop);
@@ -252,6 +254,8 @@ enum Mode {
     SkipCsi,
     ControlString {
         escape: bool,
+        apc: bool,
+        malformed: bool,
     },
     Paste(Paste),
 }
@@ -365,7 +369,11 @@ impl Decoder {
                 }
                 b']' | b'P' | b'_' | b'^' => {
                     self.sequence.clear();
-                    self.mode = Mode::ControlString { escape: false };
+                    self.mode = Mode::ControlString {
+                        escape: false,
+                        apc: byte == b'_',
+                        malformed: false,
+                    };
                     None
                 }
                 b'\x1b' => {
@@ -485,13 +493,33 @@ impl Decoder {
                 }
                 None
             }
-            Mode::ControlString { escape } => {
-                if byte == b'\x07' || (*escape && byte == b'\\') {
+            Mode::ControlString {
+                escape,
+                apc,
+                malformed,
+            } => {
+                if *escape && byte == b'\\' {
+                    let reply = (*apc && !*malformed && self.sequence == b"Gi=31;OK")
+                        .then_some(ReaderEvent::GraphicsReply);
                     self.reset();
+                    reply
+                } else if byte == b'\x07' {
+                    self.reset();
+                    None
                 } else {
+                    if *escape {
+                        *malformed = true;
+                    }
+                    if *apc && byte != b'\x1b' {
+                        if self.sequence.len() < MAX_GRAPHICS_REPLY_BYTES {
+                            self.sequence.push(byte);
+                        } else {
+                            *malformed = true;
+                        }
+                    }
                     *escape = byte == b'\x1b';
+                    None
                 }
-                None
             }
             Mode::Paste(paste) => {
                 if !paste.feed(byte) {
@@ -618,13 +646,15 @@ fn reply_or_mouse(text: &str, end: u8) -> Option<ReaderEvent> {
         let reply = match end {
             b'u' if parts.next().is_none() => super::KeyboardReply::Flags,
             b'c' => {
-                for part in parts {
-                    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
-                        return None;
-                    }
-                    part.parse::<u32>().ok()?;
-                }
-                super::KeyboardReply::DeviceAttributes
+                let attributes = std::iter::once(first)
+                    .chain(parts)
+                    .map(|part| {
+                        (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                            .then(|| part.parse::<u32>().ok())
+                            .flatten()
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                super::KeyboardReply::DeviceAttributes(attributes)
             }
             _ => return None,
         };
@@ -847,6 +877,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kitty_graphics_reply_is_exact_bounded_and_separate_from_da1() {
+        let mut oversized = b"\x1b_G".to_vec();
+        oversized.extend([b'A'; MAX_GRAPHICS_REPLY_BYTES + 1]);
+        oversized.extend_from_slice(b"\x1b\\");
+        for (bytes, expected) in [
+            (b"\x1b_Gi=31;OK\x1b\\".as_slice(), true),
+            (b"\x1b_Gi=31;O\x1b\\", false),
+            (oversized.as_slice(), false),
+            (b"\x1b_Gi=32;OK\x1b\\", false),
+            (b"\x1b_Xi=31;OK\x1b\\", false),
+            (b"\x1b[?1;4c", false),
+        ] {
+            let mut decoder = Decoder::default();
+            let events: Vec<_> = bytes
+                .iter()
+                .filter_map(|&byte| decoder.feed(byte, Instant::now()))
+                .collect();
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, ReaderEvent::GraphicsReply)),
+                expected
+            );
+            if bytes == b"\x1b[?1;4c" {
+                assert!(matches!(
+                    events.as_slice(),
+                    [ReaderEvent::KeyboardReply(super::super::KeyboardReply::DeviceAttributes(attributes))]
+                    if attributes == &[1, 4]
+                ));
+            }
+        }
+    }
+
     struct ProbeWriter {
         peer: UnixStream,
         start: Option<std::sync::mpsc::SyncSender<()>>,
@@ -880,7 +944,7 @@ mod tests {
         let queries = TerminalQueries::default();
         assert_eq!(
             queries
-                .probe_keyboard_within(&mut Vec::new(), Duration::ZERO)
+                .probe_keyboard_within(&mut Vec::new(), Duration::ZERO, false)
                 .unwrap(),
             Legacy
         );
@@ -935,7 +999,7 @@ mod tests {
         };
         assert_eq!(
             queries
-                .probe_keyboard_within(&mut output, KEYBOARD_REPLY_TIMEOUT)
+                .probe_keyboard_within(&mut output, KEYBOARD_REPLY_TIMEOUT, false)
                 .unwrap(),
             expected
         );
