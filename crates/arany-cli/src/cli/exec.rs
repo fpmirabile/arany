@@ -1613,6 +1613,7 @@ mod tests {
             )
         );
         assert!(!report.success);
+        assert_jsonl_committed_answer(&report.stdout, "The notes remain unchanged");
     }
 
     fn assert_finished_jsonl_budget_feedback(events: Vec<arany::EventEnvelope>) {
@@ -1635,8 +1636,12 @@ mod tests {
                 "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
             )
         );
-        let answer_line = report
-            .stdout
+        assert_jsonl_committed_answer(&report.stdout, &answer);
+        assert!(!report.success);
+    }
+
+    fn assert_jsonl_committed_answer(stdout: &str, answer: &str) {
+        let answer_line = stdout
             .lines()
             .map(|line| {
                 serde_json::from_str::<arany_cli::protocol::EventLine>(line).expect("JSONL Event")
@@ -1644,7 +1649,6 @@ mod tests {
             .find(|line| line.kind == "MessageCommitted")
             .expect("committed answer Event");
         assert_eq!(answer_line.payload["text"], answer);
-        assert!(!report.success);
     }
 
     fn finished_run_at_active_limit(events: Vec<arany::EventEnvelope>) -> CommittedOutcome {
