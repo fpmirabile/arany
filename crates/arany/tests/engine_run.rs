@@ -4817,7 +4817,6 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         );
         let source = store.load_view(first.session_id).await.unwrap().unwrap();
         assert_eq!(unsaved.images, source.runs[0].images);
-        assert!(unsaved.images_omitted);
         for head in [
             (source.last_sequence - 1, source.rewinds.prefix_digest()),
             (source.last_sequence, [0; 32]),

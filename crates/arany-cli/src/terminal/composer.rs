@@ -1192,6 +1192,7 @@ impl Composer {
         if !matches!(input, TerminalInput::Up | TerminalInput::Down) {
             self.vertical_grapheme_column = None;
         }
+        let mut deselected = false;
         if let Some(selected) = self.selected_image() {
             match input {
                 TerminalInput::Backspace | TerminalInput::Delete => {
@@ -1210,7 +1211,10 @@ impl Composer {
                     self.selected_image = None;
                     return ComposerEdit::Changed;
                 }
-                _ => self.selected_image = None,
+                _ => {
+                    self.selected_image = None;
+                    deselected = true;
+                }
             }
         } else if !self.images.is_empty() {
             match input {
@@ -1225,6 +1229,15 @@ impl Composer {
                 _ => {}
             }
         }
+        let edit = self.apply_text_edit(input);
+        if deselected && edit == ComposerEdit::Unchanged {
+            ComposerEdit::Changed
+        } else {
+            edit
+        }
+    }
+
+    fn apply_text_edit(&mut self, input: TerminalInput) -> ComposerEdit {
         match input {
             TerminalInput::Tab
                 if !self.text_only && self.pastes.is_empty() && self.cursor == self.text.len() =>
@@ -1395,6 +1408,35 @@ fn next_word_boundary(text: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_deselection_requests_redraw_without_text_or_caret_changes() {
+        let draft = "draft";
+        let end = draft.len();
+        for (input, cursor) in [
+            (TerminalInput::Home, 0),
+            (TerminalInput::End, end),
+            (TerminalInput::Up, end),
+            (TerminalInput::Down, end),
+            (TerminalInput::Escape, end),
+            (TerminalInput::WordLeft, 0),
+            (TerminalInput::WordRight, end),
+            (TerminalInput::Tab, end),
+        ] {
+            let mut composer = Composer::default();
+            composer.insert_literal(draft).unwrap();
+            composer.cursor = cursor;
+            composer
+                .attach_image(arany::test_support::test_image())
+                .unwrap();
+            assert_eq!(composer.apply(input), ComposerEdit::Changed, "{input:?}");
+            assert_eq!(composer.selected_image(), None);
+            assert_eq!(composer.text(), draft);
+            assert_eq!(composer.cursor_byte_offset(), cursor);
+            assert_eq!(composer.images().len(), 1);
+            assert_eq!(composer.apply(input), ComposerEdit::Unchanged, "{input:?}");
+        }
+    }
 
     #[test]
     fn pasted_text_deselects_an_image_before_backspace() {

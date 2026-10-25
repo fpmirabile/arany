@@ -504,11 +504,15 @@ async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
         next(&mut output).await;
         let mut runs = Vec::new();
         for prompt in ["First prompt", "Second prompt"] {
+            let mut content = vec![json!({"type":"text","text":prompt})];
+            if prompt == "First prompt" {
+                content.push(json!({"type":"image","mediaType":"image/png","data":arany::test_support::test_image().base64()}));
+            }
             input
                 .send(request(
                     3,
                     "turn/start",
-                    json!({"threadId":thread,"input":[{"type":"text","text":prompt}]}),
+                    json!({"threadId":thread,"input":content}),
                 ))
                 .await
                 .unwrap();
@@ -573,6 +577,7 @@ async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
         input.send(request(11,"thread/rewind",json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"conversation"}))).await.unwrap();
         let restored = next(&mut output).await["result"].clone();
         assert_eq!(restored["rewind"]["outcome"], "restored");
+        assert_eq!(restored["conversation"]["imagesOmitted"], false);
         assert_eq!(next(&mut output).await["method"], "thread/started");
         let (after, _) = closed_view(&state, source).await;
         assert_eq!(after, before);
@@ -690,6 +695,11 @@ async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
         assert!(first.get("thread").is_none());
         assert_eq!(first["conversation"]["threadId"], Value::Null);
         assert_eq!(first["conversation"]["prompt"], "First prompt");
+        assert_eq!(first["conversation"]["imagesOmitted"], true);
+        assert_eq!(
+            first["notices"],
+            json!(["Images were not copied; attach them again"])
+        );
         input.send(ClientMessage::Eof).await.unwrap();
     };
     let (result, ()) = tokio::join!(
