@@ -185,12 +185,16 @@ impl PanelSelection {
         (!selected.is_empty()).then(|| Ok(display_text(selected)))
     }
 
-    fn render(&self, frame: &mut ratatui::Frame<'_>) {
-        if self.area.is_none_or(|area| area.is_empty()) {
+    fn render(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        if self.area != Some(area) {
+            self.clear();
+        }
+        self.area = Some(area);
+        if area.is_empty() {
             return;
         }
-        let (Some(area), Some((mut start_row, mut start_col)), Some((mut end_row, mut end_col))) =
-            (self.area, self.anchor, self.head)
+        let (Some((mut start_row, mut start_col)), Some((mut end_row, mut end_col))) =
+            (self.anchor, self.head)
         else {
             return;
         };
@@ -2023,7 +2027,7 @@ impl AttachedTerminal {
         } else {
             None
         };
-        let selection = &self.panel_selection;
+        let selection = &mut self.panel_selection;
         let terminal = Self::owned_terminal(&mut self.terminal);
         let mut area = Rect::default();
         let classic = self.mode == TerminalMode::Classic;
@@ -2036,7 +2040,7 @@ impl AttachedTerminal {
             }
             render(frame, area);
             panel_lines = rendered_panel_lines(frame.buffer_mut(), area);
-            selection.render(frame);
+            selection.render(frame, area);
             if let Some(feedback) = &feedback {
                 draw_panel_feedback(frame, area, feedback, palette);
             }
@@ -2047,7 +2051,6 @@ impl AttachedTerminal {
             self.panel_selection.feedback = None;
         }
         self.history_area = history_area;
-        self.panel_selection.area = Some(area);
         self.panel_selection.lines = panel_lines;
         Ok(area)
     }
@@ -4053,6 +4056,44 @@ mod panel_selection_tests {
         assert!(selection.shown());
         selection.clear();
         assert!(!selection.selecting());
+    }
+
+    #[test]
+    fn panel_selection_clears_before_rendering_changed_dialog_bounds() {
+        let previous = Rect::new(0, 1, 8, 3);
+        for current in [
+            previous,
+            Rect::new(0, 2, 8, 3),
+            Rect::new(0, 1, 8, 1),
+            Rect::new(0, 1, 4, 3),
+        ] {
+            let mut selection = PanelSelection {
+                area: Some(previous),
+                lines: vec!["panel".into(); usize::from(previous.height)],
+                ..PanelSelection::default()
+            };
+            selection.select(0, 2);
+            selection.extend(2, 2);
+            let mut terminal = Terminal::new(TestBackend::new(8, 6)).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(Paragraph::new("panel\npanel\npanel"), current);
+                    selection.render(frame, current);
+                })
+                .expect("panel frame");
+            let highlighted = (0..6).any(|row| {
+                (0..8).any(|column| {
+                    terminal.backend().buffer()[(column, row)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::UNDERLINED)
+                })
+            });
+            let unchanged = current == previous;
+            assert_eq!(highlighted, unchanged, "panel bounds {current:?}");
+            assert_eq!(selection.shown(), unchanged, "panel bounds {current:?}");
+            assert_eq!(selection.text(), unchanged.then(|| Ok("pan".into())));
+            assert_eq!(selection.area, Some(current));
+        }
     }
 
     #[test]

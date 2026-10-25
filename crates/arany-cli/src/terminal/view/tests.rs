@@ -2732,7 +2732,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                                     head: Some((4, 3)),
                                     ..crate::terminal::PanelSelection::default()
                                 }
-                                .render(frame);
+                                .render(frame, area);
                                 crate::terminal::draw_panel_feedback(
                                     frame,
                                     area,
