@@ -4,6 +4,23 @@ use arany::test_support::process::file_output;
 use std::{fs, process::Command};
 
 #[test]
+fn generate_limits_matches_committed_reference() {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .current_dir(root.path())
+        .arg("generate-limits");
+    let output = file_output(&mut command, None);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        output.stdout,
+        include_bytes!("../../../docs/specs/limits.md")
+    );
+}
+
+#[test]
 fn generate_schema_subcommand_writes_the_snapshot() {
     let root = tempfile::tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));

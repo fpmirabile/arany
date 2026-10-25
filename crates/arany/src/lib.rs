@@ -12,6 +12,7 @@ mod engine;
 pub(crate) use engine::MAX_DELEGATION_DEADLINE;
 mod fault;
 mod journal;
+pub mod limits;
 mod private_fs;
 mod provider;
 mod session;
