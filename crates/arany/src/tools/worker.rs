@@ -1776,6 +1776,7 @@ mod tests {
                     .retain(|path, _| within(path, &view.grant.read_paths));
                 view.base = Arc::new(view.current.clone());
             }
+            let mut next_sequence = 1;
             for call in [
                 ToolCall::Move {
                     source: "owned/a".into(),
@@ -1806,7 +1807,10 @@ mod tests {
                         1
                     }
                 );
-                let data = reference(&candidate);
+                let mut data = reference(&candidate);
+                data.first_sequence = next_sequence;
+                data.seal_sequence = next_sequence + u64::from(data.chunks);
+                next_sequence = data.seal_sequence + 1;
                 let observation = view.acknowledge(candidate, data).unwrap();
                 assert!(observation.valid());
                 assert_eq!(

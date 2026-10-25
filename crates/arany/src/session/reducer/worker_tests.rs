@@ -5303,10 +5303,11 @@ fn worker_delete_and_move_replay_require_the_exact_source_and_destination_delta(
                         },
                     ],
                 },
-                vec!["write".into(), "delete".into(), "move".into()],
+                vec!["delete".into(), "move".into(), "write".into()],
                 vec![WorkerTool::Write, WorkerTool::Delete, WorkerTool::Move],
                 None,
             );
+            f.view();
             f.call(
                 f.child,
                 AgentPhase::ChildWork,

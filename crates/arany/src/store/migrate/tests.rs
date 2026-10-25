@@ -2578,9 +2578,7 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
     host["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))});
     host["intent"]["call"] = serde_json::json!({"operation":"git_push","remote":"https://github.com/o/r","branch":"main"});
     host["intent"]["limits"]["network"] = serde_json::json!("host");
-    let expiry = REGISTRY
-        .event_step("ToolStarted", payload_version("ToolStarted").unwrap() - 1)
-        .unwrap();
+    let expiry = REGISTRY.event_step("ToolStarted", 18).unwrap();
     assert!((expiry.canonical)(&host.to_string()).is_some());
     let migrated = (expiry.transform)(host.clone()).unwrap();
     assert!(migrated["intent"].get("expires_at_ms").is_none());
@@ -2592,6 +2590,9 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
         migrated, host,
         "host approval loses only the shared clock expiry"
     );
+    let removal = REGISTRY.event_step("ToolStarted", 19).unwrap();
+    assert!((removal.canonical)(&migrated.to_string()).is_some());
+    assert_eq!((removal.transform)(migrated.clone()), Some(migrated));
 }
 
 #[test]
