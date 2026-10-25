@@ -1439,6 +1439,55 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
+    async fn run_with_exhaustion_after_answer(
+        exec: ExecArgs,
+        provider: arany::test_support::scenario::ScriptedProvider,
+        active_ms: u64,
+    ) -> CommandOutput {
+        const ANSWER_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let requests = Arc::clone(&provider.requests);
+        let (publish, gate) = tokio::sync::oneshot::channel();
+        let publish = Mutex::new(Some(publish));
+        let provider = provider.with_before_call(1, move || {
+            let session = requests
+                .lock()
+                .expect("requests")
+                .last()
+                .expect("Answer call")
+                .session_id;
+            let gate = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, arany::Event::MessageCommitted { .. })
+            });
+            publish
+                .lock()
+                .expect("gate sender")
+                .take()
+                .expect("one gate")
+                .send(gate)
+                .expect("gate receiver");
+        });
+        let admission = exec.admit().expect("valid autonomous command");
+        let advance_after_answer = async {
+            let (entered, release) = tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, gate)
+                .await
+                .expect("answer gate deadline")
+                .expect("answer gate");
+            tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, entered)
+                .await
+                .expect("answer commit deadline")
+                .expect("answer committed");
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_millis(active_ms)).await;
+            tokio::time::resume();
+            release.send(()).expect("answer acknowledgement released");
+        };
+        let (report, ()) = tokio::join!(
+            run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled()),
+            advance_after_answer,
+        );
+        report.expect("completed Run with an exhausted Goal")
+    }
+
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
         use std::os::unix::fs::PermissionsExt;
@@ -1486,17 +1535,18 @@ mod tests {
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
-        .with_profile("openai", "gpt-5.4")
-        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
+        .with_profile("openai", "gpt-5.4");
         let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
         exec.prompt = None;
         exec.goal = Some("Inspect the notes".into());
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
-        let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
-            .await
-            .expect("completed Run with an exhausted Goal");
+        let report = run_with_exhaustion_after_answer(
+            exec,
+            provider,
+            budget.max_active_ms.expect("active-time limit"),
+        )
+        .await;
         let first_event: serde_json::Value =
             serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
                 .expect("JSONL Event");
@@ -1506,9 +1556,13 @@ mod tests {
         let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
         let run = view.runs.last().expect("Finished Run");
         assert_eq!(run.status, RunStatus::Finished);
+        let goal = view.goals.last().expect("Failed Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
         assert_eq!(
-            view.goals.last().expect("Failed Goal").status,
-            GoalStatus::Failed
+            goal.budget_refusal
+                .as_ref()
+                .map(|refusal| refusal.dimension),
+            Some(arany::GoalLimit::ActiveTime)
         );
         let feedback =
             crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");

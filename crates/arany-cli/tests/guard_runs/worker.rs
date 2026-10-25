@@ -87,7 +87,7 @@ pub(super) async fn worker_case(case: &'static str) {
         std::fs::create_dir(workspace.join("reads")).unwrap();
         std::fs::write(
             workspace.join("reads/facts.txt"),
-            format!("{}\n", "x".repeat(99)).repeat(150),
+            format!("{}\n", "x".repeat(99)).repeat(50),
         )
         .unwrap();
     }
@@ -228,7 +228,7 @@ pub(super) async fn worker_case(case: &'static str) {
         max_provider_calls: Some(if case == "calls" {
             4
         } else if case.starts_with("clear_") {
-            128
+            64
         } else {
             32
         }),
