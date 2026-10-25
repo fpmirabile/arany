@@ -293,9 +293,9 @@ fn classic_history_status(width: u16, omitted_history: bool, pinned: bool) -> &'
             "More history · arany show"
         }
     } else if pinned {
-        "Classic (--classic) · Ctrl+T details"
+        "Classic (--classic) · Ctrl+O details"
     } else {
-        "Classic · Ctrl+T details · /settings"
+        "Classic · Ctrl+O details · /settings"
     }
 }
 
@@ -1247,7 +1247,7 @@ impl AttachedTerminal {
             self.prepare_frame()?;
             self.insert_native(
                 history::MessageKind::Notice,
-                "Use your terminal's find; Ctrl+T writes details to scrollback",
+                "Use your terminal's find; Ctrl+O writes details to scrollback",
                 None,
             )?;
             return Ok(true);

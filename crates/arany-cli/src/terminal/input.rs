@@ -971,7 +971,7 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
             KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
             KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
-            KeyCode::Char('t' | 'T' | 'o' | 'O') => Some(TerminalInput::Transcript),
+            KeyCode::Char('o' | 'O') => Some(TerminalInput::Transcript),
             KeyCode::Char('j' | 'J') => Some(TerminalInput::Newline),
             KeyCode::Left => Some(TerminalInput::WordLeft),
             KeyCode::Right => Some(TerminalInput::WordRight),
@@ -1550,6 +1550,10 @@ mod tests {
                 Some(TerminalInput::Transcript),
             ),
             (
+                Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+                Some(TerminalInput::IgnoredKey),
+            ),
+            (
                 Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
                 Some(TerminalInput::ClipboardPaste),
             ),
@@ -1727,7 +1731,7 @@ mod tests {
                         TerminalInput::Character('/'),
                         TerminalInput::Submit,
                         TerminalInput::Transcript,
-                        TerminalInput::Transcript,
+                        TerminalInput::IgnoredKey,
                         TerminalInput::Newline,
                         TerminalInput::Interrupt,
                         TerminalInput::BackspaceWord,

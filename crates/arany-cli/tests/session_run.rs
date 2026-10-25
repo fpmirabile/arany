@@ -1189,7 +1189,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                 .split_once("\x1b[?1049h")
                 .expect("explicit Fullscreen switch")
                 .0;
-            for word in ["terminal's", "find;", "Ctrl+T", "scrollback"] {
+            for word in ["terminal's", "find;", "Ctrl+O", "scrollback"] {
                 assert!(
                     before_fullscreen.contains(word),
                     "terminal find notice is missing {word}"

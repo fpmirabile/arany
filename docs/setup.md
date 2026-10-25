@@ -61,7 +61,7 @@ model limitations.
 
 Fullscreen, the default chat view, provides managed history with a visible
 composer. Classic inserts confirmed turns into native scrollback; choose it with
-`--classic` for one process or save it as the chat view in `/settings`. Ctrl+T
+`--classic` for one process or save it as the chat view in `/settings`. Ctrl+O
 or `/transcript` shows Tool details and public commentary. Visual streaming is
 provisional: interrupted saved prefixes remain incomplete and
 outside later model context. `--screen-reader` uses linear confirmed output.
