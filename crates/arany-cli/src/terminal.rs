@@ -188,7 +188,7 @@ mod workspace_image_tests {
     #[test]
     fn pasted_png_reads_only_a_pinned_regular_workspace_file() {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
+        let workspace = temp.path().canonicalize().unwrap().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let bytes = STANDARD
             .decode(arany::test_support::test_image().base64())
