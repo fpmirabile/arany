@@ -22,10 +22,10 @@ pub(crate) use goal::{GoalSuccessState, GoalUsage, STORE_ACTION_OVERHEAD_MS};
 pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
-    DisplayChunk, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
-    MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause,
-    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunFailure,
-    SessionDefaults, ToolIntentRecord,
+    DisplayChunk, EffectTarget, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES,
+    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition,
+    RunFailure, SessionDefaults, ToolIntentRecord,
 };
 use validate::bounded;
 
