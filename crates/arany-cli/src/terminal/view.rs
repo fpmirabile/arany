@@ -606,7 +606,7 @@ impl Palette {
         }
     }
 
-    fn attention(self) -> Style {
+    pub(super) fn attention(self) -> Style {
         if self.color {
             Style::default().fg(Color::Yellow)
         } else {

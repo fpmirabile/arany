@@ -391,6 +391,7 @@ impl AttachedSession {
             | TerminalInput::Shutdown(_)
             | TerminalInput::Resize
             | TerminalInput::CopySelection
+            | TerminalInput::PanelSelectionChanged
             | TerminalInput::PointerMove { .. }
             | TerminalInput::PointerClick { .. }
             | TerminalInput::PointerDrag { .. }
