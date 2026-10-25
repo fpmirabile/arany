@@ -1584,6 +1584,42 @@ fn shell_hook(script: &str) -> Value {
     json!({"type": "command", "command": script})
 }
 
+const HOOK_PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(10);
+const HOOK_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const HOOK_PROCESS_LIST_STDOUT_BYTES: usize = 256 * 1024;
+
+fn process_list_contains(marker: &str, observation_root: &Path) -> bool {
+    let mut command = std::process::Command::new("ps");
+    command.args(["-A", "-o", "command="]);
+    let output = super::observe_process(
+        &mut command,
+        observation_root,
+        HOOK_PROCESS_LIST_STDOUT_BYTES,
+    );
+    assert!(output.status.success(), "process listing succeeded");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim() == marker)
+}
+
+async fn cancel_when_hook_process_is_running(
+    marker: String,
+    observation_root: std::path::PathBuf,
+    cancellation: RunCancellation,
+) -> bool {
+    tokio::time::timeout(HOOK_PROCESS_OBSERVATION_TIMEOUT, async move {
+        loop {
+            if process_list_contains(&marker, &observation_root) {
+                cancellation.cancel();
+                return;
+            }
+            tokio::time::sleep(HOOK_PROCESS_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 fn hook_json(decision: &str) -> String {
     let output = json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -4384,6 +4420,100 @@ mod lifecycle_hooks {
     }
 
     #[tokio::test]
+    async fn cancellation_during_auto_pre_compact_stops_before_reservation() {
+        let marker = format!("27.{}", std::process::id());
+        let settings = json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(
+            &format!("sleep {marker}; exit 0")
+        )]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let page = 60 * 1024;
+        let reads = 5;
+        let call_budget = u32::try_from(2 * reads + 1).unwrap();
+        std::fs::write(
+            fixture.workspace.join("notes/data.txt"),
+            format!("{}\n", "x".repeat(1023)).repeat(usize::try_from(page / 1024).unwrap()),
+        )
+        .unwrap();
+        let mut outcomes: Vec<_> = (0..reads)
+            .map(|_| {
+                tool_outcome(arany::ToolCall::Read {
+                    path: "notes/data.txt".into(),
+                    offset: None,
+                    limit: None,
+                })
+            })
+            .collect();
+        outcomes.push(finish("done"));
+        let provider = Arc::new(
+            ScriptedProvider::new(outcomes).with_compactions(
+                (0..reads)
+                    .map(|_| {
+                        Ok(CompactionResponse {
+                            summary: "Earlier reads remain recorded in the journal.".into(),
+                            response_id: None,
+                            usage: arany::Usage::default(),
+                            wire_provenance: None,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+        let cancellation = RunCancellation::new();
+        let mut input = request(&fixture.workspace, "Inspect and complete the task");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Single;
+        input.goal.budget = Some(arany::GoalBudget {
+            max_provider_calls: Some(call_budget),
+            ..budget()
+        });
+        let outcome = {
+            let running = run_with(
+                &fixture.engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    cancellation: cancellation.clone(),
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(running);
+            let watcher = tokio::spawn(cancel_when_hook_process_is_running(
+                format!("sleep {marker}"),
+                fixture._temp.path().to_owned(),
+                cancellation,
+            ));
+            let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
+            assert!(
+                gate_reached.unwrap(),
+                "the PreCompact hook process reached its gate"
+            );
+            outcome.expect("cancelled Run")
+        };
+        assert_eq!(outcome.run.status, RunStatus::Cancelled);
+        assert!(provider.compact_requests.lock().unwrap().is_empty());
+
+        let (events, view) = fixture.reopen(outcome.session_id).await;
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::HookFinished { outcome, .. }
+                if outcome.observation.disposition == arany::ToolDisposition::Cancelled
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            Event::GoalCompactionCallReserved { .. }
+                | Event::GoalFinished {
+                    exhausted: true,
+                    ..
+                }
+        )));
+        assert_eq!(
+            view.goal(outcome.goal_id).unwrap().status,
+            arany::GoalStatus::Interrupted
+        );
+    }
+
+    #[tokio::test]
     async fn pre_compact_block_skips_compaction_once() {
         for trigger in ["manual", "auto"] {
             let settings = json!({"hooks":{"PreCompact":[{"matcher":trigger,"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
@@ -4457,7 +4587,7 @@ mod lifecycle_hooks {
     }
 
     #[tokio::test]
-    async fn cancellation_during_subagent_stop_cancels_the_child_not_the_budget() {
+    async fn cancellation_during_subagent_stop_cancels_the_run_without_exhausting_the_goal() {
         let marker = format!("29.{}", std::process::id());
         let settings = json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook(
             &format!("sleep {marker}; exit 2")
@@ -4474,48 +4604,103 @@ mod lifecycle_hooks {
         input.policy = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        let watcher = {
-            let cancellation = cancellation.clone();
-            tokio::spawn(async move {
-                let running = async {
-                    loop {
-                        let listing = tokio::process::Command::new("ps")
-                            .args(["-A", "-o", "command="])
-                            .output()
-                            .await
-                            .expect("process listing");
-                        if String::from_utf8_lossy(&listing.stdout)
-                            .lines()
-                            .any(|line| line.trim() == format!("sleep {marker}"))
-                        {
-                            cancellation.cancel();
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                };
-                let _ = tokio::time::timeout(Duration::from_secs(60), running).await;
-            })
-        };
-        let outcome = run_with(
-            &fixture.engine,
-            &provider,
-            input,
-            RunControls {
-                tools: ToolGrant::Configured,
+        let outcome = {
+            let running = run_with(
+                &fixture.engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    cancellation: cancellation.clone(),
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(running);
+            let watcher = tokio::spawn(cancel_when_hook_process_is_running(
+                format!("sleep {marker}"),
+                fixture._temp.path().to_owned(),
                 cancellation,
-                ..Default::default()
-            },
-        )
-        .await;
-        watcher.abort();
-        let _ = watcher.await;
-        assert!(
-            matches!(
-                outcome,
-                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
-            ),
-            "a killed hook is unknown, never a budget stop: {outcome:?}"
+            ));
+            let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
+            assert!(
+                gate_reached.unwrap(),
+                "the SubagentStop hook process reached its gate"
+            );
+            outcome.expect("cancelled Run")
+        };
+        assert_eq!(outcome.run.status, RunStatus::Cancelled);
+        let (events, view) = fixture.reopen(outcome.session_id).await;
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::HookFinished { outcome, .. }
+                if outcome.observation.disposition == arany::ToolDisposition::Cancelled
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            Event::GoalFinished {
+                exhausted: true,
+                ..
+            }
+        )));
+        assert_eq!(
+            view.goal(outcome.goal_id).unwrap().status,
+            arany::GoalStatus::Interrupted
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_stop_cancels_the_run_without_exhausting_the_goal() {
+        let marker = format!("28.{}", std::process::id());
+        let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook(
+            &format!("sleep {marker}; exit 2")
+        )]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let cancellation = RunCancellation::new();
+        let provider = Arc::new(ScriptedProvider::new(vec![finish("candidate")]));
+        let mut input = request(&fixture.workspace, "Inspect and complete the task");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Single;
+        let outcome = {
+            let mut running = Box::pin(run_with(
+                &fixture.engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    cancellation: cancellation.clone(),
+                    ..Default::default()
+                },
+            ));
+            let watcher = tokio::spawn(cancel_when_hook_process_is_running(
+                format!("sleep {marker}"),
+                fixture._temp.path().to_owned(),
+                cancellation,
+            ));
+            let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
+            assert!(
+                gate_reached.unwrap(),
+                "the Stop hook process reached its gate"
+            );
+            outcome.expect("cancelled Run")
+        };
+        assert_eq!(outcome.run.status, RunStatus::Cancelled);
+
+        let (events, view) = fixture.reopen(outcome.session_id).await;
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::HookFinished { outcome, .. }
+                if outcome.observation.disposition == arany::ToolDisposition::Cancelled
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            Event::GoalFinished {
+                exhausted: true,
+                ..
+            }
+        )));
+        assert_eq!(
+            view.goal(outcome.goal_id).unwrap().status,
+            arany::GoalStatus::Interrupted
         );
     }
 

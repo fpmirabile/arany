@@ -313,6 +313,7 @@ pub(super) enum ChildEnd {
 pub(super) enum StopHookRun {
     Passed,
     Blocked,
+    Cancelled,
     CutOffByActiveTime,
     CutOffByContext,
     Uncertain,
@@ -470,6 +471,11 @@ pub(super) fn decide_child_stop(
     facts: &ChildFacts,
 ) -> ChildStop {
     match run {
+        StopHookRun::Cancelled => ChildStop::End {
+            disposition: AgentDisposition::Cancelled,
+            cause: WorkerCause::Cancelled,
+            stops_wave: true,
+        },
         StopHookRun::Passed if facts.actor_hook_stop => ChildStop::End {
             disposition: AgentDisposition::StoppedByHook,
             cause: WorkerCause::StoppedByHook,
@@ -2188,7 +2194,11 @@ impl RunLoop<'_> {
         } = decision
         {
             if stops_wave {
-                abort.get_or_insert(WaveStop::BUDGET);
+                abort.get_or_insert(if self.controls.cancellation.is_cancelled() {
+                    WaveStop::Abort(StopCause::Cancelled)
+                } else {
+                    WaveStop::BUDGET
+                });
             }
             if !child.editor {
                 self.finish_child(
@@ -2218,7 +2228,7 @@ impl RunLoop<'_> {
             .is_none_or(|(runtime, tools)| {
                 tools.has_stop_room(&turn, runtime.context_limit_bytes())
             });
-        let feedback = match self
+        let result = self
             .lifecycle_hooks(LifecycleHook {
                 agent: child.agent_run_id,
                 event: crate::tools::permissions::HookEvent::SubagentStop,
@@ -2227,13 +2237,17 @@ impl RunLoop<'_> {
                 deadline: Some(deadline),
                 feedback_fits: fits,
             })
-            .await?
-        {
+            .await?;
+        if self.controls.cancellation.is_cancelled() {
+            return Ok(StopHookRun::Cancelled);
+        }
+        let feedback = match result {
             Ok(Some(feedback)) => feedback,
             Ok(None) => return Ok(StopHookRun::Passed),
             Err(HookRefusal::ActiveTime) => {
                 return Ok(StopHookRun::CutOffByActiveTime);
             }
+            Err(HookRefusal::Cancelled) => return Ok(StopHookRun::Cancelled),
             Err(HookRefusal::ContextFull) => return Ok(StopHookRun::CutOffByContext),
         };
         if let Some(tools) = child.tools.as_mut() {
@@ -3667,6 +3681,12 @@ mod decision_tests {
         let unsettled = with(|f| f.hook.settled = false);
         let budget = StopHookRun::CutOffByActiveTime;
         let rows = [
+            (
+                StopHookRun::Cancelled,
+                None,
+                with(|f| f.cancelled = true),
+                end(Cancelled, WorkerCause::Cancelled, true),
+            ),
             (StopHookRun::Passed, None, OPEN, ChildStop::Proceed),
             (
                 StopHookRun::Passed,

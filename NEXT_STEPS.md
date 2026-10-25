@@ -42,7 +42,6 @@ Done when a normal engineering day in this repository needs no fallback to anoth
 
 ### Tool and Engine follow-ups
 
-- **Hook cancellation reported as budget exhaustion.** [Hook dispatch](./crates/arany/src/engine/run_loop/step/hooks.rs) returns `EngineError::GoalBudgetExhausted` when the Run is cancelled during a hook, so the Goal reports an exhausted active-time budget instead of a cancellation. Report it as a cancellation.
 - **Recorded native Guard storage.** Extend the [storage report](./docs/specs/terminal.md#storage-report) through the existing Linux seed and macOS image ownership records: backing-byte accounting, live/retained/unknown labels and the existing maintenance guidance. Cover mounted-image non-traversal, unrecorded prefixes, stale boot, replaced roots, busy or changing records and aggregate overflow. Do not introduce worktree management.
 - **Full-output spill (owner decision).** Keep the [current excerpt-only contract](./docs/specs/tools.md#limits-and-failure-behavior) until dogfooding demonstrates a need for a private per-Run file that Read can page. Revisit only with a security pass for the new persistent format and read surface.
 - **Conditional loop refinements.** Revisit RAII `ActiveSegment`, a typed `ChildQueue` state machine or a repeated-call stop only if dogfooding demonstrates remaining pain. First identify the failing lifecycle or repetition case; accept a contract before adding a stop beyond the existing proposal-refusal cap.
