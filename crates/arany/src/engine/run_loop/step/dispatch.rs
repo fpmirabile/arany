@@ -1,6 +1,7 @@
+use super::ask::Resolution;
 use super::hooks::HookFold;
 use super::permission::Permission;
-use super::{ActiveTime, Answer, HookDenial, Resolution};
+use super::{ActiveTime, Answer, HookDenial};
 use crate::engine::ledger::ActiveDeadlineCause;
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};
@@ -337,38 +338,52 @@ pub(super) fn decide_dispatch<'a>(
     after: &AfterAsk,
 ) -> DispatchDecision<'a> {
     if let Err(refusal) = facts.gate() {
-        let (decision, source) = match refusal.reason {
-            NotDispatched::HumanOnlyUnavailable => {
-                (Decision::Ask, PermissionSource::UnavailableApproval)
-            }
-            NotDispatched::TimeoutLimit { .. }
-            | NotDispatched::HookDenied(_)
-            | NotDispatched::DelegationDeadline
-            | NotDispatched::DenyRule
-            | NotDispatched::OutsideGrant
-            | NotDispatched::HostSourceUnavailable
-            | NotDispatched::ModeDenied
-            | NotDispatched::UnguardedNotOffered(_)
-            | NotDispatched::OutsidePlan
-            | NotDispatched::ActiveTime
-            | NotDispatched::Paused
-            | NotDispatched::Cancelled
-            | NotDispatched::TokenBudget
-            | NotDispatched::UnsavedRule
-            | NotDispatched::SaveUnconfirmed
-            | NotDispatched::UnguardedNeedsHuman
-            | NotDispatched::ApprovalUnavailable
-            | NotDispatched::ApprovalRefused => {
-                (facts.permission.decision, facts.unresolved_source())
-            }
-        };
-        return DispatchDecision {
-            outcome: Err(refusal),
-            decision,
-            source,
-        };
+        return gate_refusal(facts, refusal);
     }
-    let (mut approved, mut source, active_time_exhausted) = match (&after.approval, facts.site) {
+
+    let (approved, source, active_time_exhausted) = approval_gate(facts, after);
+    let (approved, source) = host_gate(facts, after, approved, source);
+    let outcome = dispatch_gate(facts, after, approved, source, active_time_exhausted);
+    DispatchDecision {
+        outcome,
+        decision: facts.permission.decision,
+        source,
+    }
+}
+
+fn gate_refusal<'a>(facts: &DispatchFacts<'a>, refusal: Refusal<'a>) -> DispatchDecision<'a> {
+    let (decision, source) = match refusal.reason {
+        NotDispatched::HumanOnlyUnavailable => {
+            (Decision::Ask, PermissionSource::UnavailableApproval)
+        }
+        NotDispatched::TimeoutLimit { .. }
+        | NotDispatched::HookDenied(_)
+        | NotDispatched::DelegationDeadline
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
+        | NotDispatched::ModeDenied
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::Paused
+        | NotDispatched::Cancelled
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::SaveUnconfirmed
+        | NotDispatched::UnguardedNeedsHuman
+        | NotDispatched::ApprovalUnavailable
+        | NotDispatched::ApprovalRefused => (facts.permission.decision, facts.unresolved_source()),
+    };
+    DispatchDecision {
+        outcome: Err(refusal),
+        decision,
+        source,
+    }
+}
+
+fn approval_gate(facts: &DispatchFacts<'_>, after: &AfterAsk) -> (bool, PermissionSource, bool) {
+    let (approved, source, active_time_exhausted) = match (&after.approval, facts.site) {
         (Some(resolution), _) => (
             resolution.approved,
             resolution.source,
@@ -382,10 +397,29 @@ pub(super) fn decide_dispatch<'a>(
     };
     let active_time_exhausted =
         active_time_exhausted || after.deadline == Some(ActiveDeadlineCause::Goal);
+    (approved, source, active_time_exhausted)
+}
+
+fn host_gate(
+    facts: &DispatchFacts<'_>,
+    after: &AfterAsk,
+    approved: bool,
+    source: PermissionSource,
+) -> (bool, PermissionSource) {
     if facts.host && (source != PermissionSource::Human || after.approval.is_none()) {
-        approved = false;
-        source = PermissionSource::UnavailableApproval;
+        (false, PermissionSource::UnavailableApproval)
+    } else {
+        (approved, source)
     }
+}
+
+fn dispatch_gate<'a>(
+    facts: &DispatchFacts<'a>,
+    after: &AfterAsk,
+    approved: bool,
+    source: PermissionSource,
+    active_time_exhausted: bool,
+) -> Result<Dispatch, Refusal<'a>> {
     let refused = |reason| {
         let stop = if facts.site == DispatchSite::Primary && recoverable_primary_refusal(&reason) {
             None
@@ -394,7 +428,7 @@ pub(super) fn decide_dispatch<'a>(
         };
         Err(refuse(reason, stop))
     };
-    let outcome = match facts.site {
+    match facts.site {
         _ if after.cancelled => refused(if after.paused {
             NotDispatched::Paused
         } else {
@@ -445,11 +479,6 @@ pub(super) fn decide_dispatch<'a>(
         } else {
             NotDispatched::ApprovalRefused
         }),
-    };
-    DispatchDecision {
-        outcome,
-        decision: facts.permission.decision,
-        source,
     }
 }
 
@@ -508,6 +537,7 @@ fn refusal_cause(
     }
 }
 
+// One arm per refusal keeps the observation mapping exhaustive.
 pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservation {
     // Every other Limit here, including a hook's delegation deadline, stays a Resource limit.
     let timed = match reason {

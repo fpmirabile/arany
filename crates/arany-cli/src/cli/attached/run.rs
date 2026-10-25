@@ -15,6 +15,12 @@ use arany::{
 use std::path::Path;
 use std::time::Duration;
 
+mod approval;
+mod input;
+
+use approval::{ApprovalPage, ApprovalUi, withdraw_abandoned_approval};
+use input::InputRoute;
+
 #[derive(Clone, Copy)]
 pub(super) struct ToolAccess<'a> {
     pub configured: bool,
@@ -274,35 +280,6 @@ enum RunStep<'a> {
     Completed(Result<Box<RunOutcome>, RunAttemptError>),
 }
 
-fn linear_approval_choice(
-    answer: &str,
-    choices: &[crate::presentation::ToolApprovalChoice],
-) -> Option<crate::presentation::ToolApprovalChoice> {
-    use crate::presentation::ToolApprovalChoice::{No, Yes};
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "" | "no" => Some(No),
-        "yes" => Some(Yes),
-        number => number
-            .parse::<usize>()
-            .ok()
-            .and_then(|number| number.checked_sub(1))
-            .and_then(|index| choices.get(index))
-            .copied(),
-    }
-}
-
-async fn withdraw_abandoned_approval(
-    pending: &mut Option<arany::ToolApproval>,
-    answer: &mut Composer,
-) {
-    match pending.as_mut() {
-        Some(approval) => approval.abandoned().await,
-        None => std::future::pending().await,
-    }
-    pending.take();
-    answer.clear();
-}
-
 fn draft_retained_notice(autonomous: bool) -> &'static str {
     if autonomous {
         "Draft retained; press Enter after this Goal to submit"
@@ -469,35 +446,14 @@ pub(super) struct RunProgress<'a> {
     exit_after_run: bool,
 }
 
-#[derive(Default)]
-struct ApprovalUi {
-    pending: Option<arany::ToolApproval>,
-    page: usize,
-    choice: usize,
-    answer: Composer,
-    unarmed: bool,
-    review_notice: bool,
-}
-
 enum Iteration {
     Armed(ApprovalPage),
     Redraw,
 }
 
-#[derive(Clone, Copy)]
-enum ApprovalPage {
-    More,
-    Last,
-}
-
 enum InputFailure {
     Shutdown(String),
     Return(String),
-}
-
-enum InputRoute {
-    Handled,
-    Composer,
 }
 
 enum Completion {
@@ -587,24 +543,6 @@ impl<'a> RunProgress<'a> {
         } else {
             ApprovalPage::Last
         }))
-    }
-
-    fn receive_approval(&mut self, ui: &mut RunUi<'_>) {
-        if self.approval_ui.pending.is_some() {
-            ui.composer.disarm_continuation();
-        }
-        self.approval_ui.page = 0;
-        self.approval_ui.choice = self
-            .approval_ui
-            .pending
-            .as_ref()
-            .filter(|approval| approval.unguarded.is_some())
-            .map_or(0, |approval| {
-                crate::presentation::tool_approval_choices(approval).len() - 1
-            });
-        self.approval_ui.unarmed = self.approval_ui.pending.is_some();
-        self.approval_ui.review_notice = false;
-        self.approval_ui.answer.clear();
     }
 
     async fn settle(
@@ -808,359 +746,6 @@ impl<'a> RunProgress<'a> {
                 .map_err(|_| "terminal rendering failed".to_owned())?;
         }
         Ok(())
-    }
-
-    fn handle_approval(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-        page: ApprovalPage,
-    ) -> Result<(), InputFailure> {
-        let choices = crate::presentation::tool_approval_choices(
-            self.approval_ui.pending.as_ref().expect("pending action"),
-        );
-        self.approval_ui.choice = self.approval_ui.choice.min(choices.len() - 1);
-        match self.approval_control(ui, input, choices.len())? {
-            InputRoute::Handled => return Ok(()),
-            InputRoute::Composer => {}
-        }
-        if ui.terminal.is_linear() {
-            if let TerminalInput::Character(character) = input {
-                self.approval_ui
-                    .answer
-                    .apply(TerminalInput::Character(character));
-                return Ok(());
-            }
-            if input == TerminalInput::Backspace {
-                self.approval_ui.answer.apply(TerminalInput::Backspace);
-                return Ok(());
-            }
-        }
-        if matches!(input, TerminalInput::Character(_) | TerminalInput::Submit) {
-            if let Some(choice) = self.approval_reply(ui, input, page, &choices) {
-                self.decide_approval(ui, choice)?;
-            }
-        } else {
-            self.navigate_approval(input, page, choices.len());
-        }
-        Ok(())
-    }
-
-    fn cycle_approval(&self, composer: &mut Composer) -> String {
-        let notice = super::permissions::cycle(composer);
-        self.approvals
-            .set_mode(composer.approval_mode().unwrap_or_default());
-        notice
-    }
-
-    fn approval_control(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-        choices: usize,
-    ) -> Result<InputRoute, InputFailure> {
-        if input == TerminalInput::CycleApprovalMode {
-            let _ = self.cycle_approval(ui.composer);
-            return Ok(InputRoute::Handled);
-        }
-        if interrupt_approval_input(&input, &self.cancellation, &mut self.stop) {
-            self.approval_ui.pending.take();
-            ui.terminal
-                .settle_child_notes(ui.view, &self.steering, true);
-            ui.terminal
-                .restore_draft_input(ui.composer.input_capacity())
-                .map_err(|error| InputFailure::Return(error.to_string()))?;
-            return Ok(InputRoute::Handled);
-        }
-        if input == TerminalInput::Resize {
-            self.reset_approval_review(choices);
-            return Ok(InputRoute::Handled);
-        }
-        if input == TerminalInput::Suspend {
-            ui.terminal
-                .suspend_and_resume(ui.composer.input_capacity())
-                .map_err(|error| InputFailure::Return(error.to_string()))?;
-            self.reset_approval_focus(choices);
-            return Ok(InputRoute::Handled);
-        }
-        Ok(InputRoute::Composer)
-    }
-
-    fn navigate_approval(&mut self, input: TerminalInput, page: ApprovalPage, choices: usize) {
-        match input {
-            TerminalInput::Tab if matches!(page, ApprovalPage::Last) => {
-                self.approval_ui.choice = (self.approval_ui.choice + 1) % choices
-            }
-            TerminalInput::Up
-                if matches!(page, ApprovalPage::Last)
-                    && self.approval_ui.choice == 0
-                    && self.approval_ui.page > 0 =>
-            {
-                self.approval_ui.page -= 1
-            }
-            TerminalInput::Up if matches!(page, ApprovalPage::Last) => {
-                self.approval_ui.choice = self.approval_ui.choice.saturating_sub(1)
-            }
-            TerminalInput::Down if matches!(page, ApprovalPage::Last) => {
-                self.approval_ui.choice = (self.approval_ui.choice + 1).min(choices - 1)
-            }
-            TerminalInput::Down | TerminalInput::PageDown if matches!(page, ApprovalPage::More) => {
-                self.approval_ui.page += 1;
-                self.approval_ui.review_notice = false;
-            }
-            TerminalInput::Up | TerminalInput::PageUp => {
-                self.approval_ui.page = self.approval_ui.page.saturating_sub(1);
-            }
-            _ => {}
-        }
-    }
-
-    fn approval_reply(
-        &mut self,
-        ui: &RunUi<'_>,
-        input: TerminalInput,
-        page: ApprovalPage,
-        choices: &[crate::presentation::ToolApprovalChoice],
-    ) -> Option<crate::presentation::ToolApprovalChoice> {
-        if input == TerminalInput::Submit {
-            if matches!(page, ApprovalPage::More) {
-                self.approval_ui.page += 1;
-                return None;
-            }
-            return if ui.terminal.is_linear() {
-                let choice = linear_approval_choice(self.approval_ui.answer.text(), choices);
-                self.approval_ui.answer.clear();
-                choice
-            } else {
-                Some(choices[self.approval_ui.choice])
-            };
-        }
-        let choice = input
-            .choice_index(choices.len())
-            .map(|index| choices[index])?;
-        if matches!(page, ApprovalPage::More)
-            && choice != crate::presentation::ToolApprovalChoice::No
-        {
-            self.approval_ui.review_notice = true;
-            None
-        } else {
-            Some(choice)
-        }
-    }
-
-    fn decide_approval(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        choice: crate::presentation::ToolApprovalChoice,
-    ) -> Result<(), InputFailure> {
-        if choice == crate::presentation::ToolApprovalChoice::AutoEdits {
-            for _ in 0..2 {
-                if ui.composer.approval_mode() == Some(arany::ApprovalMode::AutoEdits) {
-                    break;
-                }
-                let _ = super::permissions::cycle(ui.composer);
-            }
-            self.approvals.set_mode(arany::ApprovalMode::AutoEdits);
-        }
-        self.approval_ui
-            .pending
-            .take()
-            .expect("pending action")
-            .decide(choice.reply());
-        ui.terminal
-            .restore_draft_input(ui.composer.input_capacity())
-            .map_err(|error| InputFailure::Return(error.to_string()))?;
-        Ok(())
-    }
-
-    fn reset_approval_focus(&mut self, choices: usize) {
-        self.approval_ui.page = 0;
-        self.approval_ui.choice = if self
-            .approval_ui
-            .pending
-            .as_ref()
-            .is_some_and(|approval| approval.unguarded.is_some())
-        {
-            choices - 1
-        } else {
-            0
-        };
-    }
-
-    fn reset_approval_review(&mut self, choices: usize) {
-        self.reset_approval_focus(choices);
-        self.approval_ui.review_notice = false;
-    }
-
-    fn route_help(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-    ) -> Result<InputRoute, InputFailure> {
-        if ui.terminal.help_open() {
-            match input {
-                TerminalInput::Interrupt => ui.terminal.close_help(),
-                TerminalInput::Suspend | TerminalInput::Shutdown(_) => {}
-                _ => {
-                    ui.terminal.help_input(input);
-                    if self.draw(ui, None).is_err() {
-                        return Err(InputFailure::Shutdown(
-                            "terminal rendering failed".to_owned(),
-                        ));
-                    }
-                    return Ok(InputRoute::Handled);
-                }
-            }
-        }
-        Ok(InputRoute::Composer)
-    }
-
-    async fn route_agents(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-    ) -> Result<InputRoute, InputFailure> {
-        if ui.terminal.agents_open()
-            && !matches!(
-                input,
-                TerminalInput::Interrupt | TerminalInput::Suspend | TerminalInput::Shutdown(_)
-            )
-        {
-            let notice = match ui.terminal.agent_input(ui.view, input).await {
-                Ok(notice) => notice.map(TerminalNotice::Transient),
-                Err(_) => {
-                    return Err(InputFailure::Shutdown(
-                        "terminal rendering failed".to_owned(),
-                    ));
-                }
-            };
-            if !ui.terminal.agents_open() && self.draw(ui, notice).is_err() {
-                return Err(InputFailure::Shutdown(
-                    "terminal rendering failed".to_owned(),
-                ));
-            }
-            return Ok(InputRoute::Handled);
-        }
-        if ui.terminal.agents_open()
-            && matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_))
-            && ui.terminal.close_agents().is_err()
-        {
-            return Err(InputFailure::Shutdown(
-                "terminal input cleanup failed".to_owned(),
-            ));
-        }
-        Ok(InputRoute::Composer)
-    }
-
-    async fn route_chat(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-    ) -> Result<InputRoute, InputFailure> {
-        // A child view takes Escape before Run cancellation; Ctrl+C passes through.
-        let agent_notice = match ui
-            .terminal
-            .agent_chat_input(ui.view, input, ui.composer)
-            .await
-        {
-            Ok(AgentChatInput::ChildMessage { target, text }) => {
-                let agent = ui
-                    .view
-                    .runs
-                    .iter()
-                    .find(|run| run.id == target.run_id)
-                    .and_then(|run| {
-                        run.agents
-                            .iter()
-                            .find(|agent| agent.id == target.agent_run_id)
-                    });
-                let ordinal = agent.map_or(0, |agent| agent.ordinal);
-                let count = agent.map_or(0, |agent| agent.steering_notes.len());
-                let (notice, offer) = if self.stop == ActiveStop::Running {
-                    match self.steering.offer_child_note(target, text.clone()) {
-                        Ok(()) => (
-                            format!("Note waiting for child {ordinal}'s next step"),
-                            Some((text, count)),
-                        ),
-                        Err(refused) => (steering_refusal(refused, self.autonomous), None),
-                    }
-                } else {
-                    (
-                        "Child note unavailable while stopping; draft retained".into(),
-                        None,
-                    )
-                };
-                ui.terminal.child_note_feedback(target, notice, offer);
-                Some(None)
-            }
-            Ok(AgentChatInput::ChildEdited(target)) => {
-                ui.terminal.withdraw_child_offer(target, &self.steering);
-                Some(None)
-            }
-            Ok(AgentChatInput::Pass) => None,
-            Ok(AgentChatInput::Handled) => return Ok(InputRoute::Handled),
-            Ok(AgentChatInput::Returned) => Some(None),
-            Ok(AgentChatInput::Notice(text)) => Some(Some(TerminalNotice::Transient(text))),
-            Err(_) => {
-                return Err(InputFailure::Shutdown(
-                    "terminal rendering failed".to_owned(),
-                ));
-            }
-        };
-        if let Some(notice) = agent_notice {
-            if self.draw(ui, notice).is_err() {
-                return Err(InputFailure::Shutdown(
-                    "terminal rendering failed".to_owned(),
-                ));
-            }
-            return Ok(InputRoute::Handled);
-        }
-        Ok(InputRoute::Composer)
-    }
-
-    async fn route_history(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-    ) -> Result<InputRoute, InputFailure> {
-        if ui.terminal.handle_draft_detail(ui.composer, input) {
-            if self.draw(ui, None).is_err() {
-                return Err(InputFailure::Shutdown("terminal rendering failed".into()));
-            }
-            return Ok(InputRoute::Handled);
-        }
-        if ui.terminal.ignores_page_key(input) {
-            return Ok(InputRoute::Handled);
-        }
-        match ui.terminal.handle_transcript_input(input, ui.view) {
-            Ok(true) => {
-                if self.draw(ui, None).is_err() {
-                    return Err(InputFailure::Shutdown(
-                        "terminal rendering failed".to_owned(),
-                    ));
-                }
-                return Ok(InputRoute::Handled);
-            }
-            Ok(false) => {}
-            Err(_) => {
-                return Err(InputFailure::Shutdown(
-                    "terminal rendering failed".to_owned(),
-                ));
-            }
-        }
-        if ui
-            .terminal
-            .handle_history_input(input, ui.view, ui.composer, true)
-            .await
-        {
-            if self.draw(ui, None).is_err() {
-                return Err(InputFailure::Shutdown(
-                    "terminal rendering failed".to_owned(),
-                ));
-            }
-            return Ok(InputRoute::Handled);
-        }
-        Ok(InputRoute::Composer)
     }
 
     async fn on_input(
@@ -1917,20 +1502,6 @@ async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result
     store.close().await.map_err(|error| error.to_string())?;
     *view = loaded?.ok_or_else(|| "Session history unavailable".to_owned())?;
     Ok(())
-}
-
-fn interrupt_approval_input(
-    input: &TerminalInput,
-    cancellation: &arany::RunCancellation,
-    stop: &mut ActiveStop,
-) -> bool {
-    if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
-        *stop = ActiveStop::Cancelling;
-        cancellation.cancel();
-        true
-    } else {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -3649,7 +3220,7 @@ mod escape_tests {
 
 #[cfg(test)]
 mod approval_reply_tests {
-    use super::{linear_approval_choice, withdraw_abandoned_approval};
+    use super::approval::{linear_approval_choice, withdraw_abandoned_approval};
     use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
     use crate::terminal::{Composer, TerminalInput};
     use std::time::Duration;
@@ -3756,6 +3327,7 @@ mod approval_reply_tests {
 #[cfg(test)]
 mod driver_tests {
     use super::super::active::session_with_goal;
+    use super::approval::interrupt_approval_input;
     use super::*;
 
     #[test]
