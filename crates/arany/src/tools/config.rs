@@ -348,7 +348,7 @@ impl Config {
                             .iter()
                             .any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()));
             }
-            ToolCall::GhPrList { .. } => {
+            ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
                 return self.git_available()
                     && self
                         .commands

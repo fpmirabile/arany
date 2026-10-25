@@ -30,9 +30,21 @@ pub(crate) const PR_LIST_FAILED: &str =
 pub(crate) const PR_LIST_CAPTURE_LIMIT: &str =
     "host: GitHub pull request list exceeded a capture limit.";
 pub(crate) const PR_LIST_INVALID: &str = "host: GitHub returned invalid pull request data.";
+pub(crate) const PR_VIEW_FAILED: &str =
+    "host: GitHub pull request inspection failed; no result was reported.";
+pub(crate) const PR_VIEW_CAPTURE_LIMIT: &str =
+    "host: GitHub pull request inspection exceeded a capture limit.";
+pub(crate) const PR_VIEW_INVALID: &str =
+    "host: GitHub returned invalid pull request inspection data.";
+const PR_VIEW_REFUSAL_BUDGET: &str = "host: refused; nothing dispatched.";
 pub(crate) const PR_LIST_TITLE_BYTES: usize = 256;
 pub(crate) const PR_LIST_TEXT_BYTES: usize = 2048;
 const PR_LIST_REFUSAL_BUDGET: &str = "host: refused; nothing dispatched.";
+const PR_VIEW_COMMENT_LIMIT: usize = 50;
+const PR_VIEW_REVIEW_LIMIT: usize = 50;
+const PR_VIEW_CHECK_LIMIT: usize = 100;
+const PR_VIEW_TEXT_BYTES: usize = 8 * 1024;
+const PR_VIEW_QUERY_BYTES: usize = 8 * 1024;
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn valid(call: &ToolCall) -> bool {
@@ -68,6 +80,13 @@ pub(crate) fn valid(call: &ToolCall) -> bool {
                 && base.as_deref().is_none_or(valid_branch)
                 && head.as_deref().is_none_or(valid_branch)
                 && (1..=MAX_PR_LIST_LIMIT).contains(limit)
+        }
+        ToolCall::GhPrView {
+            repository, number, ..
+        } => {
+            repository.len() <= 256
+                && repository_parts(repository).is_some()
+                && (1..=i32::MAX as u32).contains(number)
         }
         _ => false,
     }
@@ -133,6 +152,27 @@ fn repository_parts(value: &str) -> Option<(&str, &str, &str)> {
     .then_some((host, owner, repo))
 }
 
+fn valid_pr_view_url(url: &str, repository: &str, number: u32) -> bool {
+    let Some((host, owner, name)) = repository_parts(repository) else {
+        return false;
+    };
+    let Some(path) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((url_host, path)) = path.split_once('/') else {
+        return false;
+    };
+    let mut segments = path.split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next(), segments.next(), segments.next()),
+        (Some(url_owner), Some(url_name), Some("pull"), Some(url_number), None)
+            if url_host == host
+                && url_owner.eq_ignore_ascii_case(owner)
+                && url_name.eq_ignore_ascii_case(name)
+                && url_number == number.to_string()
+    )
+}
+
 pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     let string = || json!({"type":"string"});
     let mut pr_states: Vec<_> = PrState::ALL
@@ -190,6 +230,16 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
                 json!({"type":["integer","null"], "minimum":1, "maximum":MAX_PR_LIST_LIMIT, "description":format!("Maximum rows; null defaults to {DEFAULT_PR_LIMIT}.")}),
             ),
         ],
+        "gh_pr_view" => vec![
+            (
+                "repository",
+                json!({"type":"string", "description":"Exact host/owner/repository; host must match admitted gh authentication."}),
+            ),
+            (
+                "number",
+                json!({"type":"integer", "minimum":1, "maximum":2147483647}),
+            ),
+        ],
         _ => return None,
     })
 }
@@ -200,6 +250,9 @@ pub(crate) fn valid_pin(call: &ToolCall, pin: &HostIntent) -> bool {
         ToolCall::GhPrCreate { head, .. } => head,
         ToolCall::GhPrList { .. } => {
             return pin.source_oid == "gh-pr-list-v1" && pin.refspec == "fixed-list";
+        }
+        ToolCall::GhPrView { .. } => {
+            return pin.source_oid == "gh-pr-view-v1" && pin.refspec == "fixed-view-v1";
         }
         _ => return false,
     };
@@ -215,10 +268,20 @@ pub(crate) fn pin(workspace: &Path, call: &ToolCall) -> Result<HostIntent, ToolE
     if !valid(call) {
         return Err(ToolError::Configuration);
     }
-    if matches!(call, ToolCall::GhPrList { .. }) {
+    if matches!(call, ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. }) {
         return Ok(HostIntent {
-            source_oid: "gh-pr-list-v1".into(),
-            refspec: "fixed-list".into(),
+            source_oid: if matches!(call, ToolCall::GhPrList { .. }) {
+                "gh-pr-list-v1"
+            } else {
+                "gh-pr-view-v1"
+            }
+            .into(),
+            refspec: if matches!(call, ToolCall::GhPrList { .. }) {
+                "fixed-list"
+            } else {
+                "fixed-view-v1"
+            }
+            .into(),
         });
     }
     let repository = inspect_layout(workspace)?.map_err(|_| ToolError::Path)?;
@@ -411,6 +474,7 @@ impl Authentication {
             "git_push" => !self.git_config.is_empty() || self.ssh_agent.is_some(),
             "gh_pr_create" => self.gh_hosts.is_some(),
             "gh_pr_list" => self.gh_hosts.is_some(),
+            "gh_pr_view" => self.gh_hosts.is_some(),
             _ => false,
         }
     }
@@ -429,6 +493,10 @@ impl Authentication {
                     && repository_parts(repository).is_some_and(|(host, _, _)| host == self.gh_host)
             }
             ToolCall::GhPrList { repository, .. } => {
+                self.gh_hosts.is_some()
+                    && repository_parts(repository).is_some_and(|(host, _, _)| host == self.gh_host)
+            }
+            ToolCall::GhPrView { repository, .. } => {
                 self.gh_hosts.is_some()
                     && repository_parts(repository).is_some_and(|(host, _, _)| host == self.gh_host)
             }
@@ -817,7 +885,7 @@ fn prepare_command(
         return Err(ToolError::Configuration);
     }
     let path = helper_path(&["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])?;
-    let view = if matches!(intent.call, ToolCall::GhPrList { .. }) {
+    let view = if intent.call.is_host_pr_read() {
         empty_private_view(root)?
     } else {
         private_view(workspace, root, intent)?
@@ -874,7 +942,7 @@ fn prepare_command(
             ]);
             (git, args, auth)
         }
-        ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. } => {
+        ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
             let (gh, args) = prepare_gh_command(config, root, &intent.call)?;
             (gh, args, None)
         }
@@ -882,7 +950,7 @@ fn prepare_command(
     };
     let executable = if matches!(
         intent.call,
-        ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. }
+        ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. }
     ) {
         root.join("gh-executable")
     } else {
@@ -992,9 +1060,113 @@ fn prepare_gh_command<'a>(
             }
             args
         }
+        ToolCall::GhPrView { repository, number } => vec![
+            "pr".into(),
+            "view".into(),
+            number.to_string(),
+            "--repo".into(),
+            repository.clone(),
+            "--json".into(),
+            "number,title,url,author,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,reviewDecision,updatedAt,body,mergeable".into(),
+        ],
         _ => return Err(ToolError::Configuration),
     };
     Ok((gh, args))
+}
+
+const PR_VIEW_QUERY_TEMPLATE: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewDecision comments(last:__COMMENT_LIMIT__){pageInfo{hasPreviousPage} nodes{author{login} createdAt body}} reviews(last:__REVIEW_LIMIT__){pageInfo{hasPreviousPage} nodes{author{login} submittedAt state body}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:__CHECK_LIMIT__){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}}}}";
+
+fn pr_view_query() -> String {
+    PR_VIEW_QUERY_TEMPLATE
+        .replace("__COMMENT_LIMIT__", &PR_VIEW_COMMENT_LIMIT.to_string())
+        .replace("__REVIEW_LIMIT__", &PR_VIEW_REVIEW_LIMIT.to_string())
+        .replace("__CHECK_LIMIT__", &PR_VIEW_CHECK_LIMIT.to_string())
+}
+
+fn valid_graphql_delimiters(query: &str) -> bool {
+    let mut braces = 0_i32;
+    let mut parentheses = 0_i32;
+    for byte in query.bytes() {
+        match byte {
+            b'{' => braces += 1,
+            b'}' => braces -= 1,
+            b'(' => parentheses += 1,
+            b')' => parentheses -= 1,
+            _ => {}
+        }
+        if braces < 0 || parentheses < 0 {
+            return false;
+        }
+    }
+    braces == 0 && parentheses == 0
+}
+
+fn prepare_graphql_command(
+    config: &Config,
+    authentication: &Authentication,
+    root: &Path,
+    repository: &str,
+    number: u32,
+) -> Result<(Command, String, Vec<u8>), ToolError> {
+    let (host, owner, name) = repository_parts(repository).ok_or(ToolError::Configuration)?;
+    let gh = config
+        .commands
+        .iter()
+        .find(|program| program.name == "gh" && !program.interpreter && program.inputs.is_empty())
+        .ok_or(ToolError::Configuration)?;
+    let query = pr_view_query();
+    if !valid_graphql_delimiters(&query) {
+        return Err(ToolError::Configuration);
+    }
+    let input = serde_json::to_vec(&json!({
+        "query": query,
+        "variables": {"owner": owner, "name": name, "number": number},
+    }))
+    .map_err(|_| ToolError::Configuration)?;
+    if input.len() > PR_VIEW_QUERY_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let path = helper_path(&["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])?;
+    let args = [
+        "api",
+        "graphql",
+        "--hostname",
+        host,
+        "--method",
+        "POST",
+        "--input",
+        "-",
+    ];
+    let mut command = Command::new(root.join("gh-executable"));
+    command
+        .args(args)
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", format!("{}:{path}", root.join("bin").display()))
+        .env("HOME", &authentication.home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/usr/bin/false")
+        .env("SSH_ASKPASS", "/usr/bin/false")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .env("GH_EDITOR", "/usr/bin/false")
+        .env("GH_BROWSER", "/usr/bin/false")
+        .env("GH_PAGER", "cat")
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1")
+        .env("GH_CONFIG_DIR", root.join("gh"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    Ok((command, gh.sha256.clone(), input))
 }
 
 pub(crate) async fn run(
@@ -1051,11 +1223,27 @@ pub(crate) async fn run(
         result = tokio::time::timeout_at(deadline, preparation) =>
             result.unwrap_or(Err(PREPARATION_TIMEOUT)),
     };
-    let (_root, backing, command, executable) = match prepared {
+    let (root, backing, command, executable) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => return observation(intent, ToolDisposition::Denied, reason, None),
     };
-    let mut outcome = supervise(deadline, command, intent, executable, cancellation).await;
+    let mut outcome = if matches!(intent.call, ToolCall::GhPrView { .. }) {
+        supervise_pr_view(PrViewDispatch {
+            deadline,
+            command,
+            environment: PrViewEnvironment {
+                config,
+                authentication,
+                root: root.as_ref().as_ref(),
+            },
+            intent,
+            executable,
+            cancellation,
+        })
+        .await
+    } else {
+        supervise(deadline, command, intent, executable, cancellation).await
+    };
     if backing.is_some()
         && outcome.attestation.is_some()
         && backing_identity(workspace).ok() != backing
@@ -1073,10 +1261,14 @@ fn observation(
     receipt: Option<UnguardedReceipt>,
 ) -> ToolObservation {
     let output = if disposition == ToolDisposition::Denied
-        && matches!(intent.call, ToolCall::GhPrList { .. })
+        && intent.call.is_host_pr_read()
         && output.len() > intent.limits.result_bytes as usize
     {
-        PR_LIST_REFUSAL_BUDGET
+        if matches!(intent.call, ToolCall::GhPrView { .. }) {
+            PR_VIEW_REFUSAL_BUDGET
+        } else {
+            PR_LIST_REFUSAL_BUDGET
+        }
     } else {
         output
     };
@@ -1192,10 +1384,224 @@ fn pr_list_text(
         .take_while(|(index, character)| index + character.len_utf8() <= cap)
         .last()
         .map_or(0, |(index, character)| index + character.len_utf8());
-    if end < text.len() {
+    if end < text.len() && !truncated.iter().any(|name| name == field) {
         truncated.push(field.to_owned());
     }
     Some(text[..end].to_owned())
+}
+
+#[derive(Clone)]
+pub(crate) struct PrViewIdentity {
+    pub(crate) repository: String,
+    pub(crate) number: u32,
+}
+
+fn pr_view_result(
+    scalar: &Value,
+    graph_text: &str,
+    identity: PrViewIdentity,
+    result_bytes: usize,
+) -> Option<String> {
+    if scalar.get("number")?.as_u64()? != u64::from(identity.number) {
+        return None;
+    }
+    if !valid_pr_view_url(
+        scalar.get("url")?.as_str()?,
+        &identity.repository,
+        identity.number,
+    ) {
+        return None;
+    }
+    let graph: Value = serde_json::from_str(graph_text).ok()?;
+    if let Some(errors) = graph.get("errors")
+        && !errors.as_array()?.is_empty()
+    {
+        return None;
+    }
+    let pull = graph.get("data")?.get("repository")?.get("pullRequest")?;
+    if pull.is_null() {
+        return None;
+    }
+    let graph_head = pull.get("headRefOid")?.as_str()?;
+    let scalar_head = scalar.get("headRefOid")?.as_str()?;
+    if !valid_oid(graph_head) || !valid_oid(scalar_head) {
+        return None;
+    }
+    let mut truncated_fields = Vec::new();
+    let result = pr_view_payload(scalar, pull, identity, graph_head, &mut truncated_fields)?;
+    fit_pr_view_result(result, result_bytes)
+}
+
+fn pr_view_payload(
+    scalar: &Value,
+    pull: &Value,
+    identity: PrViewIdentity,
+    graph_head: &str,
+    truncated_fields: &mut Vec<String>,
+) -> Option<Value> {
+    let review_decision = scalar.get("reviewDecision")?;
+    let review_decision = if review_decision.is_null() {
+        Value::Null
+    } else {
+        Value::String(pr_view_text(
+            review_decision,
+            PR_LIST_TEXT_BYTES,
+            "review_decision",
+            truncated_fields,
+        )?)
+    };
+    Some(json!({
+        "pull_request": {
+            "number": identity.number,
+            "title": pr_view_text(scalar.get("title")?, PR_LIST_TITLE_BYTES, "title", truncated_fields)?,
+            "url": pr_view_text(scalar.get("url")?, PR_LIST_TEXT_BYTES, "url", truncated_fields)?,
+            "author": pr_view_nullable_text(scalar.get("author")?.get("login"), PR_LIST_TEXT_BYTES, "author", truncated_fields)?,
+            "state": pr_view_text(scalar.get("state")?, PR_LIST_TEXT_BYTES, "state", truncated_fields)?,
+            "draft": scalar.get("isDraft")?.as_bool()?,
+            "base": pr_view_text(scalar.get("baseRefName")?, PR_LIST_TEXT_BYTES, "base", truncated_fields)?,
+            "base_oid": pr_view_text(scalar.get("baseRefOid")?, PR_LIST_TEXT_BYTES, "base_oid", truncated_fields)?,
+            "head": pr_view_text(scalar.get("headRefName")?, PR_LIST_TEXT_BYTES, "head", truncated_fields)?,
+            "head_oid": scalar.get("headRefOid")?,
+            "checks_head_oid": graph_head,
+            "review_decision": review_decision,
+            "discussion_review_decision": pr_view_nullable_text(pull.get("reviewDecision"), PR_LIST_TEXT_BYTES, "discussion_review_decision", truncated_fields)?,
+            "updated_at": pr_view_text(scalar.get("updatedAt")?, PR_LIST_TEXT_BYTES, "updated_at", truncated_fields)?,
+            "body": pr_view_text(scalar.get("body")?, PR_VIEW_TEXT_BYTES, "body", truncated_fields)?,
+            "mergeable": pr_view_nullable_text(scalar.get("mergeable"), PR_LIST_TEXT_BYTES, "mergeable", truncated_fields)?,
+            "comments": pr_view_comments(pull.get("comments")?, truncated_fields)?,
+            "reviews": pr_view_reviews(pull.get("reviews")?, truncated_fields)?,
+            "checks": pr_view_checks(pull, truncated_fields)?,
+            "stale": !graph_head.eq_ignore_ascii_case(scalar.get("headRefOid")?.as_str()?),
+            "truncated_fields": truncated_fields,
+        }
+    }))
+}
+
+fn fit_pr_view_result(mut result: Value, result_bytes: usize) -> Option<String> {
+    let budget = result_bytes.min(crate::tools::types::MAX_TOOL_RESULT_BYTES);
+    loop {
+        let output = serde_json::to_string(&result).ok()?;
+        if output.len() <= budget {
+            return Some(output);
+        }
+        if let Some(trimmed) = ["checks", "reviews", "comments"].into_iter().find(|field| {
+            result["pull_request"][*field]["items"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+        }) {
+            result["pull_request"][trimmed]["items"]
+                .as_array_mut()?
+                .pop();
+            result["pull_request"][trimmed]["truncated"] = Value::Bool(true);
+            continue;
+        }
+        let body = result["pull_request"]["body"].as_str()?;
+        if body.is_empty() {
+            return None;
+        }
+        let keep = body.len() / 2;
+        let end = body
+            .char_indices()
+            .take_while(|(index, character)| index + character.len_utf8() <= keep)
+            .last()
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        result["pull_request"]["body"] = Value::String(body[..end].to_owned());
+        let fields = result["pull_request"]["truncated_fields"].as_array_mut()?;
+        if !fields.iter().any(|field| field == "body") {
+            fields.push(Value::String("body".into()));
+        }
+    }
+}
+
+fn pr_view_text(
+    value: &Value,
+    cap: usize,
+    field: &str,
+    truncated: &mut Vec<String>,
+) -> Option<String> {
+    pr_list_text(value, cap, field, truncated)
+}
+
+fn pr_view_comments(connection: &Value, truncated: &mut Vec<String>) -> Option<Value> {
+    let nodes = connection.get("nodes")?.as_array()?;
+    if nodes.len() > PR_VIEW_COMMENT_LIMIT {
+        return None;
+    }
+    Some(json!({
+        "items": nodes.iter().map(|comment| Some(json!({
+            "author": pr_view_nullable_text(comment.get("author")?.get("login"), PR_LIST_TEXT_BYTES, "comment_author", truncated)?,
+            "created_at": pr_view_text(comment.get("createdAt")?, PR_LIST_TEXT_BYTES, "comment_created_at", truncated)?,
+            "body": pr_view_text(comment.get("body")?, PR_VIEW_TEXT_BYTES, "comment_body", truncated)?,
+        }))).collect::<Option<Vec<_>>>()?,
+        "truncated": connection.get("pageInfo")?.get("hasPreviousPage")?.as_bool()?,
+    }))
+}
+
+fn pr_view_reviews(connection: &Value, truncated: &mut Vec<String>) -> Option<Value> {
+    let nodes = connection.get("nodes")?.as_array()?;
+    if nodes.len() > PR_VIEW_REVIEW_LIMIT {
+        return None;
+    }
+    Some(json!({
+        "items": nodes.iter().map(|review| Some(json!({
+            "author": pr_view_nullable_text(review.get("author")?.get("login"), PR_LIST_TEXT_BYTES, "review_author", truncated)?,
+            "submitted_at": pr_view_nullable_text(review.get("submittedAt"), PR_LIST_TEXT_BYTES, "review_submitted_at", truncated)?,
+            "state": pr_view_text(review.get("state")?, PR_LIST_TEXT_BYTES, "review_state", truncated)?,
+            "body": pr_view_text(review.get("body")?, PR_VIEW_TEXT_BYTES, "review_body", truncated)?,
+        }))).collect::<Option<Vec<_>>>()?,
+        "truncated": connection.get("pageInfo")?.get("hasPreviousPage")?.as_bool()?,
+    }))
+}
+
+fn pr_view_nullable_text(
+    value: Option<&Value>,
+    cap: usize,
+    field: &str,
+    truncated: &mut Vec<String>,
+) -> Option<Value> {
+    match value {
+        None | Some(Value::Null) => Some(Value::Null),
+        Some(value) => Some(Value::String(pr_view_text(value, cap, field, truncated)?)),
+    }
+}
+
+fn pr_view_checks(pull: &Value, truncated: &mut Vec<String>) -> Option<Value> {
+    let Some(commit) = pull
+        .get("commits")?
+        .get("nodes")?
+        .as_array()?
+        .first()
+        .and_then(|node| node.get("commit"))
+    else {
+        return Some(Value::Null);
+    };
+    let rollup = commit
+        .get("statusCheckRollup")
+        .filter(|value| !value.is_null());
+    let Some(rollup) = rollup else {
+        return Some(Value::Null);
+    };
+    let connection = rollup.get("contexts")?;
+    let nodes = connection.get("nodes")?.as_array()?;
+    if nodes.len() > PR_VIEW_CHECK_LIMIT {
+        return None;
+    }
+    Some(json!({
+        "items": nodes.iter().map(|check| {
+            let typename = check.get("__typename")?.as_str()?;
+            let (name, status, conclusion) = match typename {
+                "CheckRun" => (check.get("name")?, check.get("status")?, Some(check.get("conclusion")?)),
+                "StatusContext" => (check.get("context")?, check.get("state")?, None),
+                _ => return None,
+            };
+            Some(json!({
+                "name": pr_view_text(name, PR_LIST_TEXT_BYTES, "check_name", truncated)?,
+                "status": pr_view_nullable_text(Some(status), PR_LIST_TEXT_BYTES, "check_status", truncated)?,
+                "conclusion": pr_view_nullable_text(conclusion, PR_LIST_TEXT_BYTES, "check_conclusion", truncated)?,
+            }))
+        }).collect::<Option<Vec<_>>>()?,
+        "truncated": connection.get("pageInfo")?.get("hasNextPage")?.as_bool()?,
+    }))
 }
 
 pub(crate) fn valid_pr_list_output(output: &str, limit: u8) -> bool {
@@ -1216,6 +1622,208 @@ pub(crate) fn valid_pr_list_output(output: &str, limit: u8) -> bool {
         return false;
     };
     rows.len() <= usize::from(limit) && rows.iter().all(valid_pr_list_row)
+}
+
+pub(crate) fn valid_pr_view_output(output: &str, identity: PrViewIdentity) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    let Some(root) = value.as_object() else {
+        return false;
+    };
+    let Some(pull) = value.get("pull_request").and_then(Value::as_object) else {
+        return false;
+    };
+    root.len() == 1
+        && pull.len() == 21
+        && valid_pr_view_identity(pull, identity)
+        && valid_pr_view_text_fields(pull)
+        && valid_pr_view_status_fields(pull)
+        && valid_pr_view_connections(pull)
+        && valid_pr_view_truncated_fields(pull)
+}
+
+fn valid_pr_view_identity(pull: &serde_json::Map<String, Value>, identity: PrViewIdentity) -> bool {
+    let number = pull.get("number").and_then(Value::as_u64);
+    let url = pull.get("url").and_then(Value::as_str);
+    let head = pull.get("head_oid").and_then(Value::as_str);
+    let checks_head = pull.get("checks_head_oid").and_then(Value::as_str);
+    number == Some(u64::from(identity.number))
+        && url.is_some_and(|url| valid_pr_view_url(url, &identity.repository, identity.number))
+        && head.zip(checks_head).is_some_and(|(head, checks_head)| {
+            valid_oid(head)
+                && valid_oid(checks_head)
+                && pull.get("stale").and_then(Value::as_bool)
+                    == Some(!head.eq_ignore_ascii_case(checks_head))
+        })
+}
+
+fn valid_pr_view_text_fields(pull: &serde_json::Map<String, Value>) -> bool {
+    [
+        ("title", PR_LIST_TITLE_BYTES),
+        ("state", PR_LIST_TEXT_BYTES),
+        ("base", PR_LIST_TEXT_BYTES),
+        ("base_oid", PR_LIST_TEXT_BYTES),
+        ("head", PR_LIST_TEXT_BYTES),
+        ("updated_at", PR_LIST_TEXT_BYTES),
+        ("body", PR_VIEW_TEXT_BYTES),
+    ]
+    .iter()
+    .all(|(field, cap)| {
+        pull.get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.len() <= *cap)
+    }) && ["author", "mergeable"].iter().all(|field| {
+        pull.get(*field).is_some_and(|value| {
+            value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+        })
+    })
+}
+
+fn valid_pr_view_status_fields(pull: &serde_json::Map<String, Value>) -> bool {
+    pull.get("draft").is_some_and(Value::is_boolean)
+        && ["review_decision", "discussion_review_decision"]
+            .iter()
+            .all(|field| {
+                pull.get(*field).is_some_and(|value| {
+                    value.is_null()
+                        || value
+                            .as_str()
+                            .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                })
+            })
+}
+
+fn valid_pr_view_connections(pull: &serde_json::Map<String, Value>) -> bool {
+    pull.get("comments")
+        .is_some_and(|value| valid_pr_view_connection(value, "comments"))
+        && pull
+            .get("reviews")
+            .is_some_and(|value| valid_pr_view_connection(value, "reviews"))
+        && (pull.get("checks").is_some_and(Value::is_null)
+            || pull
+                .get("checks")
+                .is_some_and(|value| valid_pr_view_connection(value, "checks")))
+}
+
+fn valid_pr_view_truncated_fields(pull: &serde_json::Map<String, Value>) -> bool {
+    pull.get("truncated_fields")
+        .and_then(Value::as_array)
+        .is_some_and(|fields| {
+            let mut unique = std::collections::HashSet::new();
+            fields.iter().all(|field| {
+                field.as_str().is_some_and(|field| {
+                    unique.insert(field)
+                        && [
+                            "title",
+                            "url",
+                            "author",
+                            "state",
+                            "base",
+                            "base_oid",
+                            "head",
+                            "updated_at",
+                            "review_decision",
+                            "discussion_review_decision",
+                            "body",
+                            "mergeable",
+                            "comment_author",
+                            "comment_created_at",
+                            "comment_body",
+                            "review_author",
+                            "review_submitted_at",
+                            "review_state",
+                            "review_body",
+                            "check_name",
+                            "check_status",
+                            "check_conclusion",
+                        ]
+                        .contains(&field)
+                })
+            })
+        })
+}
+
+fn valid_pr_view_connection(value: &Value, kind: &str) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let Some(items) = object.get("items").and_then(Value::as_array) else {
+        return false;
+    };
+    object.len() == 2
+        && object.contains_key("truncated")
+        && object.get("truncated").is_some_and(Value::is_boolean)
+        && items.len()
+            <= if kind == "checks" {
+                PR_VIEW_CHECK_LIMIT
+            } else if kind == "comments" {
+                PR_VIEW_COMMENT_LIMIT
+            } else {
+                PR_VIEW_REVIEW_LIMIT
+            }
+        && items.iter().all(|item| {
+            let Some(item) = item.as_object() else {
+                return false;
+            };
+            match kind {
+                "comments" => {
+                    item.len() == 3
+                        && item.get("author").is_some_and(|value| {
+                            value.is_null()
+                                || value
+                                    .as_str()
+                                    .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                        })
+                        && item
+                            .get("created_at")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                        && item
+                            .get("body")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.len() <= PR_VIEW_TEXT_BYTES)
+                }
+                "reviews" => {
+                    item.len() == 4
+                        && ["author", "submitted_at"].iter().all(|field| {
+                            item.get(*field).is_some_and(|value| {
+                                value.is_null()
+                                    || value
+                                        .as_str()
+                                        .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                            })
+                        })
+                        && item
+                            .get("state")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                        && item
+                            .get("body")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.len() <= PR_VIEW_TEXT_BYTES)
+                }
+                "checks" => {
+                    item.len() == 3
+                        && item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                        && ["status", "conclusion"].iter().all(|field| {
+                            item.get(*field).is_some_and(|value| {
+                                value.is_null()
+                                    || value
+                                        .as_str()
+                                        .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+                            })
+                        })
+                }
+                _ => false,
+            }
+        })
 }
 
 fn valid_pr_list_row(value: &Value) -> bool {
@@ -1311,11 +1919,197 @@ fn non_fast_forward(intent: &EffectIntent, output: &[u8]) -> bool {
 
 async fn supervise(
     deadline: tokio::time::Instant,
-    mut command: Command,
+    command: Command,
     intent: EffectIntent,
     executable_sha256: String,
-    mut cancellation: Cancellation,
+    cancellation: Cancellation,
 ) -> ToolObservation {
+    supervise_input(ProcessDispatch {
+        deadline,
+        command,
+        intent,
+        executable_sha256,
+        cancellation,
+        input: None,
+    })
+    .await
+}
+
+struct PrViewEnvironment<'a> {
+    config: &'a Config,
+    authentication: &'a Authentication,
+    root: &'a Path,
+}
+
+struct PrViewDispatch<'a> {
+    deadline: tokio::time::Instant,
+    command: Command,
+    environment: PrViewEnvironment<'a>,
+    intent: EffectIntent,
+    executable: String,
+    cancellation: Cancellation,
+}
+
+async fn supervise_pr_view(dispatch: PrViewDispatch<'_>) -> ToolObservation {
+    let PrViewDispatch {
+        deadline,
+        command,
+        environment,
+        intent,
+        executable,
+        cancellation,
+    } = dispatch;
+    let scalar = supervise(
+        deadline,
+        command,
+        intent.clone(),
+        executable,
+        cancellation.clone(),
+    )
+    .await;
+    if scalar.disposition != ToolDisposition::Succeeded {
+        return scalar;
+    }
+    let identity = match &intent.call {
+        ToolCall::GhPrView {
+            repository, number, ..
+        } => PrViewIdentity {
+            repository: repository.clone(),
+            number: *number,
+        },
+        _ => return scalar,
+    };
+    let scalar_json: Value = match serde_json::from_str(&scalar.output) {
+        Ok(value) => value,
+        Err(_) => return pr_view_failure(intent, scalar, PR_VIEW_INVALID),
+    };
+    if !scalar_json
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .is_some_and(valid_oid)
+    {
+        return pr_view_failure(intent, scalar, PR_VIEW_INVALID);
+    }
+    supervise_pr_view_details(PrViewDetails {
+        deadline,
+        environment,
+        intent,
+        scalar,
+        scalar_json,
+        identity,
+        cancellation,
+    })
+    .await
+}
+
+struct PrViewDetails<'a> {
+    deadline: tokio::time::Instant,
+    environment: PrViewEnvironment<'a>,
+    intent: EffectIntent,
+    scalar: ToolObservation,
+    scalar_json: Value,
+    identity: PrViewIdentity,
+    cancellation: Cancellation,
+}
+
+async fn supervise_pr_view_details(details: PrViewDetails<'_>) -> ToolObservation {
+    let PrViewDetails {
+        deadline,
+        environment,
+        intent,
+        scalar,
+        scalar_json,
+        identity,
+        cancellation,
+    } = details;
+    let (query, query_executable, input) = match prepare_graphql_command(
+        environment.config,
+        environment.authentication,
+        environment.root,
+        &identity.repository,
+        identity.number,
+    ) {
+        Ok(prepared) => prepared,
+        Err(_) => return pr_view_failure(intent, scalar, PR_VIEW_FAILED),
+    };
+    let query = supervise_input(ProcessDispatch {
+        deadline,
+        command: query,
+        intent: intent.clone(),
+        executable_sha256: query_executable,
+        cancellation,
+        input: Some(input),
+    })
+    .await;
+    if query.disposition != ToolDisposition::Succeeded {
+        if query.attestation.is_none() {
+            return pr_view_failure(intent, scalar, PR_VIEW_FAILED);
+        }
+        return query;
+    }
+    match pr_view_result(
+        &scalar_json,
+        &query.output,
+        identity,
+        intent.limits.result_bytes as usize,
+    ) {
+        Some(output) => observation(
+            intent,
+            ToolDisposition::Succeeded,
+            &output,
+            query.attestation.and_then(host_receipt),
+        ),
+        None => observation(
+            intent,
+            ToolDisposition::Failed,
+            PR_VIEW_INVALID,
+            query.attestation.and_then(host_receipt),
+        ),
+    }
+}
+
+fn pr_view_failure(
+    intent: EffectIntent,
+    scalar: ToolObservation,
+    output: &'static str,
+) -> ToolObservation {
+    observation(
+        intent,
+        ToolDisposition::Failed,
+        output,
+        scalar.attestation.and_then(host_receipt),
+    )
+}
+
+fn host_receipt(attestation: Attestation) -> Option<UnguardedReceipt> {
+    match attestation {
+        Attestation::Host(receipt) => Some(receipt),
+        _ => None,
+    }
+}
+
+fn valid_oid(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+struct ProcessDispatch {
+    deadline: tokio::time::Instant,
+    command: Command,
+    intent: EffectIntent,
+    executable_sha256: String,
+    cancellation: Cancellation,
+    input: Option<Vec<u8>>,
+}
+
+async fn supervise_input(dispatch: ProcessDispatch) -> ToolObservation {
+    let ProcessDispatch {
+        deadline,
+        mut command,
+        intent,
+        executable_sha256,
+        mut cancellation,
+        input,
+    } = dispatch;
     if cancellation.is_cancelled() {
         return observation(intent, ToolDisposition::Denied, CANCELLED, None);
     }
@@ -1328,15 +2122,28 @@ async fn supervise(
     let pid = child.id().unwrap_or(0);
     let group = i32::try_from(pid).ok().and_then(Pid::from_raw);
     let completed = if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
+        let stdin = input.as_ref().and_then(|_| child.stdin.take());
+        let write_input = async {
+            if let Some(input) = input {
+                let mut stdin = stdin.ok_or(ToolError::Operation)?;
+                tokio::io::AsyncWriteExt::write_all(&mut stdin, &input)
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                tokio::io::AsyncWriteExt::shutdown(&mut stdin)
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+            }
+            Ok::<_, ToolError>(())
+        };
         tokio::select! {
             biased;
             () = cancellation.cancelled() => None,
             result = tokio::time::timeout_at(deadline, async {
                 tokio::try_join!(
                     async { crate::tools::guard::reap_owned_child(&mut child).await.map_err(|_| ToolError::Operation) },
-                    capture(out, GIT_CAPTURE_BYTES), discard(err, STDERR_BYTES)
+                    capture(out, GIT_CAPTURE_BYTES), discard(err, STDERR_BYTES), write_input
                 )
-            }) => result.ok().map(|result| result.map(|(status, bytes, ())| (status, bytes))),
+            }) => result.ok().map(|result| result.map(|(status, bytes, (), ())| (status, bytes))),
         }
     } else {
         None
@@ -1397,9 +2204,9 @@ fn classify_outcome(
     let pr_list_capture_limited = matches!(
         completed,
         Some(Err(ToolError::Limit | ToolError::OutputCeiling))
-    ) && matches!(intent.call, ToolCall::GhPrList { .. });
+    ) && intent.call.is_host_pr_read();
     let succeeded = reaped && stopped && execution_status.is_some_and(|status| status.success());
-    let pr_list_confirmed_failure = matches!(intent.call, ToolCall::GhPrList { .. })
+    let pr_read_confirmed_failure = intent.call.is_host_pr_read()
         && reaped
         && stopped
         && (pr_list_capture_limited || execution_status.is_some_and(|status| !status.success()));
@@ -1412,7 +2219,11 @@ fn classify_outcome(
                 .is_ok_and(|(_, bytes)| non_fast_forward(intent, bytes))
         });
     let output = if pr_list_capture_limited && reaped && stopped {
-        PR_LIST_CAPTURE_LIMIT.into()
+        if matches!(intent.call, ToolCall::GhPrView { .. }) {
+            PR_VIEW_CAPTURE_LIMIT.into()
+        } else {
+            PR_LIST_CAPTURE_LIMIT.into()
+        }
     } else if succeeded {
         match &intent.call {
             ToolCall::GhPrList { limit, .. } => completed
@@ -1422,10 +2233,19 @@ fn classify_outcome(
                     pr_list_result(bytes, *limit, intent.limits.result_bytes as usize)
                 })
                 .unwrap_or_else(|| PR_LIST_INVALID.into()),
+            ToolCall::GhPrView { .. } => completed
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|(_, bytes)| String::from_utf8(bytes.clone()).ok())
+                .unwrap_or_else(|| PR_VIEW_INVALID.into()),
             _ => "host: remote operation completed.".into(),
         }
-    } else if pr_list_confirmed_failure {
-        PR_LIST_FAILED.into()
+    } else if pr_read_confirmed_failure {
+        if matches!(intent.call, ToolCall::GhPrView { .. }) {
+            PR_VIEW_FAILED.into()
+        } else {
+            PR_LIST_FAILED.into()
+        }
     } else if rejected {
         NON_FAST_FORWARD.into()
     } else {
@@ -1434,12 +2254,14 @@ fn classify_outcome(
     let disposition = if pr_list_capture_limited && reaped && stopped {
         ToolDisposition::Failed
     } else if succeeded {
-        if matches!(intent.call, ToolCall::GhPrList { .. }) && output == PR_LIST_INVALID {
+        if matches!(intent.call, ToolCall::GhPrList { .. }) && output == PR_LIST_INVALID
+            || matches!(intent.call, ToolCall::GhPrView { .. }) && output == PR_VIEW_INVALID
+        {
             ToolDisposition::Failed
         } else {
             ToolDisposition::Succeeded
         }
-    } else if pr_list_confirmed_failure || rejected {
+    } else if pr_read_confirmed_failure || rejected {
         ToolDisposition::Failed
     } else {
         ToolDisposition::Uncertain
@@ -1496,6 +2318,224 @@ mod tests {
             head: None,
             limit: DEFAULT_PR_LIMIT,
         }
+    }
+
+    fn pr_view_scalar(head_oid: &str) -> Value {
+        json!({
+            "number": 17, "title": "Review", "url": "https://github.com/example/project/pull/17",
+            "author": {"login":"author"}, "state":"OPEN", "isDraft":false,
+            "baseRefName":"main", "baseRefOid":"a".repeat(40), "headRefName":"topic",
+            "headRefOid":head_oid, "reviewDecision":null, "updatedAt":"2026-10-22T00:00:00Z",
+            "body":"Description", "mergeable":"MERGEABLE"
+        })
+    }
+
+    fn pr_view_identity() -> PrViewIdentity {
+        PrViewIdentity {
+            repository: "github.com/example/project".into(),
+            number: 17,
+        }
+    }
+
+    fn pr_view_graph(head_oid: &str, check_status: &str) -> Value {
+        json!({"data":{"repository":{"pullRequest":{
+            "headRefOid":head_oid,
+            "reviewDecision":"REVIEW_REQUIRED",
+            "comments":{"pageInfo":{"hasPreviousPage":true},"nodes":[{"author":{"login":"commenter"},"createdAt":"2026-10-22T00:00:00Z","body":"Please update"}]},
+            "reviews":{"pageInfo":{"hasPreviousPage":false},"nodes":[{"author":{"login":"reviewer"},"submittedAt":"2026-10-22T00:00:00Z","state":"CHANGES_REQUESTED","body":"Needs work"}]},
+            "commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"CheckRun","name":"ci","status":check_status,"conclusion":null}]}}}}]}
+        }}}})
+    }
+
+    #[test]
+    fn host_gh_pr_view_query_is_fixed_and_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let (command, _, input) = prepare_graphql_command(
+            &config(),
+            &authentication(temp.path()),
+            temp.path(),
+            "github.com/example/project",
+            17,
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "api",
+                "graphql",
+                "--hostname",
+                "github.com",
+                "--method",
+                "POST",
+                "--input",
+                "-"
+            ]
+        );
+        let input: Value = serde_json::from_slice(&input).unwrap();
+        assert_eq!(
+            input["variables"],
+            json!({"owner":"example","name":"project","number":17})
+        );
+        assert!(
+            input["query"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("comments(last:{PR_VIEW_COMMENT_LIMIT})"))
+        );
+        assert!(
+            input["query"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("reviews(last:{PR_VIEW_REVIEW_LIMIT})"))
+        );
+        assert!(
+            input["query"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("contexts(first:{PR_VIEW_CHECK_LIMIT})"))
+        );
+        assert!(!input["query"].as_str().unwrap().contains("paginate"));
+        assert!(valid_graphql_delimiters(input["query"].as_str().unwrap()));
+        assert!(!valid_graphql_delimiters("query { repository("));
+        assert!(serde_json::to_vec(&input).unwrap().len() <= PR_VIEW_QUERY_BYTES);
+    }
+
+    #[test]
+    fn host_gh_pr_view_accepts_mixed_case_repository_identity() {
+        let scalar_head = "a".repeat(40);
+        let mut scalar = pr_view_scalar(&scalar_head);
+        scalar["url"] = json!("https://github.com/Example/Project/pull/17");
+        let output = pr_view_result(
+            &scalar,
+            &serde_json::to_string(&pr_view_graph(&scalar_head, "COMPLETED")).unwrap(),
+            pr_view_identity(),
+            crate::tools::types::MAX_TOOL_RESULT_BYTES,
+        )
+        .unwrap();
+        assert!(valid_pr_view_output(&output, pr_view_identity()));
+    }
+
+    #[test]
+    fn host_gh_pr_view_preserves_pending_status_partiality_and_head_races() {
+        let scalar_head = "a".repeat(40);
+        let graph_head = "b".repeat(40);
+        let result = pr_view_result(
+            &pr_view_scalar(&scalar_head),
+            &serde_json::to_string(&pr_view_graph(&graph_head, "IN_PROGRESS")).unwrap(),
+            pr_view_identity(),
+            crate::tools::types::MAX_TOOL_RESULT_BYTES,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        assert!(value["pull_request"]["stale"].as_bool().unwrap());
+        assert_eq!(value["pull_request"]["head_oid"], scalar_head);
+        assert_eq!(value["pull_request"]["checks_head_oid"], graph_head);
+        assert_eq!(
+            value["pull_request"]["checks"]["items"][0]["status"],
+            "IN_PROGRESS"
+        );
+        assert_eq!(value["pull_request"]["comments"]["truncated"], true);
+        assert_eq!(
+            value["pull_request"]["discussion_review_decision"],
+            "REVIEW_REQUIRED"
+        );
+        assert!(valid_pr_view_output(&result, pr_view_identity()));
+    }
+
+    #[test]
+    fn host_gh_pr_view_rejects_mismatched_identity_and_graph_errors() {
+        let head = "a".repeat(40);
+        let graph = pr_view_graph(&head, "COMPLETED");
+        let result = pr_view_result(
+            &pr_view_scalar(&head),
+            &graph.to_string(),
+            pr_view_identity(),
+            crate::tools::types::MAX_TOOL_RESULT_BYTES,
+        )
+        .unwrap();
+        for (field, replacement) in [
+            ("number", json!(18)),
+            ("url", json!("https://github.com/elsewhere/project/pull/17")),
+            ("stale", json!(true)),
+        ] {
+            let mut invalid: Value = serde_json::from_str(&result).unwrap();
+            invalid["pull_request"][field] = replacement;
+            assert!(!valid_pr_view_output(
+                &invalid.to_string(),
+                pr_view_identity()
+            ));
+        }
+
+        for url in [
+            "http://github.com/example/project/pull/17",
+            "https://elsewhere.com/example/project/pull/17",
+            "https://github.com/example/project/issues/17",
+            "https://github.com/example/project/pull/18",
+        ] {
+            let mut invalid = pr_view_scalar(&head);
+            invalid["url"] = json!(url);
+            assert!(
+                pr_view_result(
+                    &invalid,
+                    &graph.to_string(),
+                    pr_view_identity(),
+                    crate::tools::types::MAX_TOOL_RESULT_BYTES,
+                )
+                .is_none(),
+                "accepted URL: {url}"
+            );
+        }
+
+        let mut partial = graph;
+        partial["errors"] = json!([{"message":"partial response"}]);
+        assert!(
+            pr_view_result(
+                &pr_view_scalar(&head),
+                &partial.to_string(),
+                pr_view_identity(),
+                crate::tools::types::MAX_TOOL_RESULT_BYTES,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn host_gh_pr_view_accepts_missing_checks_and_preserves_failures() {
+        let head = "a".repeat(40);
+        let mut no_checks = pr_view_graph(&head, "COMPLETED");
+        no_checks["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"] =
+            Value::Null;
+        let no_checks = pr_view_result(
+            &pr_view_scalar(&head),
+            &no_checks.to_string(),
+            pr_view_identity(),
+            crate::tools::types::MAX_TOOL_RESULT_BYTES,
+        )
+        .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&no_checks).unwrap()["pull_request"]["checks"].is_null()
+        );
+
+        let mut failed_check = pr_view_graph(&head, "COMPLETED");
+        failed_check["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]
+            ["contexts"]["nodes"][0]["conclusion"] = json!("FAILURE");
+        let failed_check = pr_view_result(
+            &pr_view_scalar(&head),
+            &failed_check.to_string(),
+            pr_view_identity(),
+            crate::tools::types::MAX_TOOL_RESULT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&failed_check).unwrap()["pull_request"]["checks"]["items"]
+                [0]["conclusion"],
+            "FAILURE"
+        );
     }
 
     fn intent(workspace: &Path, call: ToolCall) -> EffectIntent {
@@ -1656,7 +2696,8 @@ mod tests {
             "git_log",
             "git_branch",
             "gh_pr_create",
-            "gh_pr_list"
+            "gh_pr_list",
+            "gh_pr_view"
         ]);
         assert_eq!(operations(&runtime), with_pr_reads);
         runtime.config.commands.clear();
@@ -1681,7 +2722,8 @@ mod tests {
                 "git_diff",
                 "git_log",
                 "git_branch",
-                "gh_pr_list"
+                "gh_pr_list",
+                "gh_pr_view"
             ])
         );
     }
@@ -2745,6 +3787,41 @@ done
         assert_eq!(observation.disposition, ToolDisposition::Failed);
         assert_eq!(observation.output, PR_LIST_INVALID);
         assert!(observation.valid());
+    }
+
+    #[tokio::test]
+    async fn host_gh_pr_view_nonzero_exit_uses_inspection_failure_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let private = Arc::new(tempfile::tempdir().unwrap());
+        let intent = intent(
+            &workspace,
+            ToolCall::GhPrView {
+                repository: "github.com/example/project".into(),
+                number: 17,
+            },
+        );
+        let (prepared, digest) = prepare(
+            &config(),
+            &authentication(temp.path()),
+            &workspace,
+            &intent,
+            Arc::clone(&private),
+        )
+        .await
+        .unwrap();
+        let command = synthetic_peer(
+            &prepared,
+            Path::new("/bin/sh"),
+            &["-c".into(), "exit 7".into()],
+        );
+        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert_eq!(observation.output, PR_VIEW_FAILED);
+        assert!(observation.valid());
+        let mut wrong_operation = observation;
+        wrong_operation.output = PR_LIST_FAILED.into();
+        assert!(!wrong_operation.valid());
     }
 
     #[tokio::test]

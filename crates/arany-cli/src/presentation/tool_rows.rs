@@ -91,6 +91,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::GitPush { remote, branch } => format!("host Git push({branch} → {remote})"),
         ToolCall::GhPrCreate { repository, .. } => format!("host PR create({repository})"),
         ToolCall::GhPrList { repository, .. } => format!("host PR list({repository})"),
+        ToolCall::GhPrView { repository, number } => {
+            format!("host PR view #{number}({repository})")
+        }
     };
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
@@ -114,7 +117,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
                     safe_truncate(&observation.output, 160)
                 }
-                ToolCall::GhPrList { .. } => safe_truncate(&observation.output, 160),
+                ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
+                    safe_truncate(&observation.output, 160)
+                }
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -521,6 +526,11 @@ fn approval_call_lines(call: &arany::ToolCall) -> Vec<String> {
                     escape_terminal(head.as_deref().unwrap_or("any"))
                 ));
                 lines.push(format!("Limit: {limit}"));
+            }
+            ToolCall::GhPrView { repository, number } => {
+                lines.push("Private GitHub PR data may be sent to the current Provider.".into());
+                lines.push(format!("Repository: {}", escape_terminal(repository)));
+                lines.push(format!("Pull request: #{number}"));
             }
             _ => {}
         }
@@ -1035,6 +1045,9 @@ impl ToolApprovalChoice {
                 arany::permissions::TypedGitPrefix::PrList => {
                     "Yes, and allow gh pr list from the next Run"
                 }
+                arany::permissions::TypedGitPrefix::PrView => {
+                    "Yes, and allow gh pr view from the next Run"
+                }
             },
             Self::No => "No",
         }
@@ -1060,7 +1073,10 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         choices.push(ToolApprovalChoice::ExactCommand);
     } else if approval.unguarded.is_none()
         && (!approval.intent.call.is_host()
-            || matches!(approval.intent.call, arany::ToolCall::GhPrList { .. }))
+            || matches!(
+                approval.intent.call,
+                arany::ToolCall::GhPrList { .. } | arany::ToolCall::GhPrView { .. }
+            ))
     {
         if approval.allow_auto_edits && !approval.intent.call.is_host() {
             choices.push(ToolApprovalChoice::AutoEdits);

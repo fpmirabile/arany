@@ -885,7 +885,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
     offered["git"]["operations"]
         .as_array_mut()
         .unwrap()
-        .push(json!("gh_pr_list"));
+        .extend([json!("gh_pr_list"), json!("gh_pr_view")]);
     request.input.tools = Some(tool_context(offered));
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 2,

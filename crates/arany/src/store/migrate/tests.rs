@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 71] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -223,6 +223,42 @@ const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
     (
         "ProviderCallRecorded",
         21,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    (
+        "ToolStarted",
+        21,
+        include_str!("toolstarted-without-expiry.json"),
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        28,
+        include_str!("toolfinished-without-expiry.json"),
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "HookStarted",
+        11,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        17,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        12,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        22,
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
@@ -2717,6 +2753,24 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
 fn source_for_tool_started() -> Value {
     serde_json::from_str(include_str!("toolstarted-without-expiry.json"))
         .expect("expiry-free ToolStarted fixture")
+}
+
+#[test]
+fn pr_view_identity_step_rejects_view_authority_in_older_payloads() {
+    let step = REGISTRY.event_step("ToolStarted", 21).unwrap();
+    let mut source = source_for_tool_started();
+    source["intent"]["call"] = serde_json::json!({
+        "operation":"gh_pr_view",
+        "repository":"github.com/o/r",
+        "number":17
+    });
+    source["intent"]["host"] = serde_json::json!({
+        "source_oid":"gh-pr-view-v1",
+        "refspec":"fixed-view-v1"
+    });
+    source["intent"]["limits"]["network"] = serde_json::json!("host");
+    assert!((step.canonical)(&source.to_string()).is_none());
+    assert!((step.transform)(source).is_none());
 }
 
 #[test]

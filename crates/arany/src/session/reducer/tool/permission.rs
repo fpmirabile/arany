@@ -29,9 +29,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 && !unguarded
                 && pending_call.is_git()
                 && pending_call.facts().mutates;
-            let first_unconfigured_host_read = !permissions_pinned
-                && definition_mode.is_none()
-                && matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. });
+            let first_unconfigured_host_read =
+                !permissions_pinned && definition_mode.is_none() && pending_call.is_host_pr_read();
             if first_use
                 && !(primary
                     && verdict.hook_restriction.is_none()
@@ -63,7 +62,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                             && (matches!(
                                 verdict.mode,
                                 Some(PermissionMode::Default | PermissionMode::DontAsk)
-                            ) || matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. }))
+                            ) || pending_call.is_host_pr_read())
                         || !verdict.approved && verdict.decision == Decision::Deny))
             {
                 return Err(ReplayError::InvalidTransition);
@@ -83,7 +82,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 && verdict.approved
                 && (!primary
                     || pending_tool(run, *agent_run_id)?.intent.host.is_none()
-                    || if matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. }) {
+                    || if pending_call.is_host_pr_read() {
                         !(verdict.source == PermissionSource::TypedPrefixRule
                             && verdict.basis == PermissionSource::TypedPrefixRule
                             && verdict.decision == Decision::Allow

@@ -488,6 +488,7 @@ impl RunLoop<'_> {
             | ToolCall::GitPush { .. }
             | ToolCall::GhPrCreate { .. }
             | ToolCall::GhPrList { .. }
+            | ToolCall::GhPrView { .. }
             | ToolCall::Glob { .. } => 0,
         })
     }

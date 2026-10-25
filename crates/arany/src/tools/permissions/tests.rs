@@ -2484,13 +2484,13 @@ fn typed_host_pr_list_allow_applies_in_every_mode() {
         limit: crate::tools::types::DEFAULT_PR_LIMIT,
     };
     for mode in ["default", "acceptEdits", "auto", "plan", "dontAsk"] {
-        let config = typed_config(
+        let typed_permissions = typed_config(
             mode,
             vec![typed(TypedGitPrefix::PrList.tokens(), "allow", Value::Null)],
         )
         .unwrap();
         assert_eq!(
-            config.evaluate(&call),
+            typed_permissions.evaluate(&call),
             (Decision::Allow, PermissionSource::TypedPrefixRule, None),
             "{mode}"
         );
@@ -2499,4 +2499,23 @@ fn typed_host_pr_list_allow_applies_in_every_mode() {
     }
     let ordinary_allow = config(json!({"allow": ["gh_pr_list"]}));
     assert_eq!(ordinary_allow.evaluate(&call).0, Decision::Ask);
+
+    let view = ToolCall::GhPrView {
+        repository: "github.com/o/r".into(),
+        number: 17,
+    };
+    for mode in ["default", "acceptEdits", "auto", "plan", "dontAsk"] {
+        let typed_permissions = typed_config(
+            mode,
+            vec![typed(TypedGitPrefix::PrView.tokens(), "allow", Value::Null)],
+        )
+        .unwrap();
+        assert_eq!(
+            typed_permissions.evaluate(&view),
+            (Decision::Allow, PermissionSource::TypedPrefixRule, None),
+            "{mode}"
+        );
+        let ordinary_allow = config(json!({"allow": ["gh_pr_view"]}));
+        assert_eq!(ordinary_allow.evaluate(&view).0, Decision::Ask);
+    }
 }

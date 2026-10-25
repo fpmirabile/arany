@@ -380,7 +380,7 @@ impl PermissionConfig {
             && (facts.asks_approval
                 || facts.spawns_process
                 || matches!(facts.family, Family::Mcp | Family::Git));
-        let typed_host_read = matches!(call, ToolCall::GhPrList { .. });
+        let typed_host_read = call.is_host_pr_read();
         let allow_skips_approval = typed_host_read
             || !call.is_unguarded()
                 && !call.is_host()
