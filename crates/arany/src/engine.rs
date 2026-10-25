@@ -979,7 +979,6 @@ struct GoalWorkspaceLock {
 
 impl Engine {
     pub fn revoke_host_approvals(&self) -> Result<(), EngineError> {
-        let _slot = self.claim()?;
         self.clear_host_epoch();
         Ok(())
     }

@@ -474,9 +474,7 @@ impl ServerLoop {
         if encode_line(&response).is_err() {
             return Err(Fault::engine(EngineError::ContextTooLarge));
         }
-        if self.active.is_none() {
-            self.engine.revoke_host_approvals().map_err(Fault::engine)?;
-        }
+        self.engine.revoke_host_approvals().map_err(Fault::engine)?;
         self.threads.map.insert(thread_id, loaded);
         self.inbound
             .wait(

@@ -1668,7 +1668,7 @@ enum ApprovalCase {
 #[tokio::test]
 async fn approval_accept_dispatches_the_exact_journaled_intent_once() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Accept, false).await;
+    approval_scenario(ApprovalCase::Accept, false, false).await;
 }
 
 #[cfg(unix)]
@@ -1680,7 +1680,7 @@ async fn approval_decline_invalid_and_client_error_deny() {
         ApprovalCase::Invalid,
         ApprovalCase::ClientError,
     ] {
-        approval_scenario(case, false).await;
+        approval_scenario(case, false, false).await;
     }
 }
 
@@ -1693,7 +1693,7 @@ async fn approval_cancel_interrupt_and_eof_deny() {
         ApprovalCase::Interrupt,
         ApprovalCase::Eof,
     ] {
-        approval_scenario(case, false).await;
+        approval_scenario(case, false, false).await;
     }
 }
 
@@ -1701,14 +1701,14 @@ async fn approval_cancel_interrupt_and_eof_deny() {
 #[tokio::test]
 async fn approval_remains_answerable_after_the_former_deadline() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::LateAccept, false).await;
+    approval_scenario(ApprovalCase::LateAccept, false, false).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn approval_duplicate_and_unknown_responses_cannot_resolve_another_intent() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Duplicate, false).await;
+    approval_scenario(ApprovalCase::Duplicate, false, false).await;
 }
 
 #[cfg(unix)]
@@ -1719,7 +1719,7 @@ async fn approval_cancel_journals_while_outbound_is_full() {
         ApprovalCase::Backpressure,
         ApprovalCase::BackpressureInterrupt,
     ] {
-        approval_scenario(case, false).await;
+        approval_scenario(case, false, false).await;
     }
 }
 
@@ -1727,7 +1727,7 @@ async fn approval_cancel_journals_while_outbound_is_full() {
 #[tokio::test]
 async fn approval_never_delivered_is_unavailable_and_rejects_late_acceptance() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Undelivered, false).await;
+    approval_scenario(ApprovalCase::Undelivered, false, false).await;
 }
 
 #[test]
@@ -1761,7 +1761,10 @@ fn host_approval_once_refusal_and_transport_failures_replay() {
                 ApprovalCase::Remember,
             ] {
                 let _deadline = deadline();
-                approval_scenario(case, true).await;
+                approval_scenario(case, true, false).await;
+                if case == ApprovalCase::Session {
+                    approval_scenario(case, true, true).await;
+                }
             }
         });
 }
@@ -1772,6 +1775,107 @@ fn decision(id: Value, result: Value) -> ClientMessage {
         id: serde_json::from_value(id).unwrap(),
         result,
     }))
+}
+
+const BUSY_RESUME_OBJECTIVE: &str = "Hold a tools-disabled turn";
+
+struct ResumeProvider {
+    scripted: Arc<ScriptedProvider>,
+    waiting: WaitingProvider,
+}
+
+#[async_trait::async_trait]
+impl Provider for ResumeProvider {
+    fn identity(&self) -> &arany::ProviderIdentity {
+        self.scripted.identity()
+    }
+
+    async fn invoke(
+        &self,
+        request: arany::ProviderRequest,
+    ) -> Result<arany::ProviderResponse, arany::ProviderError> {
+        if request.input.objective == BUSY_RESUME_OBJECTIVE {
+            self.waiting.invoke(request).await
+        } else {
+            self.scripted.invoke(request).await
+        }
+    }
+}
+
+async fn resume_host_thread(
+    input: &mpsc::Sender<ClientMessage>,
+    output: &mut mpsc::Receiver<Message>,
+    thread: &Value,
+    workspace: &std::path::Path,
+) {
+    input.send(request(6, "thread/resume", json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"default","collaboration":"single"}))).await.unwrap();
+    loop {
+        let message = next(output).await;
+        assert!(message.get("error").is_none(), "{message}");
+        if message["id"] == 6 {
+            break;
+        }
+    }
+}
+
+async fn resume_during_tools_disabled_turn(
+    input: &mpsc::Sender<ClientMessage>,
+    output: &mut mpsc::Receiver<Message>,
+    thread: &Value,
+    workspace: &std::path::Path,
+    started: &mut mpsc::UnboundedReceiver<()>,
+) {
+    input
+        .send(request(
+            8,
+            "thread/start",
+            json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","collaboration":"single"}),
+        ))
+        .await
+        .unwrap();
+    let other = next(output).await["result"]["thread"]["id"].clone();
+    assert!(!other.is_null());
+    assert_eq!(next(output).await["method"], "thread/started");
+    input
+        .send(request(
+            3,
+            "turn/start",
+            json!({"threadId":other,"input":[{"type":"text","text":BUSY_RESUME_OBJECTIVE}]}),
+        ))
+        .await
+        .unwrap();
+    let run = loop {
+        let message = next(output).await;
+        assert!(message.get("error").is_none(), "{message}");
+        if message["id"] == 3 {
+            break message["result"]["turn"]["id"].clone();
+        }
+    };
+    started.recv().await.unwrap();
+    resume_host_thread(input, output, thread, workspace).await;
+    input
+        .send(request(
+            9,
+            "turn/interrupt",
+            json!({"threadId":other,"turnId":run}),
+        ))
+        .await
+        .unwrap();
+    let mut acknowledged = false;
+    let mut completed = false;
+    while !acknowledged || !completed {
+        let message = next(output).await;
+        assert!(message.get("error").is_none(), "{message}");
+        if message["id"] == 9 {
+            assert_eq!(message["result"], json!({}));
+            acknowledged = true;
+        }
+        if message["method"] == "turn/completed" {
+            assert_eq!(message["params"]["threadId"], other);
+            assert_eq!(message["params"]["turn"]["status"], "interrupted");
+            completed = true;
+        }
+    }
 }
 
 async fn session_host_turn(
@@ -1812,7 +1916,7 @@ async fn session_host_turn(
 }
 
 #[cfg(unix)]
-async fn approval_scenario(case: ApprovalCase, host: bool) {
+async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1897,8 +2001,24 @@ async fn approval_scenario(case: ApprovalCase, host: bool) {
             }),
     );
     let requests = provider.requests.clone();
+    let (busy_started, mut busy_start) = mpsc::unbounded_channel();
+    let busy_requests = Arc::new(Mutex::new(Vec::new()));
+    let busy_dropped = Arc::new(AtomicUsize::new(0));
+    let selected: Arc<dyn Provider> = if busy_resume {
+        Arc::new(ResumeProvider {
+            scripted: provider.clone(),
+            waiting: WaitingProvider {
+                started: busy_started,
+                dropped: busy_dropped.clone(),
+                requests: busy_requests.clone(),
+                identity: provider.identity().clone(),
+            },
+        })
+    } else {
+        provider.clone()
+    };
     let threads = threads::Threads {
-        provider: Some(provider.clone()),
+        provider: Some(selected),
         ..Default::default()
     };
     let approval_method = if host {
@@ -2215,13 +2335,17 @@ async fn approval_scenario(case: ApprovalCase, host: bool) {
         let mut receipt = None;
         if case == ApprovalCase::Session {
             session_host_turn(&input, &mut output, &thread, 0).await;
-            input.send(request(6, "thread/resume", json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"default","collaboration":"single"}))).await.unwrap();
-            loop {
-                let message = next(&mut output).await;
-                assert!(message.get("error").is_none(), "{message}");
-                if message["id"] == 6 {
-                    break;
-                }
+            if busy_resume {
+                resume_during_tools_disabled_turn(
+                    &input,
+                    &mut output,
+                    &thread,
+                    &workspace,
+                    &mut busy_start,
+                )
+                .await;
+            } else {
+                resume_host_thread(&input, &mut output, &thread, &workspace).await;
             }
             session_host_turn(&input, &mut output, &thread, 1).await;
             input
@@ -2271,6 +2395,20 @@ async fn approval_scenario(case: ApprovalCase, host: bool) {
             "{case:?}: {message:?}"
         );
     }
+    if busy_resume {
+        assert_eq!(busy_dropped.load(Ordering::SeqCst), 1);
+        let busy_session = {
+            let busy = busy_requests.lock().unwrap();
+            assert_eq!(busy.len(), 1);
+            busy[0].session_id
+        };
+        let (events, view) = closed_view(&state, busy_session).await;
+        assert!(view.runs[0].config.as_ref().unwrap().tool_policy.is_none());
+        assert_eq!(view.runs[0].status, arany::RunStatus::Cancelled);
+        for prefix in 1..=events.len() {
+            arany::SessionView::replay(view.id, &events[..prefix]).unwrap();
+        }
+    }
     let (events, view) = closed_view(&state, id).await;
     if host {
         assert_eq!(
@@ -2309,6 +2447,12 @@ async fn approval_scenario(case: ApprovalCase, host: bool) {
             third.permission_verdict.as_ref().unwrap().source,
             arany::permissions::PermissionSource::Human
         );
+        for tool in [second, third] {
+            assert_eq!(
+                tool.observation.as_ref().unwrap().disposition,
+                arany::ToolDisposition::Succeeded
+            );
+        }
         let epoch = |run: &arany::RunView| {
             run.config
                 .as_ref()
