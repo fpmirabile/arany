@@ -535,12 +535,12 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = uuid::Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "storage": "private_file",
         "account": {
-            "schema": 2,
+            "schema": 3,
             "id": account_id,
-            "provider": "openai",
+            "provider": {"kind": "openai", "custom_name": null},
             "model": "gpt-5.4",
             "effort": null,
             "api_key": "synthetic-existing-key",

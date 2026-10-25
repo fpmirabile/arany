@@ -171,6 +171,18 @@ impl Chat {
         );
     }
 
+    fn wait_provider(&mut self, ready: &mpsc::Receiver<()>, label: &str) {
+        self.wait(
+            0,
+            |_| match ready.try_recv() {
+                Ok(()) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => panic!("{label}: provider disconnected"),
+            },
+            label,
+        );
+    }
+
     // A picker takes keys only once its armed frame is drawn.
     fn wait_armed(&mut self, from: usize, label: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -545,9 +557,7 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
     );
 
     chat.send(b"start work\r");
-    run_ready
-        .recv_timeout(Duration::from_secs(10))
-        .expect("Run provider request");
+    chat.wait_provider(&run_ready, "Run provider request");
     let attach = chat.send(b"\x1b[200~preview.png\x1b[201~");
     chat.wait(attach, has_image_chip, "Run draft image chip");
     let (column, row) = image_chip_position(&chat.transcript);
@@ -580,16 +590,21 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
     release_sender.send(()).expect("release Run response");
     chat.wait(
         0,
-        |bytes| screen_text_position(bytes, "active answer").is_some(),
-        "Run completes",
+        |bytes| {
+            screen_text_position(bytes, "active answer").is_some()
+                && screen_text_position(bytes, "Draft retained:").is_some()
+        },
+        "Run returns to idle with the retained draft",
     );
     let clear = chat.send(b"\x03");
-    chat.wait_for(clear, &[EMPTY_COMPOSER], "Run draft cleared");
+    chat.wait(
+        0,
+        |bytes| position(&bytes[clear..], EMPTY_COMPOSER).is_some() && !has_image_chip(bytes),
+        "Run draft cleared",
+    );
 
     chat.send(b"/compact\r");
-    compact_ready
-        .recv_timeout(Duration::from_secs(10))
-        .expect("compaction provider request");
+    chat.wait_provider(&compact_ready, "compaction provider request");
     let attach = chat.send(b"\x1b[200~preview.png\x1b[201~");
     chat.wait(attach, has_image_chip, "compaction draft image chip");
     let (column, row) = image_chip_position(&chat.transcript);

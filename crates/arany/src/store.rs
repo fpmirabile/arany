@@ -17,8 +17,11 @@ mod journal;
 mod migrate;
 mod replay;
 mod state;
+pub(crate) use evidence::{MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_NATIVE_EVIDENCE_ROWS};
+pub(crate) use journal::MAX_HOT_SESSION_PAYLOAD_BYTES;
 use journal::{HotSession, append, open_connection};
 pub use migrate::{RECORD_FORMATS, RecordFormat, RecordStep};
+pub(crate) use replay::{MAX_DISCOVERED_SESSIONS, MAX_LIST_SCAN_EVENTS, MAX_SESSION_EVENTS};
 use replay::{
     latest_session_id, list_session_page, load_session, resolve_open_view, resolve_view,
     session_for_run,
@@ -35,6 +38,10 @@ pub(crate) use state::{
     archive_size_with_limit,
 };
 pub use state::{ArchivedHistory, HistoryReset};
+#[cfg(unix)]
+pub(crate) use state::{
+    MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES,
+};
 pub use state::{ProviderRecordEdit, ProviderRecordTarget, Record, RecordKind, StateRoot};
 #[cfg(target_os = "macos")]
 pub(crate) use state::{capture_archive_async_with_limit, restore_archive_async_with_limit};
@@ -51,14 +58,15 @@ pub(crate) const MAX_COMPACTION_RECORD_BYTES: usize =
 // JSON escaping writes at most six bytes (`\u00XX`) per objective byte.
 const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_BYTES;
 pub(crate) const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
-const MAX_MESSAGE_ACCEPTED_BYTES: usize =
+pub(crate) const MAX_MESSAGE_ACCEPTED_BYTES: usize =
     MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
-const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES + 512;
-const MAX_GOAL_FINISHED_BYTES: usize =
+pub(crate) const MAX_TOOL_FINISHED_BYTES: usize =
+    crate::tools::types::MAX_TOOL_OBSERVATION_BYTES + 512;
+pub(crate) const MAX_GOAL_FINISHED_BYTES: usize =
     crate::session::MAX_GOAL_REPORT_BYTES + crate::session::MAX_BUDGET_REFUSAL_BYTES + 512;
 const _: () = assert!(MAX_GOAL_FINISHED_BYTES <= MAX_EVENT_BYTES);
 // The complete intent: Tool arguments plus bounded metadata; Tool admission reserves it as an observation slot.
-const MAX_TOOL_STARTED_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_TOOL_STARTED_BYTES: usize = 512 * 1024;
 const _: () = assert!(MAX_TOOL_STARTED_BYTES <= MAX_TOOL_FINISHED_BYTES);
 // Run start needs extra headroom because GoalStarted and MessageAccepted exceed the ordinary Event bound.
 const RUN_START_EXTRA_BYTES: usize =

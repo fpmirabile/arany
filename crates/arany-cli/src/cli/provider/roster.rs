@@ -2,29 +2,67 @@ use super::routing::{Route, RoutingError, admit};
 use super::select::{ProviderArg, Selection};
 use arany::{
     AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, ProviderKind,
-    Providers, RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
+    Providers, RecordFormat, RecordKind, RecordStep, RosterSnapshot, StateRoot, valid_profile_name,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
+
+pub(crate) const MAX_PROFILES: usize = 32;
+pub(crate) const MAX_PRESETS: usize = 16;
+pub(crate) const MAX_ELIGIBLE_PROFILES: usize = 8;
+const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 
 const INVALID: &str = "invalid or oversized provider-roster.json";
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Profile {
-    name: String,
-    routes: Vec<Route>,
+pub(crate) struct Profile {
+    pub(crate) name: String,
+    pub(crate) routes: Vec<Route>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Preset {
-    name: String,
-    providers: Providers<Option<String>>,
-    child_profiles: Vec<String>,
+pub(crate) struct Preset {
+    pub(crate) name: String,
+    pub(crate) providers: Providers<Option<String>>,
+    pub(crate) child_profiles: Vec<String>,
 }
 
-#[derive(Deserialize)]
+impl Preset {
+    fn bounded_references(&self) -> Result<BTreeSet<String>, String> {
+        let referenced = self
+            .providers
+            .values()
+            .into_iter()
+            .flatten()
+            .chain(self.child_profiles.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if referenced.len() > MAX_ELIGIBLE_PROFILES {
+            return Err(format!(
+                "Preset {} references more than {MAX_ELIGIBLE_PROFILES} distinct profiles; remove a role reference or an eligible child",
+                crate::presentation::escape_terminal(&self.name),
+            ));
+        }
+        Ok(referenced)
+    }
+
+    fn validate_child_default(&self) -> Result<(), String> {
+        let primary = self.providers.primary.as_ref().ok_or(INVALID)?;
+        let child = self.providers.child.as_ref().unwrap_or(primary);
+        if !self.child_profiles.contains(child) {
+            return Err(format!(
+                "Preset {} must list its child default {} under eligible children",
+                crate::presentation::escape_terminal(&self.name),
+                crate::presentation::escape_terminal(child),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     version: u8,
@@ -41,7 +79,7 @@ pub(crate) struct SelectedRoster {
 }
 
 fn bounded(bytes: &[u8]) -> bool {
-    if bytes.len() > 64 * 1024 {
+    if bytes.len() > RecordKind::ProviderRoster.limit() {
         return false;
     }
     let (mut depth, mut string, mut escape) = (0u32, false, false);
@@ -80,10 +118,180 @@ pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRoster,
     field: "version",
     floor: 1,
-    current: 1,
-    steps: &[],
+    current: 2,
+    steps: &[RecordStep {
+        from: 1,
+        transform: migrate_roster,
+    }],
     accepts: |bytes| presets(bytes).is_ok(),
 };
+
+pub(crate) struct RosterDraft {
+    pub(crate) profiles: Vec<Profile>,
+    pub(crate) presets: Vec<Preset>,
+    expected: Option<Vec<u8>>,
+}
+
+impl RosterDraft {
+    pub(crate) fn load(state: &StateRoot) -> Result<Self, String> {
+        let expected = state
+            .read_current(&PROVIDER_ROSTER)
+            .map_err(|_| "Provider roster unavailable or unsafe")?;
+        let config = match &expected {
+            Some(bytes) => {
+                presets(bytes)?;
+                serde_json::from_slice::<Config>(bytes).map_err(|_| INVALID)?
+            }
+            None => Config {
+                version: u8::try_from(PROVIDER_ROSTER.current).map_err(|_| INVALID)?,
+                profiles: vec![],
+                presets: vec![],
+            },
+        };
+        Ok(Self {
+            profiles: config.profiles,
+            presets: config.presets,
+            expected,
+        })
+    }
+
+    pub(crate) fn expected(&self) -> Option<&[u8]> {
+        self.expected.as_deref()
+    }
+
+    pub(crate) fn remove_profile(&mut self, index: usize) -> Result<(), String> {
+        let profile = self.profiles.get(index).ok_or(INVALID)?;
+        let uses = self
+            .presets
+            .iter()
+            .filter(|preset| {
+                preset
+                    .providers
+                    .values()
+                    .into_iter()
+                    .any(|name| name.as_ref() == Some(&profile.name))
+                    || preset.child_profiles.contains(&profile.name)
+            })
+            .map(|preset| preset.name.as_str())
+            .collect::<Vec<_>>();
+        if !uses.is_empty() {
+            return Err(format!(
+                "Profile is referenced by presets: {}; change those references first",
+                uses.join(", ")
+            ));
+        }
+        self.profiles.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn encode(&self) -> Result<Option<Vec<u8>>, String> {
+        if self.presets.is_empty() {
+            return if self.expected.is_some() {
+                Ok(None)
+            } else {
+                Err("Add a named preset before saving route profiles".into())
+            };
+        }
+        for preset in &self.presets {
+            preset.validate_child_default()?;
+            preset.bounded_references()?;
+        }
+        let mut profiles = self.profiles.clone();
+        for profile in &mut profiles {
+            for route in &mut profile.routes {
+                route.resolve_effort().map_err(|_| INVALID)?;
+            }
+        }
+        let bytes = serde_json::to_vec(&Config {
+            version: u8::try_from(PROVIDER_ROSTER.current).map_err(|_| INVALID)?,
+            profiles,
+            presets: self.presets.clone(),
+        })
+        .map_err(|_| INVALID)?;
+        presets(&bytes)?;
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn preview(&self) -> Result<String, String> {
+        let Some(bytes) = self.encode()? else {
+            return Ok("No presets remain. Save removes the entire roster record, including its route profiles. No preset is activated.".into());
+        };
+        let mut text = "Private roster draft. Save does not activate a preset, check a route or contact a Provider. Every candidate is re-admitted at submission.\n".to_owned();
+        for profile in &self.profiles {
+            text.push_str(&format!("\nProfile: {}\n", profile.name));
+            for (index, route) in profile.routes.iter().enumerate() {
+                text.push_str(&format!(
+                    "  {index}: {}/{} effort={} account={}\n",
+                    route.provider.profile(),
+                    crate::presentation::escape_terminal(&route.model),
+                    route
+                        .effort
+                        .map_or("default".into(), |effort| effort.to_string()),
+                    route
+                        .account_id
+                        .map_or("environment".into(), |id| id.to_string())
+                ));
+            }
+        }
+        for preset in &self.presets {
+            text.push_str(&format!(
+                "\nConfigured references for {}: primary={}, child={}, review={}, compaction={}\n",
+                preset.name,
+                preset.providers.primary.as_deref().ok_or(INVALID)?,
+                preset
+                    .providers
+                    .child
+                    .as_deref()
+                    .unwrap_or("Inherit primary"),
+                preset
+                    .providers
+                    .review
+                    .as_deref()
+                    .unwrap_or("Inherit primary"),
+                preset
+                    .providers
+                    .compaction
+                    .as_deref()
+                    .unwrap_or("Inherit primary")
+            ));
+        }
+        for selected in presets(&bytes)? {
+            text.push('\n');
+            text.push_str(&selected.manifest()?);
+            text.push_str(&format!(
+                "Launch explicitly: arany --profile {}\n",
+                selected.name
+            ));
+        }
+        Ok(text)
+    }
+
+    pub(crate) fn publish(
+        &self,
+        state: &StateRoot,
+        bytes: Option<&[u8]>,
+    ) -> Result<(), arany::StoreError> {
+        state.edit_provider_record(
+            arany::ProviderRecordTarget::Roster,
+            self.expected(),
+            bytes.map_or(
+                arany::ProviderRecordEdit::Remove,
+                arany::ProviderRecordEdit::Replace,
+            ),
+            &PROVIDER_ROSTER,
+        )
+    }
+}
+
+fn migrate_roster(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    for profile in value.get_mut("profiles")?.as_array_mut()? {
+        for route in profile.get_mut("routes")?.as_array_mut()? {
+            super::routing::migrate_route(route)?;
+        }
+    }
+    value["version"] = PROVIDER_ROSTER.current.into();
+    Some(value)
+}
 
 pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<bool, String> {
     let state = StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable")?;
@@ -100,7 +308,7 @@ pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<
         .profiles
         .iter()
         .flat_map(|profile| &profile.routes)
-        .any(|route| route.provider == provider))
+        .any(|route| route.provider.profile() == provider))
 }
 
 fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
@@ -118,11 +326,11 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         return Err(INVALID.into());
     }
     let mut config: Config = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
-    if config.version != 1
+    if u64::from(config.version) != PROVIDER_ROSTER.current
         || config.profiles.is_empty()
-        || config.profiles.len() > 32
+        || config.profiles.len() > MAX_PROFILES
         || config.presets.is_empty()
-        || config.presets.len() > 16
+        || config.presets.len() > MAX_PRESETS
     {
         return Err(INVALID.into());
     }
@@ -131,17 +339,17 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         if !valid_profile_name(&profile.name)
             || !names.insert(profile.name.clone())
             || profile.routes.is_empty()
-            || profile.routes.len() > 3
+            || profile.routes.len() > arany::MAX_PROVIDER_FALLBACKS + 1
         {
             return Err(INVALID.into());
         }
         for index in 0..profile.routes.len() {
             let route = &mut profile.routes[index];
             route.validate().map_err(|_| INVALID)?;
-            if ProviderKind::parse(&route.provider).is_some_and(ProviderKind::is_native_api) {
+            if route.provider.kind().is_native_api() {
                 route.effort = Some(
                     arany::resolve_native_effort_for_run(
-                        &route.provider,
+                        &route.provider.profile(),
                         &route.model,
                         route.effort,
                     )
@@ -159,10 +367,12 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         if !valid_profile_name(&preset.name)
             || !preset_names.insert(preset.name.clone())
             || preset.child_profiles.is_empty()
-            || preset.child_profiles.len() > 8
+            || preset.child_profiles.len() > MAX_ELIGIBLE_PROFILES
         {
             return Err(INVALID.into());
         }
+        preset.validate_child_default().map_err(|_| INVALID)?;
+        let referenced = preset.bounded_references().map_err(|_| INVALID)?;
         let primary = preset.providers.primary.ok_or(INVALID)?;
         let providers = Providers {
             child: preset.providers.child.unwrap_or_else(|| primary.clone()),
@@ -178,17 +388,10 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
             .child_profiles
             .iter()
             .any(|name| !eligible.insert(name.clone()))
-            || !preset.child_profiles.contains(&providers.child)
         {
             return Err(INVALID.into());
         }
-        let referenced: BTreeSet<_> = providers
-            .values()
-            .into_iter()
-            .chain(preset.child_profiles.iter())
-            .cloned()
-            .collect();
-        if referenced.len() > 8 || !referenced.is_subset(&names) {
+        if !referenced.is_subset(&names) {
             return Err(INVALID.into());
         }
         result.push(SelectedRoster {
@@ -250,7 +453,7 @@ impl SelectedRoster {
                 for route in &profile.routes {
                     if !super::select::authenticate(
                         state_dir,
-                        &route.provider,
+                        &route.provider.profile(),
                         &route.model,
                         route.effort,
                         route.account_id,
@@ -283,7 +486,7 @@ impl SelectedRoster {
         effort: Option<Effort>,
     ) -> Result<(), String> {
         let primary = self.primary();
-        if provider.is_some_and(|provider| provider.profile_label() != primary.provider)
+        if provider.is_some_and(|provider| provider.profile_label() != primary.provider.profile())
             || model.is_some_and(|model| model != primary.model)
             || effort.is_some_and(|effort| Some(effort) != primary.effort)
         {
@@ -307,7 +510,7 @@ impl SelectedRoster {
             } else {
                 selection.effort
             };
-        if selection.profile != primary.provider
+        if selection.profile != primary.provider.profile()
             || selection.model != primary.model
             || effort != primary.effort
             || selection.account_id != primary.account_id
@@ -329,18 +532,18 @@ impl SelectedRoster {
         );
         for profile in &self.profiles {
             for (index, route) in profile.routes.iter().enumerate() {
-                let billing = match ProviderKind::parse(&route.provider) {
-                    Some(ProviderKind::ChatGpt) => {
+                let billing = match route.provider.kind() {
+                    ProviderKind::ChatGpt => {
                         "ChatGPT plan; local-only output cap does not cap remote plan consumption"
                     }
-                    Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => "native API",
-                    Some(ProviderKind::Custom) | None => "exact custom; unknown pricing",
+                    ProviderKind::OpenAi | ProviderKind::Anthropic => "native API",
+                    ProviderKind::Custom => "exact custom; unknown pricing",
                 };
                 text.push_str(&format!(
                     "  {}[{}]: {}/{} effort={} ({})\n",
                     profile.name,
                     index,
-                    route.provider,
+                    route.provider.profile(),
                     crate::presentation::escape_terminal(&route.model),
                     route
                         .effort
@@ -349,8 +552,11 @@ impl SelectedRoster {
                 ));
             }
         }
-        if text.len() > 16 * 1024 {
-            return Err("roster manifest exceeds 16 KiB".into());
+        if text.len() > MAX_MANIFEST_BYTES {
+            return Err(format!(
+                "roster manifest exceeds {} KiB",
+                MAX_MANIFEST_BYTES / 1024
+            ));
         }
         Ok(text)
     }
@@ -451,7 +657,7 @@ pub(crate) async fn pinned_compaction(
     let mut chain = Vec::new();
     for identity in routes {
         let route = Route {
-            provider: identity.profile.clone(),
+            provider: arany::ProviderRecord::parse(&identity.profile).ok_or(INVALID)?,
             model: identity.model.clone(),
             effort: identity.effort,
             account_id: match &identity.provenance {
@@ -479,7 +685,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn record() -> Value {
-        json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
+        json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
     }
 
     #[test]
@@ -494,7 +700,7 @@ mod tests {
         let mut config = record();
         config["profiles"].as_array_mut().unwrap().push(json!({
             "name": "alternative",
-            "routes": [{"provider":"custom:example-route","model":"example-model","effort":null,"account_id":null}]
+            "routes": [{"provider":{"kind":"custom","custom_name":"example-route"},"model":"example-model","effort":null,"account_id":null}]
         }));
         for selected in [false, true] {
             if selected {
@@ -522,7 +728,7 @@ mod tests {
         assert!(parse(&bytes, "coding").is_ok());
         assert!(parse(&bytes, "missing").is_err());
         for (pointer, value) in [
-            ("/version", json!(2)),
+            ("/version", json!(3)),
             ("/extra", json!(true)),
             ("/profiles/0/extra", json!(true)),
             ("/profiles/0/name", json!("../main")),
@@ -574,7 +780,7 @@ mod tests {
         }
         let source = String::from_utf8(bytes.clone()).unwrap();
         for (from, to) in [
-            ("\"version\":1", "\"version\":1,\"version\":1"),
+            ("\"version\":2", "\"version\":2,\"version\":2"),
             ("\"name\":\"main\"", "\"name\":\"main\",\"name\":\"main\""),
             ("\"child\":null", "\"child\":null,\"child\":null"),
             ("\"effort\":null", "\"effort\":null,\"effort\":null"),
@@ -639,7 +845,7 @@ mod tests {
         }
         for count in [3, 4] {
             let mut chained = valid.clone();
-            chained["profiles"][0]["routes"] = json!((0..count).map(|index| json!({"provider":"openai","model":format!("model-{index}"),"effort":"low","account_id":null})).collect::<Vec<_>>());
+            chained["profiles"][0]["routes"] = json!((0..count).map(|index| json!({"provider":{"kind":"openai","custom_name":null},"model":format!("model-{index}"),"effort":"low","account_id":null})).collect::<Vec<_>>());
             assert_eq!(
                 parse(&serde_json::to_vec(&chained).unwrap(), "coding").is_ok(),
                 count == 3
@@ -651,6 +857,88 @@ mod tests {
             .unwrap()
             .push(valid["profiles"][0]["routes"][0].clone());
         assert!(parse(&serde_json::to_vec(&duplicate).unwrap(), "coding").is_err());
+    }
+
+    #[test]
+    fn roster_draft_names_the_ineligible_child_default_and_preserves_repairable_edits() {
+        let mut config: Config = serde_json::from_value(record()).unwrap();
+        let mut alternative = config.profiles[0].clone();
+        alternative.name = "inspect".into();
+        config.profiles.push(alternative);
+        for (primary, child) in [("inspect", None), ("main", Some("inspect"))] {
+            let mut preset = config.presets[0].clone();
+            preset.providers.primary = Some(primary.into());
+            preset.providers.child = child.map(str::to_owned);
+            let bytes = serde_json::to_vec(&Config {
+                version: u8::try_from(PROVIDER_ROSTER.current).unwrap(),
+                profiles: config.profiles.clone(),
+                presets: vec![preset.clone()],
+            })
+            .unwrap();
+            assert!(matches!(presets(&bytes), Err(message) if message == INVALID));
+            let mut draft = RosterDraft {
+                profiles: config.profiles.clone(),
+                presets: vec![preset],
+                expected: None,
+            };
+            let expected =
+                "Preset coding must list its child default inspect under eligible children";
+            assert_eq!(draft.encode().unwrap_err(), expected);
+            assert_eq!(draft.preview().unwrap_err(), expected);
+            draft.presets[0].child_profiles.push("inspect".into());
+            assert!(draft.encode().unwrap().is_some());
+            draft.presets[0].name = "coding\u{001b}".into();
+            draft.presets[0].providers.child = Some("unsafe\nchild".into());
+            let error = draft.encode().unwrap_err();
+            assert!(!error.contains(['\u{001b}', '\n']));
+        }
+    }
+
+    #[test]
+    fn roster_draft_names_excess_references_and_preserves_both_repair_paths() {
+        let source: Config = serde_json::from_value(record()).unwrap();
+        let profiles = (0..=MAX_ELIGIBLE_PROFILES)
+            .map(|index| {
+                let mut profile = source.profiles[0].clone();
+                profile.name = format!("profile-{index}");
+                profile
+            })
+            .collect::<Vec<_>>();
+        for role in [arany::ProviderRole::Review, arany::ProviderRole::Compaction] {
+            let mut preset = source.presets[0].clone();
+            preset.providers.primary = Some(profiles[0].name.clone());
+            preset.child_profiles = profiles[..MAX_ELIGIBLE_PROFILES]
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect();
+            *preset.providers.get_mut(role) = Some(profiles[MAX_ELIGIBLE_PROFILES].name.clone());
+            let bytes = serde_json::to_vec(&Config {
+                version: u8::try_from(PROVIDER_ROSTER.current).unwrap(),
+                profiles: profiles.clone(),
+                presets: vec![preset.clone()],
+            })
+            .unwrap();
+            assert!(matches!(presets(&bytes), Err(message) if message == INVALID));
+            let mut draft = RosterDraft {
+                profiles: profiles.clone(),
+                presets: vec![preset],
+                expected: None,
+            };
+            let expected = format!(
+                "Preset coding references more than {MAX_ELIGIBLE_PROFILES} distinct profiles; remove a role reference or an eligible child"
+            );
+            assert_eq!(draft.encode().unwrap_err(), expected);
+            assert_eq!(draft.preview().unwrap_err(), expected);
+            draft.presets[0].name.push('\u{001b}');
+            assert!(!draft.encode().unwrap_err().contains('\u{001b}'));
+            draft.presets[0].name.pop();
+            *draft.presets[0].providers.get_mut(role) = None;
+            assert!(draft.encode().unwrap().is_some());
+            *draft.presets[0].providers.get_mut(role) =
+                Some(profiles[MAX_ELIGIBLE_PROFILES].name.clone());
+            draft.presets[0].child_profiles.pop();
+            assert!(draft.encode().unwrap().is_some());
+        }
     }
 
     #[test]
@@ -684,7 +972,7 @@ mod tests {
                 .unwrap()
                 .primary()
         );
-        metadata["profiles"][0]["routes"][0] = json!({"provider":"chatgpt","model":"visible-model","effort":"high","account_id":uuid::Uuid::now_v7()});
+        metadata["profiles"][0]["routes"][0] = json!({"provider":{"kind":"chatgpt","custom_name":null},"model":"visible-model","effort":"high","account_id":uuid::Uuid::now_v7()});
         let subscription = parse(&serde_json::to_vec(&metadata).unwrap(), "coding").unwrap();
         assert_eq!(
             subscription.manifest().unwrap(),
@@ -693,7 +981,7 @@ mod tests {
         let names: Vec<_> = (0..8)
             .map(|index| format!("{}{index}", "a".repeat(63)))
             .collect();
-        metadata["profiles"] = json!(names.iter().map(|name| json!({"name":name,"routes":(0..3).map(|index| json!({"provider":format!("custom:{}", "a".repeat(64)),"model":format!("{}{index:02}", "\u{202e}".repeat(42)),"effort":null,"account_id":null})).collect::<Vec<_>>()})).collect::<Vec<_>>());
+        metadata["profiles"] = json!(names.iter().map(|name| json!({"name":name,"routes":(0..3).map(|index| json!({"provider":{"kind":"custom","custom_name":"a".repeat(64)},"model":format!("{}{index:02}", "\u{202e}".repeat(42)),"effort":null,"account_id":null})).collect::<Vec<_>>()})).collect::<Vec<_>>());
         metadata["presets"][0]["providers"]["primary"] = json!(names[0]);
         metadata["presets"][0]["child_profiles"] = json!(names);
         let maximum = parse(&serde_json::to_vec(&metadata).unwrap(), "coding")

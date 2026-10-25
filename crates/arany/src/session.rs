@@ -34,9 +34,10 @@ pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
-    COMPACTION_COMPILER_VERSION, CompactionInputError, MAX_COMPACTION_INPUT_BYTES,
-    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
-    MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, validate_compaction_references,
+    AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, CompactionInputError,
+    MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
+    MAX_COMPACTION_TURNS, MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction,
+    validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
@@ -65,12 +66,12 @@ pub(crate) use events::{
     goal_started_v7_to_v8, intent_without_expiry, pre_command_selection_payload,
     pre_file_removal_payload, pre_gh_pr_list_payload, pre_git_write_payload, pre_glob_payload,
     pre_host_git_payload, pre_host_payload, pre_host_prefix_payload, pre_multiedit_payload,
-    pre_role_routing_payload, pre_typed_prefix_payload, provider_call_v18_payload,
-    provider_call_v18_to_v19, provider_call_v19_payload, provider_call_v19_to_v20,
-    provider_call_v22_payload, rebind_intent_pins, replace_intent_pin, rewind_started_v1_payload,
-    rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload, run_started_v18_to_v19,
-    run_started_v19_payload, run_started_v19_to_v20, run_started_v23_payload,
-    run_started_v23_to_v24,
+    pre_role_routing_payload, pre_roster_setup_payload, pre_typed_prefix_payload,
+    provider_call_v18_payload, provider_call_v18_to_v19, provider_call_v19_payload,
+    provider_call_v19_to_v20, provider_call_v22_payload, rebind_intent_pins, replace_intent_pin,
+    rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
+    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
+    run_started_v23_payload, run_started_v23_to_v24,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]

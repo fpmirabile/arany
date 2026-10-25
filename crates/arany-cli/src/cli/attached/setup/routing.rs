@@ -7,14 +7,14 @@ use crate::cli::provider::routing::{MAX_ROLE_MODEL_BYTES, Route, RoutingDraft};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
 use arany::{
-    CustomProfile, Effort, MAX_PROVIDER_FALLBACKS, ProviderRole, ProviderSetupDisposition,
-    ProviderSetupTargetKind, SessionDefaults, StateRoot, StoreError,
+    CustomProfile, Effort, MAX_PROVIDER_FALLBACKS, ProviderKind, ProviderRecord, ProviderRole,
+    ProviderSetupTargetKind, SessionDefaults, StateRoot,
 };
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const MAX_ROLE_MANIFEST_BYTES: usize = 16 * 1024;
-const ROLES: [(ProviderRole, &str); 4] = [
+pub(super) const ROLES: [(ProviderRole, &str); 4] = [
     (ProviderRole::Primary, "Primary"),
     (ProviderRole::Child, "Child"),
     (ProviderRole::Review, "Review"),
@@ -65,23 +65,33 @@ pub(super) async fn manage(
                     ChainEdit::Explicit(chain) => Some(chain),
                 };
                 *draft.providers.get_mut(role) = chain;
-                await_setup_ack(terminal, label, "Draft updated; Save publishes all four roles").await?;
+                await_setup_ack(
+                    terminal,
+                    label,
+                    "Draft updated; Save publishes all four roles",
+                )
+                .await?;
             }
             b'6' => {
-                let bytes = draft.encode(primary.as_ref()).map_err(|error| error.to_string())?;
+                let bytes = draft
+                    .encode(primary.as_ref())
+                    .map_err(|error| error.to_string())?;
                 let text = manifest(&state, &draft, primary.as_ref()).await?;
-                if review_warning(terminal, "Save role routing?", &text, "Save all four role chains?").await? {
+                if review_warning(
+                    terminal,
+                    "Save role routing?",
+                    &text,
+                    "Save all four role chains?",
+                )
+                .await?
+                {
                     publish(journal, &state, &draft, Some(&bytes)).await?;
                     await_setup_ack(terminal, "Role routing", "Saved; next submission re-admits every route; no Provider check was started").await?;
                     return Ok(());
                 }
             }
             b'7' => {
-                if review_warning(terminal, "Clear role routing?",
-                    "Remove the saved role-routing record. Every role will inherit the next selected primary without fallbacks. Active and historical Run pins are unchanged. Roster presets still require explicit --profile selection.",
-                    "Clear role routing?").await? {
-                    publish(journal, &state, &draft, None).await?;
-                    await_setup_ack(terminal, "Role routing", "Cleared; the next submission uses the selected primary").await?;
+                if clear(terminal, &state, journal, &draft).await? {
                     return Ok(());
                 }
             }
@@ -90,12 +100,33 @@ pub(super) async fn manage(
     }
 }
 
-fn current_route(defaults: &SessionDefaults) -> Result<Option<Route>, SetupError> {
+pub(super) async fn clear(
+    terminal: &mut AttachedTerminal,
+    state: &StateRoot,
+    journal: &mut SetupJournal,
+    draft: &RoutingDraft,
+) -> Result<bool, SetupError> {
+    if !review_warning(terminal, "Clear role routing?",
+        "Remove the saved role-routing record. Every role will inherit the next selected primary without fallbacks. Active and historical Run pins are unchanged. Roster presets still require explicit --profile selection.",
+        "Clear role routing?").await? {
+        return Ok(false);
+    }
+    publish(journal, state, draft, None).await?;
+    await_setup_ack(
+        terminal,
+        "Role routing",
+        "Cleared; the next submission uses the selected primary",
+    )
+    .await?;
+    Ok(true)
+}
+
+pub(super) fn current_route(defaults: &SessionDefaults) -> Result<Option<Route>, SetupError> {
     let (Some(provider), Some(model)) = (&defaults.provider, &defaults.model) else {
         return Ok(None);
     };
     let mut route = Route {
-        provider: provider.clone(),
+        provider: ProviderRecord::parse(provider).ok_or("invalid Provider")?,
         model: model.clone(),
         effort: defaults.effort,
         account_id: defaults.account_id,
@@ -197,7 +228,7 @@ async fn edit_chain(
     }
 }
 
-async fn edit_slot(
+pub(super) async fn edit_slot(
     terminal: &mut AttachedTerminal,
     state: &StateRoot,
     chain: &mut Vec<Route>,
@@ -267,7 +298,7 @@ async fn edit_slot(
     Ok(())
 }
 
-async fn select_route(
+pub(super) async fn select_route(
     terminal: &mut AttachedTerminal,
     state: &StateRoot,
     primary: Option<&Route>,
@@ -298,12 +329,12 @@ async fn select_route(
                 .ok_or_else(|| "Select a primary with /model first".into());
         }
         b'2' | b'3' => Route {
-            provider: if source == b'2' {
+            provider: ProviderRecord::parse(if source == b'2' {
                 "openai"
             } else {
                 "anthropic"
-            }
-            .into(),
+            })
+            .expect("native Provider"),
             model: String::new(),
             effort: None,
             account_id: None,
@@ -315,7 +346,7 @@ async fn select_route(
             route
         }
         b'5' => Route {
-            provider: "chatgpt".into(),
+            provider: ProviderRecord::parse("chatgpt").expect("native Provider"),
             model: String::new(),
             effort: None,
             account_id: Some(chatgpt::selected_account_id().map_err(|error| error.to_string())?),
@@ -369,10 +400,15 @@ async fn edit_model_effort(
     let efforts = std::iter::once(None)
         .chain(Effort::ALL.into_iter().map(Some))
         .filter(|effort| {
-            if route.provider == "chatgpt" {
+            if route.provider.kind() == ProviderKind::ChatGpt {
                 effort.is_some()
             } else {
-                arany::resolve_native_effort_for_run(&route.provider, &route.model, *effort).is_ok()
+                arany::resolve_native_effort_for_run(
+                    &route.provider.profile(),
+                    &route.model,
+                    *effort,
+                )
+                .is_ok()
             }
         })
         .collect::<Vec<_>>();
@@ -443,7 +479,8 @@ async fn select_custom(
         return Ok(None);
     };
     Ok(Some(Route {
-        provider: format!("custom:{}", profile.name()),
+        provider: ProviderRecord::parse(&ProviderKind::custom_profile(profile.name()))
+            .ok_or("invalid custom Provider")?,
         model: profile.model().into(),
         effort,
         account_id: None,
@@ -479,15 +516,15 @@ async fn choose_effort(
     Ok(selected.and_then(|key| efforts.get(usize::from(key.saturating_sub(1))).copied()))
 }
 
-fn tuple_label(route: &Route) -> String {
+pub(super) fn tuple_label(route: &Route) -> String {
     let source = route
         .account_id
         .map_or_else(|| "environment".into(), |id| format!("account {id}"));
     format!(
         "{}/{} · {} · {source}",
-        escape_terminal(&route.provider),
+        escape_terminal(&route.provider.profile()),
         escape_terminal(&route.model),
-        arany::resolve_native_effort_for_run(&route.provider, &route.model, route.effort)
+        arany::resolve_native_effort_for_run(&route.provider.profile(), &route.model, route.effort)
             .ok()
             .or(route.effort)
             .map_or("default".into(), |effort| effort.to_string())
@@ -528,7 +565,7 @@ async fn manifest(
         }
         for (index, route) in chain.iter().enumerate() {
             text.push_str(&format!("  {}: {}\n", index + 1, tuple_label(route)));
-            if let Some(name) = route.provider.strip_prefix("custom:") {
+            if let Some(name) = ProviderKind::custom_name(&route.provider.profile()) {
                 if let Some(profile) = profiles.iter().find(|profile| profile.name() == name) {
                     text.push_str(&format!(
                         "    {} · Credential: {} — not checked by listing · {}\n",
@@ -561,41 +598,20 @@ async fn publish(
             draft.expected().map(|value| Sha256::digest(value).into()),
         )
         .await?;
-    match draft.publish(state, bytes) {
-        Ok(()) => {
-            journal
-                .finish(
-                    operation,
-                    Some(Sha256::digest(bytes.unwrap_or_default()).into()),
-                    ProviderSetupDisposition::Applied,
-                )
-                .await
-        }
-        Err(error) => {
-            let uncertain = matches!(error, StoreError::ReplaceUnconfirmed);
-            journal
-                .finish(
-                    operation,
-                    None,
-                    if uncertain {
-                        ProviderSetupDisposition::Uncertain
-                    } else {
-                        ProviderSetupDisposition::Failed
-                    },
-                )
-                .await?;
-            if uncertain {
-                Err(SetupError::Uncertain("Role routing publication is unknown; inspect saved state and start a new Session; no retry was attempted".into()))
-            } else {
-                Err(error.to_string().into())
-            }
-        }
-    }
+    journal
+        .finish_record(
+            operation,
+            bytes,
+            draft.publish(state, bytes),
+            "Role routing",
+        )
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arany::ProviderSetupDisposition;
 
     #[tokio::test]
     async fn routing_edits_journal_save_stale_failure_and_clear_without_a_run() {

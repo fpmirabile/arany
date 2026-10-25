@@ -1,3 +1,4 @@
+mod roster;
 mod routing;
 
 use crate::accounts::chatgpt::{
@@ -159,6 +160,45 @@ impl SetupJournal {
         )
         .await
         .map_err(|_| SetupError::Presentation("could not journal Provider setup edit".into()))
+    }
+
+    async fn finish_record(
+        &self,
+        operation: uuid::Uuid,
+        bytes: Option<&[u8]>,
+        result: Result<(), StoreError>,
+        label: &str,
+    ) -> Result<(), SetupError> {
+        match result {
+            Ok(()) => {
+                self.finish(
+                    operation,
+                    Some(Sha256::digest(bytes.unwrap_or_default()).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await
+            }
+            Err(error) => {
+                let uncertain = matches!(error, StoreError::ReplaceUnconfirmed);
+                self.finish(
+                    operation,
+                    None,
+                    if uncertain {
+                        ProviderSetupDisposition::Uncertain
+                    } else {
+                        ProviderSetupDisposition::Failed
+                    },
+                )
+                .await?;
+                if uncertain {
+                    Err(SetupError::Uncertain(format!(
+                        "{label} publication is unknown; inspect saved state and start a new Session; no retry was attempted"
+                    )))
+                } else {
+                    Err(error.to_string().into())
+                }
+            }
+        }
     }
 
     async fn finish(
@@ -547,11 +587,12 @@ pub(super) async fn resolve(
         terminal,
         1,
         "Provider setup",
-        "Manage access, custom routes and role routing",
+        "Manage access, custom routes, role routing and roster presets",
         &[
             (b'1', "API accounts"),
             (b'2', "Custom routes"),
             (b'3', "Role routing"),
+            (b'4', "Roster profiles"),
         ],
     )
     .await?
@@ -563,6 +604,10 @@ pub(super) async fn resolve(
         b'2' => custom_routes_setup(terminal, state_dir, journal).await,
         b'3' => {
             routing::manage(terminal, state_dir, journal, current).await?;
+            Ok(None)
+        }
+        b'4' => {
+            roster::manage(terminal, state_dir, journal, current).await?;
             Ok(None)
         }
         _ => Err("invalid Provider setup choice".into()),
@@ -615,7 +660,7 @@ async fn inspect_native_account(terminal: &mut AttachedTerminal) -> Result<(), S
     };
     let details = format!(
         "Provider: {}\nModel: {}\nEffort: {}\nStorage: {}\nCredential: stored; hidden",
-        escape_terminal(&account.provider),
+        escape_terminal(&account.provider.profile()),
         escape_terminal(&account.model),
         account
             .effort
@@ -652,15 +697,17 @@ async fn select_native_account(
     {
         return Ok(None);
     }
-    let credentials = credentials::load_selected(account.id, &account.provider)
+    let credentials = credentials::load_selected(account.id, &account.provider.profile())
         .await
         .map_err(|error| SetupError::from(error.to_string()))?;
-    let Some(catalog) = load_catalog(terminal, &account.provider, &credentials).await? else {
+    let Some(catalog) = load_catalog(terminal, &account.provider.profile(), &credentials).await?
+    else {
         return Ok(None);
     };
     let notice = format!(
         "{} ready: {} · use /model to change.",
-        account.provider, account.model
+        account.provider.profile(),
+        account.model
     );
     Ok(Some(SetupSelection::Native {
         defaults: defaults(&account),
@@ -2924,7 +2971,7 @@ fn native_catalog_default<'a>(provider: &str, items: &'a [ModelEntry]) -> Option
 
 fn defaults(account: &SavedAccount) -> SessionDefaults {
     SessionDefaults {
-        provider: Some(account.provider.clone()),
+        provider: Some(account.provider.profile()),
         model: Some(account.model.clone()),
         effort: account.effort,
         account_id: Some(account.id),

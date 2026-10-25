@@ -49,6 +49,10 @@ mod checks;
 mod routing;
 
 #[cfg(debug_assertions)]
+#[path = "setup/roster.rs"]
+mod roster;
+
+#[cfg(debug_assertions)]
 const SETUP_SHELL: &str = "trap ':' INT; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; printf 'SCRIPT_INPUT_GATE\n'; IFS= read -r gate; [ \"$gate\" = go ] || exit 2; \"$ARANY_TEST_EXE\" --screen-reader --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
 
 #[cfg(debug_assertions)]
@@ -469,7 +473,7 @@ fn choose_native_account_setup(
         input,
         transcript,
         answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input
         .write_all(b"API accounts\r")
@@ -854,7 +858,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             &mut input,
             &mut transcript,
             &mut answered,
-            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
         );
         let text = String::from_utf8_lossy(&transcript);
         let shell_pid = text
@@ -1112,7 +1116,7 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input.write_all(b"API accounts\r").expect("open accounts");
     acknowledge_linear_pages(
@@ -1300,7 +1304,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         &mut transcript,
         &mut answered,
         setup_at,
-        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input.write_all(b"\x03").expect("cancel setup");
     wait_for(
@@ -1399,7 +1403,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             &mut input,
             &mut transcript,
             &mut answered,
-            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
         );
         let shell_pid = String::from_utf8_lossy(&transcript)
             .lines()
@@ -3239,27 +3243,30 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
             &mut answered,
             b"TTY_BEFORE:",
         );
-        wait_for(
+        super::slash_completion::wait_for_frame(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"Esc",
+            (0, 16, 8),
+            |screen| {
+                screen.iter().any(|row| row.trim() == "Provider setup")
+                    && screen.iter().any(|row| row.starts_with("> API accounts"))
+            },
         );
+        let feedback_at = transcript.len();
         input.write_all(b"x").expect("non-navigation setup key");
-        wait_for(
+        super::slash_completion::wait_for_frame(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"Use Up/Down",
-        );
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Enter",
+            (feedback_at, 16, 8),
+            |screen| {
+                screen.iter().any(|row| row.starts_with("Use Up/Down"))
+                    && screen.iter().any(|row| row.contains("Enter Esc"))
+                    && screen.iter().any(|row| row.starts_with("> API accounts"))
+            },
         );
         assert!(!state.exists(), "invalid choice created State");
         let accounts_at = transcript.len();
@@ -3558,7 +3565,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     let (shell_pid, before) = {
         let text = String::from_utf8_lossy(&transcript);
@@ -3831,7 +3838,7 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
                 &mut transcript,
                 &mut answered,
                 setup_at,
-                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
             );
             input
                 .write_all(b"API accounts\r")
@@ -4248,9 +4255,9 @@ fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
     let slot = format!("native-test-{}", Uuid::now_v7());
     let _cleanup = Cleanup(slot.clone());
     let account = serde_json::to_vec(&serde_json::json!({
-        "schema": 2,
+        "schema": 3,
         "id": Uuid::now_v7(),
-        "provider": "openai",
+        "provider": {"kind": "openai", "custom_name": null},
         "model": "gpt-5.4",
         "effort": null,
         "api_key": "synthetic-native-helper-key", "anthropic_workspace_id": null

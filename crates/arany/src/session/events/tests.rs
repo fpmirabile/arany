@@ -2451,6 +2451,15 @@ mod payload_version_tests {
                 operation_id: uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001")
                     .expect("operation ID"),
                 target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::Roster,
+                    identity: "roster".into(),
+                },
+                expected_digest: None,
+            },
+            Event::ProviderSetupEditStarted {
+                operation_id: uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001")
+                    .expect("operation ID"),
+                target: ProviderSetupTarget {
                     kind: ProviderSetupTargetKind::RoleRouting,
                     identity: "roles".into(),
                 },
@@ -2473,6 +2482,7 @@ mod payload_version_tests {
             },
         ];
         let fixtures = [
+            r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"Roster","identity":"roster"},"expected_digest":null}"#,
             r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"RoleRouting","identity":"roles"},"expected_digest":null}"#,
             r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#,
             r#"{"operation_id":"01900000-0000-7000-8000-000000000001","resulting_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"disposition":"Applied"}"#,
@@ -2483,7 +2493,7 @@ mod payload_version_tests {
             assert_eq!(
                 version,
                 if event.kind() == "ProviderSetupEditStarted" {
-                    2
+                    3
                 } else {
                     1
                 }

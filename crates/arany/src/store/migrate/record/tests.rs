@@ -148,6 +148,18 @@ fn an_interrupted_upgrade_keeps_the_original_and_finishes_on_the_next_read() {
     for (format, original) in [
         (&FORMAT, br#"{"version":1,"name":"Session"}"#.as_slice()),
         (&profiles, original_profiles.as_slice()),
+        (
+            &synthetic(RecordKind::SavedAccount),
+            br#"{"version":1,"name":"Session"}"#.as_slice(),
+        ),
+        (
+            &synthetic(RecordKind::ProviderRouting),
+            br#"{"version":1,"name":"Session"}"#.as_slice(),
+        ),
+        (
+            &synthetic(RecordKind::ProviderRoster),
+            br#"{"version":1,"name":"Session"}"#.as_slice(),
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let (state, path) = root(temp.path());

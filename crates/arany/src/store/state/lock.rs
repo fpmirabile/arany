@@ -21,13 +21,13 @@ const ACCOUNT_LOCK_FILE: &str = "account-credentials.lock";
 // history.lock stays separate from the database: a macOS flock on the SQLite file conflicts with SQLite's own locking.
 const HISTORY_LOCK_FILE: &str = "history.lock";
 #[cfg(unix)]
-const MAX_SESSION_LOCK_FILES: usize = 65_536;
+pub(crate) const MAX_SESSION_LOCK_FILES: usize = 65_536;
 #[cfg(unix)]
 const WORKSPACE_LOCK_NAMESPACE_FILE: &str = "workspace-locks.guard";
 #[cfg(unix)]
-const MAX_WORKSPACE_LOCK_FILES: usize = 4096;
+pub(crate) const MAX_WORKSPACE_LOCK_FILES: usize = 4096;
 #[cfg(unix)]
-const MAX_STATE_OVERHEAD_FILES: usize = 32;
+pub(crate) const MAX_STATE_OVERHEAD_FILES: usize = 32;
 
 #[cfg(unix)]
 struct NamespaceLock(File);

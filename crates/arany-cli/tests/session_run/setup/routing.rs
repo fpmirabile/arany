@@ -51,11 +51,11 @@ fn role_manager_saves_ordered_chains_reopens_inheritance_and_clears_in_every_pre
         let record: serde_json::Value = serde_json::from_slice(&saved).unwrap();
         assert_eq!(
             record,
-            json!({"version":1,"providers":{
+            json!({"version":2,"providers":{
                 "primary":null,"child":[
-                    {"provider":"anthropic","model":"claude-sonnet-5","effort":"high","account_id":null},
-                    {"provider":"anthropic","model":"claude-opus-5-5","effort":"medium","account_id":null},
-                    {"provider":"openai","model":"gpt-5.4","effort":"none","account_id":null}
+                    {"provider":{"kind":"anthropic","custom_name":null},"model":"claude-sonnet-5","effort":"high","account_id":null},
+                    {"provider":{"kind":"anthropic","custom_name":null},"model":"claude-opus-5-5","effort":"medium","account_id":null},
+                    {"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"none","account_id":null}
                 ],"review":null,"compaction":null
             }})
         );
@@ -102,7 +102,13 @@ fn add_native(
     presentation.menu(pty, from, "Edit role chain");
 }
 
-fn confirm(pty: &mut SetupPty, presentation: Presentation, from: usize, title: &str, accept: bool) {
+pub(super) fn confirm(
+    pty: &mut SetupPty,
+    presentation: Presentation,
+    from: usize,
+    title: &str,
+    accept: bool,
+) {
     match presentation {
         Presentation::ScreenReader => {
             acknowledge_linear_pages(

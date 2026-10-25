@@ -733,13 +733,14 @@ mod journey {
         time::Duration,
     };
 
+    const ROSTER_REQUESTS: usize = 11;
+
     fn preset(child_profiles: &[&str]) -> Vec<u8> {
-        let route =
-            json!({"provider":"custom:local","model":"model-1","effort":null,"account_id":null});
-        serde_json::to_vec(&json!({"version":1,"profiles":[
+        let route = json!({"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null});
+        serde_json::to_vec(&json!({"version":2,"profiles":[
             {"name":"main","routes":[route]},
             {"name":"inspect","routes":[route]}
-        ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":child_profiles}]})).unwrap()
+        ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":child_profiles},{"name":"research","providers":{"primary":"inspect","child":null,"review":null,"compaction":null},"child_profiles":["inspect"]}]})).unwrap()
     }
 
     fn delegate_to_inspect() -> serde_json::Value {
@@ -753,7 +754,7 @@ mod journey {
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             listener.set_nonblocking(true).expect("bounded accept");
-            for index in 0..8 {
+            for index in 0..ROSTER_REQUESTS {
                 let mut stream = crate::process::accept_with_deadline(
                     &listener,
                     Duration::from_secs(60),
@@ -770,7 +771,7 @@ mod journey {
                         json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                     }
                     2 => json!(r#"synthetic summary"#),
-                    3 | 5 => {
+                    3 | 5 | 8 => {
                         assert_eq!(input["phase"], "root_plan");
                         assert!(body.to_string().contains("\"inspect\""));
                         delegate_to_inspect()
@@ -785,14 +786,19 @@ mod journey {
                         let _ = stream.read(&mut [0; 1]);
                         continue;
                     }
-                    6 => {
+                    6 | 9 => {
                         assert_eq!(input["phase"], "child_work");
                         json!("child result")
                     }
-                    _ => {
+                    7 => {
                         assert_eq!(input["phase"], "root_synthesis");
                         json!("resumed answer")
                     }
+                    10 => {
+                        assert_eq!(input["phase"], "root_synthesis");
+                        json!("research answer")
+                    }
+                    _ => unreachable!("bounded roster request index"),
                 };
                 super::super::loopback::send_response_for(
                     &mut stream,
@@ -1042,7 +1048,6 @@ mod journey {
             String::from_utf8_lossy(&resumed.stderr)
         );
         assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed answer"));
-        server.join().unwrap();
         assert_eq!(served.load(Ordering::SeqCst), 8);
 
         let view = replay();
@@ -1055,6 +1060,74 @@ mod journey {
             std::fs::read(&roster).unwrap(),
             preset(&["main", "inspect"])
         );
+        assert!(
+            view.runs.iter().all(|run| run
+                .config
+                .as_ref()
+                .unwrap()
+                .roster
+                .as_ref()
+                .unwrap()
+                .preset
+                == "coding")
+        );
+        select_alternate(&workspace, &state, session_id, &runtime);
+        server.join().unwrap();
+        assert_eq!(served.load(Ordering::SeqCst), ROSTER_REQUESTS);
+    }
+
+    fn select_alternate(
+        workspace: &Path,
+        state: &Path,
+        previous: SessionId,
+        runtime: &tokio::runtime::Runtime,
+    ) {
+        let alternate = super::super::loopback::wait_product(
+            exec(workspace, state, &["--profile", "research", "answer"])
+                .spawn()
+                .unwrap(),
+        );
+        assert!(
+            alternate.status.success(),
+            "{}",
+            String::from_utf8_lossy(&alternate.stderr)
+        );
+        assert_eq!(alternate.stdout, b"Answer:\n  research answer\n");
+        let manifest = String::from_utf8(alternate.stderr).unwrap();
+        assert!(manifest.starts_with("Roster preset: research\nRoles: primary=inspect, child=inspect, review=inspect, compaction=inspect\nEligible child profiles: inspect\n"));
+        runtime.block_on(async {
+            let sessions = arany::list_sessions(
+                StateRoot::open_existing(state).unwrap(),
+                workspace.to_owned(),
+            )
+            .await
+            .unwrap();
+            let alternate_id = sessions
+                .iter()
+                .find(|session| session.id != previous)
+                .unwrap()
+                .id;
+            let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+            let events = store.load_session(alternate_id).await.unwrap();
+            store.close().await.unwrap();
+            let alternate = SessionView::replay(alternate_id, &events).unwrap().unwrap();
+            assert_eq!(alternate.runs[0].status, RunStatus::Finished);
+            assert_eq!(alternate.runs[0].agents.len(), 2);
+            assert_eq!(
+                alternate.runs[0].agents[1].profile.as_deref(),
+                Some("inspect")
+            );
+            let snapshot = alternate.runs[0]
+                .config
+                .as_ref()
+                .unwrap()
+                .roster
+                .as_ref()
+                .unwrap();
+            assert_eq!(snapshot.preset, "research");
+            assert_eq!(snapshot.providers.primary, "inspect");
+            assert_eq!(snapshot.child_profiles, ["inspect"]);
+        });
     }
 
     #[test]

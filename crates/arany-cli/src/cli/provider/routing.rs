@@ -1,7 +1,7 @@
 use super::select::{ProviderArg, Selection, SelectionError, select_provider};
 use arany::{
-    AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderKind, ProviderRole,
-    Providers, RecordFormat, RecordKind, StateRoot,
+    AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderKind, ProviderRecord,
+    ProviderRole, Providers, RecordFormat, RecordKind, RecordStep, StateRoot,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, str::FromStr, sync::Arc};
@@ -56,7 +56,7 @@ struct RoutingConfig {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Route {
-    pub(crate) provider: String,
+    pub(crate) provider: ProviderRecord,
     pub(crate) model: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) effort: Option<Effort>,
@@ -66,8 +66,8 @@ pub(crate) struct Route {
 
 impl Route {
     pub(crate) fn validate(&self) -> Result<(), RoutingError> {
-        let profile =
-            ProviderArg::from_str(&self.provider).map_err(RoutingError::InvalidProvider)?;
+        let profile = ProviderArg::from_str(&self.provider.profile())
+            .map_err(RoutingError::InvalidProvider)?;
         if self.model.is_empty()
             || self.model.len() > MAX_ROLE_MODEL_BYTES
             || self.model.chars().any(char::is_control)
@@ -80,8 +80,12 @@ impl Route {
         }
         match profile {
             ProviderArg::Openai | ProviderArg::Anthropic => {
-                arany::resolve_native_effort_for_run(&self.provider, &self.model, self.effort)
-                    .map_err(|_| RoutingError::InvalidModelEffort)?;
+                arany::resolve_native_effort_for_run(
+                    &self.provider.profile(),
+                    &self.model,
+                    self.effort,
+                )
+                .map_err(|_| RoutingError::InvalidModelEffort)?;
             }
             ProviderArg::Chatgpt => {
                 arany::validate_native_model_id(&self.model)
@@ -136,7 +140,8 @@ impl RoutingDraft {
             }
         }
         let bytes = serde_json::to_vec(&RoutingConfig {
-            version: 1,
+            version: u8::try_from(PROVIDER_ROUTING.current)
+                .map_err(|_| RoutingError::InvalidConfiguration)?,
             providers,
         })
         .map_err(|_| RoutingError::InvalidConfiguration)?;
@@ -171,10 +176,14 @@ impl RoutingDraft {
 
 impl Route {
     pub(crate) fn resolve_effort(&mut self) -> Result<(), RoutingError> {
-        if ProviderKind::parse(&self.provider).is_some_and(ProviderKind::is_native_api) {
+        if self.provider.kind().is_native_api() {
             self.effort = Some(
-                arany::resolve_native_effort_for_run(&self.provider, &self.model, self.effort)
-                    .map_err(|_| RoutingError::InvalidModelEffort)?,
+                arany::resolve_native_effort_for_run(
+                    &self.provider.profile(),
+                    &self.model,
+                    self.effort,
+                )
+                .map_err(|_| RoutingError::InvalidModelEffort)?,
             );
         }
         Ok(())
@@ -185,10 +194,31 @@ pub(crate) const PROVIDER_ROUTING: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRouting,
     field: "version",
     floor: 1,
-    current: 1,
-    steps: &[],
+    current: 2,
+    steps: &[RecordStep {
+        from: 1,
+        transform: migrate_routing,
+    }],
     accepts: |bytes| parse(bytes).is_ok(),
 };
+
+pub(super) fn migrate_route(route: &mut serde_json::Value) -> Option<()> {
+    let provider = ProviderRecord::parse(route.get("provider")?.as_str()?)?;
+    route["provider"] = serde_json::to_value(provider).ok()?;
+    Some(())
+}
+
+fn migrate_routing(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    for chain in value.get_mut("providers")?.as_object_mut()?.values_mut() {
+        if !chain.is_null() {
+            for route in chain.as_array_mut()? {
+                migrate_route(route)?;
+            }
+        }
+    }
+    value["version"] = PROVIDER_ROUTING.current.into();
+    Some(value)
+}
 
 pub(crate) fn references_custom_profile(
     state_dir: &Path,
@@ -208,13 +238,13 @@ pub(crate) fn references_custom_profile(
         .into_iter()
         .flatten()
         .flatten()
-        .any(|route| route.provider == ProviderKind::custom_profile(name)))
+        .any(|route| route.provider.profile() == ProviderKind::custom_profile(name)))
 }
 
 fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {
     let config: RoutingConfig =
         serde_json::from_slice(bytes).map_err(|_| RoutingError::InvalidConfiguration)?;
-    if config.version != 1 {
+    if u64::from(config.version) != PROVIDER_ROUTING.current {
         return Err(RoutingError::UnsupportedVersion);
     }
     for chain in config.providers.values().into_iter().flatten() {
@@ -247,12 +277,10 @@ pub(crate) async fn configured_providers(
     let mut providers = Providers::all(vec![Arc::clone(&primary)]);
     if let Some(chain) = &config.providers.primary {
         let selected = &chain[0];
-        let effort = if ProviderKind::parse(selected.provider.as_str())
-            .is_some_and(ProviderKind::is_native_api)
-        {
+        let effort = if selected.provider.kind().is_native_api() {
             Some(
                 arany::resolve_native_effort_for_run(
-                    &selected.provider,
+                    &selected.provider.profile(),
                     &selected.model,
                     selected.effort,
                 )
@@ -269,7 +297,7 @@ pub(crate) async fn configured_providers(
             arany::Provenance::ChatGpt(provenance) => Some(provenance.account_id),
             arany::Provenance::Custom(_) => None,
         };
-        if selected.provider != identity.profile
+        if selected.provider.profile() != identity.profile
             || selected.model != identity.model
             || effort != identity.effort
             || selected.account_id != account_id
@@ -311,7 +339,7 @@ pub(super) async fn admit(
         state_dir,
         Selection {
             workspace,
-            profile: &route.provider,
+            profile: &route.provider.profile(),
             model: &route.model,
             effort: route.effort,
             account_id: route.account_id,
@@ -319,7 +347,7 @@ pub(super) async fn admit(
     )
     .await
     .map_err(|source| RoutingError::RouteRefused {
-        provider: route.provider.clone(),
+        provider: route.provider.profile(),
         model: route.model.clone(),
         source,
     })
@@ -336,13 +364,13 @@ mod tests {
         let mut draft = RoutingDraft::load(&root).unwrap();
         let stale = RoutingDraft::load(&root).unwrap();
         let primary = Route {
-            provider: "openai".into(),
+            provider: ProviderRecord::parse("openai").unwrap(),
             model: "gpt-5.4".into(),
             effort: Some(Effort::Low),
             account_id: None,
         };
         let fallback = Route {
-            provider: "anthropic".into(),
+            provider: ProviderRecord::parse("anthropic").unwrap(),
             model: "claude-sonnet-5".into(),
             effort: Some(Effort::High),
             account_id: None,
@@ -458,16 +486,35 @@ mod tests {
 
     #[test]
     fn routing_configuration_is_closed_and_bounded() {
-        let route = serde_json::json!({"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null});
-        let valid = serde_json::json!({"version":1,"providers":{"primary":null,"child":[route.clone()],"review":null,"compaction":null}});
+        let route = serde_json::json!({"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null});
+        let valid = serde_json::json!({"version":2,"providers":{"primary":null,"child":[route.clone()],"review":null,"compaction":null}});
         assert!(parse(&serde_json::to_vec(&valid).unwrap()).is_ok());
+        let mut legacy = valid.clone();
+        legacy["version"] = 1.into();
+        legacy["providers"]["child"][0]["provider"] = "custom:exact-name".into();
+        let upgraded = PROVIDER_ROUTING
+            .upgrade(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let reopened = parse(&upgraded).unwrap();
+        assert_eq!(
+            reopened.providers.child.unwrap()[0].provider.profile(),
+            "custom:exact-name"
+        );
+        for provider in [
+            serde_json::json!({"kind":"custom","custom_name":null}),
+            serde_json::json!({"kind":"openai","custom_name":"exact-name"}),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["providers"]["child"][0]["provider"] = provider;
+            assert!(parse(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
         for invalid in [
-            serde_json::json!({"version":2,"providers":valid["providers"]}),
-            serde_json::json!({"version":1,"providers":{"primary":null,"child":[],"review":null,"compaction":null}}),
-            serde_json::json!({"version":1,"providers":{"primary":null,"child":[route.clone(),route.clone()],"review":null,"compaction":null}}),
-            serde_json::json!({"version":1,"providers":{"primary":null,"child":[route.clone(),route.clone(),route.clone(),route.clone(),route.clone()],"review":null,"compaction":null}}),
-            serde_json::json!({"version":1,"providers":{"primary":null,"child":[{"provider":"openai","model":"gpt-5.4","effort":"low"}],"review":null,"compaction":null}}),
-            serde_json::json!({"version":1,"providers":valid["providers"],"unknown":true}),
+            serde_json::json!({"version":3,"providers":valid["providers"]}),
+            serde_json::json!({"version":2,"providers":{"primary":null,"child":[],"review":null,"compaction":null}}),
+            serde_json::json!({"version":2,"providers":{"primary":null,"child":[route.clone(),route.clone()],"review":null,"compaction":null}}),
+            serde_json::json!({"version":2,"providers":{"primary":null,"child":[route.clone(),route.clone(),route.clone(),route.clone(),route.clone()],"review":null,"compaction":null}}),
+            serde_json::json!({"version":2,"providers":{"primary":null,"child":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low"}],"review":null,"compaction":null}}),
+            serde_json::json!({"version":2,"providers":valid["providers"],"unknown":true}),
         ] {
             assert!(
                 parse(&serde_json::to_vec(&invalid).unwrap()).is_err(),

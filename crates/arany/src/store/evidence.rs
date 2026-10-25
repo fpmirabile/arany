@@ -10,9 +10,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const MAX_EVIDENCE_ROWS: i64 = 32;
-const MAX_NATIVE_EVIDENCE_ROWS: i64 = 256;
-const MAX_EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+pub(crate) const MAX_EVIDENCE_ROWS: i64 = 32;
+pub(crate) const MAX_NATIVE_EVIDENCE_ROWS: i64 = 256;
+pub(crate) const MAX_EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 pub(super) fn apply(
     connection: &mut Connection,
