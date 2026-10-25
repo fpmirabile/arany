@@ -1491,13 +1491,12 @@ mod tests {
         run.await.expect("completed Run with an exhausted Goal")
     }
 
-    fn budget_feedback_fixture(
-        temp: &std::path::Path,
+    fn exec_budget_fixture(
+        state_dir: PathBuf,
+        workspace: PathBuf,
         budget: GoalBudget,
     ) -> (ExecArgs, ScriptedProvider) {
         use std::os::unix::fs::PermissionsExt;
-        let workspace = arany::test_support::goals::facts_workspace(temp, "v1");
-        let state_dir = temp.join("state");
         let root = StateRoot::admit(&state_dir).expect("state");
         let tools = state_dir.join("tools.json");
         std::fs::write(
@@ -1516,11 +1515,7 @@ mod tests {
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
             .expect("record settings");
         drop(root);
-        let mut exec = args(state_dir, workspace, "Inspect the notes");
-        exec.prompt = None;
-        exec.goal = Some("Inspect the notes".into());
-        exec.output = OutputArg::Jsonl;
-        exec.tools = true;
+
         let contract = arany::GoalPlanContract {
             mission: "Inspect the notes and report the result".into(),
             paths: vec!["notes".into()],
@@ -1535,90 +1530,67 @@ mod tests {
                 content: "v2".into(),
             },
         };
-        let provider = ScriptedProvider::new(vec![
+        let provider = arany::test_support::scenario::ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
         .with_profile("openai", "gpt-5.4");
+        let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
+        exec.prompt = None;
+        exec.goal = Some("Inspect the notes".into());
+        exec.output = OutputArg::Jsonl;
+        exec.tools = true;
         (exec, provider)
     }
 
-    #[tokio::test]
-    async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+    async fn exec_budget_report(
+        budget: GoalBudget,
+    ) -> (CommandOutput, Vec<arany::EventEnvelope>, SessionView) {
         let temp = tempfile::tempdir().expect("private test root");
-        let budget = GoalBudget {
-            max_active_ms: Some(60_000),
-            ..GoalBudget::default()
-        };
-        let (mut exec, provider) = budget_feedback_fixture(temp.path(), budget);
-        let engine = arany::test_support::engine::open(
-            StateRoot::open_existing(&temp.path().join("state")).expect("fixture State"),
-            EngineConfig::default(),
-        )
-        .expect("fixture Engine");
-        let session = engine
-            .create_session(exec.workspace.clone().expect("fixture Workspace"), None)
-            .await
-            .expect("fixture Session");
-        engine.close().await.expect("fixture Engine shutdown");
-        exec.session_id = Some(session.to_string());
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
+        let state_dir = temp.path().join("state");
+        let (exec, provider) = exec_budget_fixture(state_dir.clone(), workspace, budget);
+        let requests = Arc::clone(&provider.requests);
         let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_budget_spent_after_answer(
-            exec,
-            admission,
-            provider,
-            std::time::Duration::from_millis(budget.max_active_ms.expect("finite active time")),
-        )
-        .await;
+        let report = if let Some(active_ms) = budget.max_active_ms {
+            run_with_budget_spent_after_answer(
+                exec,
+                admission,
+                provider,
+                std::time::Duration::from_millis(active_ms),
+            )
+            .await
+        } else {
+            run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
+                .await
+                .expect("completed Run with an exhausted Goal")
+        };
         let first_event: serde_json::Value =
-            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
+            serde_json::from_str(report.stdout.lines().next().expect("first Event line"))
                 .expect("JSONL Event");
         let session_id =
             SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
                 .expect("typed Session ID");
-        assert_eq!(session_id, session);
-        let (_, view) =
-            arany::test_support::goals::replayed(&temp.path().join("state"), session_id).await;
-        let run = view.runs.last().expect("Finished Run");
-        assert_eq!(run.status, RunStatus::Finished);
-        let goal = view.goals.last().expect("Failed Goal");
-        assert_eq!(goal.status, GoalStatus::Failed);
-        assert!(goal.active_ms >= budget.max_active_ms.expect("finite active time"));
         assert_eq!(
-            goal.budget_refusal.expect("active-time refusal").dimension,
-            arany::GoalLimit::ActiveTime
+            requests
+                .lock()
+                .expect("requests")
+                .first()
+                .expect("first call")
+                .session_id,
+            session_id
         );
-        let feedback =
-            crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
-        assert_eq!(
-            report.stderr,
-            format!(
-                "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
-            )
-        );
-        assert!(!report.success);
+        let (events, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
+        (report, events, view)
     }
 
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_settled_runs() {
-        let temp = tempfile::tempdir().expect("private test root");
-        let budget = GoalBudget {
+        let (report, events, view) = exec_budget_report(GoalBudget {
             max_provider_calls: Some(2),
             ..GoalBudget::default()
-        };
-        let (exec, provider) = budget_feedback_fixture(temp.path(), budget);
-        let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
-            .await
-            .expect("completed Run with an exhausted Goal");
-        let first_event: serde_json::Value =
-            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
-                .expect("JSONL Event");
-        let session_id =
-            SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
-                .expect("typed Session ID");
-        let (events, view) =
-            arany::test_support::goals::replayed(&temp.path().join("state"), session_id).await;
+        })
+        .await;
         let run = view.runs.last().expect("Failed Run");
         assert_eq!(run.status, RunStatus::Failed);
         assert_eq!(run.failure, Some(arany::RunFailure::CriterionUnmet));
@@ -1632,6 +1604,34 @@ mod tests {
         assert_eq!(report.stderr, format!("{feedback}\n"));
         assert!(!report.success);
         assert_finished_jsonl_budget_feedback(events);
+    }
+
+    #[tokio::test]
+    async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+        let budget = GoalBudget {
+            max_active_ms: Some(60_000),
+            ..GoalBudget::default()
+        };
+        let (report, _, view) = exec_budget_report(budget).await;
+        let run = view.runs.last().expect("Finished Run");
+        assert_eq!(run.status, RunStatus::Finished);
+        let goal = view.goals.last().expect("Failed Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert!(goal.active_ms >= budget.max_active_ms.expect("finite active time"));
+        assert_eq!(
+            goal.budget_refusal.expect("budget refusal").dimension,
+            arany::GoalLimit::ActiveTime
+        );
+        let feedback =
+            crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
+        assert_eq!(
+            report.stderr,
+            format!(
+                "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
+            )
+        );
+        assert!(!report.success);
+        assert_jsonl_committed_answer(&report.stdout, "The notes remain unchanged");
     }
 
     fn assert_finished_jsonl_budget_feedback(events: Vec<arany::EventEnvelope>) {
@@ -1654,8 +1654,12 @@ mod tests {
                 "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
             )
         );
-        let answer_line = report
-            .stdout
+        assert_jsonl_committed_answer(&report.stdout, &answer);
+        assert!(!report.success);
+    }
+
+    fn assert_jsonl_committed_answer(stdout: &str, answer: &str) {
+        let answer_line = stdout
             .lines()
             .map(|line| {
                 serde_json::from_str::<arany_cli::protocol::EventLine>(line).expect("JSONL Event")
@@ -1663,7 +1667,6 @@ mod tests {
             .find(|line| line.kind == "MessageCommitted")
             .expect("committed answer Event");
         assert_eq!(answer_line.payload["text"], answer);
-        assert!(!report.success);
     }
 
     fn finished_run_at_active_limit(events: Vec<arany::EventEnvelope>) -> CommittedOutcome {
