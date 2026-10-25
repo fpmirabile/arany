@@ -678,7 +678,7 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
             },
             wire_provenance: None,
         }))
-        .chain((0..8).map(|_| good_compaction()))
+        .chain((1..READS).map(|_| good_compaction()))
         .collect(),
     );
     let requests = Arc::clone(&provider.requests);
@@ -8504,11 +8504,11 @@ async fn each_pressured_report_maintains_context_once() {
 
 #[tokio::test]
 async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
-    for (window, line_repeats) in [
-        (None, 96),
-        (Some(32_768), 96),
-        (Some(272_000), 96),
-        (Some(32_768), 24),
+    for (window, line_repeats, compaction_expected) in [
+        (None, 96, true),
+        (Some(32_768), 96, true),
+        (Some(272_000), 96, false),
+        (Some(32_768), 24, false),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(
@@ -8534,7 +8534,6 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
                     .session_id,
             );
         }
-        let compaction_expected = window == Some(32_768) && line_repeats == 96;
         let mut provider = ScriptedProvider::new(vec![
             crate::tool_outcome(facts_read()),
             crate::tool_outcome(arany::ToolCall::Search {
@@ -8617,7 +8616,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         assert_eq!(
             provider.compact_requests.lock().expect("compactions").len(),
             usize::from(compaction_expected),
-            "only the large read in the small window needs compaction"
+            "crowded default and small windows compact the large read"
         );
         assert!(
             provider
@@ -8973,7 +8972,7 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
             std::fs::write(directory.join("SKILL.md"), &body).expect("Skill body");
             bodies.push(body);
         }
-        std::fs::write(workspace.join("AGENTS.md"), "Guidance. ".repeat(6000)).expect("guidance");
+        std::fs::write(workspace.join("AGENTS.md"), "Guidance. ".repeat(1200)).expect("guidance");
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).expect("state");
         let config = state_path.join("tools.json");
@@ -9067,6 +9066,20 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
         assert!(initial.steps.is_empty());
         assert!(provider.responses.lock().expect("responses").is_empty());
         if compact {
+            let allowance = run
+                .config
+                .as_ref()
+                .expect("config")
+                .tool_policy
+                .as_ref()
+                .expect("Tool policy")
+                .max_context_bytes;
+            let reserve =
+                arany::test_support::tool_continuation_reserve(requests[0].max_output_tokens, 0);
+            assert!(
+                reserve <= allowance as usize,
+                "the compaction fixture must avoid the half-allowance fallback"
+            );
             assert!(
                 !provider
                     .compact_requests
