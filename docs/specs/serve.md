@@ -352,11 +352,13 @@ native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
 
 The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
-`items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `host_command_session_approval_v1`, `events_subscribe_v1`,
+`items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `host_command_session_approval_v1`, `events_subscribe_v2`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
 covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats follow the [journal migration contract](./execution.md#journal-migration).
+`events_subscribe_v2` identifies the current raw Event vocabulary for backlog
+pages and committed notifications, following the [committed Event contract](./execution.md#committed-event-stream).
 
 ## Acceptance scenarios and evidence owners
 

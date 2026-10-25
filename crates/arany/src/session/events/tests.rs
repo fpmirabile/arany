@@ -1744,6 +1744,7 @@ mod payload_version_tests {
             ));
         }
         for kind in [
+            "ToolProposed",
             "ToolStarted",
             "ToolFinished",
             "RunStarted",
@@ -2029,6 +2030,42 @@ mod payload_version_tests {
         }
         assert_eq!(payload_version("ToolStarted"), Some(started.version()));
         assert_eq!(payload_version("ToolPermissionDecided"), None);
+    }
+
+    #[test]
+    fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let proposed = Event::ToolProposed {
+            run_id: run,
+            agent_run_id: agent,
+            intent: read_observation(run, agent).intent.into(),
+            active_ceiling_ms: 1,
+        };
+        let payload = proposed.payload().unwrap();
+        assert_eq!(
+            Event::decode(
+                proposed.kind(),
+                proposed.version(),
+                &payload,
+                Some(run),
+                Some(agent)
+            )
+            .unwrap(),
+            proposed
+        );
+        let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        extra["verdict"] = serde_json::Value::Null;
+        assert!(matches!(
+            Event::decode(
+                proposed.kind(),
+                proposed.version(),
+                &extra.to_string(),
+                Some(run),
+                Some(agent)
+            ),
+            Err(ReplayError::InvalidPayload)
+        ));
     }
 
     #[test]

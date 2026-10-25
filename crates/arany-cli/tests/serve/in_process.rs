@@ -1483,7 +1483,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             observation: None,
             review_call_index: None,
             permission_verdict: None,
-            started_sequence: Some(0),
+            started_sequence: Some(1),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -1498,10 +1498,14 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         lifecycle_hook_sequence: None,
         provider_sequences: Default::default(),
     };
+    let history = serde_json::to_value(items::history_items(&run)).unwrap();
+    assert_eq!(history[1]["status"], "uncertain");
+    run.tools[0].started_sequence = None;
     assert_eq!(
-        serde_json::to_value(items::history_items(&run)).unwrap()[1]["status"],
-        "uncertain"
+        serde_json::to_value(items::history_items(&run)).unwrap(),
+        json!([history[0]])
     );
+    run.tools[0].started_sequence = Some(1);
     for (call, kind) in [
         (
             ToolCall::CommandUnguarded {

@@ -786,6 +786,63 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn proposal_only_tools_allow_failed_agent_and_run_termination() {
+        let (session, goal, run, agent) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let mut events = vec![goal_started(goal, GoalBudget::default())];
+        events.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, true),
+        ));
+        events.extend([
+            reserve_child_call(goal, run, agent),
+            Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: agent,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                ),
+            },
+            tool_proposed(run, agent, &read_intent(run, agent, "src/lib.rs")),
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: agent,
+                disposition: AgentDisposition::Failed,
+                summary: None,
+                result: None,
+                worker: None,
+            },
+            Event::RunFinished {
+                run_id: run,
+                disposition: RunDisposition::Failed,
+                failure: Some(crate::session::RunFailure::BudgetExhausted),
+                active_ms: 0,
+            },
+        ]);
+        let view = SessionView::replay(session, &session_with(session, events))
+            .unwrap()
+            .unwrap();
+        let run = &view.runs[0];
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.agents[0].status, AgentStatus::Failed);
+        assert_eq!(
+            run.failure,
+            Some(crate::session::RunFailure::BudgetExhausted)
+        );
+        assert_eq!(run.tools.len(), 1);
+        assert_eq!(run.tools[0].started_sequence, None);
+        assert!(run.tools[0].observation.is_none());
+    }
+
+    #[test]
     fn run_output_caps_replay_inside_the_declared_range_only() {
         let session = SessionId::new();
         let (goal, run, agent) = (GoalId::new(), RunId::new(), AgentRunId::new());
