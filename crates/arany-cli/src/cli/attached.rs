@@ -1043,7 +1043,7 @@ async fn prepare_resume(
         let selection =
             if let Some(config) = view.runs.iter().rev().find_map(|run| run.config.as_ref()) {
                 Some(SessionDefaults {
-                    provider: Some(config.provider.clone()),
+                    provider: Some(config.provider.profile()),
                     model: Some(config.model.clone()),
                     effort: config.effort,
                     account_id: config.saved_api_account_id.or_else(|| {

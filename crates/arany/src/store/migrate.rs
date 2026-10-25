@@ -165,6 +165,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        EventStep {
+            kind: "RunStarted",
+            from: 23,
+            transform: crate::session::run_started_v23_to_v24,
+            canonical: crate::session::run_started_v23_payload,
+        },
         variant_step!(
             "ProviderSetupEditStarted",
             1,

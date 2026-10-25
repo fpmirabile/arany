@@ -53,8 +53,9 @@ impl PresentationModel {
         let mut fields = vec![state.to_owned()];
         if width >= 14 {
             let model_label = if width >= 50 {
-                let provider = pinned
-                    .map(|config| config.provider.as_str())
+                let pinned_provider = pinned.map(|config| config.provider.profile());
+                let provider = pinned_provider
+                    .as_deref()
                     .or(view.defaults.provider.as_deref())
                     .unwrap_or("provider unset");
                 let provider = safe_truncate(provider, if width >= 80 { 12 } else { 8 });
@@ -206,8 +207,9 @@ pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
     let pinned = run
         .filter(|run| run.status == RunStatus::Active)
         .and_then(|run| run.config.as_ref());
-    let provider = pinned
-        .map(|config| config.provider.as_str())
+    let pinned_provider = pinned.map(|config| config.provider.profile());
+    let provider = pinned_provider
+        .as_deref()
         .or(view.defaults.provider.as_deref())
         .unwrap_or("unset");
     let model = pinned
@@ -430,7 +432,7 @@ mod tests {
                 agent_definitions: None,
                 roster: None,
                 providers: None,
-                provider: "anthropic".into(),
+                provider: arany::ProviderRecord::parse("anthropic").expect("Provider record"),
                 model: "claude-sonnet-5".into(),
                 effort: None,
                 custom_profile_provenance: None,

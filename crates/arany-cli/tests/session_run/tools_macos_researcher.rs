@@ -56,7 +56,7 @@ done
             static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
                     arany::ProviderIdentity::new(
-                        "scripted",
+                        "openai",
                         "tool-model",
                         arany::Provenance::native(),
                     )

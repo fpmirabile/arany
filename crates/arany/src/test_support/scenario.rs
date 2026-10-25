@@ -61,7 +61,7 @@ impl ScriptedProvider {
                     concurrency: 3,
                     ..CallLimits::default()
                 },
-                ..ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
+                ..ProviderIdentity::new("openai", "test-model", crate::Provenance::native())
             },
             rate_limits: Mutex::new(VecDeque::new()),
             compact_rate_limits: Mutex::new(VecDeque::new()),
@@ -335,7 +335,7 @@ pub fn gated_identity(concurrency: u8) -> ProviderIdentity {
             concurrency,
             ..CallLimits::default()
         },
-        ..ProviderIdentity::new("gated", "test-model", crate::Provenance::native())
+        ..ProviderIdentity::new("anthropic", "test-model", crate::Provenance::native())
     }
 }
 
@@ -345,7 +345,7 @@ pub fn waiting_identity(deadline: Duration) -> ProviderIdentity {
             deadline,
             ..CallLimits::default()
         },
-        ..ProviderIdentity::new("waiting", "test-model", crate::Provenance::native())
+        ..ProviderIdentity::new("openai", "test-model", crate::Provenance::native())
     }
 }
 
@@ -566,7 +566,7 @@ impl Provider for PreviewProvider {
     fn identity(&self) -> &crate::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<crate::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                crate::ProviderIdentity::new("preview", "test-model", crate::Provenance::native())
+                crate::ProviderIdentity::new("openai", "test-model", crate::Provenance::native())
             });
         &IDENTITY
     }

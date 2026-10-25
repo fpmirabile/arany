@@ -290,13 +290,13 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
 #[tokio::test(start_paused = true)]
 async fn fallback_feedback_names_the_committed_replacement_model() {
     let (root, workspace, engine) = fixture();
-    let primary = ScriptedProvider::new(vec![]).with_profile("scripted", "primary-model");
+    let primary = ScriptedProvider::new(vec![]).with_profile("openai", "primary-model");
     *primary.responses.lock().unwrap() = (0..=arany::MAX_PROVIDER_RETRIES)
         .map(|_| Err(ProviderError::RemoteHttp(503)))
         .collect();
     let fallback = Arc::new(
         ScriptedProvider::new(vec![finish("fallback answer")])
-            .with_profile("scripted", "fallback-model"),
+            .with_profile("openai", "fallback-model"),
     );
     let bindings = arany::AdmittedProviders::from_roles(Providers::all(vec![
         Arc::new(primary) as Arc<dyn arany::Provider>,

@@ -1696,7 +1696,7 @@ impl Provider for FiniteTokenTeam {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 let mut identity = arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "goal-token-team-model",
                     arany::Provenance::native(),
                 );
@@ -2106,7 +2106,7 @@ async fn exhausted_crashed_goal_closes_only_when_its_includes_are_known() {
                     agent_definitions: None,
                     roster: None,
                     providers: None,
-                    provider: "scripted".into(),
+                    provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                     model: "scripted-model".into(),
                     effort: None,
                     custom_profile_provenance: None,
@@ -2236,7 +2236,7 @@ impl Provider for PendingChildren {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 let mut identity = arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "pending-children-model",
                     arany::Provenance::native(),
                 );
@@ -2894,11 +2894,7 @@ impl Provider for MeteredProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new(
-                    "scripted",
-                    "metered-model",
-                    arany::Provenance::native(),
-                )
+                arany::ProviderIdentity::new("openai", "metered-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -7046,7 +7042,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 agent_definitions: None,
                 roster: None,
                 providers: None,
-                provider: "scripted".into(),
+                provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                 model: "scripted-model".into(),
                 effort: None,
                 custom_profile_provenance: None,
@@ -7688,9 +7684,9 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     failing.cancel_at_compaction = Some(cancellation.clone());
     let failing = Arc::new(failing);
     let fallback =
-        Arc::new(ScriptedProvider::new(vec![]).with_profile("scripted", "compact-fallback"));
+        Arc::new(ScriptedProvider::new(vec![]).with_profile("openai", "compact-fallback"));
     let primary =
-        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
+        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("openai", "primary"));
     let mut bindings = AdmittedProviders::single(primary.clone());
     bindings.roles.compaction = vec![failing.clone(), fallback.clone()];
     let engine = facts_engine(
@@ -7759,11 +7755,11 @@ async fn a_pause_in_an_in_run_compaction_backoff_starts_no_further_compaction_ca
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
-    let mut failing = ScriptedProvider::new(vec![]).with_profile("scripted", "compact-primary");
+    let mut failing = ScriptedProvider::new(vec![]).with_profile("openai", "compact-primary");
     failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
     let failing = Arc::new(failing);
     let primary =
-        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
+        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("openai", "primary"));
     let mut bindings = AdmittedProviders::single(primary.clone());
     bindings.roles.compaction = vec![failing.clone()];
     let engine = facts_engine(

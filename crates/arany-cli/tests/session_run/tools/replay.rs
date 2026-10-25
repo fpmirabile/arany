@@ -46,7 +46,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         agent_definitions: None,
         roster: None,
         providers: None,
-        provider: "scripted".into(),
+        provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
         model: "replay-model".into(),
         effort: None,
         custom_profile_provenance: None,
@@ -1141,7 +1141,7 @@ pub(super) async fn native_command_changeset_corpus(
             static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
                     arany::ProviderIdentity::new(
-                        "scripted",
+                        "openai",
                         "changeset-model",
                         arany::Provenance::native(),
                     )
