@@ -305,9 +305,17 @@ impl Config {
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
             | ToolCall::Edit { path, .. }
+            | ToolCall::Delete { path, .. }
             | ToolCall::MultiEdit {
                 file_path: path, ..
             } => Some(path),
+            ToolCall::Move {
+                source,
+                destination,
+                ..
+            } => {
+                return self.in_workspace_scope(source) && self.in_workspace_scope(destination);
+            }
             ToolCall::CommandUnguarded { .. } => return true,
             ToolCall::Command { program, .. } => {
                 return self.commands.iter().any(|value| &value.name == program);

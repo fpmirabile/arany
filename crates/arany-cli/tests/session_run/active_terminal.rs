@@ -1536,9 +1536,9 @@ fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
         .rposition(|row| row.starts_with("─ Ask Arany"))
         .expect("composer border");
     super::assert_history_above(&screen, border, "idle Classic");
-    // The following transcript gesture is a reader-order barrier for both ignored page keys.
+    // The transcript gesture follows the ignored page keys in reader order.
     let from = transcript.len();
-    input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
+    input.write_all(b"\x1b[5~\x1b[6~\x0f").unwrap();
     wait(
         &mut output,
         &mut input,

@@ -94,7 +94,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 24] = [
+pub(crate) static ALL: [OperationFacts; 26] = [
     read_row(
         "list",
         Family::File,
@@ -250,6 +250,16 @@ pub(crate) static ALL: [OperationFacts; 24] = [
             "Create a GitHub pull request with an explicit repository, base, head and payload. Always asks a human for this host operation; never pushes or forks.",
         )
     },
+    write_row(
+        "delete",
+        24,
+        "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
+    ),
+    write_row(
+        "move",
+        25,
+        "Move one regular Workspace file to a missing destination, guarded by the source SHA-256. Preserves bytes and executable status; creates missing destination parents. Never overwrites an existing destination.",
+    ),
 ];
 
 static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
@@ -288,6 +298,8 @@ impl ToolCall {
             Self::Write { .. } => &ALL[4],
             Self::Edit { .. } => &ALL[5],
             Self::MultiEdit { .. } => &ALL[21],
+            Self::Delete { .. } => &ALL[24],
+            Self::Move { .. } => &ALL[25],
             Self::Command { .. } => &ALL[6],
             Self::ApplyChangeset { .. } => &ALL[7],
             Self::CommandUnguarded { .. } => &ALL[14],
@@ -330,7 +342,7 @@ pub(crate) fn git_operations(write: bool, host: bool) -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication)";
+pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication), delete (one regular file, expected sha256), move (source and missing destination, source expected sha256, preserves bytes and executable status)";
 pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
 pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline without .git; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
 
@@ -701,6 +713,15 @@ mod tests {
                 title: "T".into(),
                 body: String::new(),
                 draft: true,
+            },
+            ToolCall::Delete {
+                path: path(),
+                expected_digest: "0".repeat(64),
+            },
+            ToolCall::Move {
+                source: path(),
+                destination: "destination".into(),
+                expected_digest: "0".repeat(64),
             },
         ]
     }

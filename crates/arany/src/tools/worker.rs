@@ -587,6 +587,8 @@ impl View {
                         | ToolCall::Write { .. }
                         | ToolCall::Edit { .. }
                         | ToolCall::MultiEdit { .. }
+                        | ToolCall::Delete { .. }
+                        | ToolCall::Move { .. }
                         | ToolCall::Command { .. }
                 ))
             || intent.call.mutates() && self.revision >= 16
@@ -599,7 +601,7 @@ impl View {
             if matches!(intent.call, ToolCall::Command { .. }) {
                 return Ok(());
             }
-            let image = edited_image(&self.current, &intent.call)?;
+            let image = edited_image(&self.current, &intent.call, &self.grant)?;
             image.validate(&self.grant)?;
             if self.base.retained_bytes() + image.retained_bytes() > self.retained_limit {
                 return Err(ToolError::Limit);
@@ -681,7 +683,7 @@ impl View {
                 .take()
                 .ok_or(ToolError::Operation)?;
             let image = Image::decode(&bytes, &self.grant)?;
-            validate_edit(&self.current, &image, &observation.intent.call)?;
+            validate_edit(&self.current, &image, &observation.intent.call, &self.grant)?;
             let data = self.data_for(&image, &observation.intent.call)?;
             Ok(Candidate {
                 observation: observation.clone(),
@@ -1096,16 +1098,73 @@ pub(super) fn validate_edit(
     before: &Image,
     after: &Image,
     call: &ToolCall,
+    grant: &WorkerGrant,
 ) -> Result<(), ToolError> {
-    if edited_image(before, call)?.entries != after.entries {
+    if edited_image(before, call, grant)?.entries != after.entries {
         return Err(ToolError::ChangedInput);
     }
     Ok(())
 }
 
-fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
+fn removed_image(before: &Image, call: &ToolCall, grant: &WorkerGrant) -> Result<Image, ToolError> {
+    let (source, destination, expected) = match call {
+        ToolCall::Delete {
+            path,
+            expected_digest,
+        } => (path, None, expected_digest),
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => (source, Some(destination), expected_digest),
+        _ => return Err(ToolError::Configuration),
+    };
+    let Some(entry @ Entry::File { content, .. }) = before.entries.get(source) else {
+        return Err(ToolError::NotFound);
+    };
+    if hex_digest(content) != *expected {
+        return Err(ToolError::Conflict);
+    }
+    let mut image = before.clone();
+    if let Some(destination) = destination {
+        if image
+            .entries
+            .get(destination)
+            .is_some_and(|e| *e != Entry::Absent)
+        {
+            return Err(ToolError::Conflict);
+        }
+        for (end, _) in destination.match_indices('/') {
+            let parent = &destination[..end];
+            match image.entries.get(parent) {
+                Some(Entry::Directory) => {}
+                None | Some(Entry::Absent) => {
+                    if within(parent, &grant.read_paths) {
+                        image.entries.insert(parent.into(), Entry::Directory);
+                    }
+                }
+                _ => return Err(ToolError::Path),
+            }
+        }
+        image.entries.insert(destination.clone(), entry.clone());
+    }
+    if grant.read_paths.contains(source) || grant.write_paths.contains(source) {
+        image.entries.insert(source.clone(), Entry::Absent);
+    } else {
+        image.entries.remove(source);
+    }
+    if image.entries.len() > WORKER_FILES {
+        return Err(ToolError::Limit);
+    }
+    Ok(image)
+}
+
+fn edited_image(before: &Image, call: &ToolCall, grant: &WorkerGrant) -> Result<Image, ToolError> {
     if matches!(call, ToolCall::PrepareWorker { .. }) {
         return Ok(before.clone());
+    }
+    if matches!(call, ToolCall::Delete { .. } | ToolCall::Move { .. }) {
+        return removed_image(before, call, grant);
     }
     let path = match call {
         ToolCall::Mkdir { path }
@@ -1231,6 +1290,8 @@ impl Transfer {
                 ToolCall::Write { .. }
                     | ToolCall::Edit { .. }
                     | ToolCall::MultiEdit { .. }
+                    | ToolCall::Delete { .. }
+                    | ToolCall::Move { .. }
                     | ToolCall::Mkdir { .. }
             ) || super::discovery::possible(&intent.call)
                 || command
@@ -1558,6 +1619,8 @@ mod tests {
                 WorkerTool::Write,
                 WorkerTool::Edit,
                 WorkerTool::MultiEdit,
+                WorkerTool::Delete,
+                WorkerTool::Move,
                 WorkerTool::Mkdir,
             ],
             skills: vec![],
@@ -1664,7 +1727,7 @@ mod tests {
         let output = fs::native(root.path(), &intent.call, &config).unwrap();
         let image = fs::worker_image(&directory, &capture_paths(&view.grant)).unwrap();
         image.validate(&view.grant).unwrap();
-        validate_edit(&view.current, &image, &intent.call).unwrap();
+        validate_edit(&view.current, &image, &intent.call, &view.grant).unwrap();
         let observation = ToolObservation {
             attestation: Some(Attestation::Guard(super::super::GuardReceipt {
                 contract_version: 1,
@@ -1698,6 +1761,71 @@ mod tests {
             chunks: candidate.data.len().div_ceil(WORKER_CHUNK_BYTES) as u16,
             bytes: candidate.data.len() as u32,
             sha256: digest(&candidate.data),
+        }
+    }
+
+    #[test]
+    fn private_delete_and_move_capture_exact_deltas_without_touching_the_workspace() {
+        for leaf_grants in [false, true] {
+            let (directory, runtime, mut view) = fixture();
+            if leaf_grants {
+                view.grant.read_paths = vec!["owned/a".into(), "owned/new/target".into()];
+                view.grant.write_paths = view.grant.read_paths.clone();
+                view.current
+                    .entries
+                    .retain(|path, _| within(path, &view.grant.read_paths));
+                view.base = Arc::new(view.current.clone());
+            }
+            let mut next_sequence = 1;
+            for call in [
+                ToolCall::Move {
+                    source: "owned/a".into(),
+                    destination: "owned/new/target".into(),
+                    expected_digest: hex_digest(b"original"),
+                },
+                ToolCall::Delete {
+                    path: "owned/new/target".into(),
+                    expected_digest: hex_digest(b"original"),
+                },
+            ] {
+                assert!(view.grant.allows(&call));
+                let mut outside = call.clone();
+                match &mut outside {
+                    ToolCall::Move { destination, .. } => *destination = "outside/target".into(),
+                    ToolCall::Delete { path, .. } => *path = "outside/target".into(),
+                    _ => unreachable!(),
+                }
+                assert!(!view.grant.allows(&outside));
+                let intent = intent(&runtime, &view, call);
+                let candidate = captured(&mut view, intent);
+                let changes: WorkerChangeset = serde_json::from_slice(&candidate.data).unwrap();
+                assert_eq!(
+                    changes.files.len(),
+                    if matches!(candidate.observation.intent.call, ToolCall::Move { .. }) {
+                        2
+                    } else {
+                        1
+                    }
+                );
+                let mut data = reference(&candidate);
+                data.first_sequence = next_sequence;
+                data.seal_sequence = next_sequence + u64::from(data.chunks);
+                next_sequence = data.seal_sequence + 1;
+                let observation = view.acknowledge(candidate, data).unwrap();
+                assert!(observation.valid());
+                assert_eq!(
+                    std::fs::read(directory.path().join("owned/a")).unwrap(),
+                    b"original"
+                );
+                assert!(!directory.path().join("owned/new").exists());
+            }
+            assert!(
+                !view
+                    .current
+                    .entries
+                    .values()
+                    .any(|entry| matches!(entry, Entry::File { .. }))
+            );
         }
     }
 
@@ -1865,11 +1993,11 @@ mod tests {
             edits[1].old_string = "missing".into();
         }
         assert!(matches!(
-            edited_image(&view.current, &late_failure),
+            edited_image(&view.current, &late_failure, &view.grant),
             Err(ToolError::Conflict)
         ));
         assert_eq!(view.current.entries, sibling.current.entries);
-        assert!(validate_edit(&view.current, &view.current, &edit.call).is_err());
+        assert!(validate_edit(&view.current, &view.current, &edit.call, &view.grant).is_err());
         let mut narrowed = grant();
         narrowed.tools.retain(|tool| *tool != WorkerTool::MultiEdit);
         assert!(narrowed.within(&grant()) && !narrowed.allows(&edit.call));
@@ -2541,15 +2669,16 @@ mod tests {
             },
             write("owned/a/leaf"),
         ] {
-            assert!(edited_image(&view.current, &call).is_err());
+            assert!(edited_image(&view.current, &call, &view.grant).is_err());
         }
-        assert!(edited_image(&view.current, &write("owned/leaf")).is_ok());
+        assert!(edited_image(&view.current, &write("owned/leaf"), &view.grant).is_ok());
         assert!(
             edited_image(
                 &view.current,
                 &ToolCall::Mkdir {
                     path: "owned/dir".into()
-                }
+                },
+                &view.grant,
             )
             .is_ok()
         );
@@ -2763,7 +2892,7 @@ mod tests {
         response.push(b'\n');
         write_frame(
             &mut response,
-            &edited_image(&view.current, &intent.call)
+            &edited_image(&view.current, &intent.call, &view.grant)
                 .unwrap()
                 .encode()
                 .unwrap(),

@@ -284,8 +284,10 @@ impl AgentDefinition {
             || self.background
             || self.tools.as_ref().is_some_and(|tools| {
                 tools.iter().any(|tool| {
-                    matches!(tool.as_str(), "edit" | "multiedit" | "write" | "mkdir")
-                        && !self.disallowed_tools.contains(tool)
+                    matches!(
+                        tool.as_str(),
+                        "edit" | "multiedit" | "write" | "mkdir" | "delete" | "move"
+                    ) && !self.disallowed_tools.contains(tool)
                 })
             })
     }
@@ -377,13 +379,13 @@ fn supported_tool(name: &str) -> Option<Vec<&str>> {
         // As in the permission mapping, the peer Glob covers List too.
         "Glob" => vec!["glob", "list"],
         "Grep" => vec!["search"],
-        "Edit" => vec!["edit", "multiedit"],
+        "Edit" => vec!["edit", "multiedit", "delete", "move"],
         "MultiEdit" => vec!["multiedit"],
         "Write" => vec!["write"],
         "Skill" => vec!["skill"],
         "Bash" => vec!["command"],
         "list" | "read" | "search" | "glob" | "edit" | "multiedit" | "write" | "mkdir"
-        | "skill" | "mcp_list" | "command" => {
+        | "delete" | "move" | "skill" | "mcp_list" | "command" => {
             vec![name]
         }
         _ => return None,

@@ -105,21 +105,24 @@ pub(crate) fn tool_request(
     {
         return Err(ProviderError::InvalidOutcome);
     }
-    let (path_key, directory) = match operation {
-        "list" | "search" | "glob" => ("path", true),
-        "command" | "command_unguarded" => ("cwd", true),
-        "multiedit" => ("file_path", false),
-        _ => ("path", false),
+    let (path_keys, directory): (&[&str], bool) = match operation {
+        "list" | "search" | "glob" => (&["path"], true),
+        "command" | "command_unguarded" => (&["cwd"], true),
+        "multiedit" => (&["file_path"], false),
+        "move" => (&["source", "destination"], false),
+        _ => (&["path"], false),
     };
-    if let Some(Value::String(path)) = fields.get_mut(path_key) {
-        let mut normalized = path.as_str();
-        while let Some(rest) = normalized.strip_prefix("./") {
-            normalized = rest;
+    for &path_key in path_keys {
+        if let Some(Value::String(path)) = fields.get_mut(path_key) {
+            let mut normalized = path.as_str();
+            while let Some(rest) = normalized.strip_prefix("./") {
+                normalized = rest;
+            }
+            if directory && normalized != "/" {
+                normalized = normalized.strip_suffix('/').unwrap_or(normalized);
+            }
+            *path = normalized.to_owned();
         }
-        if directory && normalized != "/" {
-            normalized = normalized.strip_suffix('/').unwrap_or(normalized);
-        }
-        *path = normalized.to_owned();
     }
     let call: ToolCall = serde_json::from_value(Value::Object(fields)).map_err(invalid)?;
     if matches!(
@@ -219,6 +222,33 @@ mod tests {
                 "{operation}"
             );
             assert_eq!(request.call.valid(), valid, "{operation}: {expected}");
+        }
+        for (source, destination, expected_source, expected_destination, valid) in [
+            ("././src/a", "././src/b", "src/a", "src/b", true),
+            ("./src/a/", "./src/b", "src/a/", "src/b", false),
+            ("./src/a", "./src/b/", "src/a", "src/b/", false),
+            ("./../outside", "./src/b", "../outside", "src/b", false),
+            ("./src/a", "./../outside", "src/a", "../outside", false),
+        ] {
+            let request = super::tool_request(
+                super::ToolUseId::new("call_test").unwrap(),
+                "move",
+                json!({"source":source,"destination":destination,"expected_digest":"0".repeat(64)}),
+            )
+            .expect("bounded typed move proposal");
+            assert_eq!(request.call.valid(), valid, "{source} -> {destination}");
+            let ToolCall::Move {
+                source,
+                destination,
+                ..
+            } = request.call
+            else {
+                panic!("typed move proposal");
+            };
+            assert_eq!(
+                (source.as_str(), destination.as_str()),
+                (expected_source, expected_destination)
+            );
         }
     }
 
