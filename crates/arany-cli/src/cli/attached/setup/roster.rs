@@ -24,19 +24,13 @@ pub(super) async fn manage(
     let mut draft = RosterDraft::load(&state)?;
     let primary = routing::current_route(current)?;
     loop {
+        let choices = roster_choices(&state)?;
         let Some(action) = choose(
             terminal,
             1,
             "Roster profiles",
             "Private draft; Save does not activate a preset; launch with --profile PRESET",
-            &[
-                (b'1', "Route profiles"),
-                (b'2', "Named presets"),
-                (b'3', "Preview complete roster"),
-                (b'4', "Save roster"),
-                (b'5', "Clear role routing"),
-                (b'6', "Back; discard draft"),
-            ],
+            &choices,
         )
         .await?
         else {
@@ -71,6 +65,24 @@ pub(super) async fn manage(
             _ => return Ok(()),
         }
     }
+}
+
+fn roster_choices(state: &StateRoot) -> Result<Vec<(u8, &'static str)>, SetupError> {
+    let mut choices = vec![
+        (b'1', "Route profiles"),
+        (b'2', "Named presets"),
+        (b'3', "Preview complete roster"),
+        (b'4', "Save roster"),
+    ];
+    if state
+        .record(RecordKind::ProviderRouting)
+        .present()
+        .map_err(|error| error.to_string())?
+    {
+        choices.push((b'5', "Clear role routing"));
+    }
+    choices.push((b'6', "Back; discard draft"));
+    Ok(choices)
 }
 
 async fn retain_draft(

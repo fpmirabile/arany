@@ -29,6 +29,21 @@ pub(crate) struct Preset {
     pub(crate) child_profiles: Vec<String>,
 }
 
+impl Preset {
+    fn validate_child_default(&self) -> Result<(), String> {
+        let primary = self.providers.primary.as_ref().ok_or(INVALID)?;
+        let child = self.providers.child.as_ref().unwrap_or(primary);
+        if !self.child_profiles.contains(child) {
+            return Err(format!(
+                "Preset {} must list its child default {} under eligible children",
+                crate::presentation::escape_terminal(&self.name),
+                crate::presentation::escape_terminal(child),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -155,6 +170,9 @@ impl RosterDraft {
             } else {
                 Err("Add a named preset before saving route profiles".into())
             };
+        }
+        for preset in &self.presets {
+            preset.validate_child_default()?;
         }
         let mut profiles = self.profiles.clone();
         for profile in &mut profiles {
@@ -321,6 +339,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         {
             return Err(INVALID.into());
         }
+        preset.validate_child_default().map_err(|_| INVALID)?;
         let primary = preset.providers.primary.ok_or(INVALID)?;
         let providers = Providers {
             child: preset.providers.child.unwrap_or_else(|| primary.clone()),
@@ -336,7 +355,6 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
             .child_profiles
             .iter()
             .any(|name| !eligible.insert(name.clone()))
-            || !preset.child_profiles.contains(&providers.child)
         {
             return Err(INVALID.into());
         }
@@ -812,6 +830,41 @@ mod tests {
             .unwrap()
             .push(valid["profiles"][0]["routes"][0].clone());
         assert!(parse(&serde_json::to_vec(&duplicate).unwrap(), "coding").is_err());
+    }
+
+    #[test]
+    fn roster_draft_names_the_ineligible_child_default_and_preserves_repairable_edits() {
+        let mut config: Config = serde_json::from_value(record()).unwrap();
+        let mut alternative = config.profiles[0].clone();
+        alternative.name = "inspect".into();
+        config.profiles.push(alternative);
+        for (primary, child) in [("inspect", None), ("main", Some("inspect"))] {
+            let mut preset = config.presets[0].clone();
+            preset.providers.primary = Some(primary.into());
+            preset.providers.child = child.map(str::to_owned);
+            let bytes = serde_json::to_vec(&Config {
+                version: 1,
+                profiles: config.profiles.clone(),
+                presets: vec![preset.clone()],
+            })
+            .unwrap();
+            assert!(matches!(presets(&bytes), Err(message) if message == INVALID));
+            let mut draft = RosterDraft {
+                profiles: config.profiles.clone(),
+                presets: vec![preset],
+                expected: None,
+            };
+            let expected =
+                "Preset coding must list its child default inspect under eligible children";
+            assert_eq!(draft.encode().unwrap_err(), expected);
+            assert_eq!(draft.preview().unwrap_err(), expected);
+            draft.presets[0].child_profiles.push("inspect".into());
+            assert!(draft.encode().unwrap().is_some());
+            draft.presets[0].name = "coding\u{001b}".into();
+            draft.presets[0].providers.child = Some("unsafe\nchild".into());
+            let error = draft.encode().unwrap_err();
+            assert!(!error.contains(['\u{001b}', '\n']));
+        }
     }
 
     #[test]

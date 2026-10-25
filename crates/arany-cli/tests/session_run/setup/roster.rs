@@ -80,7 +80,10 @@ fn create_draft(pty: &mut SetupPty, presentation: Presentation) {
 }
 
 fn open(pty: &mut SetupPty, presentation: Presentation) {
-    select(pty, presentation, 4, "Roster profiles");
+    let from = presentation.choose(pty, 4);
+    presentation.menu(pty, from, "Roster profiles");
+    let fresh = String::from_utf8_lossy(&pty.transcript[from..]);
+    assert!(!fresh.contains("Clear role routing"));
 }
 
 fn select(pty: &mut SetupPty, presentation: Presentation, choice: usize, title: &str) {
@@ -186,7 +189,7 @@ fn clear_conflict(
         );
     }
     let mut pty = start_setup_pty_mode(temp, workspace, state, mode(presentation));
-    open(&mut pty, presentation);
+    select(&mut pty, presentation, 4, "Roster profiles");
     let from = presentation.choose(&mut pty, 5);
     confirm(&mut pty, presentation, from, "Clear role routing?", false);
     let from = pty.transcript.len();
@@ -198,7 +201,8 @@ fn clear_conflict(
     let (from, result) = acknowledge_result(&mut pty, presentation, from);
     assert_result_contains(&result, "Cleared");
     presentation.menu(&mut pty, from, "Roster profiles");
-    let _ = presentation.choose(&mut pty, 6);
+    assert!(!String::from_utf8_lossy(&pty.transcript[from..]).contains("Clear role routing"));
+    let _ = presentation.choose(&mut pty, 5);
     assert!(finish_setup_pty(pty).status.success());
     assert!(!state.join("provider-routing.json").exists());
     assert_eq!(
