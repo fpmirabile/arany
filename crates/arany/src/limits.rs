@@ -18,6 +18,7 @@ use crate::{
     },
 };
 
+#[derive(Debug)]
 pub struct Limit {
     pub name: &'static str,
     pub value: u64,
@@ -25,6 +26,7 @@ pub struct Limit {
     pub owner: &'static str,
 }
 
+#[derive(Debug)]
 pub struct LimitsTable {
     pub rows: &'static [Limit],
 }
