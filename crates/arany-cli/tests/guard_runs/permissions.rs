@@ -4462,6 +4462,22 @@ fn assert_narrowed_batch_stop(
     reservation.sequence = continuation.last().unwrap().sequence + 1;
     continuation.push(reservation);
     assert!(
+        SessionView::replay(session, &continuation).is_ok(),
+        "a pending Tool can reserve its review call"
+    );
+    let mut recorded = events
+        .iter()
+        .find(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
+        .unwrap()
+        .clone();
+    let Event::ProviderCallRecorded { record, .. } = &mut recorded.event else {
+        unreachable!()
+    };
+    record.disposition = arany::ProviderCallDisposition::Finished;
+    record.requested_tools = 0;
+    recorded.sequence = continuation.last().unwrap().sequence + 1;
+    continuation.push(recorded);
+    assert!(
         SessionView::replay(session, &continuation).is_err(),
         "a missing replacement never allows Provider continuation"
     );
