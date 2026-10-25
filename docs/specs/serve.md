@@ -6,13 +6,13 @@ This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
 transport, thread and turn projection, and JSON Schema export. The server runs
 `initialize` / `initialized`, `thread/start|resume|fork|unsubscribe|list`, `turn/start|interrupt|steer`,
 `thread/settings/update`, `thread/rewind/preview`, `thread/rewind`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
-The server sends one-use human approval requests. The remaining work belongs to
+The server sends one-use human approval requests and negotiates exact-session scope for eligible primary host commands. The remaining work belongs to
 [NEXT_STEPS conditional crate extraction](../../NEXT_STEPS.md#pursue-in-order).
 
 [Session](./session.md) owns durable Session identity and replay,
 [execution](./execution.md) owns committed Runs and Events,
 [Goals](./goals.md) owns budgets and recovery, and [Tools](./tools.md) owns
-authority and one-use approvals. [Terminal](./terminal.md) owns `exec` and
+authority and approval scopes. [Terminal](./terminal.md) owns `exec` and
 `show` output. Protocol serialization adds no authority or Engine policy.
 
 ## Framing and envelope
@@ -86,7 +86,7 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 
 | Method | Params and result | Ordering and admission |
 |---|---|---|
-| `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string]}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
+| `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string],hostCommandSessionApproval?:bool}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
 | `thread/start` | `{cwd,provider,model,effort?,title?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread}` | Selects the Provider and configured role chains as `exec` does. `Engine::create_session` commits `SessionStarted` before the result and subsequent `thread/started`. A thread is a durable Session, including when no turn follows. |
 | `thread/resume` | `{threadId,cwd,provider,model,effort?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and execution configuration with the same settings and defaults as start, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
 | `thread/unsubscribe` | `{threadId}` → `{status:"unsubscribed"\|"notLoaded"}` | Codex app-server shape. Removes the connection's loaded thread and raw subscription; durable Session history remains. An active submission has its approval withdrawn and cancellation signalled, and its committed completion precedes the response and slot release. The thread stays loaded until then so `events/subscribe` reconciliation of the completed turn still works; ACP close ordering is defined by [session/close](./acp.md#behavior). A second close while cancellation is pending returns `busy`. An unloaded ID returns `notLoaded` without inspecting State. |
@@ -252,7 +252,7 @@ permission-rule prose is never copied into the observation output.
 
 ## Server requests
 
-The server advertises `approvals_v2` and sends requests with a fresh integer ID
+The server advertises `approvals_v2` and `host_command_session_approval_v1` and sends requests with a fresh integer ID
 starting at 1 for each connection, independent of client request IDs. IDs are
 never reused across turns. Requests go only to the client owning the turn.
 
@@ -275,8 +275,23 @@ only that one pending ToolApproval; decline denies; cancel signals turn
 cancellation before resolving the pending reply as unavailable. A matching
 client error or invalid result records unavailable approval. Unknown,
 withdrawn, cancelled, finished or already resolved request IDs never change a
-decision and get no reply. `acceptForSession` is excluded because an immutable
-one-use intent cannot become a remembered permission rule.
+decision and get no reply.
+
+A human client opts into host session scope with
+`initialize.capabilities.hostCommandSessionApproval:true`. For an eligible
+primary host command, the request additionally carries
+`availableDecisions:["accept","acceptForSession","decline","cancel"]`.
+`acceptForSession` translates to the Engine's exact-command live-session grant;
+every reuse still has a fresh immutable intent and committed verdict referencing
+the original human decision. The [Tools scope contract](./tools.md#primary-host-commands)
+owns eligibility, bounds and expiry. Subsequent turns on the same live binding
+may reuse it; explicit thread/Goal resume, reconnect, restart and fork cannot.
+Clients without this capability receive once/decline/cancel only. A session reply
+without an offered session scope, including for ordinary Tools, is unavailable
+approval. No request offers a remembered prefix, and remember/rule-creation
+replies reject without saving or dispatching. This follows Codex's
+[`acceptForSession` vocabulary](https://github.com/openai/codex/blob/61f34c35af77777db4d77d0ea2aeb8547a6b4523/codex-rs/app-server-protocol/schema/typescript/v2/CommandExecutionApprovalDecision.ts);
+Arany journals a separate bounded scope grant rather than renewing the old intent.
 
 Unanswered primary requests remain pending without a wall-clock deadline while
 the owning connection and Run remain live. EOF, turn interruption, pause,
@@ -293,9 +308,10 @@ bounded ingress slot. Child-request allowance and withdrawal follow the
 [Tools approval rules](./tools.md#folder-trust-and-approvals). An excess ask refuses
 without evicting or renewing the first.
 
-This client is the human approval channel. Human-only requests, including
-`command_unguarded` and hook asks, always require an explicit human client
-decision; this transport adds no AI or automatic approval. Engine permission
+This client is the human approval channel. Hook asks require an explicit human
+client decision. Primary host commands require that decision unless an eligible
+existing session or user-owned prefix grant already authorizes them under the
+Tools contract. This transport adds no AI approval. Engine permission
 composition, pin revalidation, cancellation, Policy, one-use grants and Guard
 admission still apply. Hook execution remains owned by the Tools contract.
 
@@ -336,7 +352,7 @@ native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
 
 The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
-`items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `events_subscribe_v1`,
+`items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `host_command_session_approval_v1`, `events_subscribe_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
 covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
@@ -360,6 +376,7 @@ pre-beta; stored formats follow the [journal migration contract](./execution.md#
 | Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |
 | Replay, receipts and forks | Exclusive `since`, count/byte pagination, live Event order and JSONL identity; tap overflow recovery; unknown threads/Goals and future cursors refused; receipt equals committed GoalFinished and oversized receipt refuses without closing the connection; fork lineage and Workspace identity preserved, busy and nonterminal sources refused | [History protocol corpus](../../crates/arany-cli/tests/serve/history.rs) |
+| Host scopes and client failures | Once/session round trips, exact reuse across turns, fresh epoch on resume, unsupported and remembered scopes refused; stale/forged replies, EOF, cancellation and backpressure dispatch nothing unauthorized; closed replay retains host receipts | [Serve approval corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Shipped process | Cleared credentials: initialize succeeds, Provider selection fails, EOF exits 0, schema-valid stdout and empty stderr; argument/TTY admission exits 2 before State | [Session process tests](../../crates/arany-cli/tests/session_run.rs) |
 
 The compiled error reason `goalIncludesUnavailable` represents continuation or resume whose original admitted include list is unknown; [Goals](./goals.md#budget-continuation) owns that admission rule. The compiled reason `goalInputTooLarge` reports an objective plus includes exceeding the serialized Goal admission envelope before any Event or Provider call. Raw Event subscriptions expose the current required nullable `GoalStarted.include_paths` field and its payload version, as [Execution](./execution.md#admission-persistence-and-recovery) defines.

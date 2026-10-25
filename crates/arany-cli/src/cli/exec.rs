@@ -873,6 +873,142 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(arany_ci),
+        ignore = "native exec host policy; requires the arany executable"
+    )]
+    fn host_prefix_exec_receipts_follow_headless_policy_and_replay() {
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let launcher = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("arany");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for mode in ["default", "dontAsk", "auto", "acceptEdits", "plan"] {
+                    let _deadline = arany::test_support::engine::deadline(
+                        "exec host policy",
+                        std::time::Duration::from_secs(30),
+                    );
+                    host_exec_scenario(launcher.clone(), mode).await;
+                }
+            });
+    }
+
+    async fn host_exec_scenario(launcher: PathBuf, mode: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state_dir = temp.path().join("state");
+        let call = arany::test_support::approval::seed_host_prefix(
+            &state_dir,
+            &workspace,
+            launcher.clone(),
+        )
+        .await;
+        let path = state_dir.join("permissions.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        settings["permissions"]["defaultMode"] = serde_json::json!(mode);
+        std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                arany::test_support::scenario::tool_outcome(call),
+                ProviderOutcome::Answer(Answer {
+                    text: "Host policy settled".into(),
+                }),
+            ])
+            .with_profile("openai", "gpt-5.4"),
+        );
+        let mut exec = args(state_dir.clone(), workspace, "Inspect host value");
+        exec.tools = true;
+        let admission = exec.admit().unwrap();
+        let engine = arany::test_support::engine::open(
+            StateRoot::open_existing(&state_dir).unwrap(),
+            EngineConfig {
+                guard_executable: Some(launcher),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let output = run_on_engine(
+            exec,
+            admission,
+            AdmittedProviders::single(provider.clone()),
+            engine,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            serde_json::to_vec(&settings).unwrap()
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        assert!(provider.responses.lock().unwrap().is_empty());
+        assert_host_exec_output(&state_dir, &output, matches!(mode, "default" | "dontAsk")).await;
+    }
+
+    async fn assert_host_exec_output(
+        state_dir: &std::path::Path,
+        output: &CommandOutput,
+        allowed: bool,
+    ) {
+        assert!(output.success);
+        assert_eq!(
+            output.stdout,
+            if allowed {
+                "Answer (unguarded effects: 1):\n  Host policy settled\n"
+            } else {
+                "Answer:\n  Host policy settled\n"
+            }
+        );
+        let session = SessionId::from_str(
+            output
+                .stderr
+                .lines()
+                .next()
+                .unwrap()
+                .strip_prefix("Session: ")
+                .unwrap(),
+        )
+        .unwrap();
+        let (events, view) = arany::test_support::goals::replayed(state_dir, session).await;
+        assert_eq!(view.runs[0].unguarded_tools(), usize::from(allowed));
+        let tool = &view.runs[0].tools[0];
+        assert_eq!(tool.permission_verdict.as_ref().unwrap().approved, allowed);
+        if allowed {
+            assert_eq!(
+                tool.permission_verdict.as_ref().unwrap().source,
+                arany::permissions::PermissionSource::HostPrefixRule
+            );
+        }
+        assert_eq!(
+            output.stderr,
+            format!(
+                "Session: {session}\nRun: {}\nStatus: finished\n{}",
+                view.runs[0].id,
+                if allowed {
+                    "unguarded effects: 1\n"
+                } else {
+                    ""
+                }
+            )
+        );
+        for prefix in 1..=events.len() {
+            SessionView::replay(session, &events[..prefix]).unwrap();
+        }
+    }
+
+    #[test]
     fn slash_skill_prompts_invoke_admitted_skills_and_everything_else_stays_literal() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("temp");
