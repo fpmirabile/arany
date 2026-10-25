@@ -1497,7 +1497,6 @@ pub(super) async fn invoke_bounded_with_preview(
     let timeout = provider.identity().limits.deadline.min(remaining);
     let output_cap = request.max_output_tokens;
     let output_bound = provider.identity().limits.output_token_bound;
-    let chatgpt = provider.identity().chatgpt_provenance().is_some();
     let invocation = provider.invoke_observed(request, preview, limits);
     let result = tokio::select! {
         biased;
@@ -1509,11 +1508,15 @@ pub(super) async fn invoke_bounded_with_preview(
         Ok(Err(error)) => error
             .retry_cause()
             .map(|(cause, retry_after)| super::routing::Transient { cause, retry_after }),
-        // The ChatGPT stream had no decoded outcome at its ceiling; the router keeps the bounds.
-        Err(_) if chatgpt => Some(super::routing::Transient {
-            cause: crate::provider::RetryCause::StreamCut,
-            retry_after: None,
-        }),
+        Err(_) => {
+            provider
+                .identity()
+                .ceiling_retry_cause()
+                .map(|cause| super::routing::Transient {
+                    cause,
+                    retry_after: None,
+                })
+        }
         _ => None,
     };
     let result = match result {
@@ -1988,6 +1991,19 @@ mod decision_tests {
         assert!(
             event.payload().is_err(),
             "replay still rejects oversized records"
+        );
+    }
+
+    #[test]
+    fn invalid_outcome_failure_reason_is_recorded() {
+        let result = CallResult::Failed(CallFailure::InvalidResponse(Some(
+            ProviderFailureReason::OutcomeDecode,
+        )));
+        let record = call_record(AgentPhase::RootPlan, &result, false, None, None, None);
+        assert_eq!(record.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(
+            record.failure_reason,
+            Some(ProviderFailureReason::OutcomeDecode)
         );
     }
 

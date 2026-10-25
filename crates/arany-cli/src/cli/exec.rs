@@ -308,7 +308,33 @@ async fn run_on_engine(
     engine: Engine,
     signals: Option<StopSignals>,
 ) -> Result<CommandOutput, String> {
+    let submission = submit_and_wait(args, admission, providers, engine, signals).await?;
+    let submission = classify_submission(submission).await?;
+    let committed = load_committed_outcome(submission).await?;
+    let classification = classify_committed_state(&committed)?;
+    render_committed_outcome(committed, classification)
+}
+
+struct Submission {
+    output: OutputArg,
+    state_dir: PathBuf,
+    session_id: Option<SessionId>,
+    resumed_goal: Option<GoalId>,
+    new_session: bool,
+    signalled: SignalledRun,
+}
+
+async fn submit_and_wait(
+    args: ExecArgs,
+    admission: Admission,
+    providers: AdmittedProviders,
+    engine: Engine,
+    signals: Option<StopSignals>,
+) -> Result<Submission, String> {
     let new_session = admission.session_id.is_none();
+    let state_dir = admission.state_dir.clone();
+    let session_id = admission.session_id;
+    let output = args.output;
     let tools = if args.tools {
         if !native_protection_supported() {
             return Err(
@@ -349,11 +375,41 @@ async fn run_on_engine(
         .close()
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
-    let SignalledRun {
-        result,
-        interrupted,
-        forced,
-    } = end?;
+    Ok(Submission {
+        output,
+        state_dir,
+        session_id,
+        resumed_goal,
+        new_session,
+        signalled: end?,
+    })
+}
+
+struct ClassifiedSubmission {
+    output: OutputArg,
+    state_dir: PathBuf,
+    new_session: bool,
+    outcome: arany::RunOutcome,
+    stopped: Option<arany::RunStop>,
+    continuation_error: Option<EngineError>,
+    interrupted: bool,
+    forced: Option<&'static str>,
+}
+
+async fn classify_submission(submission: Submission) -> Result<ClassifiedSubmission, String> {
+    let Submission {
+        output,
+        state_dir,
+        session_id,
+        resumed_goal,
+        new_session,
+        signalled:
+            SignalledRun {
+                result,
+                interrupted,
+                forced,
+            },
+    } = submission;
     let (outcome, stopped, continuation_error) = match result {
         Ok(RunResult {
             run,
@@ -364,8 +420,8 @@ async fn run_on_engine(
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
         Err(EngineError::GoalBudgetExhausted) => {
-            if let (Some(session), Some(goal_id)) = (admission.session_id, resumed_goal) {
-                let root = StateRoot::open_existing(&admission.state_dir)
+            if let (Some(session), Some(goal_id)) = (session_id, resumed_goal) {
+                let root = StateRoot::open_existing(&state_dir)
                     .map_err(|_| "state directory unavailable or unsafe")?;
                 let store = Store::open_read_only(root).map_err(|_| "state store unavailable")?;
                 let view = store
@@ -389,7 +445,44 @@ async fn run_on_engine(
         }
         Err(error) => return Err(error.to_string()),
     };
-    let root = StateRoot::open_existing(&admission.state_dir)
+    Ok(ClassifiedSubmission {
+        output,
+        state_dir,
+        new_session,
+        outcome,
+        stopped,
+        continuation_error,
+        interrupted,
+        forced,
+    })
+}
+
+struct CommittedOutcome {
+    output: OutputArg,
+    new_session: bool,
+    outcome: arany::RunOutcome,
+    stopped: Option<arany::RunStop>,
+    continuation_error: Option<EngineError>,
+    interrupted: bool,
+    forced: Option<&'static str>,
+    events: Vec<arany::EventEnvelope>,
+    view: arany::SessionView,
+}
+
+async fn load_committed_outcome(
+    submission: ClassifiedSubmission,
+) -> Result<CommittedOutcome, String> {
+    let ClassifiedSubmission {
+        output,
+        state_dir,
+        new_session,
+        outcome,
+        stopped,
+        continuation_error,
+        interrupted,
+        forced,
+    } = submission;
+    let root = StateRoot::open_existing(&state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let store = Store::open_read_only(root).map_err(|_| "state store unavailable".to_owned())?;
     let events = store
@@ -406,14 +499,45 @@ async fn run_on_engine(
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
     // A later Run without a terminal receipt may follow the returned committed one.
-    let run = view
+    let run_matches_history = view
         .runs
         .iter()
         .rev()
         .find(|run| run.id == outcome.run.id)
-        .filter(|run| **run == outcome.run)
-        .ok_or("Run history unavailable or invalid")?;
-    let paused = (interrupted || run.status == RunStatus::StoppedByHook)
+        .is_some_and(|run| *run == outcome.run);
+    if !run_matches_history {
+        return Err("Run history unavailable or invalid".into());
+    }
+    Ok(CommittedOutcome {
+        output,
+        new_session,
+        outcome,
+        stopped,
+        continuation_error,
+        interrupted,
+        forced,
+        events,
+        view,
+    })
+}
+
+struct CommittedClassification {
+    paused: bool,
+    success: bool,
+    stop: Option<String>,
+}
+
+fn classify_committed_state(
+    committed: &CommittedOutcome,
+) -> Result<CommittedClassification, String> {
+    let CommittedOutcome {
+        outcome,
+        interrupted,
+        view,
+        ..
+    } = committed;
+    let run = &outcome.run;
+    let paused = (*interrupted || run.status == RunStatus::StoppedByHook)
         && view.goal(outcome.goal_id).is_some_and(|goal| {
             matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
         });
@@ -421,140 +545,192 @@ async fn run_on_engine(
     // The committed answer is still printed; the stop line makes the exit nonzero.
     let stop = stop_after_answer(
         run.status,
-        stopped,
-        continuation_error.as_ref(),
-        interrupted,
+        committed.stopped,
+        committed.continuation_error.as_ref(),
+        *interrupted,
     )
     .map(|reason| format!("Goal stopped after a committed Run: {reason}"));
     if !run.status.is_outcome() {
         if view.budget_stop_goal(run).is_some()
-            && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
+            && let Some(feedback) = crate::presentation::session_run_feedback(view, run)
         {
             return Err(feedback);
         }
-        return Err(stopped
+        return Err(committed
+            .stopped
             .map_or("Run did not reach a terminal state", stop_text)
             .into());
     }
-    let stdout = render_exec(run, &events, args.output.into(), new_session);
-    let stderr = match args.output {
-        OutputArg::Text => {
-            let mut receipt = format!(
-                "Session: {}\nRun: {}\nStatus: {}\n{}",
-                outcome.session_id,
-                run.id,
-                match run.status {
-                    RunStatus::Finished => "finished",
-                    RunStatus::Failed => "failed",
-                    RunStatus::Cancelled => "cancelled",
-                    RunStatus::StoppedByHook => "stopped_by_hook",
-                    _ => return Err("Run did not reach a terminal state".into()),
-                },
-                match run.config.as_ref() {
-                    Some(config) if config.chatgpt_provenance.is_some() => {
-                        "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
-                    }
-                    Some(config) if config.custom_profile_provenance.is_some() => {
-                        "Provider: custom verified\n"
-                    }
-                    _ => "",
-                },
-            );
-            if run.config.as_ref().is_some_and(|config| {
-                config.chatgpt_provenance.is_none()
-                    && config.providers.as_ref().is_some_and(|providers| {
-                        providers.values().iter().any(|chain| {
-                            chain.iter().any(|identity| {
-                                identity.limits.output_token_bound
-                                    == arany::OutputTokenBound::LocalAcceptanceOnly
-                            })
-                        })
-                    })
-            }) {
-                receipt.push_str(
-                    "Output bound: some role routes are local only; remote usage is not capped\n",
-                );
-            }
-            let goal_runs: Vec<_> = match view.goal(outcome.goal_id) {
-                Some(goal) => view
-                    .runs
-                    .iter()
-                    .filter(|candidate| goal.run_ids.contains(&candidate.id))
-                    .collect(),
-                None => vec![run],
-            };
-            let unguarded: usize = goal_runs.iter().map(|run| run.unguarded_tools()).sum();
-            if unguarded > 0 {
-                receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
-            }
-            let host: usize = goal_runs.iter().map(|run| run.host_tools()).sum();
-            if host > 0 {
-                receipt.push_str(&format!("host effects: {host}\n"));
-            }
-            if let Some(notice) = crate::presentation::render_goal_provider_attempts(goal_runs) {
-                receipt.push_str(&notice);
-                receipt.push('\n');
-            }
-            if let Some(notice) = crate::presentation::render_cache_update_feedback(run) {
-                receipt.push_str(notice);
-                receipt.push('\n');
-            }
-            if run.status == RunStatus::StoppedByHook
-                && let Some(notice) = crate::presentation::run_feedback(run)
-            {
-                receipt.push_str("error: ");
-                receipt.push_str(&notice);
-                receipt.push('\n');
-            }
-            if view.budget_stop_goal(run).is_some()
-                && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
-            {
-                receipt.push_str(&feedback);
-                receipt.push('\n');
-            }
-            receipt
+    Ok(CommittedClassification {
+        paused,
+        success,
+        stop,
+    })
+}
+
+fn render_committed_outcome(
+    committed: CommittedOutcome,
+    classification: CommittedClassification,
+) -> Result<CommandOutput, String> {
+    let stdout = render_exec(
+        &committed.outcome.run,
+        &committed.events,
+        committed.output.into(),
+        committed.new_session,
+    );
+    let stderr = match committed.output {
+        OutputArg::Text => text_receipt(&committed)?,
+        OutputArg::Jsonl
+            if committed
+                .view
+                .budget_stop_goal(&committed.outcome.run)
+                .is_some() =>
+        {
+            jsonl_failure(&committed)
         }
-        OutputArg::Jsonl if view.budget_stop_goal(run).is_some() => format!(
-            "{}\n",
-            crate::presentation::session_run_feedback(&view, run).unwrap_or_default()
-        ),
-        OutputArg::Jsonl if success => String::new(),
-        OutputArg::Jsonl => match run.status {
-            RunStatus::Cancelled => "error: Run cancelled\n".into(),
-            RunStatus::StoppedByHook => format!(
-                "error: {}\n",
-                crate::presentation::run_feedback(run).unwrap_or_default()
-            ),
-            RunStatus::Failed => "error: Run failed\n".into(),
-            // A finished Run that is not a success keeps its Goal paused.
-            _ => "error: Goal paused before completion\n".into(),
-        },
+        OutputArg::Jsonl if classification.success => String::new(),
+        OutputArg::Jsonl => jsonl_failure(&committed),
     };
-    let stderr = if paused {
-        format!(
-            "{stderr}{}",
-            resume_hint(
-                outcome.session_id,
-                outcome.goal_id,
-                run.config
-                    .as_ref()
-                    .and_then(|config| config.roster.as_ref())
-                    .map(|roster| roster.preset.as_str())
-            )
-        )
-    } else {
-        stderr
-    };
-    let stop = forced.map(str::to_owned).or(stop);
-    let stderr = match &stop {
-        Some(message) => format!("{stderr}error: {message}\n"),
-        None => stderr,
-    };
+    let stderr = append_resume_and_stop(stderr, &committed, classification);
     Ok(CommandOutput {
         stdout,
-        stderr,
-        success: success && stop.is_none(),
+        success: stderr.success,
+        stderr: stderr.text,
     })
+}
+
+fn text_receipt(committed: &CommittedOutcome) -> Result<String, String> {
+    let run = &committed.outcome.run;
+    let view = &committed.view;
+    let outcome = &committed.outcome;
+    let mut receipt = format!(
+        "Session: {}\nRun: {}\nStatus: {}\n{}",
+        outcome.session_id,
+        run.id,
+        match run.status {
+            RunStatus::Finished => "finished",
+            RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
+            RunStatus::StoppedByHook => "stopped_by_hook",
+            _ => return Err("Run did not reach a terminal state".into()),
+        },
+        match run.config.as_ref() {
+            Some(config) if config.chatgpt_provenance.is_some() => {
+                "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
+            }
+            Some(config) if config.custom_profile_provenance.is_some() => {
+                "Provider: custom verified\n"
+            }
+            _ => "",
+        },
+    );
+    if run.config.as_ref().is_some_and(|config| {
+        config.chatgpt_provenance.is_none()
+            && config.providers.as_ref().is_some_and(|providers| {
+                providers.values().iter().any(|chain| {
+                    chain.iter().any(|identity| {
+                        identity.limits.output_token_bound
+                            == arany::OutputTokenBound::LocalAcceptanceOnly
+                    })
+                })
+            })
+    }) {
+        receipt.push_str(
+            "Output bound: some role routes are local only; remote usage is not capped\n",
+        );
+    }
+    let goal_runs: Vec<_> = match view.goal(outcome.goal_id) {
+        Some(goal) => view
+            .runs
+            .iter()
+            .filter(|candidate| goal.run_ids.contains(&candidate.id))
+            .collect(),
+        None => vec![run],
+    };
+    let unguarded: usize = goal_runs.iter().map(|run| run.unguarded_tools()).sum();
+    if unguarded > 0 {
+        receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
+    }
+    let host: usize = goal_runs.iter().map(|run| run.host_tools()).sum();
+    if host > 0 {
+        receipt.push_str(&format!("host effects: {host}\n"));
+    }
+    if let Some(notice) = crate::presentation::render_goal_provider_attempts(goal_runs) {
+        receipt.push_str(&notice);
+        receipt.push('\n');
+    }
+    if let Some(notice) = crate::presentation::render_cache_update_feedback(run) {
+        receipt.push_str(notice);
+        receipt.push('\n');
+    }
+    if run.status == RunStatus::StoppedByHook
+        && let Some(notice) = crate::presentation::run_feedback(run)
+    {
+        receipt.push_str("error: ");
+        receipt.push_str(&notice);
+        receipt.push('\n');
+    }
+    if view.budget_stop_goal(run).is_some()
+        && let Some(feedback) = crate::presentation::session_run_feedback(view, run)
+    {
+        receipt.push_str(&feedback);
+        receipt.push('\n');
+    }
+    Ok(receipt)
+}
+
+fn jsonl_failure(committed: &CommittedOutcome) -> String {
+    let run = &committed.outcome.run;
+    let view = &committed.view;
+    if view.budget_stop_goal(run).is_some() {
+        return format!(
+            "{}\n",
+            crate::presentation::session_run_feedback(view, run).unwrap_or_default()
+        );
+    }
+    match run.status {
+        RunStatus::Cancelled => "error: Run cancelled\n".into(),
+        RunStatus::StoppedByHook => format!(
+            "error: {}\n",
+            crate::presentation::run_feedback(run).unwrap_or_default()
+        ),
+        RunStatus::Failed => "error: Run failed\n".into(),
+        // A finished Run that is not a success keeps its Goal paused.
+        _ => "error: Goal paused before completion\n".into(),
+    }
+}
+
+struct FinalOutput {
+    text: String,
+    success: bool,
+}
+
+fn append_resume_and_stop(
+    mut stderr: String,
+    committed: &CommittedOutcome,
+    classification: CommittedClassification,
+) -> FinalOutput {
+    if classification.paused {
+        stderr.push_str(&resume_hint(
+            committed.outcome.session_id,
+            committed.outcome.goal_id,
+            committed
+                .outcome
+                .run
+                .config
+                .as_ref()
+                .and_then(|config| config.roster.as_ref())
+                .map(|roster| roster.preset.as_str()),
+        ));
+    }
+    let stop = committed.forced.map(str::to_owned).or(classification.stop);
+    if let Some(message) = &stop {
+        stderr.push_str(&format!("error: {message}\n"));
+    }
+    FinalOutput {
+        text: stderr,
+        success: classification.success && stop.is_none(),
+    }
 }
 
 fn resume_hint(session_id: SessionId, goal_id: GoalId, preset: Option<&str>) -> String {
@@ -1261,6 +1437,88 @@ mod tests {
         .err()
         .expect("a closed Goal is not resumable");
         assert_eq!(error, "Goal is not available for explicit resume");
+    }
+
+    #[tokio::test]
+    async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
+        let state_dir = temp.path().join("state");
+        let root = StateRoot::admit(&state_dir).expect("state");
+        let tools = state_dir.join("tools.json");
+        std::fs::write(
+            &tools,
+            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .expect("Tool configuration");
+        std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
+            .expect("private Tool configuration");
+        let budget = GoalBudget {
+            max_active_ms: Some(60_000),
+            ..GoalBudget::default()
+        };
+        let preferences = serde_json::json!({"version":5,"preferences":{
+            "completion":"tabs","view":"fullscreen","goal_budget":budget,
+            "resources":arany::ToolResourceSettings::default(),
+            "mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"
+        }});
+        root.record(arany::RecordKind::UiPreferences)
+            .replace(&serde_json::to_vec(&preferences).expect("settings"))
+            .expect("record settings");
+        drop(root);
+
+        let contract = arany::GoalPlanContract {
+            mission: "Inspect the notes and report the result".into(),
+            paths: vec!["notes".into()],
+            commands: Vec::new(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            budget,
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/facts.txt".into(),
+                content: "v2".into(),
+            },
+        };
+        let provider = arany::test_support::scenario::ScriptedProvider::new(vec![
+            arany::test_support::scenario::plan_outcome(contract),
+            arany::test_support::goals::finish_with("The notes remain unchanged"),
+        ])
+        .with_profile("openai", "gpt-5.4")
+        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
+        let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
+        exec.prompt = None;
+        exec.goal = Some("Inspect the notes".into());
+        exec.output = OutputArg::Jsonl;
+        exec.tools = true;
+        let admission = exec.admit().expect("valid autonomous command");
+        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
+            .await
+            .expect("completed Run with an exhausted Goal");
+        let first_event: serde_json::Value =
+            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
+                .expect("JSONL Event");
+        let session_id =
+            SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
+                .expect("typed Session ID");
+        let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
+        let run = view.runs.last().expect("Finished Run");
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(
+            view.goals.last().expect("Failed Goal").status,
+            GoalStatus::Failed
+        );
+        let feedback =
+            crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
+        assert_eq!(
+            report.stderr,
+            format!(
+                "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
+            )
+        );
+        assert!(!report.success);
     }
 
     #[tokio::test]

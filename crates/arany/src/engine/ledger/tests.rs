@@ -132,7 +132,9 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
 
 fn edit(ledger: &GoalLedger, change: impl FnOnce(&mut GoalView, &mut InFlight)) {
     let mut state = ledger.state.lock().expect("state");
-    let State { view, in_flight } = &mut *state;
+    let State {
+        view, in_flight, ..
+    } = &mut *state;
     change(&mut view.goals[0], in_flight);
 }
 

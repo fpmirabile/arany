@@ -3907,8 +3907,16 @@ fn supervised_handover() -> (Fixture, u64, WorkerDataRef, Event) {
     f.changes = WorkerChangeset { files };
     let data = f.finish_worker();
     let subject = f.handover(data.clone());
-    let verdict = f.view().runs[0]
-        .supervisor
+    let envelopes = f.envelopes();
+    let mut evaluator = crate::supervisor::SupervisorState::default();
+    let mut view = SessionView::replay_open(f.session, &envelopes[..1])
+        .unwrap()
+        .unwrap();
+    for envelope in &envelopes[1..] {
+        view.apply_committed(envelope).unwrap();
+        evaluator.after(&view, envelope);
+    }
+    let verdict = evaluator
         .pending_event()
         .expect("sixteen-file handover notice");
     assert!(

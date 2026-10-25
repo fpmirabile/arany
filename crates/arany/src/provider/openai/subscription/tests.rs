@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
+use crate::provider::{DEFAULT_OUTPUT_TOKEN_CAP, MAX_RESPONSE_BYTES};
 use crate::{
     provider::{
         AgentPhase, CompactionItem, HistoryTurn, ProviderFailureClass, ProviderOutcome,
@@ -627,7 +627,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             "reflected token" => Stage::CredentialReflection,
             _ => Stage::EventType,
         };
-        assert_eq!(decoder.stage, stage, "{label}");
+        assert_eq!(decoder.stage(), stage, "{label}");
     }
     let mut failed = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
     let failure = failed
@@ -710,7 +710,7 @@ fn created_event_echoing_a_large_tool_catalog_is_admitted_within_the_byte_bound(
     );
     let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
     assert!(decoder.feed(flood.as_bytes()).is_err());
-    assert_eq!(decoder.stage, Stage::EventJson);
+    assert_eq!(decoder.stage(), Stage::EventJson);
 }
 
 // A response.created event echoes the whole request; half-cap headroom makes catalog growth fail here before it fails users.
@@ -1262,6 +1262,68 @@ async fn compaction_stream_requires_complete_bounded_summary() {
         );
         server.await.expect("server");
     }
+}
+
+#[tokio::test]
+#[cfg(debug_assertions)]
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+async fn completed_response_header_rejections_log_the_validation_stage() {
+    if crate::test_process::isolate_test() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("diagnostic state");
+    let root =
+        crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
+    crate::diagnostics::enable_development_diagnostics(&root);
+    let path = root.path().join("development.log");
+    for (headers, stage) in [
+        (
+            "Content-Type: text/event-stream\r\nContent-Encoding: gzip\r\n".to_owned(),
+            Stage::ContentEncoding,
+        ),
+        (
+            "Content-Type: application/json\r\n".to_owned(),
+            Stage::ResponseContent,
+        ),
+        (
+            format!(
+                "Content-Type: text/event-stream\r\nContent-Length: {}\r\n",
+                crate::provider::max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP) + 1
+            ),
+            Stage::ContentLength,
+        ),
+    ] {
+        let reply = format!("HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n");
+        let (endpoint, server) = serve(reply.into_bytes()).await;
+        let mut response = client()
+            .post(endpoint)
+            .body("{}")
+            .send()
+            .await
+            .expect("synthetic response headers");
+        let error = super::super::responses::read_completed_response(
+            &mut response,
+            TOKEN,
+            "model-a",
+            None,
+            DEFAULT_OUTPUT_TOKEN_CAP,
+        )
+        .await
+        .expect_err("rejected headers");
+        assert!(matches!(error, ProviderError::InvalidStream));
+        assert!(error.retry_cause().is_none());
+        server.await.expect("server");
+        let log = std::fs::read_to_string(&path).expect("header diagnostics");
+        let record = format!("subscription stage={stage:?} bytes=0 events=0 http_status=Some(200)");
+        assert_eq!(log.matches(&record).count(), 1, "{stage:?}");
+        assert!(!log.contains(TOKEN));
+    }
+    let log = std::fs::read_to_string(path).expect("length diagnostics");
+    assert_eq!(
+        log.matches("stream reason=StreamProtocol stage=StreamLimit bytes=0 events=0")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2196,7 +2258,7 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
     }
     let slot = RateLimitSlot::default();
     let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
-    decoder.limits = slot.clone();
+    decoder.set_limits(slot.clone());
     let event = json!({"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":23,"window_minutes":10080,"reset_at":2000}},"plan_type":"DO_NOT_KEEP_PLAN","account_id":"DO_NOT_KEEP_ACCOUNT"});
     assert!(
         decoder
@@ -2273,7 +2335,7 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
             assert!(decoder.feed(frame).unwrap().is_none());
         }
         let error = decoder.feed(frame).unwrap_err();
-        assert_eq!(decoder.stage, Stage::StreamLimit);
+        assert_eq!(decoder.stage(), Stage::StreamLimit);
         assert_eq!(
             error.failure_reason(),
             Some(crate::ProviderFailureReason::StreamProtocol)
@@ -2292,7 +2354,7 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
                 .is_none()
         );
         let error = decoder.feed(b":").unwrap_err();
-        assert_eq!(decoder.stage, Stage::StreamLimit);
+        assert_eq!(decoder.stage(), Stage::StreamLimit);
         assert_eq!(
             error.failure_reason(),
             Some(crate::ProviderFailureReason::StreamProtocol)

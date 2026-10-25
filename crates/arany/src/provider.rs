@@ -541,6 +541,10 @@ impl ProviderIdentity {
         }
     }
 
+    pub(crate) fn ceiling_retry_cause(&self) -> Option<RetryCause> {
+        self.chatgpt_provenance().map(|_| RetryCause::StreamCut)
+    }
+
     pub(crate) fn valid(&self) -> bool {
         let provider = ProviderKind::parse(&self.profile);
         let chatgpt = provider == Some(ProviderKind::ChatGpt);
@@ -1101,6 +1105,7 @@ pub enum ProviderFailureReason {
     UsageTemporarilyUnavailable,
     ServiceUnavailable,
     StreamProtocol,
+    OutcomeDecode,
     ResponseContract,
     OutcomeContract,
     LocalOutputLimit,
@@ -1137,6 +1142,7 @@ impl ProviderError {
     pub(crate) fn failure_reason(&self) -> Option<ProviderFailureReason> {
         match self {
             Self::InvalidStream | Self::StreamEnded => Some(ProviderFailureReason::StreamProtocol),
+            Self::InvalidOutcome => Some(ProviderFailureReason::OutcomeDecode),
             Self::InvalidResponseContract => Some(ProviderFailureReason::ResponseContract),
             Self::InvalidOutcomeContract => Some(ProviderFailureReason::OutcomeContract),
             Self::LocalOutputLimit => Some(ProviderFailureReason::LocalOutputLimit),
@@ -1370,6 +1376,35 @@ mod tests {
         assert_eq!(ProviderKind::custom_name("custom:"), Some(""));
         assert_eq!(ProviderKind::custom_name("custom:local"), Some("local"));
         assert_eq!(ProviderKind::custom_name("local"), None);
+    }
+
+    #[test]
+    fn only_chatgpt_ceiling_timeouts_are_retryable_stream_cuts() {
+        for (profile, provenance, expected) in [
+            ("openai", Provenance::native(), None),
+            ("anthropic", Provenance::native(), None),
+            (
+                "custom:local",
+                Provenance::Custom(CustomProfileProvenance {
+                    endpoint: "https://example.com/v1/responses".into(),
+                    evidence_digest: [7; 32],
+                    capability_evidence_version: 2,
+                }),
+                None,
+            ),
+            (
+                "chatgpt",
+                Provenance::ChatGpt(ChatGptProvenance {
+                    account_id: Uuid::now_v7(),
+                    evidence_fingerprint: [7; 32],
+                    admission: ChatGptAdmission::AccountConsent,
+                }),
+                Some(RetryCause::StreamCut),
+            ),
+        ] {
+            let identity = ProviderIdentity::new(profile, "model-a", provenance);
+            assert_eq!(identity.ceiling_retry_cause(), expected, "{profile}");
+        }
     }
 
     #[test]
@@ -1664,7 +1699,6 @@ mod tests {
         for error in [
             ProviderError::Rejected,
             ProviderError::Unavailable,
-            ProviderError::InvalidOutcome,
             ProviderError::RemoteStreamCode("unknown_code".into()),
             ProviderError::RemoteStreamCode("subscription_sharing_usage_unavailable\n".into()),
             ProviderError::RemoteStreamCode("subscription_sharing_usage_limit_exceeded".into()),
@@ -1675,6 +1709,10 @@ mod tests {
             (
                 ProviderError::InvalidStream,
                 ProviderFailureReason::StreamProtocol,
+            ),
+            (
+                ProviderError::InvalidOutcome,
+                ProviderFailureReason::OutcomeDecode,
             ),
             (
                 ProviderError::InvalidResponseContract,

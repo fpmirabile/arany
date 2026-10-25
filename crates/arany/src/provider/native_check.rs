@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v38";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v39";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -533,7 +533,7 @@ mod tests {
     async fn reject_superseded_native_evidence(root: StateRoot, key: &str, checked_at_ms: i64) {
         for version in [
             "native-goal-contract-outcome-conformance-v33",
-            "native-goal-contract-outcome-conformance-journal-v37",
+            "native-goal-contract-outcome-conformance-journal-v38",
         ] {
             let mut legacy = Vec::new();
             for field in [

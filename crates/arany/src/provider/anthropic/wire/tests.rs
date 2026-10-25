@@ -233,6 +233,25 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
         serde_json::to_value(&requests[0].call).unwrap(),
         json!({"operation": "read", "path": "src/main.rs", "offset": null, "limit": null})
     );
+    let omitted = decode(
+        &request,
+        &response(
+            "tool_use",
+            json!([tool_use(
+                "toolu_omitted",
+                "arany_read",
+                json!({"path": "src/main.rs"})
+            )]),
+        ),
+    )
+    .unwrap();
+    let ProviderOutcome::Tools(omitted_calls) = omitted.outcome else {
+        panic!("Read call without paging fields")
+    };
+    assert_eq!(
+        serde_json::to_value(&omitted_calls[0].call).unwrap(),
+        json!({"operation": "read", "path": "src/main.rs", "offset": null, "limit": null})
+    );
     assert_eq!(
         answer.turn.items("anthropic").unwrap(),
         content.as_array().unwrap().clone(),
@@ -293,6 +312,36 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
             fixture["model"] = json!("claude-sonnet-5");
             assert!(decode(&request, &fixture).is_err());
         }
+    }
+}
+
+#[test]
+fn streamed_messages_report_closed_failure_stages() {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    for (wire, expected) in [
+        ("data: {\n\n".to_owned(), Stage::EventJson),
+        (
+            sse(&[json!({"type":"message_start","message":{}})]),
+            Stage::ResponseMessage,
+        ),
+        (
+            sse(&[
+                message_start(),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
+            ]),
+            Stage::ResponseContent,
+        ),
+        (
+            sse(&[json!({"type":"error","error":{"type":"overloaded_error"}})]),
+            Stage::RemoteFailure,
+        ),
+    ] {
+        let (preview, _) = crate::provider::ResponsePreview::new();
+        let mut decoder = MessageStream::new(KEY, "model-1", preview, DEFAULT_OUTPUT_TOKEN_CAP);
+        assert!(decoder.feed(wire.as_bytes()).is_err());
+        assert_eq!(decoder.stage(), expected);
+        assert_eq!(decoder.counts().bytes, wire.len());
+        assert!(decoder.counts().events > 0);
     }
 }
 
@@ -1189,6 +1238,174 @@ fn a_clean_end_after_a_framed_event_is_a_retryable_cut_and_a_non_stream_is_not()
             "{label}"
         );
     }
+}
+
+#[test]
+fn decoded_messages_report_closed_failure_stages() {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    let request = primary_request(MODEL);
+    let conversation = render::conversation(&request).unwrap();
+    let offered: Vec<_> = conversation
+        .tools
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(outcome_specs(&conversation.outcome))
+        .collect();
+    let scope = RunScope {
+        model: &request.model,
+        output_cap: request.max_output_tokens,
+        secret: KEY,
+        offered: &offered,
+        review: false,
+    };
+    let encode = |value: Value| serde_json::to_vec(&value).unwrap();
+    let mut wrong_model = response("end_turn", json!([text_block("answer")]));
+    wrong_model["model"] = json!("other-model");
+    let mut invalid_usage = response("end_turn", json!([text_block("answer")]));
+    invalid_usage["usage"]["output_tokens"] = json!(u64::from(request.max_output_tokens) + 1);
+    let mut invalid_status = response("unknown_stop", json!([text_block("answer")]));
+    invalid_status["stop_sequence"] = json!("sequence");
+    let mut invalid_id = response("end_turn", json!([text_block("answer")]));
+    invalid_id["id"] = json!("");
+    let malformed_second_tool = response(
+        "tool_use",
+        json!([
+            tool_use("toolu_read", "arany_read", json!({"path":"src/main.rs"})),
+            tool_use(
+                "toolu_write",
+                "arany_write",
+                json!({"path":"src/new.rs","content":"x"})
+            )
+        ]),
+    );
+    let malformed_second_tool = encode(malformed_second_tool);
+    let invalid_typed_tool = encode(response(
+        "tool_use",
+        json!([tool_use(
+            "",
+            "arany_read",
+            json!({"path":"src/main.rs","offset":7,"limit":3})
+        )]),
+    ));
+    let cases = [
+        (b"{".to_vec(), Stage::ResponseEnvelope),
+        (encode(wrong_model), Stage::ResponseModel),
+        (encode(invalid_usage), Stage::UsageContract),
+        (encode(invalid_status), Stage::ResponseStatus),
+        (encode(invalid_id), Stage::ResponseIdentifier),
+        (
+            encode(response("end_turn", json!([]))),
+            Stage::ResponseContent,
+        ),
+        (
+            encode(response(
+                "end_turn",
+                json!([{"type":"text","text":"answer","unknown":"field"}]),
+            )),
+            Stage::ResponseEnvelope,
+        ),
+        (invalid_typed_tool.clone(), Stage::OutcomeToolArguments),
+        (
+            encode(response(
+                "tool_use",
+                json!([
+                    tool_use("toolu_one", "arany_read", json!({"path":"src/main.rs"})),
+                    tool_use("toolu_two", "arany_read", json!({"path":"src/lib.rs"}))
+                ]),
+            )),
+            Stage::OutcomeToolArguments,
+        ),
+        (malformed_second_tool.clone(), Stage::OutcomeToolArguments),
+    ];
+    for (bytes, expected) in cases {
+        assert_eq!(decode_run_failure_stage(&bytes, &scope), expected);
+    }
+    for (bytes, expected) in [
+        (&malformed_second_tool, "operation: \"write\""),
+        (&invalid_typed_tool, "read_offset: Some(7)"),
+        (&invalid_typed_tool, "read_limit: Some(3)"),
+        (&invalid_typed_tool, "path_bytes: Some(11)"),
+    ] {
+        let shape = decode_run_failure_tool_shape(bytes, &scope);
+        if cfg!(debug_assertions) {
+            assert!(format!("{:?}", shape.unwrap()).contains(expected));
+        } else {
+            assert!(shape.is_none());
+        }
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn completed_stream_rejection_logs_decoder_record_with_received_counters() {
+    if crate::test_process::isolate_test() {
+        return;
+    }
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    let temp = tempfile::tempdir().expect("diagnostic state");
+    let root =
+        crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
+    crate::diagnostics::enable_development_diagnostics(&root);
+
+    let request = primary_request(MODEL);
+    let conversation = render::conversation(&request).unwrap();
+    let offered: Vec<_> = conversation
+        .tools
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(outcome_specs(&conversation.outcome))
+        .collect();
+    let scope = RunScope {
+        model: &request.model,
+        output_cap: request.max_output_tokens,
+        secret: KEY,
+        offered: &offered,
+        review: false,
+    };
+    let (bytes, counts, wire_bytes) = malformed_completed_write_stream();
+    assert_eq!(counts.events, 6);
+    assert_eq!(counts.bytes, wire_bytes);
+    assert_ne!(counts.bytes, bytes.len());
+    assert_eq!(counts.http_status, Some(200));
+    assert!(decode_run_with_counts(&bytes, &scope, counts).is_err());
+
+    let log =
+        std::fs::read_to_string(root.path().join("development.log")).expect("decoder diagnostic");
+    assert!(log.contains(&format!(
+        "messages stage={:?} bytes={wire_bytes} events=6 http_status=Some(200)",
+        Stage::OutcomeToolArguments
+    )));
+    assert!(log.contains("operation: \"write\""));
+}
+
+#[cfg(debug_assertions)]
+fn malformed_completed_write_stream() -> (Vec<u8>, crate::diagnostics::StreamCounts, usize) {
+    let mut start = message_start();
+    start["message"]["model"] = json!(MODEL);
+    let streamed = sse(&[
+        start,
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_write","name":"arany_write","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"src/new.rs\",\"content\":\"x\"}"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let (preview, _) = crate::provider::ResponsePreview::new();
+    let mut decoder = MessageStream::new(KEY, MODEL, preview, DEFAULT_OUTPUT_TOKEN_CAP);
+    decoder.set_http_status(200);
+    let mut reply = None;
+    for chunk in streamed.as_bytes().chunks(17) {
+        if let Some(bytes) = decoder.feed(chunk).unwrap() {
+            reply = Some(bytes);
+        }
+    }
+    (
+        reply.expect("completed Messages stream"),
+        decoder.counts(),
+        streamed.len(),
+    )
 }
 
 #[test]
