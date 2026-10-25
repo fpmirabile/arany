@@ -364,7 +364,7 @@ owns defaults, configuration, resource bounds and interruption semantics.
 
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
-The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [Terminal spec](../specs/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
+`OwnedTerminal` acquires and owns the active renderer, reader and terminal-mode guards, and restores them in lifecycle order. `AttachedTerminal` keeps signal listeners through committed output and transfers them during reacquisition; secret echo and clipboard ownership stay separate. Suspension retains the pinned Run future and bounded draft; lifecycle failures cannot manufacture a committed outcome. [Terminal spec](../specs/terminal.md#interruption-suspension-and-restoration) owns restoration behavior; [next steps](../../NEXT_STEPS.md) owns unverified claims.
 
 ### Display observations and terminal continuity
 
