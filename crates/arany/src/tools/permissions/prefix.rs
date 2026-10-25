@@ -303,6 +303,8 @@ impl PermissionSettings {
         if rule.prefix != *prefix || prefix.len() < super::MIN_HOST_PREFIX_TOKENS {
             return Err(SettingsError::Invalid);
         }
+        rule.verify_creation(state, Path::new(rule.workspace()))
+            .map_err(|_| SettingsError::Invalid)?;
         let identity = crate::session::WorkspaceIdentity {
             device: intent.workspace_device,
             inode: intent.workspace_inode,

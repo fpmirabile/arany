@@ -2482,6 +2482,69 @@ fn host_intent() -> crate::tools::EffectIntent {
 }
 
 #[test]
+fn remembered_host_prefix_revalidates_executable_bytes_before_saving() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&root.join("state")).unwrap();
+    let tools = state.path().join("tools.json");
+    std::fs::write(
+        &tools,
+        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let executable = root.join("inspect");
+    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut intent = host_intent();
+    let identity = crate::tools::workspace_identity(&workspace).unwrap();
+    intent.workspace_device = identity.device;
+    intent.workspace_inode = identity.inode;
+    let mut pin =
+        crate::tools::unguarded::pin("inspect", &workspace, root.to_str().unwrap()).unwrap();
+    pin.state_roots = [
+        state.path().to_str().unwrap().into(),
+        root.join("account").to_str().unwrap().into(),
+    ];
+    intent.host_command = Some(pin);
+    let ToolCall::CommandUnguarded {
+        program,
+        prefix_rule,
+        ..
+    } = &mut intent.call
+    else {
+        unreachable!()
+    };
+    *program = "inspect".into();
+    *prefix_rule = Some(vec![program.clone(), "value %s".into()]);
+    let digest = PermissionSettings::remember_host(&state, &intent, None).unwrap();
+    let file = state.path().join("permissions.json");
+    let before = std::fs::read(&file).unwrap();
+    let mut changed = std::fs::read(&executable).unwrap();
+    changed.extend_from_slice(b"changed");
+    std::fs::write(&executable, changed).unwrap();
+    let ToolCall::CommandUnguarded {
+        args, prefix_rule, ..
+    } = &mut intent.call
+    else {
+        unreachable!()
+    };
+    args[0] = "changed %s".into();
+    prefix_rule.as_mut().unwrap()[1].clone_from(&args[0]);
+    assert!(matches!(
+        PermissionSettings::remember_host(&state, &intent, Some(digest)),
+        Err(SettingsError::Invalid)
+    ));
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let reopened = PermissionSettings::load(&state, &workspace).unwrap();
+    assert_eq!(reopened.host_prefixes().len(), 1);
+    assert_eq!(reopened.digest(), Some(digest));
+}
+
+#[test]
 fn host_prefix_records_enforce_literal_scope_closed_policy_and_settings_bounds() {
     let intent = host_intent();
     let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
