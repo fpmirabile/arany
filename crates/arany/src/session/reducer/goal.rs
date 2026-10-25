@@ -998,7 +998,7 @@ pub(super) fn apply(
 }
 
 // A compaction prefix must end on a whole step to preserve Tool-request correlation.
-fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
+pub(super) fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;
     };
