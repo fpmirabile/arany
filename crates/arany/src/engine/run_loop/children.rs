@@ -34,12 +34,27 @@ const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 // Keep enough room for a full Read page and its metadata before offering child Tools.
 const MIN_CHILD_RESULT_BYTES: usize = crate::tools::types::MAX_TOOL_RESULT_BYTES;
 
+#[derive(Clone, Copy)]
+pub(super) enum ChildKind {
+    Researcher,
+    Editor,
+}
+
+impl ChildKind {
+    pub(super) fn is_editor(self) -> bool {
+        match self {
+            Self::Researcher => false,
+            Self::Editor => true,
+        }
+    }
+}
+
 pub(super) struct ChildWork {
     pub(super) agent_run_id: AgentRunId,
     pub(super) objective: String,
     pub(super) definition: Option<crate::tools::definitions::AgentDefinition>,
     pub(super) turns_remaining: u8,
-    pub(super) editor: bool,
+    pub(super) kind: ChildKind,
     pub(super) source_context: Option<ChildResult>,
     pub(super) steering_notes: Vec<String>,
     pub(super) stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
@@ -51,7 +66,11 @@ pub(super) struct ChildWork {
 impl ChildWork {
     fn hook_subject(&self) -> &str {
         self.definition.as_ref().map_or(
-            if self.editor { "editor" } else { "researcher" },
+            if self.kind.is_editor() {
+                "editor"
+            } else {
+                "researcher"
+            },
             |definition| definition.name.as_str(),
         )
     }
@@ -929,11 +948,11 @@ impl RunLoop<'_> {
         pending: VecDeque<usize>,
         end: WorkerEnd,
     ) -> Result<Admission<()>, EngineError> {
-        if children.iter().any(|c| c.editor) {
+        if children.iter().any(|child| child.kind.is_editor()) {
             self.observe_worker_stop().await?;
         }
         for index in pending {
-            if children[index].editor {
+            if children[index].kind.is_editor() {
                 let completed = {
                     let _active_work = self.ledger().active_work();
                     self.complete_worker(
@@ -1193,7 +1212,7 @@ impl RunLoop<'_> {
             objective: assignment.objective,
             turns_remaining: definition.as_ref().map_or(MAX_CHILD_TURNS, |d| d.max_turns),
             definition,
-            editor: false,
+            kind: ChildKind::Researcher,
             source_context: None,
             steering_notes: Vec::new(),
             stop_hook_feedback: Vec::new(),
@@ -1964,7 +1983,7 @@ impl RunLoop<'_> {
                 | CallResult::Failed(_)
                 | CallResult::Cancelled => false,
             };
-        if wave.children[index].editor {
+        if wave.children[index].kind.is_editor() {
             let decision = self
                 .classify_editor_call(
                     &wave.children[index],
@@ -2178,12 +2197,14 @@ impl RunLoop<'_> {
             .run_subagent_stop(child, &answer.text, turn, deadline)
             .await
         {
-            Err(EngineError::Tool(crate::tools::ToolError::Uncertain)) if child.editor => {
+            Err(EngineError::Tool(crate::tools::ToolError::Uncertain))
+                if child.kind.is_editor() =>
+            {
                 Ok(StopHookRun::Uncertain)
             }
             run => run,
         }?;
-        if run == StopHookRun::Blocked && !child.editor {
+        if run == StopHookRun::Blocked && !child.kind.is_editor() {
             self.ledger().child_call_finished()?;
         }
         let decision = decide_child_stop(run, *abort, &self.child_facts(child, deadline)?);
@@ -2200,7 +2221,7 @@ impl RunLoop<'_> {
                     WaveStop::BUDGET
                 });
             }
-            if !child.editor {
+            if !child.kind.is_editor() {
                 self.finish_child(
                     child.agent_run_id,
                     disposition,
@@ -2563,7 +2584,7 @@ impl RunLoop<'_> {
             &mut request.model,
             &mut request.max_output_tokens,
         )?;
-        if child.editor && !self.admit_worker_call(wave.queue).await? {
+        if child.kind.is_editor() && !self.admit_worker_call(wave.queue).await? {
             wave.queue.pending.push_front(index);
             return Ok(Admission::Reserved(SlotDispatch::Stopped));
         }
@@ -2697,7 +2718,7 @@ impl RunLoop<'_> {
             .iter()
             .map(|definition| format!("Agent definition:\n{}", definition.body))
             .collect();
-        if child.editor {
+        if child.kind.is_editor() {
             let assignment = self.proposed_editor(child.agent_run_id)?;
             context.push(format!(
                 "Worker assignment: {}",
@@ -2749,7 +2770,7 @@ impl RunLoop<'_> {
             match tools.steps.last_mut() {
                 Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
                 None => {
-                    if child.editor {
+                    if child.kind.is_editor() {
                         let mut catalog: serde_json::Value = serde_json::from_str(tools.catalog())
                             .map_err(|_| EngineError::InvalidRequest)?;
                         catalog["tool_calls_remaining"] =
@@ -2763,7 +2784,7 @@ impl RunLoop<'_> {
                         );
                     }
                     // Only the first call rebuilds the catalog; later calls keep this restriction.
-                    if !child.editor
+                    if !child.kind.is_editor()
                         && let Some(definition) = &child.definition
                     {
                         restrict_catalog(tools, definition)?;
@@ -2780,7 +2801,7 @@ impl RunLoop<'_> {
             phase: AgentPhase::ChildWork,
             collaboration: CollaborationPolicy::Single,
             model: String::new(),
-            max_output_tokens: if child.editor {
+            max_output_tokens: if child.kind.is_editor() {
                 MAX_OUTPUT_TOKEN_CAP
             } else {
                 DEFAULT_OUTPUT_TOKEN_CAP
@@ -2811,7 +2832,7 @@ impl RunLoop<'_> {
                 includes: root.includes.clone(),
                 tools: child.tools.clone(),
                 ..RunInput::new(
-                    if child.editor {
+                    if child.kind.is_editor() {
                         PromptRole::Editor
                     } else if researcher {
                         PromptRole::Researcher
@@ -2933,7 +2954,7 @@ impl RunLoop<'_> {
             && child.tool_calls_remaining > 0 && child.turns_remaining > 0
             && request.call.valid()
             && self.model_may_propose(&request.call)
-            && (if child.editor {
+            && (if child.kind.is_editor() {
                 self.proposed_editor(child.agent_run_id)
                     .and_then(|a| self.editor_grant(&a))
                     .is_ok_and(|g| g.allows(&request.call))
@@ -3161,7 +3182,7 @@ mod delegation_bound_tests {
                     objective: "Inspect notes".into(),
                     definition: None,
                     turns_remaining: 2,
-                    editor: false,
+                    kind: ChildKind::Researcher,
                     source_context: None,
                     steering_notes: Vec::new(),
                     stop_hook_feedback: Vec::new(),
@@ -3191,13 +3212,13 @@ mod delegation_bound_tests {
         ]}}"#,
         )
         .unwrap();
-        for editor in [false, true] {
+        for kind in [ChildKind::Researcher, ChildKind::Editor] {
             let child = ChildWork {
                 agent_run_id: AgentRunId::new(),
                 objective: "Inspect assignment".into(),
                 definition: None,
                 turns_remaining: 0,
-                editor,
+                kind,
                 source_context: None,
                 steering_notes: Vec::new(),
                 stop_hook_feedback: Vec::new(),
@@ -3213,7 +3234,7 @@ mod delegation_bound_tests {
             assert_eq!(matched.len(), 1);
             assert_eq!(
                 matched[0].2.command(),
-                if editor {
+                if kind.is_editor() {
                     "editor-check"
                 } else {
                     "researcher-check"

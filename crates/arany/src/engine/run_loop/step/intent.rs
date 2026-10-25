@@ -144,7 +144,7 @@ impl RunLoop<'_> {
         deadline: Instant,
     ) -> Option<EffectIntent> {
         let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        let overhead = if child.editor {
+        let overhead = if child.kind.is_editor() {
             runtime.worker_reservation_overhead(&intent.call)
         } else {
             runtime.reservation_overhead(&intent.call)
@@ -317,7 +317,7 @@ impl RunLoop<'_> {
                 else {
                     return Ok(Err(deadline_refusal));
                 };
-                if child.editor {
+                if child.kind.is_editor() {
                     self.shape_worker_intent(&mut intent, child.agent_run_id)?;
                     self.size_editor_runtime(runtime, &mut intent, deadline);
                     if intent.limits.runtime_ms < 1_000 {
@@ -407,7 +407,7 @@ impl RunLoop<'_> {
             return Err(EngineError::CoordinatorFailed);
         };
         let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        if child.editor {
+        if child.kind.is_editor() {
             self.shape_worker_intent(&mut intent, child.agent_run_id)?;
         }
         let permission = self
@@ -426,7 +426,7 @@ impl RunLoop<'_> {
             active_ceiling_ms: self.ledger().active_ceiling(0)?,
         })
         .await?;
-        if child.editor {
+        if child.kind.is_editor() {
             self.worker
                 .lock()
                 .await
@@ -512,7 +512,7 @@ impl RunLoop<'_> {
             active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;
-        if matches!(grant, Grant::Researcher { child, .. } if child.editor) {
+        if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
             self.worker
                 .lock()
                 .await
@@ -556,7 +556,7 @@ impl RunLoop<'_> {
                     let mut timed_out = false;
                     let execution = async {
                         let _active_work = self.ledger().active_work();
-                        if child.editor {
+                        if child.kind.is_editor() {
                             let (observation, pending) = self
                                 .dispatch_worker(runtime, intent, cancellation.clone())
                                 .await?;
