@@ -232,6 +232,7 @@ async fn transport_failure(
         TransportError::Rejected
         | TransportError::InvalidOutcome
         | TransportError::InvalidResponseContract
+        | TransportError::InvalidOutcomeContract
         | TransportError::HttpServerUnavailable(_)
         | TransportError::RateLimited(_)
         | TransportError::QuotaExceeded => CheckDisposition::Rejected,

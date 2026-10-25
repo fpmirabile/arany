@@ -236,21 +236,21 @@ fn decode_function_call(
         .ok_or(ProviderError::InvalidResponseContract)?;
     let operation = name
         .strip_prefix("arany_")
-        .ok_or(ProviderError::InvalidOutcome)?;
+        .ok_or(ProviderError::InvalidOutcomeContract)?;
     let fields = crate::tools::parse_json(
         arguments.as_bytes(),
         crate::provider::decode::argument_limit(operation),
     )
-    .map_err(|_| ProviderError::InvalidOutcome)?;
+    .map_err(|_| ProviderError::InvalidOutcomeContract)?;
     let fields = fields
         .as_object()
         .cloned()
-        .ok_or(ProviderError::InvalidOutcome)?;
+        .ok_or(ProviderError::InvalidOutcomeContract)?;
     let outcome_functions = outcome_specs(outcome_schema);
     if !offered.iter().any(|spec| spec.name == name)
         && !outcome_functions.iter().any(|spec| spec.name == name)
     {
-        return Err(ProviderError::InvalidOutcome);
+        return Err(ProviderError::InvalidOutcomeContract);
     }
     let outcome = if operation == "delegate" {
         function_outcome(operation, fields)
@@ -260,7 +260,8 @@ fn decode_function_call(
             operation,
             Value::Object(fields),
         )
-    }?;
+    }
+    .map_err(|_| ProviderError::InvalidOutcomeContract)?;
     Ok((
         outcome,
         json!({

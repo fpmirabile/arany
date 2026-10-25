@@ -5,6 +5,8 @@ use crate::provider::{Effort, PromptRole, RunInput, render, test_support::read_o
 const MODEL: &str = "chat-model";
 const KEY: &str = "synthetic-chat-key";
 
+type RejectionCase = (&'static str, fn(&mut Value));
+
 fn request() -> ProviderRequest {
     read_only_request(MODEL)
 }
@@ -16,6 +18,30 @@ fn answer_reply() -> Value {
         "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"safe answer"}}],
         "usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}
     })
+}
+
+fn delegate_request() -> ProviderRequest {
+    let mut request = request();
+    request.phase = crate::provider::AgentPhase::RootPlan;
+    request.input = RunInput::new(PromptRole::ReadOnly, "delegate objective".into());
+    request.collaboration = crate::CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    request
+}
+
+fn delegate_reply() -> Value {
+    let mut reply = answer_reply();
+    reply["choices"][0] = json!({
+        "finish_reason":"tool_calls",
+        "message":{"role":"assistant","content":null,"tool_calls":[{
+            "id":"call_delegate","type":"function","function":{
+                "name":"arany_delegate",
+                "arguments":json!({"children":[{"objective":"Inspect the plan","profile":null}],"agent":null}).to_string()
+            }
+        }]}
+    });
+    reply
 }
 
 #[test]
@@ -143,27 +169,15 @@ fn decoder_rejects_selected_key_reflection_and_sse_envelopes() {
 
 #[test]
 fn one_offered_delegate_call_decodes_as_a_typed_outcome() {
-    let mut request = request();
-    request.phase = crate::provider::AgentPhase::RootPlan;
-    request.input = RunInput::new(PromptRole::ReadOnly, "delegate objective".into());
-    request.collaboration = crate::CollaborationPolicy::Team {
-        max_active_children: 1,
-    };
+    let request = delegate_request();
     let conversation = render::conversation(&request).unwrap();
     let body = run_body(&request, &conversation, None).unwrap();
     assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["tools"][0]["function"]["name"], "arany_delegate");
-    let arguments = json!({
-        "children":[{"objective":"Inspect the plan","profile":null}],
-        "agent":null
-    })
-    .to_string();
-    let reply = json!({
-        "id":"chatcmpl_delegate",
-        "model":MODEL,
-        "choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_delegate","type":"function","function":{"name":"arany_delegate","arguments":arguments}}]}}],
-        "usage":{"prompt_tokens":14,"completion_tokens":5,"total_tokens":19}
-    });
+    let reply = delegate_reply();
+    let arguments = reply["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
     let response = decode_run(
         &serde_json::to_vec(&reply).unwrap(),
         &request,
@@ -199,6 +213,116 @@ fn one_offered_delegate_call_decodes_as_a_typed_outcome() {
 }
 
 #[test]
+fn call_shapes_reject_multiple_mixed_and_unoffered_calls() {
+    let request = delegate_request();
+    let conversation = render::conversation(&request).unwrap();
+    let cases: [RejectionCase; 4] = [
+        ("multiple calls", |value| {
+            let call = value["choices"][0]["message"]["tool_calls"][0].clone();
+            value["choices"][0]["message"]["tool_calls"]
+                .as_array_mut()
+                .unwrap()
+                .push(call);
+        }),
+        ("mixed answer and call", |value| {
+            value["choices"][0]["finish_reason"] = json!("stop");
+            value["choices"][0]["message"]["content"] = json!("answer");
+        }),
+        ("non-null content with call", |value| {
+            value["choices"][0]["message"]["content"] = json!("");
+        }),
+        ("unoffered function", |value| {
+            value["choices"][0]["message"]["tool_calls"][0]["function"]["name"] =
+                json!("arany_read");
+        }),
+    ];
+    for (case, mutate) in cases {
+        let mut reply = delegate_reply();
+        mutate(&mut reply);
+        assert!(
+            decode_run(
+                reply.to_string().as_bytes(),
+                &request,
+                KEY,
+                &[],
+                &conversation.outcome
+            )
+            .is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn function_selection_and_arguments_keep_the_outcome_contract_reason() {
+    let request = delegate_request();
+    let conversation = render::conversation(&request).unwrap();
+    for (name, arguments) in [
+        ("arany_read", "{}"),
+        ("external_delegate", "{}"),
+        ("arany_delegate", "{"),
+        ("arany_delegate", "[]"),
+        ("arany_delegate", r#"{"children":"invalid","agent":null}"#),
+    ] {
+        let mut reply = delegate_reply();
+        reply["choices"][0]["message"]["tool_calls"][0]["function"] =
+            json!({"name":name,"arguments":arguments});
+        assert!(matches!(
+            decode_run(
+                reply.to_string().as_bytes(),
+                &request,
+                KEY,
+                &[],
+                &conversation.outcome
+            ),
+            Err(ProviderError::InvalidOutcomeContract)
+        ));
+    }
+}
+
+#[test]
+fn compaction_requires_bounded_string_content_without_calls_or_refusals() {
+    let limit = crate::session::MAX_COMPACTION_SUMMARY_BYTES;
+    let summary = format!("{}.", " ".repeat(limit - 1));
+    let mut accepted = answer_reply();
+    accepted["choices"][0]["message"]["content"] = json!(summary);
+    assert_eq!(
+        decode_compaction(accepted.to_string().as_bytes(), MODEL, 128)
+            .unwrap()
+            .summary,
+        summary
+    );
+
+    let cases: [RejectionCase; 6] = [
+        ("whitespace", |value| {
+            value["choices"][0]["message"]["content"] = json!(" \n\t")
+        }),
+        ("overflow", |value| {
+            value["choices"][0]["message"]["content"] =
+                json!(".".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1))
+        }),
+        ("tool call", |value| *value = delegate_reply()),
+        ("refusal", |value| {
+            value["choices"][0]["message"]["refusal"] = json!("refused")
+        }),
+        ("content array", |value| {
+            value["choices"][0]["message"]["content"] = json!([{"type":"text","text":"summary"}])
+        }),
+        ("length stop", |value| {
+            value["choices"][0]["finish_reason"] = json!("length")
+        }),
+    ];
+    for (case, mutate) in cases {
+        let mut reply = answer_reply();
+        mutate(&mut reply);
+        assert!(
+            decode_compaction(reply.to_string().as_bytes(), MODEL, 128).is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn tool_review_uses_strict_json_schema_and_decodes_a_typed_verdict() {
     let mut request = request();
     request.phase = crate::provider::AgentPhase::ToolReview;
@@ -229,5 +353,15 @@ fn tool_review_uses_strict_json_schema_and_decodes_a_typed_verdict() {
     assert_eq!(
         response.outcome,
         ProviderOutcome::Review(crate::provider::ReviewVerdict::Approve)
+    );
+    assert!(
+        decode_run(
+            delegate_reply().to_string().as_bytes(),
+            &request,
+            KEY,
+            &[],
+            &conversation.outcome
+        )
+        .is_err()
     );
 }

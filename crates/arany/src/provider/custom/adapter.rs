@@ -131,6 +131,7 @@ fn transport_error(error: TransportError) -> ProviderError {
         TransportError::StreamEnded => ProviderError::StreamEnded,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
         TransportError::InvalidResponseContract => ProviderError::InvalidResponseContract,
+        TransportError::InvalidOutcomeContract => ProviderError::InvalidOutcomeContract,
     }
 }
 

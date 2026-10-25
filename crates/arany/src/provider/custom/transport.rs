@@ -37,6 +37,7 @@ pub(super) enum TransportError {
     StreamEnded,
     InvalidOutcome,
     InvalidResponseContract,
+    InvalidOutcomeContract,
 }
 
 impl CustomTransport {
@@ -492,6 +493,7 @@ impl CustomTransport {
 fn response_decode_failure(error: ProviderError) -> TransportError {
     match error {
         ProviderError::InvalidResponseContract => TransportError::InvalidResponseContract,
+        ProviderError::InvalidOutcomeContract => TransportError::InvalidOutcomeContract,
         _ => TransportError::InvalidOutcome,
     }
 }

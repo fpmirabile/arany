@@ -2717,7 +2717,8 @@ fn add_custom_route(pty: &mut SetupPty, choice: &[u8], protocol: &[u8]) -> usize
 
 #[cfg(debug_assertions)]
 fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
-    let mut cursor = pty.transcript.len();
+    let edit_start = pty.transcript.len();
+    let mut cursor = edit_start;
     pty.input
         .write_all(b"1\r")
         .expect("select saved Chat route");
@@ -2766,7 +2767,10 @@ fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
         &mut pty.answered,
         (cursor, b"empty Enter selects 1. first-route"),
     );
-    assert!(String::from_utf8_lossy(&pty.transcript).contains("Arany adds /chat/completions"));
+    assert!(
+        String::from_utf8_lossy(&pty.transcript[edit_start..])
+            .contains("Arany adds /chat/completions")
+    );
 }
 
 #[cfg(debug_assertions)]

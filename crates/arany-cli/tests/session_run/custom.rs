@@ -99,6 +99,7 @@ enum RecheckFailure {
     ChatSse,
     ChatRunTwoChoices,
     ChatRunLength,
+    ChatRunOutcomeCorrection,
 }
 
 fn malformed_chat_failure(failure: RecheckFailure) -> bool {
@@ -183,6 +184,7 @@ fn chat_completions_custom_profile_process_gate_proves_conformance_and_durable_r
     }
     custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunTwoChoices);
     custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunLength);
+    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunOutcomeCorrection);
 }
 
 fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
@@ -369,10 +371,14 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 failure,
                 RecheckFailure::ChatRunTwoChoices | RecheckFailure::ChatRunLength
             );
+        let corrective_chat_run =
+            chat && matches!(failure, RecheckFailure::ChatRunOutcomeCorrection);
         for wire_index in 0..if malformed_chat_probe {
             1
         } else if malformed_chat_run {
             4
+        } else if corrective_chat_run {
+            5
         } else if chat {
             12
         } else if messages.is_some() {
@@ -615,7 +621,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                 continue;
             }
-            if index == 4 {
+            if index == 4 && !corrective_chat_run {
                 std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
@@ -686,6 +692,32 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             }
             if index == 9 && matches!(failure, RecheckFailure::WrongModel) {
                 response["model"] = "mistyped-highspeed-fallback".into();
+            }
+            if corrective_chat_run {
+                let has_correction = body["messages"].as_array().unwrap().iter().any(|message| {
+                    message["content"].as_str().is_some_and(|text| {
+                        serde_json::from_str::<serde_json::Value>(text)
+                            .is_ok_and(|value| value["scope"] == "harness_outcome_correction")
+                    })
+                });
+                assert_eq!(has_correction, index == 4);
+                if index == 3 {
+                    response["choices"][0] = serde_json::json!({
+                        "finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                        "tool_calls":[{"id":"call_unoffered","type":"function","function":{"name":"arany_delegate","arguments":"{}"}}]}
+                    });
+                } else if index == 4 {
+                    let database = rusqlite::Connection::open(&check_database_for_server).unwrap();
+                    let payload: String = database.query_row("SELECT payload FROM events WHERE kind='ProviderCallRecorded' ORDER BY sequence DESC LIMIT 1", [], |row| row.get(0)).unwrap();
+                    let record: arany::ProviderCallRecord = serde_json::from_str(&payload).unwrap();
+                    assert_eq!(
+                        record.failure_reason,
+                        Some(arany::ProviderFailureReason::OutcomeContract)
+                    );
+                    response["choices"][0] = serde_json::json!({
+                        "finish_reason":"stop","message":{"role":"assistant","content":"corrected answer"}
+                    });
+                }
             }
             let (mut content_type, mut response) = if body["stream"] == true {
                 (
@@ -992,23 +1024,40 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     if chat
         && matches!(
             failure,
-            RecheckFailure::ChatRunTwoChoices | RecheckFailure::ChatRunLength
+            RecheckFailure::ChatRunTwoChoices
+                | RecheckFailure::ChatRunLength
+                | RecheckFailure::ChatRunOutcomeCorrection
         )
     {
-        server.join().expect("malformed Run server completed");
-        assert!(!success.status.success());
-        assert_eq!(success.stdout, b"");
+        server.join().expect("Chat Run server completed");
+        let corrected = matches!(failure, RecheckFailure::ChatRunOutcomeCorrection);
+        assert_eq!(success.status.success(), corrected);
+        assert_eq!(
+            success.stdout,
+            if corrected {
+                b"Answer:\n  corrected answer\n".as_slice()
+            } else {
+                b""
+            }
+        );
         let receipt = std::str::from_utf8(&success.stderr).unwrap();
         let lines: Vec<_> = receipt.lines().collect();
         assert_eq!(lines.len(), 4);
-        let failed_session =
+        let recorded_session =
             SessionId::from_str(lines[0].strip_prefix("Session: ").unwrap()).unwrap();
-        let failed_run = RunId::from_str(lines[1].strip_prefix("Run: ").unwrap()).unwrap();
-        assert_eq!(lines[2], "Status: failed");
+        let recorded_run = RunId::from_str(lines[1].strip_prefix("Run: ").unwrap()).unwrap();
+        assert_eq!(
+            lines[2],
+            if corrected {
+                "Status: finished"
+            } else {
+                "Status: failed"
+            }
+        );
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
         let payload: String = connection
             .query_row(
-                "SELECT payload FROM events WHERE kind='ProviderCallRecorded' ORDER BY sequence DESC LIMIT 1",
+                "SELECT payload FROM events WHERE kind='ProviderCallRecorded' ORDER BY sequence LIMIT 1",
                 [],
                 |row| row.get(0),
             )
@@ -1016,26 +1065,46 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         let record: arany::ProviderCallRecord = serde_json::from_str(&payload).unwrap();
         assert_eq!(
             record.failure_reason,
-            Some(arany::ProviderFailureReason::ResponseContract)
+            Some(if corrected {
+                arany::ProviderFailureReason::OutcomeContract
+            } else {
+                arany::ProviderFailureReason::ResponseContract
+            })
         );
         drop(connection);
         let store = Store::open_read_only(
-            StateRoot::open_existing(&state_path).expect("state reopen after failed Run"),
+            StateRoot::open_existing(&state_path).expect("state reopen after Chat Run"),
         )
-        .expect("reopen failed Run Store");
+        .expect("reopen Chat Run Store");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("replay runtime");
         let events = runtime
-            .block_on(store.load_session(failed_session))
+            .block_on(store.load_session(recorded_session))
             .unwrap();
-        let view = SessionView::replay(failed_session, &events)
+        let view = SessionView::replay(recorded_session, &events)
             .unwrap()
             .unwrap();
         assert_eq!(view.runs.len(), 1);
-        assert_eq!(view.runs[0].id, failed_run);
-        assert_eq!(view.runs[0].status, RunStatus::Failed);
-        assert!(view.runs[0].assistant_message.is_none());
+        assert_eq!(view.runs[0].id, recorded_run);
+        assert_eq!(
+            view.runs[0].status,
+            if corrected {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            }
+        );
+        assert_eq!(
+            view.runs[0].assistant_message.as_deref(),
+            corrected.then_some("corrected answer")
+        );
+        assert_eq!(view.runs[0].agents.len(), 1);
+        let calls = &view.runs[0].agents[0].provider_calls;
+        assert_eq!(calls.len(), if corrected { 2 } else { 1 });
+        if corrected {
+            assert!(calls[1].failure_reason.is_none());
+        }
         runtime.block_on(store.close()).unwrap();
         return;
     }
