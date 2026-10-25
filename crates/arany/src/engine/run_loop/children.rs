@@ -635,25 +635,22 @@ impl RunLoop<'_> {
             return self.editor_delegation(children, agent);
         }
         let valid = {
-            self.wave_settled().unwrap_or(false)
+            self.wave_settled()?
                 && !matches!(self.controls.policy, CollaborationPolicy::Single)
                 && crate::provider::valid_assignments(children, agent)
-                && self
-                    .ledger()
-                    .view(|v| {
-                        v.runs.last().is_some_and(|r| {
-                            let attempts: usize = r
-                                .primary()
-                                .into_iter()
-                                .flat_map(|a| &a.provider_calls)
-                                .filter_map(|c| c.delegation.as_ref())
-                                .map(Vec::len)
-                                .sum();
-                            attempts + children.len()
-                                <= usize::from(self.controls.policy.max_children())
-                        })
+                && self.ledger().view(|v| {
+                    v.runs.last().is_some_and(|r| {
+                        let attempts: usize = r
+                            .primary()
+                            .into_iter()
+                            .flat_map(|a| &a.provider_calls)
+                            .filter_map(|c| c.delegation.as_ref())
+                            .map(Vec::len)
+                            .sum();
+                        attempts + children.len()
+                            <= usize::from(self.controls.policy.max_children())
                     })
-                    .unwrap_or(false)
+                })?
                 && children
                     .iter()
                     .all(|a| self.valid_research_assignment(a, agent))
