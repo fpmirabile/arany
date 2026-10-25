@@ -153,6 +153,12 @@ pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     FaultPlan::guard_cache_report_gate(observation).await;
 }
 
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn guard_dispatched(intent: &crate::tools::EffectIntent) {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::guard_dispatched(&intent.call);
+}
+
 pub(crate) struct CandidateSync {
     #[cfg(any(test, feature = "test-support"))]
     finished: Option<tokio::sync::oneshot::Sender<()>>,
@@ -278,6 +284,7 @@ mod injection {
         CheckpointStall(SessionId),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
+        GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
         GuardCacheReport(
             uuid::Uuid,
             oneshot::Sender<crate::tools::ToolObservation>,
@@ -476,6 +483,20 @@ mod injection {
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {
             plan().push(Fault::GuardReceipt(intent));
+        }
+
+        pub fn observe_guard_dispatch(call: crate::tools::ToolCall) -> oneshot::Receiver<()> {
+            let (entered, wait) = oneshot::channel();
+            plan().push(Fault::GuardDispatch(call, entered));
+            wait
+        }
+
+        pub(crate) fn guard_dispatched(call: &crate::tools::ToolCall) {
+            if let Some(Fault::GuardDispatch(_, entered)) = take(
+                |fault| matches!(fault, Fault::GuardDispatch(candidate, _) if candidate == call),
+            ) {
+                let _ = entered.send(());
+            }
         }
 
         pub fn gate_guard_cache_report(

@@ -1584,42 +1584,27 @@ fn shell_hook(script: &str) -> Value {
     json!({"type": "command", "command": script})
 }
 
-const HOOK_PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(10);
-const HOOK_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const HOOK_PROCESS_LIST_STDOUT_BYTES: usize = 256 * 1024;
+const HOOK_DISPATCH_TIMEOUT: Duration = Duration::from_secs(180);
 
-fn process_list_contains(marker: &str, observation_root: &Path) -> bool {
-    let mut command = std::process::Command::new("ps");
-    command.args(["-A", "-o", "command="]);
-    let output = super::observe_process(
-        &mut command,
-        observation_root,
-        HOOK_PROCESS_LIST_STDOUT_BYTES,
-    );
-    assert!(output.status.success(), "process listing succeeded");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.trim() == marker)
+fn cancellable_hook() -> (Value, tokio::sync::oneshot::Receiver<()>) {
+    let script = format!("while :; do :; done # {}", Uuid::now_v7());
+    let dispatched = arany::FaultPlan::observe_guard_dispatch(arany::ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.clone()],
+        cwd: String::new(),
+    });
+    (shell_hook(&script), dispatched)
 }
 
-async fn cancel_when_hook_process_is_running(
-    marker: String,
-    observation_root: std::path::PathBuf,
+async fn cancel_when_hook_dispatched(
+    dispatched: tokio::sync::oneshot::Receiver<()>,
     cancellation: RunCancellation,
 ) -> bool {
-    let deadline = std::time::Instant::now() + HOOK_PROCESS_OBSERVATION_TIMEOUT;
-    tokio::task::spawn_blocking(move || {
-        while std::time::Instant::now() < deadline {
-            if process_list_contains(&marker, &observation_root) {
-                cancellation.cancel();
-                return true;
-            }
-            std::thread::sleep(HOOK_PROCESS_POLL_INTERVAL);
-        }
-        false
-    })
-    .await
-    .expect("hook process observation task")
+    let observed = tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, dispatched)
+        .await
+        .is_ok_and(|result| result.is_ok());
+    cancellation.cancel();
+    observed
 }
 
 fn hook_json(decision: &str) -> String {
@@ -4423,10 +4408,8 @@ mod lifecycle_hooks {
 
     #[tokio::test]
     async fn cancellation_during_auto_pre_compact_stops_before_reservation() {
-        let marker = format!("27.{}", std::process::id());
-        let settings = json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(
-            &format!("sleep {marker}; exit 0")
-        )]}]}});
+        let (hook, dispatched) = cancellable_hook();
+        let settings = json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[hook]}]}});
         let fixture = Fixture::new(Some(&settings), false);
         let page = 60 * 1024;
         let reads = 5;
@@ -4480,15 +4463,11 @@ mod lifecycle_hooks {
                 },
             );
             tokio::pin!(running);
-            let watcher = tokio::spawn(cancel_when_hook_process_is_running(
-                format!("sleep {marker}"),
-                fixture._temp.path().to_owned(),
-                cancellation,
-            ));
+            let watcher = tokio::spawn(cancel_when_hook_dispatched(dispatched, cancellation));
             let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
             assert!(
                 gate_reached.unwrap(),
-                "the PreCompact hook process reached its gate"
+                "the Guard dispatched the PreCompact hook"
             );
             outcome.expect("cancelled Run")
         };
@@ -4590,10 +4569,8 @@ mod lifecycle_hooks {
 
     #[tokio::test]
     async fn cancellation_during_subagent_stop_cancels_the_run_without_exhausting_the_goal() {
-        let marker = format!("29.{}", std::process::id());
-        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook(
-            &format!("sleep {marker}; exit 2")
-        )]}]}});
+        let (hook, dispatched) = cancellable_hook();
+        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[hook]}]}});
         let fixture = Fixture::new(Some(&settings), false);
         let cancellation = RunCancellation::new();
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -4618,15 +4595,11 @@ mod lifecycle_hooks {
                 },
             );
             tokio::pin!(running);
-            let watcher = tokio::spawn(cancel_when_hook_process_is_running(
-                format!("sleep {marker}"),
-                fixture._temp.path().to_owned(),
-                cancellation,
-            ));
+            let watcher = tokio::spawn(cancel_when_hook_dispatched(dispatched, cancellation));
             let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
             assert!(
                 gate_reached.unwrap(),
-                "the SubagentStop hook process reached its gate"
+                "the Guard dispatched the SubagentStop hook"
             );
             outcome.expect("cancelled Run")
         };
@@ -4652,10 +4625,8 @@ mod lifecycle_hooks {
 
     #[tokio::test]
     async fn cancellation_during_stop_cancels_the_run_without_exhausting_the_goal() {
-        let marker = format!("28.{}", std::process::id());
-        let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook(
-            &format!("sleep {marker}; exit 2")
-        )]}]}});
+        let (hook, dispatched) = cancellable_hook();
+        let settings = json!({"hooks":{"Stop":[{"hooks":[hook]}]}});
         let fixture = Fixture::new(Some(&settings), false);
         let cancellation = RunCancellation::new();
         let provider = Arc::new(ScriptedProvider::new(vec![finish("candidate")]));
@@ -4673,16 +4644,9 @@ mod lifecycle_hooks {
                     ..Default::default()
                 },
             ));
-            let watcher = tokio::spawn(cancel_when_hook_process_is_running(
-                format!("sleep {marker}"),
-                fixture._temp.path().to_owned(),
-                cancellation,
-            ));
+            let watcher = tokio::spawn(cancel_when_hook_dispatched(dispatched, cancellation));
             let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
-            assert!(
-                gate_reached.unwrap(),
-                "the Stop hook process reached its gate"
-            );
+            assert!(gate_reached.unwrap(), "the Guard dispatched the Stop hook");
             outcome.expect("cancelled Run")
         };
         assert_eq!(outcome.run.status, RunStatus::Cancelled);
