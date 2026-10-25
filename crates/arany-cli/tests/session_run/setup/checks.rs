@@ -254,11 +254,20 @@ fn manager_check_acknowledgment_selects_verified_route_and_completes_a_turn() {
         let checking = accept_check(&mut pty, presentation, warning);
         let (listing, result) = acknowledge_result(&mut pty, presentation, checking);
         assert_result_contains(&result, "Disposition: succeeded");
+        assert_result_contains(&result, "Status: verified; ");
+        assert_result_contains(&result, " left");
         assert!(
             provider.streaming.try_recv().is_err(),
             "no Run before selection"
         );
         assert_check_facts(&state, CheckDisposition::Succeeded, 3);
+        presentation.menu(&mut pty, listing, "Custom routes");
+        let action = presentation.choose(&mut pty, 1);
+        presentation.menu(&mut pty, action, "Custom route local");
+        let inspected = presentation.choose(&mut pty, 1);
+        let (listing, details) = acknowledge_result(&mut pty, presentation, inspected);
+        assert_result_contains(&details, "Check: verified; ");
+        assert_result_contains(&details, " left");
         presentation.menu(&mut pty, listing, "Custom routes");
         let action = presentation.choose(&mut pty, 1);
         presentation.menu(&mut pty, action, "Custom route local");

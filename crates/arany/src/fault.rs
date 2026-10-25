@@ -145,6 +145,15 @@ pub(crate) async fn retry_backoff(session: SessionId, delay: Duration) {
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn autonomous_continuation(session: SessionId) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((entered, release)) = FaultPlan::autonomous_continuation_gate(session) {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_result(
     intent: uuid::Uuid,
     result: Result<ToolObservation, ToolError>,
@@ -284,6 +293,7 @@ mod injection {
             oneshot::Receiver<()>,
         ),
         Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
+        AutonomousContinuation(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         CheckpointStall(SessionId),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
@@ -383,6 +393,32 @@ mod injection {
         ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
             match take(|fault| matches!(fault, Fault::Checkpoint(id, ..) if *id == session)) {
                 Some(Fault::Checkpoint(_, entered, release)) => Some((entered, release)),
+                _ => None,
+            }
+        }
+
+        pub fn gate_autonomous_continuation(
+            session_id: SessionId,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait_entered) = oneshot::channel();
+            let (release, wait_release) = oneshot::channel();
+            plan().push(Fault::AutonomousContinuation(
+                session_id,
+                entered,
+                wait_release,
+            ));
+            (wait_entered, release)
+        }
+
+        pub(crate) fn autonomous_continuation_gate(
+            session_id: SessionId,
+        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::AutonomousContinuation(id, ..) if *id == session_id),
+            ) {
+                Some(Fault::AutonomousContinuation(_, entered, release)) => {
+                    Some((entered, release))
+                }
                 _ => None,
             }
         }

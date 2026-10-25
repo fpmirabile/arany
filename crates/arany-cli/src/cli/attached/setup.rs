@@ -1234,14 +1234,7 @@ fn custom_profile_choices(
                 .map_or("unchecked".to_owned(), |(_, status)| match status {
                     CustomCheckStatus::Unchecked => "unchecked".into(),
                     CustomCheckStatus::Stale => "stale".into(),
-                    CustomCheckStatus::VerifiedUntil(expires) => {
-                        let now = i64::try_from(arany::now_ms()).unwrap_or(i64::MAX);
-                        let remaining = expires.saturating_sub(now);
-                        format!(
-                            "verified; {} left",
-                            format_duration(remaining.max(0) as u64)
-                        )
-                    }
+                    CustomCheckStatus::VerifiedUntil(expires) => format_verified_until(*expires),
                 });
             (
                 u8::try_from(index + 1).unwrap_or(u8::MAX),
@@ -1254,6 +1247,12 @@ fn custom_profile_choices(
     choices
 }
 
+fn format_verified_until(expires_at_ms: i64) -> String {
+    let now = i64::try_from(arany::now_ms()).unwrap_or(i64::MAX);
+    let remaining_ms = expires_at_ms.saturating_sub(now).max(0) as u64;
+    format!("verified; {} left", format_duration(remaining_ms))
+}
+
 async fn inspect_custom_route(
     terminal: &mut AttachedTerminal,
     profile: &CustomProfile,
@@ -1262,7 +1261,7 @@ async fn inspect_custom_route(
     let status = match status.unwrap_or(CustomCheckStatus::Unchecked) {
         CustomCheckStatus::Unchecked => "not checked".to_owned(),
         CustomCheckStatus::Stale => "stale; check again".to_owned(),
-        CustomCheckStatus::VerifiedUntil(expires) => format!("verified until {expires}"),
+        CustomCheckStatus::VerifiedUntil(expires) => format_verified_until(expires),
     };
     let details = format!(
         "Protocol: {}\nDestination: {}\nModel: {}\nCredential: {} — not checked by listing\nCheck: {status}",
@@ -1366,10 +1365,10 @@ fn custom_check_status(
     );
     let status = match report {
         Ok(report) => format!(
-            "Check: {}\nDisposition: {}\nStatus: verified until {}",
+            "Check: {}\nDisposition: {}\nStatus: {}",
             report.view().id,
             report.view().replay_disposition(),
-            report.expires_at_ms(),
+            format_verified_until(report.expires_at_ms()),
         ),
         Err(CustomProfileError::Check { source, receipt }) => {
             let reason = if matches!(*source, CustomProfileError::CredentialNotSet) {
