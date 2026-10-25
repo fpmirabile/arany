@@ -174,11 +174,17 @@ Only committed serve items produce Tool updates. `item/started` becomes
 `tool_call` with the immutable intent ID, compiled title plus bounded escaped
 intent fields, kind, pending status and locations. Command calls are `execute`,
 file changes `edit` (delete-only sets are `delete`), Read/Skill/typed Git reads
-`read`, List/Search `search`, and MCP/other calls `other`. Available journaled
-call fields form `rawInput`; file-change items expose paths without invented
-content or diff bytes. Locations join the client's original cwd spelling with
+`read`, List/Search `search`, GhPrList `read`, and MCP/other calls `other`.
+GhPrList's title identifies the GitHub pull-request listing and includes its
+bounded, escaped repository detail; its available journaled fields remain in
+`rawInput`, and it has no Workspace location. Move retains the serve
+FileChange projection: `edit`, the `Change files` title with its escaped source
+detail, and both source and destination locations. Available journaled call
+fields form `rawInput`; file-change items expose paths without invented content
+or diff bytes. Locations join the client's original cwd spelling with
 Workspace-relative paths for display only; they are never re-resolved or used
-for access.
+for access. The typed Tool fallback matches every ToolCall variant explicitly;
+only the outer non-Tool item fallback remains open.
 
 `item/completed` becomes `tool_call_update`: success is `completed`; declined
 and failed dispositions are `failed`, with the disposition named in fenced
