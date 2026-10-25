@@ -1805,13 +1805,6 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                 _ => false,
             })
             .expect("named recovery checkpoint");
-        let last = if checkpoint == "private_unknown"
-            && matches!(original.events[last + 1].event, Event::ToolStarted { .. })
-        {
-            last + 1
-        } else {
-            last
-        };
         let mut prefix: Vec<_> = original.events[..=last]
             .iter()
             .map(|e| e.event.clone())
