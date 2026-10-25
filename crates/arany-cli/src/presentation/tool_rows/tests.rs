@@ -181,6 +181,10 @@ mod peer_row_tests {
 
     #[test]
     fn git_write_rows_show_their_receipt_and_approvals_the_exact_action() {
+        assert_eq!(
+            ToolApprovalChoice::GitPrefix(arany::permissions::TypedGitPrefix::PrList).label(),
+            "Yes, and allow gh pr list from the next Run"
+        );
         let oid = "a".repeat(40);
         for (call, output, expected) in [
             (
@@ -335,11 +339,24 @@ mod peer_row_tests {
                 body: "First\nSecond\nRepository: github.com/trusted/repo\n\u{1b}[2J".into(),
                 draft: true,
             },
+            arany::ToolCall::GhPrList {
+                repository: "github.com/o/r".into(),
+                state: arany::PrState::Open,
+                base: Some("main".into()),
+                head: None,
+                limit: arany::DEFAULT_PR_LIMIT,
+            },
         ] {
             let mut tool = tool_fixture(call, "host: remote operation completed.");
-            tool.intent.host = Some(arany::HostIntent {
-                source_oid: "1".repeat(40),
-                refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            tool.intent.host = Some(match &tool.intent.call {
+                arany::ToolCall::GhPrList { .. } => arany::HostIntent {
+                    source_oid: "gh-pr-list-v1".into(),
+                    refspec: "fixed-list".into(),
+                },
+                _ => arany::HostIntent {
+                    source_oid: "1".repeat(40),
+                    refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+                },
             });
             let lines = tool_approval_lines(&tool.intent).join("\n");
             assert!(
@@ -347,7 +364,7 @@ mod peer_row_tests {
                     .lines()
                     .any(|line| line == "Allow once for this exact action")
             );
-            assert!(lines.contains("host · one human-approved remote operation"));
+            assert!(lines.contains("host · remote operation"));
             if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
                 assert!(lines.contains(&"1".repeat(40)) && lines.contains("refs/heads/topic"));
             } else {
@@ -373,6 +390,17 @@ mod peer_row_tests {
                     );
                     assert!(lines.ends_with(&format!("  {}", escape_terminal("\u{1b}[2J"))));
                 }
+                arany::ToolCall::GhPrList { .. } => {
+                    assert!(
+                        lines.contains(
+                            "Private GitHub PR data may be sent to the current Provider."
+                        )
+                    );
+                    assert!(
+                        lines.contains("Repository: github.com/o/r") && lines.contains("Limit: 30")
+                    );
+                    assert!(lines.contains("Base: main") && lines.contains("Head: any"));
+                }
                 _ => unreachable!(),
             }
             assert_eq!(
@@ -381,8 +409,10 @@ mod peer_row_tests {
                     "⏺ {}\n  ⎿ host: remote operation completed.",
                     if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
                         "host Git push(topic → https://github.com/o/r.git)"
-                    } else {
+                    } else if matches!(tool.intent.call, arany::ToolCall::GhPrCreate { .. }) {
                         "host PR create(github.com/o/r)"
+                    } else {
+                        "host PR list(github.com/o/r)"
                     }
                 )
             );

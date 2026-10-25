@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 50] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 56] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -145,6 +145,42 @@ const EVENT_FIXTURES: [EventFixture<'static>; 50] = [
         1,
         REWIND_STARTED_V1,
         REWIND_STARTED_V2,
+    ),
+    (
+        "ToolStarted",
+        19,
+        include_str!("toolstarted-without-expiry.json"),
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        26,
+        include_str!("toolfinished-without-expiry.json"),
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "HookStarted",
+        9,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        15,
+        include_str!("hookfinished-without-expiry.json"),
+        include_str!("hookfinished-without-expiry.json"),
+    ),
+    (
+        "GoalPlanContractRecorded",
+        10,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        19,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
     ),
 ];
 const GOAL_STARTED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
@@ -2509,9 +2545,7 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
     host["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))});
     host["intent"]["call"] = serde_json::json!({"operation":"git_push","remote":"https://github.com/o/r","branch":"main"});
     host["intent"]["limits"]["network"] = serde_json::json!("host");
-    let expiry = REGISTRY
-        .event_step("ToolStarted", payload_version("ToolStarted").unwrap() - 1)
-        .unwrap();
+    let expiry = REGISTRY.event_step("ToolStarted", 18).unwrap();
     assert!((expiry.canonical)(&host.to_string()).is_some());
     let migrated = (expiry.transform)(host.clone()).unwrap();
     assert!(migrated["intent"].get("expires_at_ms").is_none());
@@ -2523,4 +2557,32 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
         migrated, host,
         "host approval loses only the shared clock expiry"
     );
+    let list_step = REGISTRY.event_step("ToolStarted", 19).unwrap();
+    let no_expiry = include_str!("toolstarted-without-expiry.json");
+    assert_eq!((list_step.canonical)(no_expiry).as_deref(), Some(no_expiry));
+    assert_eq!(
+        (list_step.transform)(serde_json::from_str(no_expiry).unwrap()),
+        Some(serde_json::from_str(no_expiry).unwrap())
+    );
+    let mut list = source_for_tool_started();
+    list["intent"]["call"] = serde_json::json!({
+        "operation":"gh_pr_list",
+        "repository":"github.com/o/r",
+        "state":"open",
+        "base":null,
+        "head":null,
+        "limit":30
+    });
+    list["intent"]["host"] = serde_json::json!({
+        "source_oid":"gh-pr-list-v1",
+        "refspec":"fixed-list"
+    });
+    list["intent"]["limits"]["network"] = serde_json::json!("host");
+    assert!((list_step.canonical)(&list.to_string()).is_none());
+    assert!((list_step.transform)(list).is_none());
+}
+
+fn source_for_tool_started() -> Value {
+    serde_json::from_str(include_str!("toolstarted-without-expiry.json"))
+        .expect("expiry-free ToolStarted fixture")
 }

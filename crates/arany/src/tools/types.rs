@@ -18,6 +18,9 @@ pub const MAX_TOOL_ARGUMENT_BYTES: usize = 400 * 1024;
 // Every operation other than Write, Edit and MultiEdit keeps this serialized bound.
 pub(crate) const MAX_ORDINARY_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+pub const DEFAULT_PR_STATE: PrState = PrState::Open;
+pub const DEFAULT_PR_LIMIT: u8 = 30;
+pub const MAX_PR_LIST_LIMIT: u8 = 50;
 pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
 pub(crate) const MAX_READ_LINE_CHARS: usize = 2000;
 // ToolObservation::valid checks every producer against this serialized bound.
@@ -380,6 +383,17 @@ pub enum ToolCall {
         body: String,
         draft: bool,
     },
+    GhPrList {
+        repository: String,
+        #[serde(default = "default_pr_state", deserialize_with = "pr_state_or_default")]
+        state: PrState,
+        #[serde(default, deserialize_with = "required_nullable")]
+        base: Option<String>,
+        #[serde(default, deserialize_with = "required_nullable")]
+        head: Option<String>,
+        #[serde(default = "default_pr_limit", deserialize_with = "pr_limit_or_default")]
+        limit: u8,
+    },
     // Null or omitted path and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
@@ -400,6 +414,46 @@ fn required_nullable<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(deserializer)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Closed,
+    Merged,
+    All,
+}
+
+impl PrState {
+    pub const ALL: [Self; 4] = [Self::Open, Self::Closed, Self::Merged, Self::All];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Merged => "merged",
+            Self::All => "all",
+        }
+    }
+}
+
+fn default_pr_state() -> PrState {
+    DEFAULT_PR_STATE
+}
+
+fn pr_state_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PrState, D::Error> {
+    Ok(Option::<PrState>::deserialize(deserializer)?.unwrap_or_else(default_pr_state))
+}
+
+fn default_pr_limit() -> u8 {
+    DEFAULT_PR_LIMIT
+}
+
+fn pr_limit_or_default<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    Ok(Option::<u8>::deserialize(deserializer)?.unwrap_or_else(default_pr_limit))
 }
 
 pub const MAX_SEARCH_ROWS: u32 = 100;
@@ -513,7 +567,8 @@ impl ToolCall {
             | Self::GitBranch { .. }
             | Self::GitSwitch { .. }
             | Self::GitPush { .. }
-            | Self::GhPrCreate { .. } => None,
+            | Self::GhPrCreate { .. }
+            | Self::GhPrList { .. } => None,
         }
     }
 
@@ -678,6 +733,7 @@ pub struct HostIntent {
 impl EffectIntent {
     pub fn effective_timeout_ms(&self) -> u32 {
         let cap = match self.call {
+            ToolCall::GhPrList { .. } => GIT_TIMEOUT_MS,
             _ if self.call.is_host() => 600_000,
             _ if self.call.is_git() => GIT_TIMEOUT_MS,
             ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
@@ -1336,13 +1392,31 @@ impl ToolObservation {
                             receipt.pid > 0
                                 && (self.disposition == ToolDisposition::Uncertain
                                     || self.disposition == ToolDisposition::Failed
+                                        && matches!(self.intent.call, ToolCall::GhPrList { .. })
+                                        && receipt.descendants_confirmed_stopped
+                                        && (self.output == super::git::host::PR_LIST_CAPTURE_LIMIT
+                                            || self.output == super::git::host::PR_LIST_FAILED
+                                                && receipt.exit_code != Some(0)
+                                            || self.output == super::git::host::PR_LIST_INVALID
+                                                && receipt.exit_code == Some(0))
+                                    || self.disposition == ToolDisposition::Failed
                                         && matches!(self.intent.call, ToolCall::GitPush { .. })
                                         && receipt.exit_code == Some(1)
                                         && receipt.descendants_confirmed_stopped
                                         && self.output == super::git::host::NON_FAST_FORWARD
                                     || self.disposition == ToolDisposition::Succeeded
                                         && receipt.exit_code == Some(0)
-                                        && receipt.descendants_confirmed_stopped)
+                                        && receipt.descendants_confirmed_stopped
+                                        && (!matches!(self.intent.call, ToolCall::GhPrList { .. })
+                                            || match self.intent.call {
+                                                ToolCall::GhPrList { limit, .. } => {
+                                                    super::git::host::valid_pr_list_output(
+                                                        &self.output,
+                                                        limit,
+                                                    )
+                                                }
+                                                _ => false,
+                                            }))
                         }
                         None => self.disposition != ToolDisposition::Succeeded,
                         _ => false,

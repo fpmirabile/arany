@@ -990,18 +990,28 @@ impl RunLoop<'_> {
             permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
         let host_permission = self.host_permission(runtime, &intent, permission, &hooks)?;
         let permission = host_permission.permission;
+        let typed_host_read = site == DispatchSite::Primary
+            && matches!(intent.call, ToolCall::GhPrList { .. })
+            && permission.decision == Decision::Allow
+            && permission.basis == PermissionSource::TypedPrefixRule;
         let facts = DispatchFacts {
             site,
             permission,
             hooks: &hooks,
             timeout_limit,
             host: intent.call.is_host(),
+            typed_host_read: typed_host_read
+                && site == DispatchSite::Primary
+                && matches!(intent.call, ToolCall::GhPrList { .. }),
             host_unpinned: intent.call.is_host() && intent.host.is_none(),
-            human_only_unavailable: (intent.call.is_host() && self.controls.approvals.is_none())
-                || self.controls.approvals.is_some_and(|approvals| {
-                    !approvals
-                        .admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
-                }),
+            human_only_unavailable: !typed_host_read
+                && ((intent.call.is_host() && self.controls.approvals.is_none())
+                    || self.controls.approvals.is_some_and(|approvals| {
+                        !approvals.admits_human_only(
+                            &intent.call,
+                            hooks.restriction == Some(Decision::Ask),
+                        )
+                    })),
             unguarded: match grant {
                 Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
                     gate: unguarded_gate(runtime, &intent).await.map(|mut prompt| {
@@ -1087,6 +1097,8 @@ impl RunLoop<'_> {
         let (agent_run_id, digest) = (intent.agent_run_id, intent.digest());
         let unguarded = intent.call.is_unguarded();
         let git_write = intent.call.is_git() && intent.call.facts().mutates;
+        let primary_host_read = matches!(grant, Grant::Primary { .. })
+            && matches!(intent.call, ToolCall::GhPrList { .. });
         let verdict = match outcome {
             Ok(()) => Verdict::Dispatch {
                 intent,
@@ -1104,7 +1116,11 @@ impl RunLoop<'_> {
             }
         };
         let mode = effective_permission_mode(config, grant);
-        if mode.is_some() || unguarded || matches!(grant, Grant::Primary { .. }) && git_write {
+        if mode.is_some()
+            || unguarded
+            || primary_host_read
+            || matches!(grant, Grant::Primary { .. }) && git_write
+        {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
             let source = if !approved && decided.source == PermissionSource::AiReview {

@@ -43,6 +43,7 @@ fn operation(call: &ToolCall) -> Operation {
         | ToolCall::GitSwitch { .. }
         | ToolCall::GitPush { .. }
         | ToolCall::GhPrCreate { .. }
+        | ToolCall::GhPrList { .. }
         | ToolCall::Glob { .. } => Operation::Other,
     }
 }

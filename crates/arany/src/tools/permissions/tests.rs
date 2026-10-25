@@ -2428,3 +2428,30 @@ fn host_git_modes_and_prefixes_never_replace_human_approval() {
         }
     }
 }
+
+#[test]
+fn typed_host_pr_list_allow_applies_in_every_mode() {
+    let call = ToolCall::GhPrList {
+        repository: "github.com/o/r".into(),
+        state: crate::tools::types::DEFAULT_PR_STATE,
+        base: None,
+        head: None,
+        limit: crate::tools::types::DEFAULT_PR_LIMIT,
+    };
+    for mode in ["default", "acceptEdits", "auto", "plan", "dontAsk"] {
+        let config = typed_config(
+            mode,
+            vec![typed(TypedGitPrefix::PrList.tokens(), "allow", Value::Null)],
+        )
+        .unwrap();
+        assert_eq!(
+            config.evaluate(&call),
+            (Decision::Allow, PermissionSource::TypedPrefixRule, None),
+            "{mode}"
+        );
+        let (channel, _) = crate::tools::ToolApprovals::new(ApprovalMode::Auto);
+        assert!(!channel.without_human_only().admits_human_only(&call, false));
+    }
+    let ordinary_allow = config(json!({"allow": ["gh_pr_list"]}));
+    assert_eq!(ordinary_allow.evaluate(&call).0, Decision::Ask);
+}

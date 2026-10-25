@@ -2,7 +2,10 @@ use super::{
     GIT_CAPTURE_BYTES, STDERR_BYTES, VIEW_CONFIG, inspect_layout, read_optional, valid_branch,
 };
 use crate::tools::config::Config;
-use crate::tools::types::{EffectIntent, HostIntent, ToolCall, ToolDisposition, ToolObservation};
+use crate::tools::types::{
+    DEFAULT_PR_LIMIT, DEFAULT_PR_STATE, EffectIntent, HostIntent, MAX_PR_LIST_LIMIT, PrState,
+    ToolCall, ToolDisposition, ToolObservation,
+};
 use crate::tools::{Attestation, CacheUpdate, Cancellation, ToolError, UnguardedReceipt};
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
@@ -22,6 +25,14 @@ const REFUSED: &str = "host: destination, source, authentication, pinned executa
 const PREPARATION_TIMEOUT: &str =
     "host: preparation exceeded the runtime deadline; nothing dispatched.";
 const CANCELLED: &str = "host: cancelled; nothing dispatched.";
+pub(crate) const PR_LIST_FAILED: &str =
+    "host: GitHub pull request list failed; no result was reported.";
+pub(crate) const PR_LIST_CAPTURE_LIMIT: &str =
+    "host: GitHub pull request list exceeded a capture limit.";
+pub(crate) const PR_LIST_INVALID: &str = "host: GitHub returned invalid pull request data.";
+pub(crate) const PR_LIST_TITLE_BYTES: usize = 256;
+pub(crate) const PR_LIST_TEXT_BYTES: usize = 2048;
+const PR_LIST_REFUSAL_BUDGET: &str = "host: refused; nothing dispatched.";
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn valid(call: &ToolCall) -> bool {
@@ -44,6 +55,19 @@ pub(crate) fn valid(call: &ToolCall) -> bool {
                 && text(title, 256, false)
                 && !title.trim().is_empty()
                 && text(body, 8192, true)
+        }
+        ToolCall::GhPrList {
+            repository,
+            base,
+            head,
+            limit,
+            ..
+        } => {
+            repository.len() <= 256
+                && repository_parts(repository).is_some()
+                && base.as_deref().is_none_or(valid_branch)
+                && head.as_deref().is_none_or(valid_branch)
+                && (1..=MAX_PR_LIST_LIMIT).contains(limit)
         }
         _ => false,
     }
@@ -111,6 +135,11 @@ fn repository_parts(value: &str) -> Option<(&str, &str, &str)> {
 
 pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     let string = || json!({"type":"string"});
+    let mut pr_states: Vec<_> = PrState::ALL
+        .into_iter()
+        .map(|state| json!(state.as_str()))
+        .collect();
+    pr_states.push(Value::Null);
     Some(match operation {
         "git_push" => vec![
             (
@@ -139,6 +168,28 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
             ("draft", json!({"type":"boolean"})),
         ],
+        "gh_pr_list" => vec![
+            (
+                "repository",
+                json!({"type":"string", "description":"Exact host/owner/repository, at most 256 bytes; host must match admitted gh authentication."}),
+            ),
+            (
+                "state",
+                json!({"type":["string","null"], "enum":pr_states, "description":format!("PR state; null defaults to {}.", DEFAULT_PR_STATE.as_str())}),
+            ),
+            (
+                "base",
+                json!({"type":["string","null"], "description":"Exact base branch name, at most 128 bytes, or null."}),
+            ),
+            (
+                "head",
+                json!({"type":["string","null"], "description":"Exact head branch name, at most 128 bytes, or null."}),
+            ),
+            (
+                "limit",
+                json!({"type":["integer","null"], "minimum":1, "maximum":MAX_PR_LIST_LIMIT, "description":format!("Maximum rows; null defaults to {DEFAULT_PR_LIMIT}.")}),
+            ),
+        ],
         _ => return None,
     })
 }
@@ -147,6 +198,9 @@ pub(crate) fn valid_pin(call: &ToolCall, pin: &HostIntent) -> bool {
     let branch = match call {
         ToolCall::GitPush { branch, .. } => branch,
         ToolCall::GhPrCreate { head, .. } => head,
+        ToolCall::GhPrList { .. } => {
+            return pin.source_oid == "gh-pr-list-v1" && pin.refspec == "fixed-list";
+        }
         _ => return false,
     };
     pin.source_oid.len() == 40
@@ -160,6 +214,12 @@ pub(crate) fn valid_pin(call: &ToolCall, pin: &HostIntent) -> bool {
 pub(crate) fn pin(workspace: &Path, call: &ToolCall) -> Result<HostIntent, ToolError> {
     if !valid(call) {
         return Err(ToolError::Configuration);
+    }
+    if matches!(call, ToolCall::GhPrList { .. }) {
+        return Ok(HostIntent {
+            source_oid: "gh-pr-list-v1".into(),
+            refspec: "fixed-list".into(),
+        });
     }
     let repository = inspect_layout(workspace)?.map_err(|_| ToolError::Path)?;
     pin_from_git(&repository.git_dir, call)
@@ -266,6 +326,7 @@ fn private_view(
     let branch = match &intent.call {
         ToolCall::GitPush { branch, .. } => branch,
         ToolCall::GhPrCreate { head, .. } => head,
+        ToolCall::GhPrList { .. } => return Err(ToolError::Configuration),
         _ => return Err(ToolError::Configuration),
     };
     let pinned = intent.host.as_ref().ok_or(ToolError::Configuration)?;
@@ -276,6 +337,14 @@ fn private_view(
         .map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("HEAD"), format!("ref: refs/heads/{branch}\n"))
         .map_err(|_| ToolError::Operation)?;
+    Ok(view)
+}
+
+fn empty_private_view(root: &Path) -> Result<PathBuf, ToolError> {
+    let view = root.join(".git");
+    std::fs::create_dir(&view).map_err(|_| ToolError::Operation)?;
+    std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
+    std::fs::create_dir(view.join("objects")).map_err(|_| ToolError::Operation)?;
     Ok(view)
 }
 
@@ -290,7 +359,7 @@ pub(crate) struct Authentication {
 
 impl Authentication {
     pub(crate) fn admit(config: &Config) -> Option<Self> {
-        if !config.write || !config.git_available() {
+        if !config.git_available() {
             return None;
         }
         let home = directories::BaseDirs::new()?.home_dir().to_owned();
@@ -341,6 +410,7 @@ impl Authentication {
         match operation {
             "git_push" => !self.git_config.is_empty() || self.ssh_agent.is_some(),
             "gh_pr_create" => self.gh_hosts.is_some(),
+            "gh_pr_list" => self.gh_hosts.is_some(),
             _ => false,
         }
     }
@@ -355,6 +425,10 @@ impl Authentication {
                 }
             }),
             ToolCall::GhPrCreate { repository, .. } => {
+                self.gh_hosts.is_some()
+                    && repository_parts(repository).is_some_and(|(host, _, _)| host == self.gh_host)
+            }
+            ToolCall::GhPrList { repository, .. } => {
                 self.gh_hosts.is_some()
                     && repository_parts(repository).is_some_and(|(host, _, _)| host == self.gh_host)
             }
@@ -743,7 +817,11 @@ fn prepare_command(
         return Err(ToolError::Configuration);
     }
     let path = helper_path(&["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])?;
-    let view = private_view(workspace, root, intent)?;
+    let view = if matches!(intent.call, ToolCall::GhPrList { .. }) {
+        empty_private_view(root)?
+    } else {
+        private_view(workspace, root, intent)?
+    };
     let bin = root.join("bin");
     private_directory(&bin)?;
     std::os::unix::fs::symlink(&git.executable, bin.join("git"))
@@ -796,42 +874,16 @@ fn prepare_command(
             ]);
             (git, args, auth)
         }
-        ToolCall::GhPrCreate {
-            repository,
-            base,
-            head,
-            title,
-            body,
-            draft,
-        } => {
-            let gh = config
-                .commands
-                .iter()
-                .find(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty())
-                .ok_or(ToolError::Configuration)?;
-            verified_copy(gh, &root.join("gh-executable"))?;
-            let mut args = vec![
-                "pr".into(),
-                "create".into(),
-                "--repo".into(),
-                repository.clone(),
-                "--base".into(),
-                base.clone(),
-                "--head".into(),
-                head.clone(),
-                "--title".into(),
-                title.clone(),
-                "--body".into(),
-                body.clone(),
-            ];
-            if *draft {
-                args.push("--draft".into());
-            }
+        ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. } => {
+            let (gh, args) = prepare_gh_command(config, root, &intent.call)?;
             (gh, args, None)
         }
         _ => return Err(ToolError::Configuration),
     };
-    let executable = if matches!(intent.call, ToolCall::GhPrCreate { .. }) {
+    let executable = if matches!(
+        intent.call,
+        ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. }
+    ) {
         root.join("gh-executable")
     } else {
         PathBuf::from(&program.executable)
@@ -872,6 +924,77 @@ fn prepare_command(
         command.env("SSH_AUTH_SOCK", socket);
     }
     Ok((command, program.sha256.clone()))
+}
+
+fn prepare_gh_command<'a>(
+    config: &'a Config,
+    root: &Path,
+    call: &ToolCall,
+) -> Result<(&'a crate::tools::config::Program, Vec<String>), ToolError> {
+    let gh = config
+        .commands
+        .iter()
+        .find(|program| program.name == "gh" && !program.interpreter && program.inputs.is_empty())
+        .ok_or(ToolError::Configuration)?;
+    verified_copy(gh, &root.join("gh-executable"))?;
+    let args = match call {
+        ToolCall::GhPrCreate {
+            repository,
+            base,
+            head,
+            title,
+            body,
+            draft,
+        } => {
+            let mut args = vec![
+                "pr".into(),
+                "create".into(),
+                "--repo".into(),
+                repository.clone(),
+                "--base".into(),
+                base.clone(),
+                "--head".into(),
+                head.clone(),
+                "--title".into(),
+                title.clone(),
+                "--body".into(),
+                body.clone(),
+            ];
+            if *draft {
+                args.push("--draft".into());
+            }
+            args
+        }
+        ToolCall::GhPrList {
+            repository,
+            state,
+            base,
+            head,
+            limit,
+        } => {
+            let mut args = vec![
+                "pr".into(),
+                "list".into(),
+                "--repo".into(),
+                repository.clone(),
+                "--state".into(),
+                state.as_str().into(),
+                "--limit".into(),
+                limit.to_string(),
+                "--json".into(),
+                "number,title,url,author,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,reviewDecision,updatedAt".into(),
+            ];
+            if let Some(base) = base {
+                args.extend(["--base".into(), base.clone()]);
+            }
+            if let Some(head) = head {
+                args.extend(["--head".into(), head.clone()]);
+            }
+            args
+        }
+        _ => return Err(ToolError::Configuration),
+    };
+    Ok((gh, args))
 }
 
 pub(crate) async fn run(
@@ -949,6 +1072,27 @@ fn observation(
     output: &str,
     receipt: Option<UnguardedReceipt>,
 ) -> ToolObservation {
+    let output = if matches!(intent.call, ToolCall::GhPrList { .. })
+        && output.len() > intent.limits.result_bytes as usize
+    {
+        match disposition {
+            ToolDisposition::Denied => PR_LIST_REFUSAL_BUDGET,
+            ToolDisposition::Uncertain => {
+                "host: remote outcome unknown; inspect remote state; never retry automatically."
+            }
+            ToolDisposition::Failed => "host: pull request read failed within the pinned budget.",
+            ToolDisposition::Cancelled => {
+                "host: pull request read cancelled within the pinned budget."
+            }
+            ToolDisposition::Limit => "host: pull request read exceeded the pinned budget.",
+            ToolDisposition::Conflict => {
+                "host: pull request read conflicted within the pinned budget."
+            }
+            ToolDisposition::Succeeded => "host: pull request result exceeded the pinned budget.",
+        }
+    } else {
+        output
+    };
     ToolObservation {
         intent,
         disposition,
@@ -977,6 +1121,187 @@ async fn discard(mut pipe: impl tokio::io::AsyncRead + Unpin, cap: usize) -> Res
             return Ok(());
         }
     }
+}
+
+fn pr_list_result(bytes: &[u8], limit: u8, result_bytes: usize) -> Option<String> {
+    if !(1..=MAX_PR_LIST_LIMIT).contains(&limit) {
+        return None;
+    }
+    let result_bytes = result_bytes.min(crate::tools::types::MAX_TOOL_RESULT_BYTES);
+    let rows: Value = serde_json::from_slice(bytes).ok()?;
+    let rows = rows.as_array()?;
+    if rows.len() > usize::from(limit) {
+        return None;
+    }
+    let values = rows.iter().map(pr_list_row).collect::<Option<Vec<_>>>()?;
+    let mut accepted = Vec::with_capacity(values.len());
+    let mut truncated = false;
+    for value in values {
+        accepted.push(value);
+        let encoded = serde_json::to_string(&json!({
+            "pull_requests": accepted.clone(),
+            "possibly_more": rows.len() == usize::from(limit),
+            "truncated": truncated,
+        }))
+        .ok()?;
+        if encoded.len() > result_bytes {
+            accepted.pop();
+            truncated = true;
+            break;
+        }
+    }
+    let output = serde_json::to_string(&json!({
+        "pull_requests": accepted,
+        "possibly_more": rows.len() == usize::from(limit) || truncated,
+        "truncated": truncated,
+    }))
+    .ok()?;
+    (output.len() <= result_bytes).then_some(output)
+}
+
+fn pr_list_row(row: &Value) -> Option<Value> {
+    let number = row.get("number")?.as_u64()?;
+    if number == 0 {
+        return None;
+    }
+    let mut truncated_fields = Vec::new();
+    let review_decision = row.get("reviewDecision")?;
+    let review_decision = if review_decision.is_null() {
+        Value::Null
+    } else {
+        Value::String(pr_list_text(
+            review_decision,
+            PR_LIST_TEXT_BYTES,
+            "review_decision",
+            &mut truncated_fields,
+        )?)
+    };
+    Some(json!({
+        "number": number,
+        "title": pr_list_text(row.get("title")?, PR_LIST_TITLE_BYTES, "title", &mut truncated_fields)?,
+        "url": pr_list_text(row.get("url")?, PR_LIST_TEXT_BYTES, "url", &mut truncated_fields)?,
+        "author": pr_list_text(row.get("author")?.get("login")?, PR_LIST_TEXT_BYTES, "author", &mut truncated_fields)?,
+        "state": pr_list_text(row.get("state")?, PR_LIST_TEXT_BYTES, "state", &mut truncated_fields)?,
+        "draft": row.get("isDraft")?.as_bool()?,
+        "base": pr_list_text(row.get("baseRefName")?, PR_LIST_TEXT_BYTES, "base", &mut truncated_fields)?,
+        "base_oid": pr_list_text(row.get("baseRefOid")?, PR_LIST_TEXT_BYTES, "base_oid", &mut truncated_fields)?,
+        "head": pr_list_text(row.get("headRefName")?, PR_LIST_TEXT_BYTES, "head", &mut truncated_fields)?,
+        "head_oid": pr_list_text(row.get("headRefOid")?, PR_LIST_TEXT_BYTES, "head_oid", &mut truncated_fields)?,
+        "review_decision": review_decision,
+        "updated_at": pr_list_text(row.get("updatedAt")?, PR_LIST_TEXT_BYTES, "updated_at", &mut truncated_fields)?,
+        "truncated_fields": truncated_fields,
+    }))
+}
+
+fn pr_list_text(
+    value: &Value,
+    cap: usize,
+    field: &str,
+    truncated: &mut Vec<String>,
+) -> Option<String> {
+    let text = value.as_str()?;
+    let end = text
+        .char_indices()
+        .take_while(|(index, character)| index + character.len_utf8() <= cap)
+        .last()
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    if end < text.len() {
+        truncated.push(field.to_owned());
+    }
+    Some(text[..end].to_owned())
+}
+
+pub(crate) fn valid_pr_list_output(output: &str, limit: u8) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.len() != 3
+        || !object.contains_key("pull_requests")
+        || !object.get("possibly_more").is_some_and(Value::is_boolean)
+        || !object.get("truncated").is_some_and(Value::is_boolean)
+    {
+        return false;
+    }
+    let Some(rows) = object.get("pull_requests").and_then(Value::as_array) else {
+        return false;
+    };
+    rows.len() <= usize::from(limit) && rows.iter().all(valid_pr_list_row)
+}
+
+fn valid_pr_list_row(value: &Value) -> bool {
+    let Some(row) = value.as_object() else {
+        return false;
+    };
+    let fields = [
+        "number",
+        "title",
+        "url",
+        "author",
+        "state",
+        "draft",
+        "base",
+        "base_oid",
+        "head",
+        "head_oid",
+        "review_decision",
+        "updated_at",
+        "truncated_fields",
+    ];
+    row.len() == fields.len()
+        && fields.iter().all(|field| row.contains_key(*field))
+        && row
+            .get("number")
+            .and_then(Value::as_u64)
+            .is_some_and(|number| number > 0)
+        && [
+            ("title", PR_LIST_TITLE_BYTES),
+            ("url", PR_LIST_TEXT_BYTES),
+            ("author", PR_LIST_TEXT_BYTES),
+            ("state", PR_LIST_TEXT_BYTES),
+            ("base", PR_LIST_TEXT_BYTES),
+            ("base_oid", PR_LIST_TEXT_BYTES),
+            ("head", PR_LIST_TEXT_BYTES),
+            ("head_oid", PR_LIST_TEXT_BYTES),
+            ("updated_at", PR_LIST_TEXT_BYTES),
+        ]
+        .iter()
+        .all(|(field, cap)| {
+            row.get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.len() <= *cap)
+        })
+        && row.get("draft").is_some_and(Value::is_boolean)
+        && row.get("review_decision").is_some_and(|value| {
+            value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|text| text.len() <= PR_LIST_TEXT_BYTES)
+        })
+        && row
+            .get("truncated_fields")
+            .and_then(Value::as_array)
+            .is_some_and(|fields| {
+                fields.iter().all(|field| {
+                    field.as_str().is_some_and(|field| {
+                        [
+                            "review_decision",
+                            "title",
+                            "url",
+                            "author",
+                            "state",
+                            "base",
+                            "base_oid",
+                            "head",
+                            "head_oid",
+                            "updated_at",
+                        ]
+                        .contains(&field)
+                    })
+                })
+            })
 }
 
 fn non_fast_forward(intent: &EffectIntent, output: &[u8]) -> bool {
@@ -1024,62 +1349,120 @@ async fn supervise(
                     async { crate::tools::guard::reap_owned_child(&mut child).await.map_err(|_| ToolError::Operation) },
                     capture(out, GIT_CAPTURE_BYTES), discard(err, STDERR_BYTES)
                 )
-            }) => result.ok().and_then(Result::ok).map(|(status, bytes, ())| (status, bytes)),
+            }) => result.ok().map(|result| result.map(|(status, bytes, ())| (status, bytes))),
         }
     } else {
         None
     };
-    let status = completed.as_ref().map(|(status, _)| *status);
-    let reaped = if status.is_some() {
+    let reaped = if completed
+        .as_ref()
+        .is_some_and(|result| result.as_ref().is_ok())
+    {
         true
     } else {
         if let Some(group) = group {
             let _ = kill_process_group(group, Signal::KILL);
         }
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            crate::tools::guard::reap_owned_child(&mut child),
+        matches!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                crate::tools::guard::reap_owned_child(&mut child),
+            )
+            .await,
+            Ok(Ok(_))
         )
-        .await
-        .is_ok_and(|r| r.is_ok())
     };
     let stopped = match group {
         Some(group) => crate::tools::unguarded::stop_group(group).await,
         None => false,
     };
-    let succeeded = reaped && stopped && status.is_some_and(|s| s.success());
-    let rejected = reaped
-        && stopped
-        && status.is_some_and(|s| s.code() == Some(1))
-        && completed
-            .as_ref()
-            .is_some_and(|(_, bytes)| non_fast_forward(&intent, bytes));
+    let outcome = classify_outcome(&intent, &completed, reaped, stopped);
     let receipt = UnguardedReceipt {
         contract_version: 1,
         intent_digest: intent.digest(),
         executable_sha256,
         pid,
-        exit_code: status.and_then(|s| s.code()),
-        descendants_confirmed_stopped: reaped && stopped,
+        exit_code: outcome.exit_code,
+        descendants_confirmed_stopped: outcome.descendants_confirmed_stopped,
     };
-    observation(
-        intent,
-        if succeeded {
-            ToolDisposition::Succeeded
-        } else if rejected {
+    observation(intent, outcome.disposition, &outcome.output, Some(receipt))
+}
+
+struct HostOutcome {
+    disposition: ToolDisposition,
+    output: String,
+    exit_code: Option<i32>,
+    descendants_confirmed_stopped: bool,
+}
+
+type CapturedProcessResult = Result<(std::process::ExitStatus, Vec<u8>), ToolError>;
+
+fn classify_outcome(
+    intent: &EffectIntent,
+    completed: &Option<CapturedProcessResult>,
+    reaped: bool,
+    stopped: bool,
+) -> HostOutcome {
+    let execution_status = completed
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|(status, _)| *status);
+    let pr_list_capture_limited = matches!(
+        completed,
+        Some(Err(ToolError::Limit | ToolError::OutputCeiling))
+    ) && matches!(intent.call, ToolCall::GhPrList { .. });
+    let succeeded = reaped && stopped && execution_status.is_some_and(|status| status.success());
+    let pr_list_confirmed_failure = matches!(intent.call, ToolCall::GhPrList { .. })
+        && reaped
+        && stopped
+        && (pr_list_capture_limited || execution_status.is_some_and(|status| !status.success()));
+    let rejected = reaped
+        && stopped
+        && execution_status.is_some_and(|status| status.code() == Some(1))
+        && completed.as_ref().is_some_and(|result| {
+            result
+                .as_ref()
+                .is_ok_and(|(_, bytes)| non_fast_forward(intent, bytes))
+        });
+    let output = if pr_list_capture_limited && reaped && stopped {
+        PR_LIST_CAPTURE_LIMIT.into()
+    } else if succeeded {
+        match &intent.call {
+            ToolCall::GhPrList { limit, .. } => completed
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|(_, bytes)| {
+                    pr_list_result(bytes, *limit, intent.limits.result_bytes as usize)
+                })
+                .unwrap_or_else(|| PR_LIST_INVALID.into()),
+            _ => "host: remote operation completed.".into(),
+        }
+    } else if pr_list_confirmed_failure {
+        PR_LIST_FAILED.into()
+    } else if rejected {
+        NON_FAST_FORWARD.into()
+    } else {
+        UNKNOWN_HOST_GIT_OUTCOME.into()
+    };
+    let disposition = if pr_list_capture_limited && reaped && stopped {
+        ToolDisposition::Failed
+    } else if succeeded {
+        if matches!(intent.call, ToolCall::GhPrList { .. }) && output == PR_LIST_INVALID {
             ToolDisposition::Failed
         } else {
-            ToolDisposition::Uncertain
-        },
-        if succeeded {
-            "host: remote operation completed."
-        } else if rejected {
-            NON_FAST_FORWARD
-        } else {
-            UNKNOWN_HOST_GIT_OUTCOME
-        },
-        Some(receipt),
-    )
+            ToolDisposition::Succeeded
+        }
+    } else if pr_list_confirmed_failure || rejected {
+        ToolDisposition::Failed
+    } else {
+        ToolDisposition::Uncertain
+    };
+    HostOutcome {
+        disposition,
+        output,
+        exit_code: execution_status.and_then(|status| status.code()),
+        descendants_confirmed_stopped: reaped && stopped,
+    }
 }
 
 #[cfg(test)]
@@ -1115,6 +1498,16 @@ mod tests {
             title: "A title".into(),
             body: "First line\nSecond line".into(),
             draft: true,
+        }
+    }
+
+    fn pr_list() -> ToolCall {
+        ToolCall::GhPrList {
+            repository: "github.com/example/project".into(),
+            state: crate::tools::types::DEFAULT_PR_STATE,
+            base: None,
+            head: None,
+            limit: DEFAULT_PR_LIMIT,
         }
     }
 
@@ -1250,19 +1643,6 @@ mod tests {
                 std::sync::Arc::new(Authentication::admit(&runtime.config));
             assert_eq!(operations(&runtime), reads);
         }
-        std::fs::create_dir(home.join(".config/gh")).unwrap();
-        private_file(
-            &home.join(".config/gh/hosts.yml"),
-            b"github.com:\n oauth_token: fixture-auth-canary\n",
-            0o600,
-        )
-        .unwrap();
-        runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
-        assert_eq!(
-            operations(&runtime),
-            reads,
-            "PR creation also needs a native gh pin"
-        );
         runtime.config.commands.push(crate::tools::config::Program {
             name: "gh".into(),
             executable: "/usr/bin/true".into(),
@@ -1272,16 +1652,51 @@ mod tests {
         });
         assert_eq!(
             operations(&runtime),
+            reads,
+            "PR reads require admitted gh authentication"
+        );
+        std::fs::create_dir(home.join(".config/gh")).unwrap();
+        private_file(
+            &home.join(".config/gh/hosts.yml"),
+            b"github.com:\n oauth_token: fixture-auth-canary\n",
+            0o600,
+        )
+        .unwrap();
+        runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
+        let with_pr_reads = json!([
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_branch",
+            "gh_pr_create",
+            "gh_pr_list"
+        ]);
+        assert_eq!(operations(&runtime), with_pr_reads);
+        runtime.config.commands.clear();
+        assert_eq!(
+            operations(&runtime),
+            reads,
+            "PR reads require a native gh pin"
+        );
+        runtime.config.commands.push(crate::tools::config::Program {
+            name: "gh".into(),
+            executable: "/usr/bin/true".into(),
+            sha256: "0".repeat(64),
+            interpreter: false,
+            inputs: vec![],
+        });
+        assert_eq!(operations(&runtime), with_pr_reads);
+        runtime.config.write = false;
+        assert_eq!(
+            operations(&runtime),
             json!([
                 "git_status",
                 "git_diff",
                 "git_log",
                 "git_branch",
-                "gh_pr_create"
+                "gh_pr_list"
             ])
         );
-        runtime.config.write = false;
-        assert_eq!(operations(&runtime), reads);
     }
 
     #[tokio::test]
@@ -2128,6 +2543,283 @@ done
                 .to_string()
                 .contains("credential-canary")
         );
+    }
+
+    #[tokio::test]
+    async fn host_gh_pr_list_uses_fixed_bounded_args_and_translates_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let private = Arc::new(tempfile::tempdir().unwrap());
+        let call = ToolCall::GhPrList {
+            repository: "github.com/example/project".into(),
+            state: crate::tools::types::PrState::Merged,
+            base: Some("main".into()),
+            head: Some("feature".into()),
+            limit: 1,
+        };
+        let intent = intent(&workspace, call);
+        let (prepared, digest) = prepare(
+            &config(),
+            &authentication(temp.path()),
+            &workspace,
+            &intent,
+            Arc::clone(&private),
+        )
+        .await
+        .unwrap();
+        let args: Vec<_> = prepared.as_std().get_args().map(|s| s.to_owned()).collect();
+        assert_eq!(
+            args,
+            [
+                "pr",
+                "list",
+                "--repo",
+                "github.com/example/project",
+                "--state",
+                "merged",
+                "--limit",
+                "1",
+                "--json",
+                "number,title,url,author,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,reviewDecision,updatedAt",
+                "--base",
+                "main",
+                "--head",
+                "feature",
+            ]
+            .map(std::ffi::OsString::from)
+        );
+        assert!(!args.iter().any(|arg| arg == "--paginate"));
+        let payload = r#"[{"number":7,"title":"Fix issue","url":"https://github.com/example/project/pull/7","author":{"login":"alice"},"state":"MERGED","isDraft":false,"baseRefName":"main","baseRefOid":"abc","headRefName":"feature","headRefOid":"def","reviewDecision":null,"updatedAt":"2026-10-22T00:00:00Z"}]"#;
+        let mut fake = vec![
+            "-c".into(),
+            format!("printf '%s' '{}'", payload).into(),
+            "gh".into(),
+        ];
+        fake.extend(args);
+        let command = synthetic_peer(&prepared, Path::new("/bin/sh"), &fake);
+        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(observation.valid());
+        assert!(observation.output.contains("\"possibly_more\":true"));
+        assert!(observation.output.contains("\"review_decision\":null"));
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::Host(_))
+        ));
+        assert!(!observation.output.contains("credential-canary"));
+    }
+
+    #[test]
+    fn host_gh_pr_list_bounds_and_default_null_fields() {
+        let call: ToolCall = serde_json::from_value(json!({
+            "operation":"gh_pr_list",
+            "repository":"github.com/example/project",
+            "state":null,
+            "base":null,
+            "head":null,
+            "limit":null
+        }))
+        .unwrap();
+        assert_eq!(call, pr_list());
+        assert!(valid(&call));
+        assert_eq!(serde_json::to_value(&call).unwrap()["state"], "open");
+        assert!(
+            serde_json::from_value::<ToolCall>(json!({
+                "operation":"gh_pr_list",
+                "repository":"github.com/example/project",
+                "state":"unexpected",
+                "base":null,
+                "head":null,
+                "limit":null
+            }))
+            .is_err()
+        );
+        for limit in [0, 51] {
+            let mut invalid = pr_list();
+            if let ToolCall::GhPrList { limit: value, .. } = &mut invalid {
+                *value = limit;
+            }
+            assert!(!valid(&invalid));
+        }
+        assert!(
+            pr_list_result(
+                b"[]",
+                DEFAULT_PR_LIMIT,
+                crate::tools::types::MAX_TOOL_RESULT_BYTES,
+            )
+            .unwrap()
+            .contains("\"possibly_more\":false")
+        );
+        assert!(pr_list_result(b"[]", 0, 1024).is_none());
+        assert!(pr_list_result(b"not json", DEFAULT_PR_LIMIT, 1024).is_none());
+        assert!(valid_pr_list_output(
+            r#"{"pull_requests":[],"possibly_more":false,"truncated":false}"#,
+            DEFAULT_PR_LIMIT
+        ));
+        assert!(!valid_pr_list_output("not json", DEFAULT_PR_LIMIT));
+        let row = json!([{
+            "number": 1,
+            "title": format!("{}🧪", "a".repeat(PR_LIST_TITLE_BYTES - 1)),
+            "url": "url",
+            "author": {"login":"author"},
+            "state": "OPEN",
+            "isDraft": false,
+            "baseRefName": "main",
+            "baseRefOid": "base",
+            "headRefName": "topic",
+            "headRefOid": "head",
+            "reviewDecision": null,
+            "updatedAt": "now"
+        }]);
+        let output = pr_list_result(
+            &serde_json::to_vec(&row).unwrap(),
+            1,
+            crate::tools::types::MAX_TOOL_RESULT_BYTES,
+        )
+        .unwrap();
+        let output: Value = serde_json::from_str(&output).unwrap();
+        let title = output["pull_requests"][0]["title"].as_str().unwrap();
+        assert_eq!(title.len(), PR_LIST_TITLE_BYTES - 1);
+        assert_eq!(
+            output["pull_requests"][0]["truncated_fields"],
+            json!(["title"])
+        );
+        assert!(valid_pr_list_output(&output.to_string(), 1));
+    }
+
+    #[test]
+    fn host_pr_list_preparation_refusal_fits_the_minimum_result_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let mut intent = intent(&workspace, pr_list());
+        intent.limits.result_bytes = 128;
+        let refusal = observation(
+            intent,
+            ToolDisposition::Denied,
+            preparation_refusal(&ToolError::Limit),
+            None,
+        );
+        assert_eq!(refusal.disposition, ToolDisposition::Denied);
+        assert!(refusal.output.contains("nothing dispatched"));
+        assert!(refusal.valid());
+    }
+
+    #[test]
+    fn host_gh_pr_list_truncates_whole_rows_to_the_pinned_result_budget() {
+        let rows = (1..=3)
+            .map(|number| {
+                json!({
+                    "number":number,
+                    "title":"a".repeat(200),
+                    "url":"https://github.com/example/project/pull/1",
+                    "author":{"login":"octocat"},
+                    "state":"OPEN",
+                    "isDraft":false,
+                    "baseRefName":"main",
+                    "baseRefOid":"base-sha",
+                    "headRefName":"topic",
+                    "headRefOid":"head-sha",
+                    "reviewDecision":"APPROVED",
+                    "updatedAt":"2026-10-25T12:00:00Z"
+                })
+            })
+            .collect::<Vec<_>>();
+        let budget = 700;
+        let output = pr_list_result(&serde_json::to_vec(&rows).unwrap(), 3, budget).unwrap();
+        assert!(output.len() <= budget);
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["possibly_more"], true);
+        assert!(valid_pr_list_output(&output, 3));
+    }
+
+    #[tokio::test]
+    async fn host_gh_pr_list_invalid_data_is_a_confirmed_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let private = Arc::new(tempfile::tempdir().unwrap());
+        let intent = intent(&workspace, pr_list());
+        let (prepared, digest) = prepare(
+            &config(),
+            &authentication(temp.path()),
+            &workspace,
+            &intent,
+            Arc::clone(&private),
+        )
+        .await
+        .unwrap();
+        let command = synthetic_peer(
+            &prepared,
+            Path::new("/bin/sh"),
+            &["-c".into(), "printf 'not json'".into()],
+        );
+        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert_eq!(observation.output, PR_LIST_INVALID);
+        assert!(observation.valid());
+    }
+
+    #[tokio::test]
+    async fn host_gh_pr_list_capture_overflow_is_a_confirmed_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let private = Arc::new(tempfile::tempdir().unwrap());
+        let intent = intent(&workspace, pr_list());
+        let (prepared, digest) = prepare(
+            &config(),
+            &authentication(temp.path()),
+            &workspace,
+            &intent,
+            Arc::clone(&private),
+        )
+        .await
+        .unwrap();
+        let command = synthetic_peer(
+            &prepared,
+            Path::new("/bin/sh"),
+            &["-c".into(), "printf '%262145s' ''".into()],
+        );
+        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert_eq!(observation.output, PR_LIST_CAPTURE_LIMIT);
+        assert!(observation.valid());
+        let Some(Attestation::Host(receipt)) = observation.attestation else {
+            panic!("bounded host receipt");
+        };
+        assert!(receipt.descendants_confirmed_stopped);
+    }
+
+    #[tokio::test]
+    async fn host_gh_pr_list_timeout_stays_uncertain_after_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let private = Arc::new(tempfile::tempdir().unwrap());
+        let mut intent = intent(&workspace, pr_list());
+        intent.limits.runtime_ms = 1;
+        let (prepared, digest) = prepare(
+            &config(),
+            &authentication(temp.path()),
+            &workspace,
+            &intent,
+            Arc::clone(&private),
+        )
+        .await
+        .unwrap();
+        let command = synthetic_peer(
+            &prepared,
+            Path::new("/bin/sh"),
+            &["-c".into(), "sleep 1".into()],
+        );
+        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+        assert_eq!(observation.output, UNKNOWN_HOST_GIT_OUTCOME);
+        assert!(observation.valid());
+        let Some(Attestation::Host(receipt)) = observation.attestation else {
+            panic!("bounded host receipt");
+        };
+        assert!(receipt.descendants_confirmed_stopped);
+        assert_eq!(receipt.exit_code, None);
     }
 
     #[tokio::test]

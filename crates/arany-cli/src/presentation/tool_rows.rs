@@ -84,6 +84,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::GitSwitch { branch } => format!("Git switch({branch})"),
         ToolCall::GitPush { remote, branch } => format!("host Git push({branch} → {remote})"),
         ToolCall::GhPrCreate { repository, .. } => format!("host PR create({repository})"),
+        ToolCall::GhPrList { repository, .. } => format!("host PR list({repository})"),
     };
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
@@ -105,6 +106,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
                     safe_truncate(&observation.output, 160)
                 }
+                ToolCall::GhPrList { .. } => safe_truncate(&observation.output, 160),
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -442,7 +444,7 @@ fn approval_header(intent: &arany::EffectIntent) -> Vec<String> {
     use arany::ToolCall;
     let mut lines = vec!["Proposed action".to_owned()];
     if intent.call.is_host() {
-        lines.push("host · one human-approved remote operation · no automatic retry".into());
+        lines.push("host · remote operation · no automatic retry".into());
         if let Some(host) = &intent.host
             && matches!(intent.call, ToolCall::GitPush { .. })
         {
@@ -491,6 +493,20 @@ fn approval_call_lines(call: &arany::ToolCall) -> Vec<String> {
                     body.lines()
                         .map(|line| format!("  {}", escape_terminal(line))),
                 );
+            }
+            ToolCall::GhPrList {
+                repository,
+                state,
+                base,
+                head,
+                limit,
+            } => {
+                lines.push("Private GitHub PR data may be sent to the current Provider.".into());
+                lines.push(format!("Repository: {}", escape_terminal(repository)));
+                lines.push(format!("State: {}", state.as_str()));
+                lines.push(format!("Base: {}", base.as_deref().unwrap_or("any")));
+                lines.push(format!("Head: {}", head.as_deref().unwrap_or("any")));
+                lines.push(format!("Limit: {limit}"));
             }
             _ => {}
         }
@@ -986,6 +1002,9 @@ impl ToolApprovalChoice {
                 }
                 arany::permissions::TypedGitPrefix::Push
                 | arany::permissions::TypedGitPrefix::PrCreate => "No remembered rule offered",
+                arany::permissions::TypedGitPrefix::PrList => {
+                    "Yes, and allow gh pr list from the next Run"
+                }
             },
             Self::No => "No",
         }
@@ -1009,8 +1028,11 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         .is_some_and(|prompt| prompt.remember)
     {
         choices.push(ToolApprovalChoice::ExactCommand);
-    } else if approval.unguarded.is_none() && !approval.intent.call.is_host() {
-        if approval.allow_auto_edits {
+    } else if approval.unguarded.is_none()
+        && (!approval.intent.call.is_host()
+            || matches!(approval.intent.call, arany::ToolCall::GhPrList { .. }))
+    {
+        if approval.allow_auto_edits && !approval.intent.call.is_host() {
             choices.push(ToolApprovalChoice::AutoEdits);
         }
         if let Some(prefix) = approval.remember_prefix {
