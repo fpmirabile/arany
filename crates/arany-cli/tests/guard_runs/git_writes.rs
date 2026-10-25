@@ -479,14 +479,25 @@ async fn host_pr_list_remember_and_replay_journey() {
     revoke_pr_list(&repo).await;
 }
 
-async fn host_pr_view_remember_and_replay_journey() {
-    let repo = Repo::new();
-    configure_pr_view(&repo);
-    refuse_pr_view_without_human(&repo).await;
-    remember_pr_view(&repo).await;
-    use_remembered_pr_view(&repo).await;
-    cancel_and_replay_pr_view(&repo).await;
-    host_pr_view_shared_deadline(&repo).await;
+#[test]
+fn host_pr_view_remember_and_replay_journey() {
+    const TEST: &str = "git_writes::host_pr_view_remember_and_replay_journey";
+    if isolate_host_git_journey(TEST) {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let repo = Repo::new();
+            configure_pr_view(&repo);
+            refuse_pr_view_without_human(&repo).await;
+            remember_pr_view(&repo).await;
+            use_remembered_pr_view(&repo).await;
+            cancel_and_replay_pr_view(&repo).await;
+            host_pr_view_shared_deadline(&repo).await;
+        });
 }
 
 fn configure_pr_view(repo: &Repo) {
@@ -1774,42 +1785,52 @@ async fn typed_prefix_rules_cannot_expand_git_authority() {
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "second\n");
 }
 
-#[test]
-fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human() {
+fn isolate_host_git_journey(test: &str) -> bool {
     use arany::test_support::process::BoundedOutput;
-    const TEST: &str = "git_writes::host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human";
     const CHILD: &str = "ARANY_HOST_GIT_JOURNEY";
     const CANARY: &str = "synthetic-host-credential-canary";
-    if std::env::var_os(CHILD).is_none() {
-        let auth = tempfile::tempdir().unwrap();
-        let home = auth.path().join("home");
-        let gh = home.join(".config/gh");
-        std::fs::create_dir_all(&gh).unwrap();
-        let hosts = gh.join("hosts.yml");
-        std::fs::write(&hosts, format!("github.com:\n    oauth_token: {CANARY}\n")).unwrap();
-        std::fs::set_permissions(hosts, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .env_clear()
-            .env(CHILD, "1")
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("GH_CONFIG_DIR", gh)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "TMPDIR",
-                std::fs::canonicalize(std::env::temp_dir()).unwrap(),
-            )
-            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
-            .bounded_output_for(Duration::from_secs(60), 64 * 1024)
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "isolated host journey: stdout={:?}; stderr={:?}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
-        process::assert_single_test_completed(&result.stdout, TEST);
+    const JOURNEY_TIMEOUT: Duration = Duration::from_secs(60);
+    const JOURNEY_OUTPUT_BYTES: usize = 64 * 1024;
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    let auth = tempfile::tempdir().unwrap();
+    let home = auth.path().join("home");
+    let gh = home.join(".config/gh");
+    std::fs::create_dir_all(&gh).unwrap();
+    let hosts = gh.join("hosts.yml");
+    std::fs::write(&hosts, format!("github.com:\n    oauth_token: {CANARY}\n")).unwrap();
+    std::fs::set_permissions(hosts, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env(CHILD, test)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GH_CONFIG_DIR", gh)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "TMPDIR",
+            std::fs::canonicalize(std::env::temp_dir()).unwrap(),
+        )
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .bounded_output_for(JOURNEY_TIMEOUT, JOURNEY_OUTPUT_BYTES)
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "isolated host journey {test}: stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    process::assert_single_test_completed(&result.stdout, test);
+    true
+}
+
+#[test]
+fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human() {
+    const TEST: &str = "git_writes::host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human";
+    const CANARY: &str = "synthetic-host-credential-canary";
+    if isolate_host_git_journey(TEST) {
         return;
     }
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
@@ -1901,6 +1922,5 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
             assert!(text.contains("host") && !text.contains(CANARY));
         }
         host_pr_list_remember_and_replay_journey().await;
-        host_pr_view_remember_and_replay_journey().await;
     });
 }

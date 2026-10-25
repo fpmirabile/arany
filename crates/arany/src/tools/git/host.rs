@@ -49,6 +49,31 @@ const MAX_PR_NUMBER: u32 = i32::MAX as u32;
 const MAX_PR_REPOSITORY_BYTES: usize = 256;
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum PrViewConnection {
+    Comments,
+    Reviews,
+    Checks,
+}
+
+impl PrViewConnection {
+    const fn field(self) -> &'static str {
+        match self {
+            Self::Comments => "comments",
+            Self::Reviews => "reviews",
+            Self::Checks => "checks",
+        }
+    }
+
+    const fn limit(self) -> usize {
+        match self {
+            Self::Comments => PR_VIEW_COMMENT_LIMIT,
+            Self::Reviews => PR_VIEW_REVIEW_LIMIT,
+            Self::Checks => PR_VIEW_CHECK_LIMIT,
+        }
+    }
+}
+
 pub(crate) fn valid(call: &ToolCall) -> bool {
     match call {
         ToolCall::GitPush { remote, branch } => {
@@ -1492,18 +1517,27 @@ fn fit_pr_view_result(mut result: Value, result_bytes: usize) -> Option<String> 
         if output.len() <= budget {
             return Some(output);
         }
-        if let Some(trimmed) = ["checks", "reviews", "comments"].into_iter().find(|field| {
-            result["pull_request"][*field]["items"]
+        if let Some(trimmed) = [
+            PrViewConnection::Checks,
+            PrViewConnection::Reviews,
+            PrViewConnection::Comments,
+        ]
+        .into_iter()
+        .find(|kind| {
+            result["pull_request"][kind.field()]["items"]
                 .as_array()
                 .is_some_and(|rows| !rows.is_empty())
         }) {
-            let items = result["pull_request"][trimmed]["items"].as_array_mut()?;
-            if trimmed == "checks" {
-                items.pop();
-            } else {
-                items.remove(0);
+            let items = result["pull_request"][trimmed.field()]["items"].as_array_mut()?;
+            match trimmed {
+                PrViewConnection::Checks => {
+                    items.pop();
+                }
+                PrViewConnection::Comments | PrViewConnection::Reviews => {
+                    items.remove(0);
+                }
             }
-            result["pull_request"][trimmed]["truncated"] = Value::Bool(true);
+            result["pull_request"][trimmed.field()]["truncated"] = Value::Bool(true);
             continue;
         }
         let body = result["pull_request"]["body"].as_str()?;
@@ -1710,14 +1744,14 @@ fn valid_pr_view_status_fields(pull: &serde_json::Map<String, Value>) -> bool {
 
 fn valid_pr_view_connections(pull: &serde_json::Map<String, Value>) -> bool {
     pull.get("comments")
-        .is_some_and(|value| valid_pr_view_connection(value, "comments"))
+        .is_some_and(|value| valid_pr_view_connection(value, PrViewConnection::Comments))
         && pull
             .get("reviews")
-            .is_some_and(|value| valid_pr_view_connection(value, "reviews"))
+            .is_some_and(|value| valid_pr_view_connection(value, PrViewConnection::Reviews))
         && (pull.get("checks").is_some_and(Value::is_null)
             || pull
                 .get("checks")
-                .is_some_and(|value| valid_pr_view_connection(value, "checks")))
+                .is_some_and(|value| valid_pr_view_connection(value, PrViewConnection::Checks)))
 }
 
 fn valid_pr_view_truncated_fields(pull: &serde_json::Map<String, Value>) -> bool {
@@ -1758,7 +1792,7 @@ fn valid_pr_view_truncated_fields(pull: &serde_json::Map<String, Value>) -> bool
         })
 }
 
-fn valid_pr_view_connection(value: &Value, kind: &str) -> bool {
+fn valid_pr_view_connection(value: &Value, kind: PrViewConnection) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
@@ -1768,20 +1802,13 @@ fn valid_pr_view_connection(value: &Value, kind: &str) -> bool {
     object.len() == 2
         && object.contains_key("truncated")
         && object.get("truncated").is_some_and(Value::is_boolean)
-        && items.len()
-            <= if kind == "checks" {
-                PR_VIEW_CHECK_LIMIT
-            } else if kind == "comments" {
-                PR_VIEW_COMMENT_LIMIT
-            } else {
-                PR_VIEW_REVIEW_LIMIT
-            }
+        && items.len() <= kind.limit()
         && items.iter().all(|item| {
             let Some(item) = item.as_object() else {
                 return false;
             };
             match kind {
-                "comments" => {
+                PrViewConnection::Comments => {
                     item.len() == 3
                         && item.get("author").is_some_and(|value| {
                             value.is_null()
@@ -1798,7 +1825,7 @@ fn valid_pr_view_connection(value: &Value, kind: &str) -> bool {
                             .and_then(Value::as_str)
                             .is_some_and(|text| text.len() <= PR_VIEW_TEXT_BYTES)
                 }
-                "reviews" => {
+                PrViewConnection::Reviews => {
                     item.len() == 4
                         && ["author", "submitted_at"].iter().all(|field| {
                             item.get(*field).is_some_and(|value| {
@@ -1817,7 +1844,7 @@ fn valid_pr_view_connection(value: &Value, kind: &str) -> bool {
                             .and_then(Value::as_str)
                             .is_some_and(|text| text.len() <= PR_VIEW_TEXT_BYTES)
                 }
-                "checks" => {
+                PrViewConnection::Checks => {
                     item.len() == 3
                         && item
                             .get("name")
@@ -1832,7 +1859,6 @@ fn valid_pr_view_connection(value: &Value, kind: &str) -> bool {
                             })
                         })
                 }
-                _ => false,
             }
         })
 }
