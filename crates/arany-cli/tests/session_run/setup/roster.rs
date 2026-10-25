@@ -268,20 +268,11 @@ fn concurrent_clear_failure_retains_the_edited_roster_and_settles_before_save() 
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
-    StateRoot::admit(&state).unwrap();
-    let route = json!({"provider":"openai","model":"gpt-5.4","effort":"none","account_id":null});
-    let record = json!({"version":1,"profiles":[
-        {"name":"main","routes":[route]}, {"name":"inspect","routes":[route]}
-    ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","inspect"]}]});
-    super::super::private_file(
-        &state.join("provider-roster.json"),
-        &serde_json::to_vec(&record).unwrap(),
-    );
-    let routing = br#"{"version":1,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
-    super::super::private_file(&state.join("provider-routing.json"), routing);
+    let routing = prepare_saved_roster(&state);
     let presentation = Presentation::ScreenReader;
     let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Manager);
     edit_saved_child(&mut pty, presentation);
+    select(&mut pty, presentation, 3, "Roster profiles");
     let from = presentation.choose(&mut pty, 5);
     acknowledge_linear_pages(
         &mut pty.output,
@@ -290,7 +281,7 @@ fn concurrent_clear_failure_retains_the_edited_roster_and_settles_before_save() 
         &mut pty.answered,
         (from, b"empty Enter selects 1. Back\r\nInput:\r\n"),
     );
-    let concurrent = [routing.as_slice(), b"\n"].concat();
+    let concurrent = [routing, b"\n"].concat();
     super::super::private_file(&state.join("provider-routing.json"), &concurrent);
     let from = pty.transcript.len();
     pty.input.write_all(b"2\r").unwrap();
@@ -327,6 +318,82 @@ fn concurrent_clear_failure_retains_the_edited_roster_and_settles_before_save() 
     );
 }
 
+#[test]
+fn routing_inspection_failures_retain_roster_edits_until_a_reviewed_save() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let routing = prepare_saved_roster(&state);
+    let original = std::fs::read(state.join("provider-roster.json")).unwrap();
+    let presentation = Presentation::ScreenReader;
+    let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Manager);
+    edit_saved_child(&mut pty, presentation);
+    let routing_path = state.join("provider-routing.json");
+    std::fs::set_permissions(&routing_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let from = presentation.choose(&mut pty, 3);
+    let (from, error) = acknowledge_result(&mut pty, presentation, from);
+    assert_result_contains(&error, "state directory is not private");
+    assert!(String::from_utf8_lossy(&pty.transcript).contains("Roster draft retained"));
+    presentation.menu(&mut pty, from, "Roster profiles");
+    assert!(!String::from_utf8_lossy(&pty.transcript[from..]).contains("Clear role routing"));
+    assert_eq!(
+        std::fs::read(state.join("provider-roster.json")).unwrap(),
+        original
+    );
+
+    let from = presentation.choose(&mut pty, 4);
+    wait_linear_page(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (from, 1),
+    );
+    std::fs::set_permissions(&routing_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (from, error) = acknowledge_result(&mut pty, presentation, from);
+    assert_result_contains(&error, "state directory is not private");
+    presentation.menu(&mut pty, from, "Roster profiles");
+    let from = presentation.choose(&mut pty, 3);
+    let (from, preview) = acknowledge_result(&mut pty, presentation, from);
+    assert_result_contains(&preview, "child=inspect");
+    presentation.menu(&mut pty, from, "Roster profiles");
+    let from = presentation.choose(&mut pty, 4);
+    confirm(&mut pty, presentation, from, "Save roster?", true);
+    let from = pty.transcript.len();
+    let (_, saved) = acknowledge_result(&mut pty, presentation, from);
+    assert_result_contains(&saved, "Saved");
+    assert!(finish_setup_pty(pty).status.success());
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join("provider-roster.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["presets"][0]["providers"]["child"], "inspect");
+    assert_eq!(std::fs::read(routing_path).unwrap(), routing);
+    assert_edits(
+        &state,
+        &workspace,
+        &[(
+            ProviderSetupTargetKind::Roster,
+            ProviderSetupDisposition::Applied,
+        )],
+    );
+}
+
+fn prepare_saved_roster(state: &Path) -> &'static [u8] {
+    StateRoot::admit(state).unwrap();
+    let route = json!({"provider":"openai","model":"gpt-5.4","effort":"none","account_id":null});
+    let record = json!({"version":1,"profiles":[
+        {"name":"main","routes":[route]}, {"name":"inspect","routes":[route]}
+    ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","inspect"]}]});
+    super::super::private_file(
+        &state.join("provider-roster.json"),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let routing = br#"{"version":1,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
+    super::super::private_file(&state.join("provider-routing.json"), routing);
+    routing
+}
+
 fn edit_saved_child(pty: &mut SetupPty, presentation: Presentation) {
     select(pty, presentation, 4, "Roster profiles");
     select(pty, presentation, 2, "Named presets");
@@ -335,7 +402,6 @@ fn edit_saved_child(pty: &mut SetupPty, presentation: Presentation) {
     select(pty, presentation, 2, "Role profile");
     select(pty, presentation, 2, "Preset roles");
     select(pty, presentation, 6, "Named presets");
-    select(pty, presentation, 3, "Roster profiles");
 }
 
 fn assert_edits(

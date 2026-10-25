@@ -24,7 +24,7 @@ pub(super) async fn manage(
     let mut draft = RosterDraft::load(&state)?;
     let primary = routing::current_route(current)?;
     loop {
-        let choices = roster_choices(&state)?;
+        let choices = roster_choices(terminal, &state).await?;
         let Some(action) = choose(
             terminal,
             1,
@@ -53,11 +53,10 @@ pub(super) async fn manage(
                     await_setup_ack(terminal, "Invalid roster draft", &message).await?;
                 }
             },
-            b'4' => {
-                if save(terminal, &state, journal, &draft).await? {
-                    return Ok(());
-                }
-            }
+            b'4' => match save(terminal, &state, journal, &draft).await {
+                Ok(true) => return Ok(()),
+                result => retain_draft(terminal, result.map(|_| ())).await?,
+            },
             b'5' => {
                 let result = match RoutingDraft::load(&state) {
                     Ok(routing) => routing::clear(terminal, &state, journal, &routing)
@@ -72,19 +71,20 @@ pub(super) async fn manage(
     }
 }
 
-fn roster_choices(state: &StateRoot) -> Result<Vec<(u8, &'static str)>, SetupError> {
+async fn roster_choices(
+    terminal: &mut AttachedTerminal,
+    state: &StateRoot,
+) -> Result<Vec<(u8, &'static str)>, SetupError> {
     let mut choices = vec![
         (b'1', "Route profiles"),
         (b'2', "Named presets"),
         (b'3', "Preview complete roster"),
         (b'4', "Save roster"),
     ];
-    if state
-        .record(RecordKind::ProviderRouting)
-        .present()
-        .map_err(|error| error.to_string())?
-    {
-        choices.push((b'5', "Clear role routing"));
+    match state.record(RecordKind::ProviderRouting).present() {
+        Ok(true) => choices.push((b'5', "Clear role routing")),
+        Ok(false) => {}
+        Err(error) => retain_draft(terminal, Err(error.to_string().into())).await?,
     }
     choices.push((b'6', "Back; discard draft"));
     Ok(choices)
