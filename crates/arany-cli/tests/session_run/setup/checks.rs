@@ -133,13 +133,26 @@ fn review_check_warning(
                 &mut pty.answered,
                 (from, b"empty Enter selects 1. Back\r\nInput:\r\n"),
             );
-            presentation.choose(
-                pty,
-                match consent {
-                    CheckConsent::Back => 1,
-                    CheckConsent::Accept => 2,
-                },
-            )
+            let invalid = pty.transcript.len();
+            pty.input
+                .write_all(b"unknown\r")
+                .expect("invalid consent choice");
+            wait_for_after(
+                &mut pty.output,
+                &mut pty.input,
+                &mut pty.transcript,
+                &mut pty.answered,
+                invalid,
+                b"Notice: Type a listed choice name; Ctrl+C cancels\r\nInput:\r\n",
+            );
+            let confirmed = pty.transcript.len();
+            pty.input
+                .write_all(match consent {
+                    CheckConsent::Back => b"\r",
+                    CheckConsent::Accept => b"2\r",
+                })
+                .expect("confirm after invalid choice");
+            confirmed
         }
         Presentation::Inline => {
             let mut cursor = from;

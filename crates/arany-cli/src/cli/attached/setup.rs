@@ -2800,8 +2800,9 @@ async fn review_linear_confirmation(
         .collect::<Vec<_>>();
     let mut input = String::new();
     let mut rejected = 0u16;
+    let mut notice = None::<&str>;
     loop {
-        terminal.draw_setup_choices(2, title, instruction, &rendered, 0, None)?;
+        terminal.draw_setup_choices(2, title, instruction, &rendered, 0, notice.take())?;
         match terminal.next_input().await? {
             TerminalInput::Submit => {
                 let accepted = if rejected == 0 && input.trim().is_empty() {
@@ -2812,10 +2813,17 @@ async fn review_linear_confirmation(
                     None
                 };
                 terminal.discard_draft_input();
-                return Ok(Some(accepted == Some(b'2')));
+                if let Some(value) = accepted {
+                    return Ok(Some(value == b'2'));
+                }
+                input.clear();
+                rejected = 0;
+                notice = Some("Type a listed choice name; Ctrl+C cancels");
             }
             TerminalInput::Character(character) => {
-                append_linear_choice_character(&mut input, &mut rejected, character);
+                if !append_linear_choice_character(&mut input, &mut rejected, character) {
+                    notice = Some("Invalid choice input; use Backspace to correct");
+                }
             }
             TerminalInput::Backspace => {
                 if rejected > 0 {
@@ -2828,6 +2836,7 @@ async fn review_linear_confirmation(
                 input.clear();
                 rejected = 0;
                 terminal.discard_draft_input();
+                notice = Some("Invalid choice line; Ctrl+C cancels");
             }
             TerminalInput::Resize => return Ok(None),
             TerminalInput::Suspend => {
