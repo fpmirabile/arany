@@ -1801,6 +1801,186 @@ impl Adapter {
 }
 
 #[tokio::test]
+async fn move_live_and_permission_projection_preserves_file_change_details() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Review changes"}]))
+        .await;
+    let intent = adapter.intent(arany::ToolCall::Move {
+        source: "source\nname.txt".into(),
+        destination: "destination.txt".into(),
+        expected_digest: "a".repeat(64),
+    });
+
+    adapter.item(&intent, None).await;
+    let started = adapter.next().await["params"]["update"].clone();
+    assert_eq!(started["kind"], "edit");
+    assert_eq!(started["title"], "Change files source name.txt");
+    assert_eq!(
+        started["locations"][0]["path"],
+        "/var/workspace/source\nname.txt"
+    );
+    assert_eq!(
+        started["locations"][1]["path"],
+        "/var/workspace/destination.txt"
+    );
+
+    adapter.permission(&intent, 10).await;
+    let request = adapter.next().await;
+    let permission = request["params"]["toolCall"].clone();
+    assert_eq!(permission["kind"], "edit");
+    assert_eq!(permission["title"], "Change files source name.txt");
+    assert_eq!(
+        permission["locations"][0]["path"],
+        "/var/workspace/source\nname.txt"
+    );
+    assert_eq!(
+        permission["locations"][1]["path"],
+        "/var/workspace/destination.txt"
+    );
+    let uncertain = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Uncertain,
+        enforcement_cause: None,
+        limit_cause: None,
+        output: String::new(),
+        attestation: None,
+        approval_cause: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter.item(&intent, Some(&uncertain)).await;
+    let withdrawal = adapter.next().await;
+    assert_eq!(withdrawal["method"], "$/cancel_request");
+    assert_eq!(withdrawal["params"]["requestId"], request["id"]);
+    let completed = adapter.next().await["params"]["update"].clone();
+    assert_eq!(completed["kind"], "edit");
+    assert_eq!(completed["status"], "failed");
+    assert_eq!(completed["_meta"]["arany.status"], "uncertain");
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn move_completion_preserves_denial_projection() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Review changes"}]))
+        .await;
+    let intent = adapter.intent(arany::ToolCall::Move {
+        source: "denied.txt".into(),
+        destination: "denied-new.txt".into(),
+        expected_digest: "b".repeat(64),
+    });
+    adapter.item(&intent, None).await;
+    let _ = adapter.next().await;
+    let observation = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Denied,
+        enforcement_cause: None,
+        limit_cause: None,
+        output: String::new(),
+        attestation: None,
+        approval_cause: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter.item(&intent, Some(&observation)).await;
+    let update = adapter.next().await["params"]["update"].clone();
+    assert_eq!(update["kind"], "edit");
+    assert_eq!(update["status"], "failed");
+    assert!(
+        update["content"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("denied")
+    );
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn move_history_projection_preserves_file_change_details() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut replay = Adapter::new().await;
+    let intent = replay.intent(arany::ToolCall::Move {
+        source: "old.txt".into(),
+        destination: "new.txt".into(),
+        expected_digest: "b".repeat(64),
+    });
+    replay
+        .call(
+            json!(3),
+            "session/load",
+            json!({"sessionId":replay.session,"cwd":"/var/workspace","mcpServers":[]}),
+        )
+        .await;
+    let request = replay.request().await;
+    assert_eq!(request.method, "thread/resume");
+    replay
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: request.id,
+            result: json!({
+                "thread":{"id":replay.session,"title":"History","workspace":"/private/var/workspace","createdAtMs":0},
+                "turns":[{"id":replay.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[
+                    {"type":"userMessage","id":format!("{}:user", replay.run),"text":"Move","images":[]},
+                    serve::items::tool_item(&intent, None, true)
+                ]}]
+            }),
+        }))
+        .await
+        .unwrap();
+    let _ = replay.next().await;
+    let started = replay.next().await["params"]["update"].clone();
+    assert_eq!(started["sessionUpdate"], "tool_call");
+    assert_eq!(started["kind"], "edit");
+    assert_eq!(started["title"], "Change files old.txt");
+    assert_eq!(started["locations"][0]["path"], "/var/workspace/old.txt");
+    assert_eq!(started["locations"][1]["path"], "/var/workspace/new.txt");
+    let completed = replay.next().await["params"]["update"].clone();
+    assert_eq!(completed["sessionUpdate"], "tool_call_update");
+    assert_eq!(completed["status"], "failed");
+    assert_eq!(completed["_meta"]["arany.status"], "uncertain");
+    assert_eq!(replay.next().await["id"], 3);
+    replay.close().await;
+}
+
+#[tokio::test]
+async fn gh_pr_list_projects_as_bounded_read() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"List pull requests"}]))
+        .await;
+    let repository = "github.com/team/\u{001b}[2J\nproject";
+    let intent = adapter.intent(arany::ToolCall::GhPrList {
+        repository: repository.into(),
+        state: arany::PrState::Open,
+        base: None,
+        head: None,
+        limit: 10,
+    });
+    adapter.item(&intent, None).await;
+    let update = adapter.next().await["params"]["update"].clone();
+    assert_eq!(update["kind"], "read");
+    assert_eq!(
+        update["title"],
+        "List GitHub pull requests github.com/team/\\u{001b}[2J project"
+    );
+    assert!(
+        !update["title"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .any(char::is_control)
+    );
+    assert_eq!(update["rawInput"]["operation"], "gh_pr_list");
+    assert_eq!(update["rawInput"]["repository"], repository);
+    assert_eq!(update["locations"], json!([]));
+    adapter.close().await;
+}
+
+#[tokio::test]
 async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans() {
     let _deadline = crate::cli::serve::tests::deadline();
     let exhausted = |limit| json!({"reason":"goalExhausted","limit":limit});
