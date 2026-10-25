@@ -13,7 +13,7 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 70] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -230,6 +230,42 @@ const EVENT_FIXTURES: [EventFixture<'static>; 70] = [
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
+    (
+        "ToolStarted",
+        21,
+        include_str!("toolstarted-without-expiry.json"),
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        28,
+        include_str!("toolfinished-without-expiry.json"),
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "HookStarted",
+        11,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        17,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        12,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        23,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
     ("ProviderCallRecorded", 22, REFUSAL_V19, REFUSAL_V19),
     ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
     ("ProviderSetupEditStarted", 2, ROLE_SETUP_V2, ROLE_SETUP_V2),
@@ -376,6 +412,7 @@ fn provider_call_v19_identity_migration_preserves_bytes_and_rejects_new_reason()
 #[test]
 fn editor_refusal_migration_preserves_bytes_and_rejects_forged_old_causes() {
     let step = REGISTRY.event_step("ProviderCallRecorded", 22).unwrap();
+    let view_step = REGISTRY.event_step("ProviderCallRecorded", 23).unwrap();
     assert_eq!((step.canonical)(REFUSAL_V19).as_deref(), Some(REFUSAL_V19));
     assert_eq!(
         (step.transform)(serde_json::from_str(REFUSAL_V19).unwrap()),
@@ -395,6 +432,16 @@ fn editor_refusal_migration_preserves_bytes_and_rejects_forged_old_causes() {
         assert!((step.canonical)(&forged).is_none(), "{cause}");
         assert!(
             (step.transform)(serde_json::from_str(&forged).unwrap()).is_none(),
+            "{cause}"
+        );
+        assert_eq!(
+            (view_step.canonical)(&forged).as_deref(),
+            Some(forged.as_str()),
+            "{cause}"
+        );
+        assert_eq!(
+            (view_step.transform)(serde_json::from_str(&forged).unwrap()),
+            Some(serde_json::from_str(&forged).unwrap()),
             "{cause}"
         );
         Event::decode(
@@ -2892,6 +2939,24 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
 fn source_for_tool_started() -> Value {
     serde_json::from_str(include_str!("toolstarted-without-expiry.json"))
         .expect("expiry-free ToolStarted fixture")
+}
+
+#[test]
+fn pr_view_identity_step_rejects_view_authority_in_older_payloads() {
+    let step = REGISTRY.event_step("ToolStarted", 21).unwrap();
+    let mut source = source_for_tool_started();
+    source["intent"]["call"] = serde_json::json!({
+        "operation":"gh_pr_view",
+        "repository":"github.com/o/r",
+        "number":17
+    });
+    source["intent"]["host"] = serde_json::json!({
+        "source_oid":"gh-pr-view-v1",
+        "refspec":"fixed-view-v1"
+    });
+    source["intent"]["limits"]["network"] = serde_json::json!("host");
+    assert!((step.canonical)(&source.to_string()).is_none());
+    assert!((step.transform)(source).is_none());
 }
 
 #[test]

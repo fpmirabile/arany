@@ -1156,11 +1156,11 @@ impl ToolRuntime {
                     .filter(|name| match *name {
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
-                        "gh_pr_list" => self.host_authentication.as_ref().as_ref()
+                        "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         _ => true,
                     })
-                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list") || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
+                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view") || self.config.pinned_gh().is_some())
                     .collect();
                 serde_json::json!({"write":write,"host":true,"operations":operations,"scope":catalog::GIT_SCOPE})
             } else {
