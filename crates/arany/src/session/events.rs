@@ -150,7 +150,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 15),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 23),
+    ("ProviderCallRecorded", 24),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),

@@ -264,7 +264,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         gh_pr_view_step!("HookStarted", 11),
         gh_pr_view_step!("HookFinished", 17),
         gh_pr_view_step!("GoalPlanContractRecorded", 12),
-        gh_pr_view_step!("ProviderCallRecorded", 22),
+        gh_pr_view_step!("ProviderCallRecorded", 23),
         expiry_step!("ToolStarted", 18),
         expiry_step!("ToolFinished", 24),
         expiry_step!("HookStarted", 8),
