@@ -50,7 +50,7 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     for phase in ["first", "retry"] {
         let mut manager = Manager::start(&root, phase);
         manager.respond(
-            "type a choice name: 1. API accounts or 2. Custom routes",
+            "type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing",
             b"1\r",
         );
         manager.respond(ACCOUNTS, b"5\r");
@@ -167,7 +167,14 @@ fn manager_stage() {
             )
             .unwrap();
             let mut journal = SetupJournal::for_conversation(&state, &workspace, &view);
-            let result = resolve(&mut terminal, &state, &workspace, &mut journal).await;
+            let result = resolve(
+                &mut terminal,
+                &state,
+                &workspace,
+                &mut journal,
+                &SessionDefaults::default(),
+            )
+            .await;
             terminal.restore().unwrap();
             assert_eq!(
                 matches!(&result, Err(SetupError::Presentation(_))),

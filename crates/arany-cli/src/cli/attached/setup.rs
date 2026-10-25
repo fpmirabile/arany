@@ -1,3 +1,5 @@
+mod routing;
+
 use crate::accounts::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
 };
@@ -534,6 +536,7 @@ pub(super) async fn resolve(
     state_dir: &Path,
     workspace: &Path,
     journal: &mut SetupJournal,
+    current: &SessionDefaults,
 ) -> Result<Option<SetupSelection>, SetupError> {
     if super::models::preferences_need_reset(workspace)?
         && !reset_saved_setup(terminal, workspace, credentials::SetupData::Models, journal).await?
@@ -544,8 +547,12 @@ pub(super) async fn resolve(
         terminal,
         1,
         "Provider setup",
-        "Add or manage access and custom routes",
-        &[(b'1', "API accounts"), (b'2', "Custom routes")],
+        "Manage access, custom routes and role routing",
+        &[
+            (b'1', "API accounts"),
+            (b'2', "Custom routes"),
+            (b'3', "Role routing"),
+        ],
     )
     .await?
     else {
@@ -554,6 +561,10 @@ pub(super) async fn resolve(
     match access {
         b'1' => accounts_setup(terminal, workspace, journal).await,
         b'2' => custom_routes_setup(terminal, state_dir, journal).await,
+        b'3' => {
+            routing::manage(terminal, state_dir, journal, current).await?;
+            Ok(None)
+        }
         _ => Err("invalid Provider setup choice".into()),
     }
 }
@@ -1228,14 +1239,7 @@ fn custom_profile_choices(
         .iter()
         .enumerate()
         .map(|(index, profile)| {
-            let status = statuses
-                .iter()
-                .find(|(name, _)| name == profile.name())
-                .map_or("unchecked".to_owned(), |(_, status)| match status {
-                    CustomCheckStatus::Unchecked => "unchecked".into(),
-                    CustomCheckStatus::Stale => "stale".into(),
-                    CustomCheckStatus::VerifiedUntil(expires) => format_verified_until(*expires),
-                });
+            let status = custom_status_label(statuses, profile.name());
             (
                 u8::try_from(index + 1).unwrap_or(u8::MAX),
                 format!("{} · {status}", escape_terminal(profile.name())),
@@ -1245,6 +1249,17 @@ fn custom_profile_choices(
     choices.push((b'a', "Add custom route".into()));
     choices.push((b'b', "Back".into()));
     choices
+}
+
+fn custom_status_label(statuses: &[(String, CustomCheckStatus)], name: &str) -> String {
+    statuses
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map_or("unchecked".to_owned(), |(_, status)| match status {
+            CustomCheckStatus::Unchecked => "unchecked".into(),
+            CustomCheckStatus::Stale => "stale".into(),
+            CustomCheckStatus::VerifiedUntil(expires) => format_verified_until(*expires),
+        })
 }
 
 fn format_verified_until(expires_at_ms: i64) -> String {
