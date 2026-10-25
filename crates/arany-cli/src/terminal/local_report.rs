@@ -20,12 +20,7 @@ impl AttachedTerminal {
         loop {
             let mut page = 1;
             let mut last = 0;
-            let width = self
-                .terminal
-                .as_mut()
-                .expect("owned terminal")
-                .size()?
-                .width;
+            let width = self.owned.terminal().size()?.width;
             let rows = text
                 .lines()
                 .flat_map(|line| view::wrap_cells(line, usize::from(width.max(1)), 0))
