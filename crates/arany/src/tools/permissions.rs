@@ -406,14 +406,16 @@ impl PermissionConfig {
             && (facts.asks_approval
                 || facts.spawns_process
                 || matches!(facts.family, Family::Mcp | Family::Git));
-        let allow_skips_approval = !call.is_unguarded()
-            && !call.is_host()
-            && !auto_review
-            && !(self.mode == PermissionMode::AcceptEdits
-                && facts.asks_approval
-                && !facts.typed_edit());
+        let typed_host_read = matches!(call, ToolCall::GhPrList { .. });
+        let allow_skips_approval = typed_host_read
+            || !call.is_unguarded()
+                && !call.is_host()
+                && !auto_review
+                && !(self.mode == PermissionMode::AcceptEdits
+                    && facts.asks_approval
+                    && !facts.typed_edit());
         let matched = self.rules.iter().find_map(|(decision, rule)| {
-            if *decision == Decision::Allow && !allow_skips_approval {
+            if *decision == Decision::Allow && (!allow_skips_approval || typed_host_read) {
                 None
             } else {
                 rule.matches_worker_paths(call, *decision, paths)

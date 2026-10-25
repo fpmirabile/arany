@@ -870,6 +870,77 @@ fn command_snapshots_exceed_previous_capacity_and_reject_new_limits() {
 }
 
 #[test]
+fn command_changeset_limits_cover_content_serialization_and_internal_context() {
+    use crate::session::worker::ChangesetSource;
+
+    let exact_content = CommandChangeset {
+        files: vec![FileChange {
+            path: "content".into(),
+            before: Some(FileVersion::from_bytes(&vec![b'a'; 16 * 1024], false)),
+            after: Some(FileVersion::from_bytes(&vec![b'b'; 16 * 1024], false)),
+        }],
+    };
+    assert!(exact_content.valid(), "32 KiB combined content is admitted");
+    let overflow_content = CommandChangeset {
+        files: vec![FileChange {
+            path: "content".into(),
+            before: exact_content.files[0].before.clone(),
+            after: Some(FileVersion::from_bytes(&vec![b'b'; 16 * 1024 + 1], false)),
+        }],
+    };
+    assert!(
+        !overflow_content.valid(),
+        "combined content over 32 KiB rejects"
+    );
+
+    let long_escaped_paths = |components: usize| CommandChangeset {
+        files: (0..MAX_CHANGESET_FILES)
+            .map(|index| FileChange {
+                path: format!(
+                    "f{index:02}/{}",
+                    std::iter::repeat_n("\"".repeat(100), components)
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ),
+                before: None,
+                after: Some(FileVersion::from_bytes(b"", false)),
+            })
+            .collect(),
+    };
+    let admitted = long_escaped_paths(3);
+    let admitted_bytes = serde_json::to_vec(&admitted).unwrap();
+    assert!(admitted_bytes.len() <= MAX_CHANGESET_SERIALIZED_BYTES);
+    assert!(
+        admitted.valid(),
+        "long escaped paths fit the serialized ceiling"
+    );
+    assert!(
+        !long_escaped_paths(4).valid(),
+        "serialized overflow rejects"
+    );
+
+    let integration = ToolCall::ApplyChangeset {
+        source: ChangesetSource::CommandReceipt {
+            source_intent_digest: [1; 32],
+            changeset: admitted,
+        },
+    };
+    assert_eq!(
+        integration.argument_limit(),
+        MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES
+    );
+    assert!(
+        serde_json::to_vec(&integration).unwrap().len() <= integration.argument_limit(),
+        "the internal envelope admits the largest serialized command changeset"
+    );
+    assert!(
+        super::ToolRuntime::step_context_reserve(true, 0)
+            >= MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES + 128 * 6 + 512 + 512,
+        "context reserves escaped internal integration arguments"
+    );
+}
+
+#[test]
 fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() {
     use nix::{sys::stat::Mode, unistd::mkfifo};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1022,7 +1093,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                             path: if case == "too-many-files" {
                                 format!("y-{index:02}")
                             } else {
-                                format!("y-{index:02}-{}", "x".repeat(480))
+                                format!("y-{index:02}-{}", "\"".repeat(400))
                             },
                             before: None,
                             after: Some(FileVersion::from_bytes(b"", false)),
@@ -1653,7 +1724,7 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 13);
+    assert_eq!(rows.len(), 14);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))

@@ -93,6 +93,12 @@ macro_rules! git_write_step {
     };
 }
 
+macro_rules! gh_pr_list_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_gh_pr_list_payload)
+    };
+}
+
 macro_rules! expiry_step {
     ($kind:literal, $from:literal) => {
         EventStep {
@@ -225,6 +231,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         variant_step!("HookStarted", 7, crate::session::pre_host_payload),
         variant_step!("HookFinished", 12, crate::session::pre_host_payload),
         variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
+        gh_pr_list_step!("ToolStarted", 20),
+        gh_pr_list_step!("ToolFinished", 27),
+        gh_pr_list_step!("HookStarted", 10),
+        gh_pr_list_step!("HookFinished", 16),
+        gh_pr_list_step!("GoalPlanContractRecorded", 11),
+        gh_pr_list_step!("ProviderCallRecorded", 21),
         expiry_step!("ToolStarted", 18),
         expiry_step!("ToolFinished", 24),
         expiry_step!("HookStarted", 8),

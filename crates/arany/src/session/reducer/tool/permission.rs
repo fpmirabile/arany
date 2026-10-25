@@ -29,6 +29,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 && !unguarded
                 && pending_call.is_git()
                 && pending_call.facts().mutates;
+            let first_unconfigured_host_read = !permissions_pinned
+                && definition_mode.is_none()
+                && matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. });
             if first_use
                 && !(primary
                     && verdict.hook_restriction.is_none()
@@ -57,10 +60,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     && (!typed_source
                         // An allow whose dispatch a later plan, budget or pause gate refused is unapproved.
                         || verdict.decision == Decision::Allow
-                            && matches!(
+                            && (matches!(
                                 verdict.mode,
                                 Some(PermissionMode::Default | PermissionMode::DontAsk)
-                            )
+                            ) || matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. }))
                         || !verdict.approved && verdict.decision == Decision::Deny))
             {
                 return Err(ReplayError::InvalidTransition);
@@ -76,7 +79,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 return Err(ReplayError::InvalidTransition);
             }
             if verdict.mode.is_some() != (permissions_pinned || definition_mode.is_some())
-                || !(permissions_pinned || definition_mode.is_some() || unguarded || first_use)
+                || !(permissions_pinned
+                    || definition_mode.is_some()
+                    || unguarded
+                    || first_use
+                    || first_unconfigured_host_read)
                 || definition_mode == Some(crate::tools::permissions::PermissionMode::DontAsk)
                     && verdict.decision == crate::tools::permissions::Decision::Ask
             {
@@ -85,13 +92,23 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if pending_call.is_host()
                 && verdict.approved
                 && (!primary
-                    || verdict.source != PermissionSource::Human
-                    || verdict.decision != Decision::Ask
-                    || matches!(
-                        verdict.mode,
-                        Some(PermissionMode::Plan | PermissionMode::DontAsk)
-                    )
-                    || pending_tool(run, *agent_run_id)?.intent.host.is_none())
+                    || pending_tool(run, *agent_run_id)?.intent.host.is_none()
+                    || if matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. }) {
+                        !(verdict.source == PermissionSource::TypedPrefixRule
+                            && verdict.basis == PermissionSource::TypedPrefixRule
+                            && verdict.decision == Decision::Allow
+                            && permissions_pinned)
+                            && (verdict.source != PermissionSource::Human
+                                || verdict.decision != Decision::Ask
+                                || matches!(verdict.mode, Some(PermissionMode::DontAsk)))
+                    } else {
+                        verdict.source != PermissionSource::Human
+                            || verdict.decision != Decision::Ask
+                            || matches!(
+                                verdict.mode,
+                                Some(PermissionMode::Plan | PermissionMode::DontAsk)
+                            )
+                    })
             {
                 return Err(ReplayError::InvalidTransition);
             }

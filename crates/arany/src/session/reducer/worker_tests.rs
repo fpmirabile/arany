@@ -2920,29 +2920,96 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
     f.view();
 }
 
+pub(crate) fn background_fixture() -> Fixture {
+    let mut f = fixture();
+    for event in &mut f.events {
+        match event {
+            Event::ProviderCallRecorded { record, .. } => {
+                for plan in record.delegation.iter_mut().flatten() {
+                    if let ChildAssignment::Editor { assignment } = plan {
+                        assignment.mode = WorkerMode::Background;
+                    }
+                }
+            }
+            Event::AgentSpawned {
+                profile: None,
+                assignment: Some(pins),
+                ..
+            } => pins.request.mode = WorkerMode::Background,
+            _ => {}
+        }
+    }
+    f
+}
+
+#[test]
+fn worker_compaction_boundaries_keep_the_preceding_step_with_integration() {
+    let mut f = background_fixture();
+    f.call(
+        f.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let read = f.intent(
+        f.primary,
+        ToolCall::Read {
+            path: "src/base".into(),
+            offset: None,
+            limit: Some(32),
+        },
+        EffectTarget::Workspace,
+    );
+    f.started(&read);
+    f.observed(
+        &read,
+        ToolDisposition::Succeeded,
+        Some(Attestation::for_site(&read)),
+        "{}",
+    );
+    let before_integration = f.view().runs[0].tools.len();
+    f.mutation();
+    let data = f.finish_worker();
+    let handover = f.handover(data.clone());
+    f.integrate(handover, data, ToolDisposition::Succeeded);
+    let view = f.view();
+    let run = &view.runs[0];
+    let boundaries = run.tool_step_boundaries();
+    assert_eq!(boundaries.len(), run.live_tool_records().count());
+    assert!(
+        boundaries.contains(&None),
+        "the pre-integration prefix is partial"
+    );
+    assert!(!boundaries.contains(&Some(before_integration)));
+    assert_eq!(boundaries.last(), Some(&Some(run.tools.len())));
+    let covered_sequence = run.tools[before_integration - 1].finished_sequence.unwrap();
+    f.compact();
+    let whole = f.events.pop().unwrap();
+    let mut partial = whole.clone();
+    let Event::GoalContextCompacted {
+        covered_tool_count,
+        record,
+        ..
+    } = &mut partial
+    else {
+        panic!("compaction outcome");
+    };
+    *covered_tool_count = u32::try_from(before_integration).unwrap();
+    record.covered_sequence = covered_sequence;
+    record.source_digest = crate::session::prefix_digest(&f.envelopes(), covered_sequence).unwrap();
+    refused(&f, partial, "prefix before worker integration");
+    f.push(whole);
+    f.view();
+}
+
 #[test]
 fn worker_protocol_background_workers_let_the_primary_continue_before_release() {
     for background in [false, true] {
-        let mut f = fixture();
-        if background {
-            for event in &mut f.events {
-                match event {
-                    Event::ProviderCallRecorded { record, .. } => {
-                        for plan in record.delegation.iter_mut().flatten() {
-                            if let ChildAssignment::Editor { assignment } = plan {
-                                assignment.mode = WorkerMode::Background;
-                            }
-                        }
-                    }
-                    Event::AgentSpawned {
-                        profile: None,
-                        assignment: Some(pins),
-                        ..
-                    } => pins.request.mode = WorkerMode::Background,
-                    _ => {}
-                }
-            }
-        }
+        let mut f = if background {
+            background_fixture()
+        } else {
+            fixture()
+        };
         f.push(Event::GoalProviderCallReserved {
             goal_id: f.goal,
             run_id: f.run,

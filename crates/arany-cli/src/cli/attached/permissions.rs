@@ -75,6 +75,7 @@ const ENTRY_BASE: u8 = 2;
 const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
 const HOST_NOTE: &str = "host; human approval required";
+const PR_LIST_DISCLOSURE: &str = "This host read can send private PR data to the current Provider.";
 
 pub(super) enum PermissionArea {
     FolderTrust,
@@ -118,7 +119,9 @@ fn decision_label(decision: Decision) -> &'static str {
 }
 
 fn verb_label(prefix: TypedGitPrefix) -> String {
-    if !matches!(prefix, TypedGitPrefix::Push | TypedGitPrefix::PrCreate) {
+    if prefix == TypedGitPrefix::PrList {
+        format!("{} (host; human approval or typed allow)", prefix.label())
+    } else if !matches!(prefix, TypedGitPrefix::Push | TypedGitPrefix::PrCreate) {
         prefix.label().to_owned()
     } else {
         format!("{} ({HOST_NOTE})", prefix.label())
@@ -233,6 +236,12 @@ pub(super) async fn manage_rules(
             }
         };
         let Some(edit) = edit else { continue };
+        if requires_pr_list_disclosure(&edit, &entries)
+            && !confirm_pr_list_disclosure(terminal).await?
+        {
+            notice = Some("Allow rule not saved.".into());
+            continue;
+        }
         match settings.save_edit(&state, workspace, edit) {
             Ok(_) => {
                 saved = true;
@@ -464,6 +473,39 @@ fn host_command_label(call: &arany::ToolCall) -> String {
         ));
     }
     crate::presentation::escape_terminal(&label)
+}
+
+fn requires_pr_list_disclosure(
+    edit: &TypedPrefixEdit,
+    entries: &[arany::permissions::TypedPrefixEntry],
+) -> bool {
+    match edit {
+        TypedPrefixEdit::Insert {
+            prefix, decision, ..
+        } => *prefix == TypedGitPrefix::PrList && *decision == Decision::Allow,
+        TypedPrefixEdit::Replace { index, decision } => {
+            *decision == Decision::Allow
+                && entries
+                    .get(*index)
+                    .is_some_and(|entry| entry.prefix == TypedGitPrefix::PrList)
+        }
+        TypedPrefixEdit::Remove { .. } => false,
+    }
+}
+
+async fn confirm_pr_list_disclosure(terminal: &mut AttachedTerminal) -> Result<bool, SetupError> {
+    Ok(matches!(
+        super::setup::choose_focused(
+            terminal,
+            2,
+            "Private PR disclosure",
+            PR_LIST_DISCLOSURE,
+            &[(b'1', "Save allow rule"), (b'0', "Cancel")],
+            None,
+        )
+        .await?,
+        Some(b'1')
+    ))
 }
 
 async fn add_edit(terminal: &mut AttachedTerminal) -> Result<Option<TypedPrefixEdit>, SetupError> {
@@ -823,7 +865,10 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_linear_selection, toggle_profile};
+    use super::{
+        PR_LIST_DISCLOSURE, parse_linear_selection, requires_pr_list_disclosure, toggle_profile,
+    };
+    use arany::permissions::{Decision, TypedGitPrefix, TypedPrefixEdit};
 
     #[test]
     fn host_rule_reload_failures_report_prior_saves_without_claiming_current_state() {
@@ -1145,5 +1190,38 @@ mod tests {
         assert_eq!(selected, [false, true, true]);
         toggle_profile(&mut selected, &options, 1);
         assert_eq!(selected, [false, false, true]);
+    }
+
+    #[test]
+    fn pr_list_allow_edits_require_provider_disclosure_confirmation() {
+        let entries = [arany::permissions::TypedPrefixEntry {
+            prefix: TypedGitPrefix::PrList,
+            decision: Decision::Ask,
+            folder: None,
+        }];
+        assert!(requires_pr_list_disclosure(
+            &TypedPrefixEdit::Insert {
+                prefix: TypedGitPrefix::PrList,
+                decision: Decision::Allow,
+                folder: false,
+            },
+            &[]
+        ));
+        assert!(requires_pr_list_disclosure(
+            &TypedPrefixEdit::Replace {
+                index: 0,
+                decision: Decision::Allow,
+            },
+            &entries
+        ));
+        assert!(!requires_pr_list_disclosure(
+            &TypedPrefixEdit::Replace {
+                index: 0,
+                decision: Decision::Deny,
+            },
+            &entries
+        ));
+        assert!(PR_LIST_DISCLOSURE.contains("private PR data"));
+        assert!(PR_LIST_DISCLOSURE.contains("current Provider"));
     }
 }

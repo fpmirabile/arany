@@ -349,6 +349,13 @@ impl Config {
                             .iter()
                             .any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()));
             }
+            ToolCall::GhPrList { .. } => {
+                return self.git_available()
+                    && self
+                        .commands
+                        .iter()
+                        .any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty());
+            }
             ToolCall::GitStatus { .. }
             | ToolCall::GitDiff { .. }
             | ToolCall::GitLog { .. }

@@ -280,6 +280,12 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&(TASK_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(crate::tools::types::MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(crate::tools::types::MAX_CHANGESET_BYTES as u64).to_le_bytes());
+    bytes.extend_from_slice(
+        &(crate::tools::types::MAX_CHANGESET_SERIALIZED_BYTES as u64).to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &(crate::tools::types::MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES as u64).to_le_bytes(),
+    );
     for &(resource, limit) in PROCESS_LIMITS {
         bytes.extend_from_slice(&(resource as u32).to_le_bytes());
         bytes.extend_from_slice(&limit.to_le_bytes());

@@ -94,7 +94,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 26] = [
+pub(crate) static ALL: [OperationFacts; 27] = [
     read_row(
         "list",
         Family::File,
@@ -260,6 +260,18 @@ pub(crate) static ALL: [OperationFacts; 26] = [
         25,
         "Move one regular Workspace file to a missing destination, guarded by the source SHA-256. Preserves bytes and executable status; creates missing destination parents. Never overwrites an existing destination.",
     ),
+    OperationFacts {
+        site: Site::Host,
+        asks_approval: true,
+        prelude: true,
+        spawns_process: true,
+        ..facts_row(
+            "gh_pr_list",
+            Family::Git,
+            26,
+            "List a bounded number of GitHub pull requests from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
+        )
+    },
 ];
 
 static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
@@ -316,6 +328,7 @@ impl ToolCall {
             Self::GitSwitch { .. } => &ALL[20],
             Self::GitPush { .. } => &ALL[22],
             Self::GhPrCreate { .. } => &ALL[23],
+            Self::GhPrList { .. } => &ALL[26],
         }
     }
 }
@@ -419,7 +432,7 @@ pub(crate) fn call_schemas() -> Vec<Value> {
 
 pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
     let git_writes = catalog["git"]["write"] == true;
-    let host_writes = catalog["git"]["host"] == true;
+    let host_available = catalog["git"]["host"] == true;
     let mut calls = call_schemas();
     calls.retain_mut(|call| {
         let Some(facts) = facts_of(call) else {
@@ -445,10 +458,21 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                 let listed = catalog["git"]["operations"]
                     .as_array()
                     .is_some_and(|names| names.iter().any(|name| name == facts.name));
-                if !facts.mutates || catalog["write"] == true && (if facts.site == Site::Host { host_writes } else { git_writes }) && listed {
+                if !listed {
+                    return false;
+                }
+                if facts.site == Site::Host {
+                    return host_available
+                        && if facts.mutates {
+                            catalog["write"] == true
+                        } else {
+                            facts.name == "gh_pr_list"
+                        };
+                }
+                if !facts.mutates || catalog["write"] == true && git_writes {
                     return true;
                 }
-                if facts.name == "git_branch" && listed {
+                if facts.name == "git_branch" {
                     call["properties"]["name"] = json!({"type":"null", "description":"null lists branch tips; creating one needs the write grant."});
                     call["properties"]["start_point"] = json!({"type":"null"});
                     return true;
@@ -724,6 +748,13 @@ mod tests {
                 destination: "destination".into(),
                 expected_digest: "0".repeat(64),
             },
+            ToolCall::GhPrList {
+                repository: "github.com/o/r".into(),
+                state: crate::tools::types::DEFAULT_PR_STATE,
+                base: None,
+                head: None,
+                limit: crate::tools::types::DEFAULT_PR_LIMIT,
+            },
         ]
     }
 
@@ -769,7 +800,7 @@ mod tests {
             for host in [false, true] {
                 let catalog = json!({
                     "write": write,
-                    "git": {"write": false, "host": host, "operations": ["git_push", "gh_pr_create"]},
+                    "git": {"write": false, "host": host, "operations": ["git_push", "gh_pr_create", "gh_pr_list"]},
                     "commands": [{"name":"gh", "interpreter":false, "inputs":[]}]
                 });
                 let offered: Vec<_> = catalog_call_schemas(&catalog)
@@ -780,12 +811,22 @@ mod tests {
                     .collect();
                 assert_eq!(
                     offered,
-                    if write && host {
-                        vec!["git_push", "gh_pr_create"]
-                    } else {
-                        vec![]
+                    match (write, host) {
+                        (true, true) => vec!["git_push", "gh_pr_create", "gh_pr_list"],
+                        (false, true) => vec!["gh_pr_list"],
+                        _ => vec![],
                     }
                 );
+                if host {
+                    let mut missing_read = catalog.clone();
+                    missing_read["git"]["operations"] = json!(["git_push", "gh_pr_create"]);
+                    assert!(
+                        !catalog_call_schemas(&missing_read)
+                            .iter()
+                            .filter_map(facts_of)
+                            .any(|facts| facts.name == "gh_pr_list")
+                    );
+                }
             }
         }
     }
