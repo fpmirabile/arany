@@ -4655,7 +4655,7 @@ mod lifecycle_hooks {
 
     fn auto_pre_compact_fixture(fixture: &Fixture) -> (Arc<ScriptedProvider>, arany::GoalBudget) {
         // Three recent pages leave room for the next turn; clearing one page still needs a summary.
-        const PAGE_BYTES: usize = 60 * 1024;
+        const PAGE_BYTES: usize = 40 * 1024;
         const LINE_BYTES: usize = 1024;
         std::fs::write(
             fixture.workspace.join("notes/data.txt"),

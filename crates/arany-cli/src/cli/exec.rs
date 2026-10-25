@@ -1438,6 +1438,8 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
+    const ACTIVE_LIMIT_MS: u64 = 60_000;
+
     async fn run_with_budget_spent_after_answer(
         exec: ExecArgs,
         admission: Admission,
@@ -1506,10 +1508,10 @@ mod tests {
         .expect("Tool configuration");
         std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
             .expect("private Tool configuration");
-        let preferences = serde_json::json!({"version":5,"preferences":{
+        let preferences = serde_json::json!({"version":6,"preferences":{
             "completion":"tabs","view":"fullscreen","goal_budget":budget,
             "resources":arany::ToolResourceSettings::default(),
-            "mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"
+            "copy_on_select":true,"newline":"shift_enter"
         }});
         root.record(arany::RecordKind::UiPreferences)
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
@@ -1609,7 +1611,7 @@ mod tests {
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
         let budget = GoalBudget {
-            max_active_ms: Some(60_000),
+            max_active_ms: Some(ACTIVE_LIMIT_MS),
             ..GoalBudget::default()
         };
         let (report, _, view) = exec_budget_report(budget).await;
@@ -1670,7 +1672,6 @@ mod tests {
     }
 
     fn finished_run_at_active_limit(events: Vec<arany::EventEnvelope>) -> CommittedOutcome {
-        const ACTIVE_LIMIT_MS: u64 = 60_000;
         const ANSWER: &str = "The notes remain unchanged";
         let budget = GoalBudget {
             max_active_ms: Some(ACTIVE_LIMIT_MS),

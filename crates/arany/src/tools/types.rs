@@ -15,7 +15,7 @@ pub(crate) const MAX_EDIT_CONTENT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_MULTI_EDITS: usize = 64;
 // Six escaped bytes per content byte plus room for the path, digest and keys.
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 400 * 1024;
-// Every operation other than Write, Edit and MultiEdit keeps this serialized bound.
+// Ordinary operations use this bound; command-receipt integration has its own ceiling.
 pub(crate) const MAX_ORDINARY_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
@@ -47,7 +47,9 @@ pub const MAX_BUILD_PROCESSES_OR_THREADS: u32 = 256;
 pub const MAX_COMMAND_TIMEOUT_MS: u32 = 600_000;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 pub(crate) const MAX_CHANGESET_FILES: usize = 64;
-pub(crate) const MAX_CHANGESET_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_CHANGESET_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_CHANGESET_SERIALIZED_BYTES: usize = 48 * 1024;
+pub(crate) const MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,8 +128,7 @@ impl CommandChangeset {
                 }
             }
         }
-        serde_json::to_vec(self)
-            .is_ok_and(|bytes| bytes.len() <= MAX_ORDINARY_TOOL_ARGUMENT_BYTES - 256)
+        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_CHANGESET_SERIALIZED_BYTES)
     }
 }
 
@@ -492,6 +493,9 @@ impl ToolCall {
             Self::Write { .. } | Self::Edit { .. } | Self::MultiEdit { .. } => {
                 MAX_TOOL_ARGUMENT_BYTES
             }
+            Self::ApplyChangeset {
+                source: ChangesetSource::CommandReceipt { .. },
+            } => MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES,
             _ => MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
         }
     }
