@@ -9711,17 +9711,7 @@ async fn researcher_deadline_records_every_batch_intent_before_non_dispatched_re
         let workspace = facts_workspace(temp.path(), "bounded facts");
         let state = temp.path().join("state");
         let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
-        let session = engine
-            .create_session(workspace.clone(), None)
-            .await
-            .unwrap();
-        let (entered, release) =
-            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(event, Event::ProviderCallRecorded { record, .. }
-                if record.phase == AgentPhase::ChildWork
-                    && record.disposition == ProviderCallDisposition::ToolRequested)
-            });
-        let provider = Arc::new(ScriptedProvider::new(vec![
+        let mut provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
@@ -9738,38 +9728,31 @@ async fn researcher_deadline_records_every_batch_intent_before_non_dispatched_re
                     })
                     .collect(),
             ),
-        ]));
+            finish_with("Unexpected child continuation"),
+            finish_with("Unexpected primary continuation"),
+        ])
+        .with_active_time_per_call(DELEGATION_ALLOWANCE - REMAINING_TOOL_TIME);
+        provider.identity.limits.deadline = DELEGATION_ALLOWANCE;
+        let provider = Arc::new(provider);
         let mut input = request(&workspace, "Delegate the reading");
-        input.session_id = Some(session);
-        input.title = None;
         input.include_paths.clear();
         input.policy = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        let outcome = {
-            let running = run_with(
-                &engine,
-                &provider,
-                input,
-                RunControls {
-                    tools: ToolGrant::Configured,
-                    ..Default::default()
-                },
-            );
-            tokio::pin!(running);
-            tokio::select! {
-                result = &mut running => panic!("Run ended before child Tool preparation: {result:?}"),
-                result = entered => result.unwrap(),
-            }
-            tokio::time::pause();
-            tokio::time::advance(DELEGATION_ALLOWANCE - REMAINING_TOOL_TIME).await;
-            tokio::time::resume();
-            release.send(()).unwrap();
-            running.await.unwrap()
-        };
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(provider.requests.lock().unwrap().len(), 2);
         engine.close().await.unwrap();
-        let (events, view) = replayed(&state, session).await;
+        let (events, view) = replayed(&state, outcome.session_id).await;
         assert_eq!(view.runs[0], outcome.run);
         assert_researcher_deadline_batch(&events, &view, count);
     }
