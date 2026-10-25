@@ -1435,81 +1435,46 @@ mod tests {
         .err()
         .expect("a closed Goal is not resumable");
         assert_eq!(error, "Goal is not available for explicit resume");
+        assert_finished_run_jsonl_budget_feedback(state_dir, paused).await;
     }
 
-    #[tokio::test]
-    async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().expect("private test root");
-        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
-        let state_dir = temp.path().join("state");
-        let root = StateRoot::admit(&state_dir).expect("state");
-        let tools = state_dir.join("tools.json");
-        std::fs::write(
-            &tools,
-            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
-        )
-        .expect("Tool configuration");
-        std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
-            .expect("private Tool configuration");
-        let budget = GoalBudget {
-            max_active_ms: Some(60_000),
-            ..GoalBudget::default()
-        };
-        let preferences = serde_json::json!({"version":5,"preferences":{
-            "completion":"tabs","view":"fullscreen","goal_budget":budget,
-            "resources":arany::ToolResourceSettings::default(),
-            "mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"
-        }});
-        root.record(arany::RecordKind::UiPreferences)
-            .replace(&serde_json::to_vec(&preferences).expect("settings"))
-            .expect("record settings");
-        drop(root);
-
-        let contract = arany::GoalPlanContract {
-            mission: "Inspect the notes and report the result".into(),
-            paths: vec!["notes".into()],
-            commands: Vec::new(),
-            resource_class: arany::ToolResourceClass::Default,
-            command_timeout_ms: None,
-            skills: Vec::new(),
-            mcp_tools: Vec::new(),
-            budget,
-            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                path: "notes/facts.txt".into(),
-                content: "v2".into(),
-            },
-        };
-        let provider = arany::test_support::scenario::ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(contract),
-            arany::test_support::goals::finish_with("The notes remain unchanged"),
-        ])
-        .with_profile("openai", "gpt-5.4")
-        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
-        let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
-        exec.prompt = None;
-        exec.goal = Some("Inspect the notes".into());
-        exec.output = OutputArg::Jsonl;
-        exec.tools = true;
-        let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
-            .await
-            .expect("completed Run with an exhausted Goal");
+    async fn assert_finished_run_jsonl_budget_feedback(
+        state_dir: PathBuf,
+        outcome: arany::RunOutcome,
+    ) {
+        let session_id = outcome.session_id;
+        let mut committed = load_committed_outcome(ClassifiedSubmission {
+            output: OutputArg::Jsonl,
+            state_dir,
+            new_session: true,
+            outcome,
+            stopped: None,
+            continuation_error: None,
+            interrupted: false,
+            forced: None,
+        })
+        .await
+        .expect("reopened exhausted Goal with its committed answer");
+        let run = &committed.outcome.run;
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.assistant_message.as_deref(), Some("first"));
+        assert_eq!(
+            committed.view.goals.last().expect("Failed Goal").status,
+            GoalStatus::Failed
+        );
+        let feedback = crate::presentation::session_run_feedback(&committed.view, run)
+            .expect("budget refusal feedback");
+        committed.stopped = committed.view.run_stop(run);
+        assert_eq!(
+            committed.stopped,
+            Some(RunStop::GoalExhausted(arany::GoalLimit::Calls))
+        );
+        let classification = classify_committed_state(&committed).expect("committed state");
+        let report = render_committed_outcome(committed, classification).expect("JSONL report");
         let first_event: serde_json::Value =
             serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
                 .expect("JSONL Event");
-        let session_id =
-            SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
-                .expect("typed Session ID");
-        let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
-        let run = view.runs.last().expect("Finished Run");
-        assert_eq!(run.status, RunStatus::Finished);
-        assert_eq!(
-            view.goals.last().expect("Failed Goal").status,
-            GoalStatus::Failed
-        );
-        let feedback =
-            crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
+        assert_eq!(first_event["session_id"], session_id.to_string());
         assert_eq!(
             report.stderr,
             format!(
