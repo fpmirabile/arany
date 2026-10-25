@@ -1582,7 +1582,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         status_at,
-        b"Runs",
+        b"Tokens",
     );
     wait_for_frame(
         &mut output,
@@ -1590,7 +1590,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         (status_at, 40, 24),
-        |screen| screen.iter().any(|row| row.contains("Esc close")),
+        |screen| {
+            screen
+                .iter()
+                .any(|row| row.contains("Tokens used: no calls yet"))
+                && screen.iter().any(|row| row.contains("/usage for details"))
+                && screen.iter().any(|row| row.contains("Esc close"))
+        },
     );
     let closed = transcript.len();
     input.write_all(b"\x1b").expect("close status report");
