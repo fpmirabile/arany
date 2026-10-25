@@ -561,6 +561,8 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: None,
             turn: delegated.turn,
@@ -1111,6 +1113,8 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
             panic!("Command")
         };
         let step = crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: Some(ProposalRefusal {
                 operation: "arany_command".into(),
                 cause: ProposalRefusalCause::InvalidPath,

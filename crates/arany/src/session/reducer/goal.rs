@@ -279,10 +279,7 @@ impl SessionView {
         {
             let registry = super::definition_registry(run)?;
             let definition = registry.get(name).ok_or(ReplayError::InvalidTransition)?;
-            let own_tool_pending = agent
-                .tools
-                .last()
-                .is_some_and(|tool| tool.observation.is_none());
+            let own_tool_pending = agent.tools.iter().any(|tool| tool.observation.is_none());
             if !own_tool_pending
                 && agent
                     .provider_calls
@@ -327,10 +324,7 @@ impl SessionView {
             .ok_or(ReplayError::InvalidTransition)?;
         let stored_bytes = run.steering_bytes();
         // A pending Tool observation means this reservation is a Tool review, not a planning or synthesis call.
-        let tool_pending = run
-            .tools
-            .last()
-            .is_some_and(|tool| tool.observation.is_none());
+        let tool_pending = run.tools.iter().any(|tool| tool.observation.is_none());
         if tool_pending
             || stored_bytes + text.len() + MAX_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES
         {
@@ -366,10 +360,7 @@ impl SessionView {
             || agent.status != AgentStatus::Active
             || run.workers.stop.is_some()
             || run.hook_stop_reason().is_some()
-            || agent
-                .tools
-                .last()
-                .is_some_and(|tool| tool.observation.is_none())
+            || agent.tools.iter().any(|tool| tool.observation.is_none())
             || run.steering_bytes() + text.len() + MAX_CHILD_STEERING_LABEL_BYTES
                 > MAX_STEERING_NOTE_BYTES
         {

@@ -779,6 +779,8 @@ mod tests {
         let mut context = tool_context(crate::provider::test_support::catalog());
         context.steps = vec![
             ToolStep {
+                narrowed_observations: Default::default(),
+                refusal_index: None,
                 refusal: None,
                 cleared: false,
                 plan: None,
@@ -867,6 +869,8 @@ mod tests {
             let mut context = tool_context(serde_json::json!({}));
             for size in sizes {
                 context.steps.push(ToolStep {
+                    narrowed_observations: Default::default(),
+                    refusal_index: None,
                     refusal: None,
                     cleared: false,
                     plan: None,

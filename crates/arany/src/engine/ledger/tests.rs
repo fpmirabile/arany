@@ -540,6 +540,15 @@ fn provider_action_reserves_plan_recording_and_terminal_events() {
         .max_events(),
         19
     );
+    for calls in 1..=usize::from(crate::session::MAX_STEP_TOOL_CALLS) {
+        let step = Action::ToolStep { calls };
+        assert_eq!(step.max_events(), calls * (Action::Tool.max_events() + 1));
+        assert_eq!(step.verdict_slots(), calls * Action::Tool.verdict_slots());
+        assert_eq!(
+            step.tool_observations(),
+            calls * Action::Tool.tool_observations()
+        );
+    }
     assert_eq!(Action::Tool.max_events(), 8);
     assert_eq!(Action::Review.max_events(), 8);
     assert_eq!(Action::Tool.verdict_slots(), 2);

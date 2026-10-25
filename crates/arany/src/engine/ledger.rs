@@ -190,6 +190,7 @@ pub enum Action {
     ProviderCall { previews: bool, steering: bool },
     Child { in_flight: u32, research: bool },
     Tool,
+    ToolStep { calls: usize },
     Worker { chunks: usize },
     Review,
     Compaction,
@@ -214,6 +215,9 @@ impl Action {
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
+            Self::ToolStep { calls } => {
+                calls.saturating_mul(Self::Tool.max_events().saturating_add(1))
+            }
             Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
@@ -235,6 +239,7 @@ impl Action {
                 .unwrap_or(usize::MAX)
                 .saturating_add(1),
             Self::Tool | Self::Review => 2,
+            Self::ToolStep { calls } => calls.saturating_mul(Self::Tool.verdict_slots()),
             Self::Worker { .. } => 12,
             Self::Compaction | Self::BoundaryCompaction { .. } => 0,
             Self::Delegation { children, research } => {
@@ -293,6 +298,7 @@ impl Action {
                     0
                 }),
             Self::Tool | Self::Review => attempt_facts(ProviderRole::Review),
+            Self::ToolStep { calls } => calls.saturating_mul(attempt_facts(ProviderRole::Review)),
             Self::Worker { .. } => attempt_facts(ProviderRole::Review)
                 .saturating_add(8 * attempt_facts(ProviderRole::Child))
                 .saturating_add(attempt_facts(ProviderRole::Primary)),
@@ -321,6 +327,7 @@ impl Action {
         match self {
             // A command can need a separate integration observation, so reserve two observations per Tool step.
             Self::Tool | Self::Review | Self::Worker { .. } => 2,
+            Self::ToolStep { calls } => calls.saturating_mul(Self::Tool.tool_observations()),
             Self::Child {
                 in_flight,
                 research: true,
@@ -601,6 +608,7 @@ impl GoalLedger {
             Action::ProviderCall { .. }
             | Action::Child { .. }
             | Action::Tool
+            | Action::ToolStep { .. }
             | Action::Worker { .. } => {
                 self.can_start_provider_call() && self.remaining_calls() != Some(0)
             }
@@ -634,6 +642,7 @@ impl GoalLedger {
                     Action::ProviderCall { .. }
                     | Action::Child { .. }
                     | Action::Tool
+                    | Action::ToolStep { .. }
                     | Action::Worker { .. }
                     | Action::Review => BudgetAction::Provider,
                 },

@@ -247,6 +247,7 @@
             "AgentSteeringNoteRecorded",
             "AssistantDisplayRecorded",
             "ToolStarted",
+            "ToolActiveTimeReserved",
             "ToolFinished",
             "SupervisorVerdictRecorded",
             "ToolPermissionDecided",

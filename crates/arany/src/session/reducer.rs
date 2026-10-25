@@ -464,6 +464,8 @@ pub struct ToolView {
     pub observation: Option<crate::tools::ToolObservation>,
     pub review_call_index: Option<u32>,
     pub permission_verdict: Option<crate::tools::permissions::PermissionVerdict>,
+    pub active_time_reserved: bool,
+    pub narrowing_source: Option<[u8; 32]>,
     pub hooks: Vec<HookView>,
     pub hook_sequence: Option<u64>,
     pub finished_sequence: Option<u64>,
@@ -638,20 +640,31 @@ impl ToolView {
     }
 }
 
-fn model_tool_count(run: &RunView) -> usize {
+fn model_tools(run: &RunView) -> impl Iterator<Item = &ToolView> {
     run.tools
         .iter()
         .skip(run.initial_tool_count())
         .filter(|tool| {
-            tool.narrowed_call().is_none()
-                && !is_integration_tool(tool)
+            !is_integration_tool(tool)
                 && !matches!(
                     tool.intent.call,
                     crate::tools::ToolCall::ParseAgentDefinition { .. }
                         | crate::tools::ToolCall::PrepareWorker { .. }
                 )
         })
+}
+
+fn model_tool_count(run: &RunView) -> usize {
+    model_tools(run)
+        .filter(|tool| tool.narrowed_call().is_none())
         .count()
+}
+
+fn pending_original_tool_requests(run: &RunView) -> Option<usize> {
+    let started = model_tools(run)
+        .filter(|tool| tool.narrowing_source.is_none())
+        .count();
+    requested_tool_total(run.primary()?).checked_sub(started)
 }
 
 fn is_integration_tool(tool: &ToolView) -> bool {
@@ -707,11 +720,15 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
                         .is_some_and(|call| call.phase == record.phase)
         })
         && run.hooks_settled()
-        && run.tools.last().is_some_and(|tool| {
+        && run.tools.iter().all(|tool| {
             tool.settled_without_stop()
                 && tool.observation.as_ref().is_some_and(|observation| {
                     observed_command_changeset(observation)
-                        .is_none_or(|changeset| changeset.files.is_empty())
+                        .is_none_or(|changeset| changeset.files.is_empty() || run.tools.iter().any(|integration| {
+                            matches!(&integration.intent.call, crate::tools::ToolCall::ApplyChangeset {
+                                source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
+                            } if *source_intent_digest == observation.intent.digest()) && integration.settled_without_stop()
+                        }))
                 })
         })
         && requested_tool_total(agent).checked_sub(model_tool_count(run)) == Some(0)
@@ -772,6 +789,23 @@ impl SessionView {
 }
 
 impl RunView {
+    pub fn stopping_tool(&self) -> Option<&ToolView> {
+        self.tools.iter().rev().find(|tool| {
+            tool.observation.as_ref().is_some_and(|observation| {
+                tool.active_time_reserved
+                    || observation.stops_run()
+                    || matches!(
+                        observation.approval_cause,
+                        Some(
+                            crate::tools::ApprovalCause::Paused
+                                | crate::tools::ApprovalCause::Cancelled
+                                | crate::tools::ApprovalCause::ChildTimeout
+                        )
+                    )
+            })
+        })
+    }
+
     pub fn host_tools(&self) -> usize {
         self.tools.iter().filter(|tool| tool.ran_host()).count()
     }
@@ -1189,6 +1223,7 @@ impl SessionView {
             && matches!(
                 envelope.event,
                 Event::ToolStarted { .. }
+                    | Event::ToolActiveTimeReserved { .. }
                     | Event::HookStarted { .. }
                     | Event::GoalProviderCallReserved { .. }
                     | Event::GoalCompactionCallReserved { .. }
@@ -1291,6 +1326,7 @@ impl SessionView {
                 worker::apply(current, &envelope.event, prior)?
             }
             Event::ToolStarted { .. }
+            | Event::ToolActiveTimeReserved { .. }
             | Event::ToolFinished { .. }
             | Event::ToolPermissionDecided { .. }
             | Event::HookStarted { .. }

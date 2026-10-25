@@ -405,6 +405,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
+            let tool = run.stopping_tool().or_else(|| run.tools.last());
             let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
             if let Some(reason) = run.failure.and_then(run_failure_notice) {
                 let last_refusal = run
@@ -438,7 +439,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
                 ));
             }
-            if let Some(tool) = run.tools.last().filter(|tool| {
+            if let Some(tool) = tool.filter(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == arany::ToolDisposition::Failed
                         && observation.attestation.is_none()
@@ -449,7 +450,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 }
                 return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
             }
-            if run.tools.last().is_some_and(|tool| {
+            if tool.is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == arany::ToolDisposition::Succeeded
                         && observation.cache_update == arany::CacheUpdate::Uncertain
@@ -457,14 +458,12 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             }) {
                 return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
             }
-            if let Some(observation) = run
-                .tools
-                .last()
-                .and_then(|tool| tool.observation.as_ref())
-                .filter(|observation| {
-                    observation.disposition == arany::ToolDisposition::Denied
-                        && observation.attestation.is_none()
-                })
+            if let Some(observation) =
+                tool.and_then(|tool| tool.observation.as_ref())
+                    .filter(|observation| {
+                        observation.disposition == arany::ToolDisposition::Denied
+                            && observation.attestation.is_none()
+                    })
             {
                 let disposition = match observation.approval_cause {
                     Some(arany::ApprovalCause::Cancelled) => "Run cancelled.",
@@ -486,7 +485,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     "{disposition} No further action ran; earlier completed actions remain. {recovery}"
                 ));
             }
-            if let Some(tool) = run.tools.last()
+            if let Some(tool) = tool
                 && tool.observation.as_ref().is_none_or(|observation| {
                     matches!(
                         observation.disposition,
@@ -514,8 +513,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
         }),
         RunStatus::Cancelled => {
             let notice = match run
-                .tools
-                .last()
+                .stopping_tool()
+                .or_else(|| run.tools.last())
                 .and_then(|tool| tool.observation.as_ref())
                 .and_then(|observation| observation.approval_cause)
             {
@@ -1514,6 +1513,8 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
         }),
         intent,
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
         hooks: Vec::new(),
         hook_sequence: None,

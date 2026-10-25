@@ -4343,6 +4343,131 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
 }
 
 #[tokio::test]
+async fn narrowed_batch_stops_when_replacement_preparation_exhausts_active_time() {
+    let _deadline = engine_support::deadline("narrowed batch allowance", HOOK_CANCELLATION_TIMEOUT);
+    let narrowed = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: None,
+        limit: Some(8),
+    };
+    let fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(&narrowing_script(
+                &json!(narrowed),
+                "\"limit\":32",
+            ))],
+        )),
+        true,
+    );
+    let session = fixture
+        .engine
+        .create_session(fixture.workspace.clone(), None)
+        .await
+        .unwrap();
+    let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+        matches!(event, Event::ToolFinished { .. })
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Tools(
+        (0..4)
+            .map(|index| arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                call: if index == 1 {
+                    narrowed.clone()
+                } else {
+                    call("read")
+                },
+            })
+            .collect(),
+    )]));
+    let mut input = request(&fixture.workspace, "Read a narrowed batch");
+    input.include_paths.clear();
+    input.session_id = Some(session);
+    input.title = None;
+    input.goal.budget = Some(arany::GoalBudget {
+        max_active_ms: Some(100_000),
+        ..budget()
+    });
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        ..Default::default()
+    };
+    let outcome = {
+        let running = run_with(&fixture.engine, &provider, input, controls);
+        tokio::pin!(running);
+        tokio::select! {
+            result = &mut running => panic!("narrowing did not reach its committed observation: {result:?}"),
+            result = entered => result.unwrap(),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(95)).await;
+        tokio::time::resume();
+        release.send(()).unwrap();
+        running
+            .await
+            .expect("replacement allowance exhaustion is a normal stop")
+    };
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    fixture.engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
+    assert_eq!(view.runs[0], outcome.run);
+    assert_narrowed_batch_stop(session, &events, &view.runs[0]);
+}
+
+fn assert_narrowed_batch_stop(
+    session: SessionId,
+    events: &[arany::EventEnvelope],
+    run: &arany::RunView,
+) {
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+    let tools = &run.tools;
+    assert_eq!(
+        tools.len(),
+        4,
+        "no replacement intent fits the remaining allowance"
+    );
+    assert!(tools[0].permission_verdict.as_ref().unwrap().narrowed);
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool.observation.as_ref().unwrap().attestation.is_none())
+    );
+    for tool in &tools[1..] {
+        assert!(
+            tool.observation
+                .as_ref()
+                .unwrap()
+                .output
+                .starts_with("not_dispatched:")
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .count(),
+        4
+    );
+    let mut continuation = events
+        .iter()
+        .take_while(|event| !matches!(event.event, Event::AgentFinished { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut reservation = events
+        .iter()
+        .find(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+        .unwrap()
+        .clone();
+    reservation.sequence = continuation.last().unwrap().sequence + 1;
+    continuation.push(reservation);
+    assert!(
+        SessionView::replay(session, &continuation).is_err(),
+        "a missing replacement never allows Provider continuation"
+    );
+}
+
+#[tokio::test]
 async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
     let widening =
         json!({"operation": "read", "path": "notes/facts.txt", "offset": null, "limit": 64});

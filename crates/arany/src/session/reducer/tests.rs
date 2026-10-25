@@ -32,6 +32,8 @@ mod goal_recovery_tests {
         };
         let tool = ToolView {
             checkpoint: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1517,6 +1519,8 @@ mod goal_replay_tests {
             ),
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1905,6 +1909,8 @@ mod goal_replay_tests {
         };
         review.runs[0].tools.push(ToolView {
             checkpoint: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -2952,6 +2958,8 @@ mod goal_replay_tests {
                     cache_update,
                 }),
                 review_call_index: None,
+                active_time_reserved: false,
+                narrowing_source: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
                 hook_sequence: None,
@@ -2984,6 +2992,8 @@ mod goal_replay_tests {
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -3012,6 +3022,8 @@ mod goal_replay_tests {
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -5124,6 +5136,8 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 tools: vec![ToolView {
                     checkpoint: None,
+                    active_time_reserved: false,
+                    narrowing_source: None,
                     permission_verdict: None,
                     hooks: Vec::new(),
                     hook_sequence: None,
@@ -5277,6 +5291,8 @@ mod goal_replay_tests {
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
                         checkpoint: None,
+                        active_time_reserved: false,
+                        narrowing_source: None,
                         permission_verdict: None,
                         hooks: Vec::new(),
                         hook_sequence: None,

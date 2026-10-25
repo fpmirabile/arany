@@ -3,6 +3,17 @@ use super::*;
 impl Event {
     pub(super) fn validate_tool(&self) -> Result<(), ReplayError> {
         match self {
+            Self::ToolActiveTimeReserved {
+                intent_digest,
+                active_ceiling_ms,
+                ..
+            } => {
+                if *intent_digest == [0; 32] || *active_ceiling_ms == 0 {
+                    Err(ReplayError::InvalidPayload)
+                } else {
+                    Ok(())
+                }
+            }
             Self::ToolStarted {
                 run_id,
                 agent_run_id,

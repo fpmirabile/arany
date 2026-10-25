@@ -232,26 +232,50 @@ pub(in crate::engine) type BoxedStep<'a, T> =
 
 pub(super) type IntentResult = Result<(ToolObservation, Option<ToolCall>), StopCause>;
 
+fn command_changeset(
+    observation: &ToolObservation,
+) -> Result<Option<crate::tools::CommandChangeset>, StopCause> {
+    if !matches!(observation.intent.call, ToolCall::Command { .. })
+        || !matches!(
+            observation.intent.target,
+            crate::worker::EffectTarget::Workspace
+        )
+        || observation.attestation.is_none()
+        || !matches!(
+            observation.disposition,
+            ToolDisposition::Succeeded | ToolDisposition::Failed
+        )
+    {
+        return Ok(None);
+    }
+    match serde_json::from_str::<CommandResult>(&observation.output) {
+        Ok(result) if result.valid() => Ok(Some(result.changeset)),
+        Err(_) if observation.disposition == ToolDisposition::Failed => Ok(None),
+        _ => Err(StopCause::InvalidCommandResult),
+    }
+}
+
 impl RunLoop<'_> {
     pub(super) async fn execute_step(
         &self,
         mut grant: Grant<'_>,
-        request: ToolRequest,
+        requests: Vec<ToolRequest>,
         turn: ProviderTurn,
     ) -> Result<StepEnd, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let source_call = request.call.clone();
-        let mut call = source_call.clone();
         let calls_remaining = match &grant {
             Grant::Primary { .. } => None,
-            Grant::Researcher { child, .. } => Some(child.tool_calls_remaining.saturating_sub(1)),
+            Grant::Researcher { child, .. } => {
+                Some(child.tool_calls_remaining.saturating_sub(requests.len()))
+            }
         };
-        let mut narrowings = 0;
         let mut step = ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: None,
             turn,
-            requests: vec![request],
+            requests,
             observations: Vec::new(),
             facts: None,
             steering_notes: Vec::new(),
@@ -259,49 +283,293 @@ impl RunLoop<'_> {
             cleared: false,
             hook_feedback: Default::default(),
         };
-        loop {
-            let intent = match self
-                .prepare_step_intent(&grant, runtime, &step, call.clone(), &source_call)
+        let intents = match self.prepare_step(&grant, runtime, &step).await? {
+            Ok(intents) => intents,
+            Err(cause) => return Ok(StepEnd::Stopped(cause)),
+        };
+        for intent in &intents {
+            if let Err(refusal) = self
+                .start_intent(
+                    &grant,
+                    runtime,
+                    intent,
+                    &intent.call,
+                    matches!(grant, Grant::Primary { .. }),
+                )
                 .await?
             {
-                Ok(intent) => intent,
-                Err(cause) => return Ok(StepEnd::Stopped(cause)),
+                return Ok(StepEnd::Stopped(refusal.into()));
+            }
+        }
+        let mut end = StepEnd::Continue;
+        for intent in intents {
+            match end {
+                StepEnd::Continue => {
+                    end = Box::pin(self.execute_step_call(&grant, runtime, &mut step, intent))
+                        .await?;
+                }
+                StepEnd::Stopped(_) => {
+                    let observation = self.finish_undispatched(&grant, runtime, intent).await?;
+                    step.observations.push(observation);
+                }
+            }
+        }
+        grant.context_mut()?.steps.push(step);
+        if let StepEnd::Stopped(_) = end {
+            return Ok(end);
+        }
+        if self.hook_requested_stop()? {
+            return Ok(StepEnd::Stopped(StopCause::HookStop));
+        }
+        if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
+            return Ok(StepEnd::Stopped(StopCause::ContextFull));
+        }
+        Ok(StepEnd::Continue)
+    }
+
+    async fn prepare_step(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+    ) -> Result<Result<Vec<EffectIntent>, StopCause>, EngineError> {
+        let mut intents = Vec::with_capacity(step.requests.len());
+        for request in &step.requests {
+            let sized = if step.requests.len() == 1 {
+                self.prepare_step_intent(grant, runtime, step, request.call.clone(), &request.call)
+                    .await?
+            } else {
+                self.sized_intent(grant, runtime, step, request.call.clone(), &request.call)
+                    .await?
+                    .map_err(StopCause::from)
             };
-            let command = matches!(intent.call, ToolCall::Command { .. })
-                && matches!(intent.target, crate::worker::EffectTarget::Workspace);
-            let source_intent_digest = intent.digest();
-            let narrowable =
-                matches!(grant, Grant::Primary { .. }) && narrowings < MAX_NARROWINGS_PER_STEP;
-            // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let (observation, narrowed) = match self
-                .run_intent(&grant, runtime, intent, &source_call, narrowable)
+            match sized {
+                Ok(intent) => intents.push(intent),
+                Err(cause) => {
+                    if cause == StopCause::ActiveTime {
+                        self.active_time_floor
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Ok(Err(cause));
+                }
+            }
+        }
+
+        match self.admit_step(grant, runtime, step, &intents).await? {
+            Ok(()) => Ok(Ok(intents)),
+            Err(cause) => Ok(Err(cause)),
+        }
+    }
+
+    async fn admit_step(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        intents: &[EffectIntent],
+    ) -> Result<Result<(), StopCause>, EngineError> {
+        for intent in intents {
+            let permission = self.permission(grant, runtime, &intent.call);
+            let hooks = self.hook_admission(runtime, &intent.call, &intent.call).0;
+            if let Err(refusal) = self
+                .admit_tool(
+                    grant,
+                    runtime,
+                    intent,
+                    permission,
+                    hooks,
+                    matches!(grant, Grant::Primary { .. }),
+                )
                 .await?
             {
+                return Ok(Err(refusal.into()));
+            }
+        }
+        if intents.len() > 1 {
+            let calls: Vec<_> = intents.iter().map(|intent| &intent.call).collect();
+            let reserve = intents
+                .iter()
+                .map(|intent| {
+                    usize::try_from(intent.limits.result_bytes).unwrap_or(usize::MAX)
+                        + ToolRuntime::step_context_reserve(
+                            matches!(intent.call, ToolCall::Command { .. }),
+                            self.feedback_reserve(runtime, &intent.call),
+                        )
+                })
+                .sum::<usize>();
+            if grant
+                .context()?
+                .reserved_len(step, &calls)
+                .saturating_add(reserve)
+                > runtime.context_limit_bytes()
+            {
+                return Ok(Err(StopCause::ContextFull));
+            }
+            let action = crate::engine::ledger::Action::ToolStep {
+                calls: intents.len(),
+            };
+            let hooks = intents
+                .iter()
+                .map(|intent| self.hook_admission(runtime, &intent.call, &intent.call).0)
+                .sum::<usize>();
+            let hook_occurrences = hooks.saturating_mul(1 + MAX_NARROWINGS_PER_STEP);
+            self.journal
+                .admit(
+                    self.session_id,
+                    action
+                        .max_events_for_admitted(&self.routing.providers)
+                        .saturating_add(self.ledger().verdicts(action))
+                        .saturating_add(self.ledger().drain_headroom())
+                        .saturating_add(2 * hook_occurrences),
+                    action
+                        .tool_observations()
+                        .saturating_add(intents.len())
+                        .saturating_add(hook_occurrences),
+                )
+                .await?;
+        }
+        Ok(Ok(()))
+    }
+
+    async fn finish_undispatched(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+    ) -> Result<ToolObservation, EngineError> {
+        let permission = self.permission(grant, runtime, &intent.call);
+        let mode = effective_permission_mode(runtime.permissions(), grant);
+        if mode.is_some()
+            || intent.call.is_unguarded()
+            || intent.call.is_host()
+            || intent.call.is_git() && intent.call.facts().mutates
+        {
+            self.append(Event::ToolPermissionDecided {
+                run_id: self.run_id,
+                agent_run_id: intent.agent_run_id,
+                verdict: PermissionVerdict {
+                    host: None,
+                    intent_digest: intent.digest(),
+                    mode,
+                    decision: permission.decision,
+                    basis: permission.basis,
+                    source: if permission.decision == Decision::Ask {
+                        PermissionSource::UnavailableApproval
+                    } else {
+                        permission.basis
+                    },
+                    approved: false,
+                    hook_restriction: None,
+                    hooks: 0,
+                    narrowed: false,
+                },
+            })
+            .await?;
+        }
+        let timeout = self.ledger().command_timeout_limit(&intent.call)?;
+        let observation = if let Some((requested, maximum)) = timeout {
+            not_dispatched(intent, &NotDispatched::TimeoutLimit { requested, maximum })
+        } else {
+            ToolObservation {
+                intent,
+                disposition: ToolDisposition::Denied,
+                output:
+                    "not_dispatched: step stopped before this call; no operation was dispatched"
+                        .into(),
+                attestation: None,
+                cache_update: CacheUpdate::NotApplicable,
+                approval_cause: None,
+                limit_cause: None,
+                enforcement_cause: None,
+            }
+        };
+        self.append(Event::ToolFinished {
+            run_id: self.run_id,
+            agent_run_id: observation.intent.agent_run_id,
+            observation: observation.clone(),
+            checkpoint: None,
+        })
+        .await?;
+        Ok(observation)
+    }
+
+    async fn reserve_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        initial: &EffectIntent,
+    ) -> Result<(), EngineError> {
+        if step.requests.len() > 1 && matches!(grant, Grant::Primary { .. }) {
+            let (_, pre_ms, post_ms) = self.hook_admission(runtime, &initial.call, &initial.call);
+            let action_ms = tool_action_ms(runtime, initial)
+                .saturating_add(pre_ms)
+                .saturating_add(post_ms);
+            self.append(Event::ToolActiveTimeReserved {
+                run_id: self.run_id,
+                agent_run_id: initial.agent_run_id,
+                intent_digest: initial.digest(),
+                active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn execute_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        initial: EffectIntent,
+    ) -> Result<StepEnd, EngineError> {
+        self.reserve_step_call(grant, runtime, step, &initial)
+            .await?;
+        let source_call = initial.call.clone();
+        let mut next = Some(initial);
+        let mut call = source_call.clone();
+        let mut narrowings = 0;
+        let source_index = step.observations.len();
+        loop {
+            let (intent, started) = match next.take() {
+                Some(intent) => (intent, true),
+                None => match self
+                    .prepare_step_intent(grant, runtime, step, call.clone(), &source_call)
+                    .await?
+                {
+                    Ok(intent) => (intent, false),
+                    Err(cause) => return Ok(StepEnd::Stopped(cause)),
+                },
+            };
+            let source_intent_digest = intent.digest();
+            let narrowable = matches!(grant, Grant::Primary { .. })
+                && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
+            // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
+            let observed = if started {
+                Box::pin(self.dispatch_intent(grant, runtime, intent, narrowable)).await?
+            } else {
+                self.run_intent(grant, runtime, intent, &source_call, narrowable)
+                    .await?
+            };
+            let (observation, narrowed) = match observed {
                 Ok(observed) => observed,
                 Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
-            if observation.stops_run() || self.controls.cancellation.is_cancelled() {
-                return Ok(StepEnd::Stopped(Self::observation_stop(
-                    &observation,
-                    self.controls.cancellation.is_cancelled(),
-                )));
-            }
-            let changeset = if command
-                && observation.attestation.is_some()
-                && matches!(
-                    observation.disposition,
-                    ToolDisposition::Succeeded | ToolDisposition::Failed
-                ) {
-                match serde_json::from_str::<CommandResult>(&observation.output) {
-                    Ok(result) if result.valid() => Some(result.changeset),
-                    Err(_) if observation.disposition == ToolDisposition::Failed => None,
-                    _ => return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult)),
-                }
-            } else {
-                None
+            let changeset = match command_changeset(&observation) {
+                Ok(changeset) => changeset,
+                Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
+            let stop =
+                (observation.stops_run() || self.controls.cancellation.is_cancelled()).then(|| {
+                    Self::observation_stop(&observation, self.controls.cancellation.is_cancelled())
+                });
             step.observations.push(observation);
+            if let Some(cause) = stop {
+                return Ok(StepEnd::Stopped(cause));
+            }
             if let Some(narrowed) = narrowed {
+                step.narrowed_observations
+                    .insert(step.observations.len() - 1);
                 narrowings += 1;
                 call = narrowed;
                 continue;
@@ -309,11 +577,8 @@ impl RunLoop<'_> {
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
                 break;
             };
-            if self.controls.cancellation.is_cancelled() {
-                return Ok(StepEnd::Stopped(StopCause::Cancelled));
-            }
-            if grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes() {
-                return Ok(StepEnd::Stopped(StopCause::ContextFull));
+            if let StepEnd::Stopped(cause) = self.integration_end(grant, runtime, step)? {
+                return Ok(StepEnd::Stopped(cause));
             }
             call = ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -325,12 +590,38 @@ impl RunLoop<'_> {
                 return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult));
             }
         }
+        self.post_step_call(grant, runtime, step, source_index + narrowings)
+            .await
+    }
+
+    fn integration_end(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+    ) -> Result<StepEnd, EngineError> {
+        Ok(if self.controls.cancellation.is_cancelled() {
+            StepEnd::Stopped(StopCause::Cancelled)
+        } else if grant.context()?.reserved_len(step, &[]) > runtime.context_limit_bytes() {
+            StepEnd::Stopped(StopCause::ContextFull)
+        } else {
+            StepEnd::Continue
+        })
+    }
+
+    async fn post_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        index: usize,
+    ) -> Result<StepEnd, EngineError> {
         // The hooks see the published tree: a Command's changeset is integrated first.
         if let Some(config) = runtime.permissions()
-            && let Some(source) = step.observations.get(narrowings)
+            && let Some(source) = step.observations.get(index)
             && source.disposition == ToolDisposition::Succeeded
             && !source.intent.call.is_internal()
-            && step.observations[narrowings + 1..]
+            && step.observations[index + 1..]
                 .iter()
                 .all(|integration| integration.disposition == ToolDisposition::Succeeded)
         {
@@ -339,7 +630,7 @@ impl RunLoop<'_> {
                     .await?;
             match post.stop {
                 HookStop::None if !post.feedback.is_empty() => {
-                    step.hook_feedback.insert(narrowings, post.feedback);
+                    step.hook_feedback.insert(index, post.feedback);
                 }
                 HookStop::None => {}
                 HookStop::Uncertain => return Ok(StepEnd::Stopped(StopCause::Uncertain)),
@@ -349,13 +640,6 @@ impl RunLoop<'_> {
                 }
                 HookStop::ActiveTime => return Ok(StepEnd::Stopped(StopCause::ActiveTime)),
             }
-        }
-        grant.context_mut()?.steps.push(step);
-        if self.hook_requested_stop()? {
-            return Ok(StepEnd::Stopped(StopCause::HookStop));
-        }
-        if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
-            return Ok(StepEnd::Stopped(StopCause::ContextFull));
         }
         Ok(StepEnd::Continue)
     }
@@ -394,7 +678,16 @@ impl RunLoop<'_> {
             .await?
         {
             Admission::Reserved(approval) => approval,
-            Admission::Exhausted => return Ok(Admission::Exhausted),
+            Admission::Exhausted => (
+                Some(Resolution {
+                    approved: false,
+                    source: PermissionSource::UnavailableApproval,
+                    active_time_exhausted: true,
+                    save: None,
+                    withdrawal: None,
+                }),
+                None,
+            ),
         };
         let decided = self.dispatch_decision(grant, &facts, approval);
         let resolution = self.dispatch_verdict(&phase, decided, save)?;

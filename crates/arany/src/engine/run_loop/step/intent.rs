@@ -291,7 +291,7 @@ impl RunLoop<'_> {
         }
     }
 
-    async fn sized_intent(
+    pub(super) async fn sized_intent(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -488,19 +488,36 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
-            .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
+            .start_intent(grant, runtime, &intent, post_call, narrowable)
             .await?
         {
             return Ok(Err(refusal.into()));
         }
+        self.dispatch_intent(grant, runtime, intent, narrowable)
+            .await
+    }
+
+    pub(super) async fn start_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        post_call: &ToolCall,
+        narrowable: bool,
+    ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
+        let permission = self.permission(grant, runtime, &intent.call);
+        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
+        if let Err(refusal) = self
+            .admit_tool(grant, runtime, intent, permission, hook_events, narrowable)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
         let agent_run_id = intent.agent_run_id;
-        let intent_id = intent.id;
         // A researcher's Tool runs inside its delegation's reservation.
         let action_ms = match grant {
-            Grant::Primary { .. } => tool_action_ms(runtime, &intent)
+            Grant::Primary { .. } => tool_action_ms(runtime, intent)
                 .saturating_add(pre_ms)
                 .saturating_add(post_ms),
             Grant::Researcher { .. } => 0,
@@ -518,8 +535,21 @@ impl RunLoop<'_> {
                 .await
                 .get_mut(&agent_run_id)
                 .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
+                .note_intent(intent);
         }
+        Ok(Ok(()))
+    }
+
+    pub(super) async fn dispatch_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+        narrowable: bool,
+    ) -> Result<IntentResult, EngineError> {
+        let agent_run_id = intent.agent_run_id;
+        let intent_id = intent.id;
+        let permission = self.permission(grant, runtime, &intent.call);
         let mut narrowed = None;
         let mut candidate = None;
         let Admission::Reserved(verdict) = self
