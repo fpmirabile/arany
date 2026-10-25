@@ -283,6 +283,10 @@ pub(super) async fn resume(
     params: ThreadResumeParams,
 ) -> Result<(ThreadResumeResult, LoadedThread), Fault> {
     threads.check_capacity(Some(params.thread_id))?;
+    let view = load_view(state, params.thread_id).await?;
+    if view.provider_setup_blocks_continuation() {
+        return Err(Fault::engine(arany::EngineError::ProviderSetupBlocked));
+    }
     let selection = ThreadStartParams {
         cwd: params.cwd,
         provider: params.provider,

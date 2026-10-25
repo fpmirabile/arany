@@ -373,6 +373,8 @@ pub(super) fn before_lifecycle_event(
                 | Event::GoalResumed { .. }
                 | Event::GoalFinished { .. }
                 | Event::SessionRenamed { .. }
+                | Event::ProviderSetupEditStarted { .. }
+                | Event::ProviderSetupEditFinished { .. }
                 | Event::WorkspaceRewindStarted { .. }
                 | Event::WorkspaceRewindFinished { .. }
                 | Event::SessionDefaultChanged { .. }

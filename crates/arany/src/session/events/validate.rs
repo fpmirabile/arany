@@ -39,6 +39,9 @@ impl Event {
             | Self::ToolResultsCleared { .. }
             | Self::MessageAccepted { .. }
             | Self::MessageCommitted { .. } => Event::validate_session(self),
+            Self::ProviderSetupEditStarted { .. } | Self::ProviderSetupEditFinished { .. } => {
+                Event::validate_setup_edit(self)
+            }
             Self::GoalStarted { .. }
             | Self::GoalRunLinked { .. }
             | Self::GoalResumed { .. }

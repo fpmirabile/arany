@@ -6,8 +6,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::{Uuid, Variant, Version};
+
+use account::SignOutOutcome;
 
 pub(crate) mod account;
 mod browser;
@@ -19,8 +21,8 @@ mod identity;
 pub(crate) mod registration;
 
 pub(crate) use account::{
-    MAX_TOKEN_RECORD_BYTES, ReauthorizationTarget, save_verified, save_without_plan_permission,
-    valid_keyring_record,
+    AccountAccess, AccountInspection, MAX_TOKEN_RECORD_BYTES, ReauthorizationTarget, save_verified,
+    save_without_plan_permission, valid_keyring_record,
 };
 pub(crate) use browser::open_authorization_url;
 pub(crate) use callback::CallbackListener;
@@ -65,8 +67,27 @@ pub(crate) async fn sign_out_selected(
     account::sign_out_selected(workspace).await
 }
 
+pub(crate) async fn remove_account_locally(
+    workspace: PathBuf,
+    account_id: Uuid,
+    expected_index: Vec<u8>,
+) -> Result<SignOutOutcome, AuthorizationError> {
+    account::remove_account_locally(workspace, account_id, expected_index).await
+}
+
+pub(crate) fn account_inspections()
+-> Result<(Option<Uuid>, Vec<AccountInspection>), AuthorizationError> {
+    account::account_inspections()
+}
+
 pub(crate) fn saved_account_ids() -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
     account::saved_ids()
+}
+
+pub(crate) fn saved_account_index(
+    workspace: &Path,
+) -> Result<(Uuid, Vec<Uuid>, Vec<u8>), AuthorizationError> {
+    account::saved_account_index(workspace)
 }
 
 pub(crate) async fn select_saved_account(
@@ -318,6 +339,15 @@ const MAX_CODE_BYTES: usize = 2048;
 const MAX_CLIENT_ID_BYTES: usize = 128;
 const MAX_SCOPE_BYTES: usize = 512;
 
+fn publication_error(error: arany::StoreError) -> AuthorizationError {
+    match error {
+        arany::StoreError::ReplaceUnconfirmed => {
+            AuthorizationError::CredentialStore(super::credentials::account_record_error(error))
+        }
+        _ => AuthorizationError::Unavailable,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum AuthorizationError {
     #[error(
@@ -370,6 +400,8 @@ pub(crate) enum AuthorizationError {
     IdentityRejected(identity::IdentityFailure),
     #[error("selected ChatGPT account changed; restart /setup")]
     SelectedAccountChanged,
+    #[error("saved ChatGPT account list changed; reopen /setup")]
+    SetupChanged,
     #[error("ChatGPT account state in different roots conflicts")]
     RegistrationConflict,
     #[error(

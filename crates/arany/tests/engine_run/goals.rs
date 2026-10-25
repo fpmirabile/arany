@@ -2555,6 +2555,74 @@ async fn interrupted_autonomous_goal(
     (outcome.session_id, outcome.goal_id)
 }
 
+async fn run_autonomous_with_setup_refusal(
+    engine: &Engine,
+    provider: &Arc<ScriptedProvider>,
+    workspace: &Path,
+    state: &Path,
+) -> arany::RunOutcome {
+    let session = engine
+        .create_session(workspace.to_owned(), None)
+        .await
+        .unwrap();
+    let (entered, release) = arany::FaultPlan::gate_autonomous_continuation(session);
+    let mut input = autonomous_input(workspace);
+    input.session_id = Some(session);
+    input.title = None;
+    let run = run_with(
+        engine,
+        provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    );
+    tokio::pin!(run);
+    const CONTINUATION_DEADLINE: Duration = Duration::from_secs(10);
+    tokio::time::timeout(CONTINUATION_DEADLINE, async {
+        tokio::select! {
+            result = &mut run => panic!("autonomous Goal missed its continuation gate: {result:?}"),
+            reached = entered => reached.expect("first autonomous Run settled"),
+        }
+        assert_setup_refused_between_autonomous_runs(state, workspace, session).await;
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        release.send(()).expect("continue autonomous Goal");
+        run.await.expect("autonomous Goal")
+    })
+    .await
+    .expect("autonomous continuation deadline")
+}
+
+async fn assert_setup_refused_between_autonomous_runs(
+    state: &Path,
+    workspace: &Path,
+    session: arany::SessionId,
+) {
+    let store = Store::open(StateRoot::open_existing(state).unwrap()).unwrap();
+    let before = store.load_session(session).await.unwrap();
+    let view = store.load_open_view(session).await.unwrap().unwrap();
+    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Running);
+    assert!(matches!(
+        arany::start_provider_setup_edit(
+            StateRoot::open_existing(state).unwrap(),
+            workspace.to_owned(),
+            session,
+            arany::ProviderSetupTarget {
+                kind: arany::ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            },
+            None,
+        )
+        .await,
+        Err(EngineError::SessionBusy)
+    ));
+    assert_eq!(store.load_session(session).await.unwrap(), before);
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -2571,17 +2639,8 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let outcome = run_with(
-        &engine,
-        &provider,
-        autonomous_input(&workspace),
-        RunControls {
-            tools: ToolGrant::Configured,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("autonomous Goal");
+    let outcome =
+        run_autonomous_with_setup_refusal(&engine, &provider, &workspace, &state_path).await;
     assert_eq!(outcome.run.status, RunStatus::Finished);
     {
         let calls = requests.lock().expect("Provider requests");
@@ -2595,6 +2654,13 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
             "the next Run takes the pinned objective and no new text"
         );
     }
+    resume_session(
+        StateRoot::open_existing(&state_path).unwrap(),
+        workspace.clone(),
+        outcome.session_id,
+    )
+    .await
+    .expect("completed autonomous submission releases its Session lease");
     engine.close().await.expect("engine shutdown");
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;

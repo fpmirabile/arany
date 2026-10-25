@@ -70,6 +70,21 @@ pub(crate) struct ReauthorizationTarget {
     pub(crate) plan_permission_missing: bool,
 }
 
+pub(crate) struct AccountInspection {
+    pub(crate) id: Uuid,
+    pub(crate) storage: AccountStorage,
+    pub(crate) access: AccountAccess,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AccountAccess {
+    Connected,
+    Disconnected,
+    PlanDisabled,
+    RenewalPending,
+    SignOutPending,
+}
+
 pub(crate) struct DisabledSignInOutcome {
     pub(crate) id: Uuid,
     pub(crate) local_cleared: bool,
@@ -78,6 +93,17 @@ pub(crate) struct DisabledSignInOutcome {
 pub(crate) struct SignOutOutcome {
     pub(crate) remote_confirmed: bool,
     pub(crate) local_cleared: bool,
+}
+
+struct SignOutTarget<'a> {
+    account_id: Option<Uuid>,
+    expected_index: Option<&'a [u8]>,
+}
+
+struct SignOutActions<R, V, D> {
+    read_keyring: R,
+    revoke: Option<V>,
+    delete_keyring: D,
 }
 
 impl SelectedAccount {
@@ -405,7 +431,7 @@ impl AccountIndex {
         state
             .record(RecordKind::ChatgptAccounts)
             .replace(&bytes)
-            .map_err(|_| AuthorizationError::Unavailable)
+            .map_err(super::publication_error)
     }
 }
 
@@ -826,7 +852,11 @@ pub(crate) async fn save_verified(
         }
     })
     .await
-    .map_err(|_| AuthorizationError::Unavailable)?
+    .map_err(|_| {
+        AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown,
+        )
+    })?
 }
 
 pub(crate) async fn save_without_plan_permission(
@@ -849,7 +879,11 @@ pub(crate) async fn save_without_plan_permission(
         )
     })
     .await
-    .map_err(|_| AuthorizationError::Unavailable)?
+    .map_err(|_| {
+        AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown,
+        )
+    })?
 }
 
 fn save_without_plan_permission_at(
@@ -908,7 +942,8 @@ fn save_without_plan_permission_at(
             };
             index.select_account(id);
             index.write(state)?;
-            registration::complete_issued_client_at(state, &identity.client_id, identity.host_id)?;
+            registration::complete_issued_client_at(state, &identity.client_id, identity.host_id)
+                .map_err(uncertain_account_publication)?;
             let local_cleared = storage != AccountStorage::Keyring
                 || previous.is_none()
                 || delete(&keyring_slot(&identity.client_id)).is_ok();
@@ -981,7 +1016,8 @@ pub(super) fn save_private_file_at(
             };
             index.select_account(id);
             index.write(state)?;
-            registration::complete_issued_client_at(state, &completed_client_id, host_id)?;
+            registration::complete_issued_client_at(state, &completed_client_id, host_id)
+                .map_err(uncertain_account_publication)?;
             Ok(id)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -1001,7 +1037,7 @@ pub(super) fn save_keyring_at(
         consent,
         expected_selected,
         |slot, record| {
-            write_chatgpt_keyring_record(slot, record).map_err(|_| AuthorizationError::Unavailable)
+            write_chatgpt_keyring_record(slot, record).map_err(AuthorizationError::CredentialStore)
         },
     )
 }
@@ -1071,22 +1107,37 @@ fn save_keyring_at_with(
                     token: None,
                 })
             };
-            write(&keyring_slot(client_id), &record)?;
+            write(&keyring_slot(client_id), &record).map_err(|error| {
+                if position.is_some() {
+                    uncertain_account_publication(error)
+                } else {
+                    error
+                }
+            })?;
             let entry = index
                 .accounts
                 .iter_mut()
                 .find(|entry| entry.id == id)
-                .ok_or(AuthorizationError::InvalidIdentity)?;
+                .ok_or_else(|| {
+                    uncertain_account_publication(AuthorizationError::InvalidIdentity)
+                })?;
             entry.renewal_pending = false;
             entry.signout_pending = false;
             entry.disconnected = false;
             entry.plan_permission_missing = false;
             index.select_account(id);
-            index.write(state)?;
-            registration::complete_issued_client_at(state, &completed_client_id, host_id)?;
+            index.write(state).map_err(uncertain_account_publication)?;
+            registration::complete_issued_client_at(state, &completed_client_id, host_id)
+                .map_err(uncertain_account_publication)?;
             Ok(id)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn uncertain_account_publication(_: AuthorizationError) -> AuthorizationError {
+    AuthorizationError::CredentialStore(
+        crate::accounts::credentials::CredentialError::WriteOutcomeUnknown,
+    )
 }
 
 pub(super) fn load_selected_private_file_at(
@@ -1227,8 +1278,65 @@ fn selected_registration_at(state: &StateRoot) -> Result<(Uuid, bool), Authoriza
     Ok((id, !entry.disconnected && !entry.signout_pending))
 }
 
+pub(super) fn account_inspections()
+-> Result<(Option<Uuid>, Vec<AccountInspection>), AuthorizationError> {
+    account_inspections_at(&open_account_state()?)
+}
+
+fn account_inspections_at(
+    state: &StateRoot,
+) -> Result<(Option<Uuid>, Vec<AccountInspection>), AuthorizationError> {
+    let index = AccountIndex::read(state)?;
+    let mut accounts = index
+        .accounts
+        .into_iter()
+        .map(|entry| AccountInspection {
+            id: entry.id,
+            storage: entry.storage,
+            access: if entry.plan_permission_missing {
+                AccountAccess::PlanDisabled
+            } else if entry.signout_pending {
+                AccountAccess::SignOutPending
+            } else if entry.renewal_pending {
+                AccountAccess::RenewalPending
+            } else if entry.disconnected {
+                AccountAccess::Disconnected
+            } else {
+                AccountAccess::Connected
+            },
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by_key(|account| Some(account.id) != index.selected);
+    Ok((index.selected, accounts))
+}
+
 pub(super) fn saved_ids() -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
     saved_ids_at(&open_account_state()?)
+}
+
+pub(super) fn saved_account_index(
+    workspace: &Path,
+) -> Result<(Uuid, Vec<Uuid>, Vec<u8>), AuthorizationError> {
+    let state = open_account_state()?;
+    state
+        .with_account_replacement_lock(workspace, || {
+            let bytes = state
+                .read_current(&CHATGPT_ACCOUNTS)
+                .map_err(|_| AuthorizationError::InvalidSavedState)?
+                .ok_or(AuthorizationError::NoSelectedAccount)?;
+            let index = AccountIndex::decode(&bytes)?;
+            let selected = index
+                .selected
+                .ok_or(AuthorizationError::NoSelectedAccount)?;
+            let mut ids = index
+                .accounts
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            ids.sort_by_key(|id| *id != selected);
+            Ok((selected, ids, bytes))
+        })
+        .map_err(|_| AuthorizationError::Unavailable)?
 }
 
 fn saved_ids_at(state: &StateRoot) -> Result<(Uuid, Vec<Uuid>), AuthorizationError> {
@@ -1241,7 +1349,7 @@ fn saved_ids_at(state: &StateRoot) -> Result<(Uuid, Vec<Uuid>), AuthorizationErr
         index
             .accounts
             .iter()
-            .filter(|entry| entry.id != selected && !entry.disconnected && !entry.signout_pending)
+            .filter(|entry| entry.id != selected && entry.ensure_usable().is_ok())
             .map(|entry| entry.id),
     );
     Ok((selected, ids))
@@ -1257,7 +1365,11 @@ pub(super) async fn select_saved(
         select_saved_at(&state, &workspace, expected_selected, target)
     })
     .await
-    .map_err(|_| AuthorizationError::Unavailable)?
+    .map_err(|_| {
+        AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown,
+        )
+    })?
 }
 
 pub(crate) async fn sign_out_selected(
@@ -1278,6 +1390,37 @@ pub(crate) async fn sign_out_selected(
     .map_err(|_| AuthorizationError::Unavailable)?
 }
 
+pub(crate) async fn remove_account_locally(
+    workspace: PathBuf,
+    account_id: Uuid,
+    expected_index: Vec<u8>,
+) -> Result<SignOutOutcome, AuthorizationError> {
+    tokio::task::spawn_blocking(move || {
+        let state = open_account_state()?;
+        sign_out_target_at_with(
+            &state,
+            &workspace,
+            SignOutTarget {
+                account_id: Some(account_id),
+                expected_index: Some(&expected_index),
+            },
+            SignOutActions {
+                read_keyring: read_keyring_token,
+                revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+                delete_keyring: |slot: &str| {
+                    delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable)
+                },
+            },
+        )
+    })
+    .await
+    .map_err(|_| {
+        AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown,
+        )
+    })?
+}
+
 fn sign_out_at_with(
     state: &StateRoot,
     workspace: &Path,
@@ -1285,20 +1428,59 @@ fn sign_out_at_with(
     revoke: impl FnOnce(&VerifiedCredentials) -> Result<(), AuthorizationError>,
     delete_keyring: impl FnOnce(&str) -> Result<(), AuthorizationError>,
 ) -> Result<SignOutOutcome, AuthorizationError> {
+    sign_out_target_at_with(
+        state,
+        workspace,
+        SignOutTarget {
+            account_id: None,
+            expected_index: None,
+        },
+        SignOutActions {
+            read_keyring,
+            revoke: Some(revoke),
+            delete_keyring,
+        },
+    )
+}
+
+fn sign_out_target_at_with(
+    state: &StateRoot,
+    workspace: &Path,
+    target: SignOutTarget<'_>,
+    actions: SignOutActions<
+        impl FnOnce(&str, &str, Uuid) -> Result<TokenRecord, AuthorizationError>,
+        impl FnOnce(&VerifiedCredentials) -> Result<(), AuthorizationError>,
+        impl FnOnce(&str) -> Result<(), AuthorizationError>,
+    >,
+) -> Result<SignOutOutcome, AuthorizationError> {
     state
         .with_account_replacement_lock(workspace, || {
+            if let Some(expected) = target.expected_index {
+                let current = state
+                    .record(RecordKind::ChatgptAccounts)
+                    .read()
+                    .map_err(|_| AuthorizationError::InvalidSavedState)?;
+                if current.as_deref() != Some(expected) {
+                    return Err(AuthorizationError::SetupChanged);
+                }
+            }
             let mut index = AccountIndex::read(state)?;
-            let id = index
-                .selected
+            let id = target
+                .account_id
+                .or(index.selected)
                 .ok_or(AuthorizationError::NoSelectedAccount)?;
             let position = index.account_position(id)?;
             let entry = &index.accounts[position];
             let slot = keyring_slot(&entry.client_id);
             if entry.disconnected {
+                let local_cleared = entry.storage == AccountStorage::PrivateFile
+                    || (actions.delete_keyring)(&slot).is_ok();
+                if !local_cleared {
+                    return Err(AuthorizationError::SignOutStorageUncertain);
+                }
                 return Ok(SignOutOutcome {
                     remote_confirmed: false,
-                    local_cleared: entry.storage == AccountStorage::PrivateFile
-                        || delete_keyring(&slot).is_ok(),
+                    local_cleared,
                 });
             }
             let storage = entry.storage;
@@ -1311,23 +1493,32 @@ fn sign_out_at_with(
             let entry = &index.accounts[position];
             let token = match storage {
                 AccountStorage::Keyring => {
-                    read_keyring(&entry.client_id, &entry.subject, entry.host_id).ok()
+                    (actions.read_keyring)(&entry.client_id, &entry.subject, entry.host_id).ok()
                 }
                 AccountStorage::PrivateFile => entry.token.clone(),
             };
-            let remote_confirmed = token
-                .filter(|token| token.valid_for(storage))
-                .is_some_and(|token| revoke(&token.credentials).is_ok());
+            let remote_confirmed =
+                token
+                    .filter(|token| token.valid_for(storage))
+                    .is_some_and(|token| {
+                        actions
+                            .revoke
+                            .is_some_and(|revoke| revoke(&token.credentials).is_ok())
+                    });
             index.accounts[position].token = None;
             index.accounts[position].signout_pending = false;
             index.accounts[position].disconnected = true;
             index
                 .write(state)
                 .map_err(|_| AuthorizationError::SignOutStorageUncertain)?;
+            let local_cleared =
+                storage == AccountStorage::PrivateFile || (actions.delete_keyring)(&slot).is_ok();
+            if !local_cleared {
+                return Err(AuthorizationError::SignOutStorageUncertain);
+            }
             Ok(SignOutOutcome {
                 remote_confirmed,
-                local_cleared: storage == AccountStorage::PrivateFile
-                    || delete_keyring(&slot).is_ok(),
+                local_cleared,
             })
         })
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -1441,7 +1632,7 @@ async fn refresh_selected_at(
         })
     })
     .await
-    .map_err(|_| AuthorizationError::Unavailable)?
+    .map_err(|_| AuthorizationError::RenewalStorageUncertain)?
 }
 
 fn refresh_selected_with(

@@ -185,6 +185,9 @@ impl Engine {
         view: &SessionView,
         before_run: RunId,
     ) -> Result<PreparedConversation, EngineError> {
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         if view.runs.last().is_some_and(|run| {
             matches!(
                 run.status,
@@ -542,6 +545,9 @@ impl Engine {
         request: RewindRequest,
         view: &SessionView,
     ) -> Result<Prepared, EngineError> {
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         if !view.rewinds.checkpoints.contains(&request.target) {
             return Err(EngineError::InvalidRequest);
         }

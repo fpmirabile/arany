@@ -4598,6 +4598,167 @@ async fn a_handle_dropped_inside_a_provider_call_frees_the_engine_for_the_same_s
     );
 }
 
+async fn assert_setup_blocked_consumers(
+    engine: &Engine,
+    store: &Store,
+    state: &Path,
+    workspace: &Path,
+    session_id: SessionId,
+) {
+    for uncertain in [false, true] {
+        let operation_id =
+            arany::test_support::record_setup_edit_state(store, session_id, uncertain).await;
+        let events = store.load_session(session_id).await.unwrap();
+        let view = SessionView::replay(session_id, &events).unwrap().unwrap();
+        assert_eq!(view.runs.len(), 2);
+        assert_eq!(
+            view.pending_provider_setup_edit,
+            (!uncertain).then_some(operation_id)
+        );
+        assert_eq!(view.provider_setup_uncertain, uncertain);
+        let sessions = list_sessions(
+            StateRoot::open_existing(state).unwrap(),
+            workspace.to_owned(),
+        )
+        .await
+        .unwrap();
+        assert_setup_blocked_rewinds(engine, workspace, &view).await;
+        assert_setup_blocked_lifecycle(engine, state, workspace, &view).await;
+        assert_setup_blocked_submissions(engine, workspace, &view).await;
+        assert_eq!(store.load_session(session_id).await.unwrap(), events);
+        assert_eq!(
+            list_sessions(
+                StateRoot::open_existing(state).unwrap(),
+                workspace.to_owned()
+            )
+            .await
+            .unwrap(),
+            sessions,
+            "blocked operations create no Session or Event"
+        );
+    }
+}
+
+async fn assert_setup_blocked_rewinds(engine: &Engine, workspace: &Path, view: &SessionView) {
+    for run in &view.runs {
+        for result in [
+            engine
+                .rewind_conversation(view.id, workspace.to_owned(), run.id)
+                .await,
+            engine
+                .rewind_conversation_at_head(
+                    view.id,
+                    workspace.to_owned(),
+                    run.id,
+                    (view.last_sequence, view.rewinds.prefix_digest()),
+                )
+                .await,
+        ] {
+            assert!(matches!(result, Err(EngineError::ProviderSetupBlocked)));
+        }
+    }
+    let result = engine
+        .rewind_preview(arany::RewindRequest {
+            session_id: view.id,
+            workspace: workspace.to_owned(),
+            target: view.rewinds.checkpoints.last().unwrap().clone(),
+            tools: ToolGrant::None,
+            kept: Vec::new(),
+            overwrite: Vec::new(),
+        })
+        .await;
+    assert!(matches!(result, Err(EngineError::ProviderSetupBlocked)));
+}
+
+async fn assert_setup_blocked_lifecycle(
+    engine: &Engine,
+    state: &Path,
+    workspace: &Path,
+    view: &SessionView,
+) {
+    let root = || StateRoot::open_existing(state).unwrap();
+    for result in [
+        engine
+            .fork_session(view.id, workspace.to_owned(), None)
+            .await,
+        engine
+            .fork_session_at(
+                view.id,
+                workspace.to_owned(),
+                view.runs[0].finished_sequence.unwrap(),
+                None,
+            )
+            .await,
+        fork_session(root(), workspace.to_owned(), view.id, None).await,
+    ] {
+        assert!(matches!(result, Err(EngineError::ProviderSetupBlocked)));
+    }
+    assert!(matches!(
+        resume_session(root(), workspace.to_owned(), view.id).await,
+        Err(EngineError::ProviderSetupBlocked)
+    ));
+    for result in [
+        arany::set_session_defaults(root(), workspace.to_owned(), view.id, view.defaults.clone())
+            .await,
+        rename_session(
+            root(),
+            workspace.to_owned(),
+            view.id,
+            "Blocked change".into(),
+        )
+        .await,
+    ] {
+        assert!(matches!(result, Err(EngineError::ProviderSetupBlocked)));
+    }
+}
+
+async fn assert_setup_blocked_submissions(engine: &Engine, workspace: &Path, view: &SessionView) {
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+    let goal_id = view.goals.last().unwrap().id;
+    for goal in [
+        arany::GoalRequest::default(),
+        arany::GoalRequest::autonomous(
+            arany::GoalBudget::default(),
+            arany::GoalPhase::Implementation,
+        ),
+        arany::GoalRequest::resume(goal_id, true),
+        arany::GoalRequest::continue_from(
+            goal_id,
+            arany::GoalBudget::default(),
+            Default::default(),
+        ),
+    ] {
+        let mut input = request(workspace, "Must not disclose after setup");
+        input.session_id = Some(view.id);
+        input.title = None;
+        if goal.continues.is_some() {
+            input.objective.clear();
+        }
+        input.goal = goal;
+        assert!(matches!(
+            run_to_end(engine, &provider, input).await,
+            Err(EngineError::ProviderSetupBlocked)
+        ));
+    }
+    let providers = AdmittedProviders::single(provider.clone());
+    assert!(matches!(
+        engine
+            .compact_session(&providers, view.id, workspace.to_owned())
+            .await,
+        Err(EngineError::ProviderSetupBlocked)
+    ));
+    for run in &view.runs {
+        assert!(matches!(
+            engine
+                .auto_compact_session(&providers, view.id, workspace.to_owned(), run.id)
+                .await,
+            Err(EngineError::ProviderSetupBlocked)
+        ));
+    }
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
+}
+
 #[test]
 fn fork_pins_committed_parent_prefix_and_rejects_drift() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -4943,6 +5104,8 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                 .source_session_id,
             first.session_id
         );
+        assert_setup_blocked_consumers(&engine, &store, &state_path, &workspace, first.session_id)
+            .await;
         store.close().await.unwrap();
         for bytes in [8 * 1024, 8 * 1024 + 1, 64 * 1024] {
             let prompt = "x".repeat(bytes);

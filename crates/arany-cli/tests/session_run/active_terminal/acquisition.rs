@@ -522,10 +522,12 @@ fn lost_pty_case(screen_reader: bool) {
         .expect("product PID");
     let product = ProductGuard::new(product_pid, state);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"Choose access method".len())
-        .any(|part| part == b"Choose access method")
-    {
+    let prompt: &[u8] = if screen_reader {
+        b"empty Enter selects 1. API accounts\r\nInput:\r\n"
+    } else {
+        b"Provider setup"
+    };
+    while !transcript.windows(prompt.len()).any(|part| part == prompt) {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,

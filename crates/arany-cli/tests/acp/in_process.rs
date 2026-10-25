@@ -258,6 +258,58 @@ async fn session(
     serde_json::from_value(next(reader).await["result"]["sessionId"].clone()).unwrap()
 }
 
+#[tokio::test]
+async fn setup_edits_block_loaded_session_prompts_without_events_or_provider_calls() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
+    let (mut writer, mut reader, task) = start(&state, provider.clone());
+    initialize(&mut writer, &mut reader).await;
+    let session = session(&mut writer, &mut reader, &workspace).await;
+    let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+    for uncertain in [false, true] {
+        arany::test_support::record_setup_edit_state(&store, session, uncertain).await;
+        let events = store.load_session(session).await.unwrap();
+        for (method, params) in [
+            (
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"Must not disclose"}]}),
+            ),
+            (
+                "session/load",
+                json!({"sessionId":session,"cwd":workspace,"mcpServers":[]}),
+            ),
+            (
+                "session/resume",
+                json!({"sessionId":session,"cwd":workspace}),
+            ),
+        ] {
+            send(&mut writer, json!(3), method, params).await;
+            let response = next(&mut reader).await;
+            assert_eq!(response["id"], 3);
+            assert_eq!(response["error"]["code"], -32603);
+            assert_eq!(response["error"]["data"]["reason"], "providerSetupBlocked");
+        }
+        assert_eq!(store.load_session(session).await.unwrap(), events);
+    }
+    assert_eq!(
+        arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
+    store.close().await.unwrap();
+    writer.shutdown().await.unwrap();
+    assert_eq!(reader.read(&mut [0; 1]).await.unwrap(), 0);
+    task.await.unwrap().unwrap();
+}
+
 fn scripted() -> Arc<ScriptedProvider> {
     Arc::new(
         ScriptedProvider::new(vec![arany::ProviderOutcome::Answer(arany::Answer {

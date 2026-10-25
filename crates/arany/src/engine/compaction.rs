@@ -7,8 +7,8 @@ use crate::provider::{
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
     CompactionFailure, CompactionInputError, CompactionRecord, CompactionStatus, Event,
-    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, SessionId,
-    prefix_digest,
+    EventEnvelope, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction,
+    SessionId, SessionView, prefix_digest,
 };
 use crate::telemetry::{ProviderTraceOutcome, TraceProvider};
 use sha2::{Digest, Sha256};
@@ -56,8 +56,7 @@ impl Engine {
         let provider = std::sync::Arc::clone(&providers.compaction[0]);
         let identity = super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
-        let (events, view) = self.journal.store().load_resolved(session_id).await?;
-        let view = view.ok_or(EngineError::MissingSession)?;
+        let (events, view) = self.compaction_history(session_id).await?;
         session_lock.keep();
         let _lineage_locks = self.lock_lineage(&view).await?;
         ensure_session_workspace(
@@ -203,6 +202,18 @@ impl Engine {
         trace.event_committed(&committed);
         trace.finish(provider_outcome.into());
         Ok(Some(record))
+    }
+
+    async fn compaction_history(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(Vec<EventEnvelope>, SessionView), EngineError> {
+        let (events, view) = self.journal.store().load_resolved(session_id).await?;
+        let view = view.ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
+        Ok((events, view))
     }
 
     async fn compaction_view(

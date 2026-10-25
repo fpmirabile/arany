@@ -467,6 +467,26 @@ impl PanelSelection {
     }
 }
 
+const MAX_INLINE_SETUP_CHOICE_CHARS: usize = 180;
+
+pub fn setup_choices_need_paging(instruction: &str, choices: &[(u8, &str)]) -> bool {
+    let names = choices
+        .iter()
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let longest = choices
+        .iter()
+        .map(|(_, name)| *name)
+        .max_by_key(|name| name.chars().count())
+        .unwrap_or("");
+    names.chars().count() > MAX_INLINE_SETUP_CHOICE_CHARS
+        || format!("{instruction}; type a choice name: {names}; empty Enter selects {longest}")
+            .chars()
+            .count()
+            > crate::presentation::MAX_ROW_WIDTH
+}
+
 const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Visual sessions negotiate modifier support. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
@@ -2640,17 +2660,29 @@ impl AttachedTerminal {
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
+            let paged = setup_choices_need_paging(instruction, choices);
             let names = choices
                 .iter()
                 .map(|(_, name)| *name)
                 .collect::<Vec<_>>()
                 .join(" or ");
-            let mut directions = if instruction.is_empty() {
+            let mut directions = if paged {
+                let numbered = format!(
+                    "type a listed choice number or exact name (1-{}); empty Enter selects {}",
+                    choices.len(),
+                    selected + 1
+                );
+                if instruction.is_empty() {
+                    numbered
+                } else {
+                    format!("{instruction}; {numbered}")
+                }
+            } else if instruction.is_empty() {
                 format!("Type a choice name: {names}")
             } else {
                 format!("{instruction}; type a choice name: {names}")
             };
-            if let Some((_, name)) = choices.get(selected) {
+            if !paged && let Some((_, name)) = choices.get(selected) {
                 directions.push_str("; empty Enter selects ");
                 directions.push_str(name);
             }
@@ -4134,6 +4166,8 @@ mod pointer_tests {
                     runs: Vec::new(),
                     compactions: Vec::new(),
                     goals: Vec::new(),
+                    pending_provider_setup_edit: None,
+                    provider_setup_uncertain: false,
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
@@ -4200,6 +4234,8 @@ mod pointer_tests {
                     runs: Vec::new(),
                     compactions: Vec::new(),
                     goals: Vec::new(),
+                    pending_provider_setup_edit: None,
+                    provider_setup_uncertain: false,
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
