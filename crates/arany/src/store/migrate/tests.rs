@@ -1842,6 +1842,13 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    let supervisor =
+        serde_json::to_string(&crate::supervisor::SupervisorPolicy::default()).unwrap();
+    let host_run_started = HOST_RUNSTARTED.replacen(
+        r#""supervisor":null"#,
+        &format!(r#""supervisor":{supervisor}"#),
+        1,
+    );
     for kind in [
         "ToolStarted",
         "ToolFinished",
@@ -1858,9 +1865,9 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
             .max_by_key(|(from, _)| *from)
             .expect("canonical payload fixture");
         assert_eq!(from + 1, crate::session::payload_version(kind).unwrap());
-        // The host migration fixture lacks the Supervisor required by its Tool policy.
+        // Preserve the historical fixture while pairing its policy with a current Supervisor.
         let fixture = if kind == "RunStarted" {
-            GLOBAL_RUNSTARTED
+            host_run_started.as_str()
         } else {
             fixture
         };
