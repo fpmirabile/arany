@@ -792,8 +792,43 @@ pub(super) async fn worker_case(case: &'static str) {
             );
             assert_eq!(
                 run.status,
-                RunStatus::Finished,
+                RunStatus::Failed,
                 "{case}: closed-store settlement"
+            );
+            assert_eq!(
+                run.failure,
+                Some(arany::RunFailure::CriterionUnmet),
+                "{case}"
+            );
+            assert_eq!(result.stopped, bundle.view.run_stop(run), "{case}");
+            let goal = bundle.view.goal(result.run.goal_id).unwrap();
+            assert_eq!(goal.status, arany::GoalStatus::Failed, "{case}");
+            assert!(
+                !goal.success_criterion_satisfied && !goal.budget_closed,
+                "{case}"
+            );
+            assert!(
+                goal.budget_refusal.is_none(),
+                "{case}: criterion failure is not budget exhaustion"
+            );
+            assert!(
+                goal.report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|fact| { fact.contains("CriterionUnverified") }),
+                "{case}: the Goal report retains the worker failure"
+            );
+            assert!(
+                run.assistant_message.is_none(),
+                "{case}: no successful answer"
+            );
+            assert!(
+                !bundle.events.iter().any(|event| matches!(&event.event,
+                    Event::MessageCommitted { run_id, .. } if *run_id == run.id
+                )),
+                "{case}: the failed criterion cannot commit an answer"
             );
             assert_eq!(synthesis_calls, 1, "{case}: primary reports the failure");
             assert_eq!(
@@ -821,7 +856,8 @@ pub(super) async fn worker_case(case: &'static str) {
             );
             assert_eq!(
                 render_exec(run, &bundle.events, Output::Text, true),
-                "Answer:\n  The worker edit was refused and the Workspace is unchanged\n"
+                "",
+                "{case}: no fabricated assistant answer"
             );
             return;
         }
