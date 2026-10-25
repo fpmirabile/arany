@@ -1068,15 +1068,8 @@ impl AlternateScreen {
     fn release(&mut self) -> io::Result<()> {
         if self.active {
             #[cfg(test)]
-            if let Some(probe) = &self.test_reset {
-                let mut probe = probe.borrow_mut();
-                probe.steps.borrow_mut().push(probe.name);
-                if std::mem::take(&mut probe.fail_next) {
-                    return Err(io::Error::other(format!(
-                        "injected {} reset failure",
-                        probe.name
-                    )));
-                }
+            if let Some(result) = probe_reset(self.test_reset.as_ref()) {
+                result?;
                 self.active = false;
                 return Ok(());
             }
@@ -1256,15 +1249,8 @@ impl RawMode {
     fn release(&mut self) -> io::Result<()> {
         if self.active {
             #[cfg(test)]
-            if let Some(probe) = &self.test_reset {
-                let mut probe = probe.borrow_mut();
-                probe.steps.borrow_mut().push(probe.name);
-                if std::mem::take(&mut probe.fail_next) {
-                    return Err(io::Error::other(format!(
-                        "injected {} reset failure",
-                        probe.name
-                    )));
-                }
+            if let Some(result) = probe_reset(self.test_reset.as_ref()) {
+                result?;
                 self.active = false;
                 return Ok(());
             }
@@ -1345,6 +1331,22 @@ struct ModeResetProbe {
 }
 
 #[cfg(test)]
+fn probe_reset(
+    probe: Option<&std::rc::Rc<std::cell::RefCell<ModeResetProbe>>>,
+) -> Option<io::Result<()>> {
+    let mut probe = probe?.borrow_mut();
+    probe.steps.borrow_mut().push(probe.name);
+    Some(if std::mem::take(&mut probe.fail_next) {
+        Err(io::Error::other(format!(
+            "injected {} reset failure",
+            probe.name
+        )))
+    } else {
+        Ok(())
+    })
+}
+
+#[cfg(test)]
 fn reset_probe(
     name: &'static str,
     steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
@@ -1380,15 +1382,8 @@ impl ModeGuard {
     fn release(&mut self) -> io::Result<()> {
         if self.active {
             #[cfg(test)]
-            if let Some(probe) = &self.test_reset {
-                let mut probe = probe.borrow_mut();
-                probe.steps.borrow_mut().push(probe.name);
-                if std::mem::take(&mut probe.fail_next) {
-                    return Err(io::Error::other(format!(
-                        "injected {} reset failure",
-                        probe.name
-                    )));
-                }
+            if let Some(result) = probe_reset(self.test_reset.as_ref()) {
+                result?;
                 self.active = false;
                 return Ok(());
             }
@@ -1398,11 +1393,6 @@ impl ModeGuard {
             self.active = false;
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn failing_reset_for_test(steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>) -> Self {
-        Self::tracked_for_test("pointer", steps, true)
     }
 
     #[cfg(test)]
@@ -4651,8 +4641,11 @@ mod terminal_lifecycle_tests {
         );
         let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
         terminal.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
-        terminal.owned.pointer_modes =
-            Some(super::ModeGuard::failing_reset_for_test(steps.clone()));
+        terminal.owned.pointer_modes = Some(super::ModeGuard::tracked_for_test(
+            "pointer",
+            steps.clone(),
+            true,
+        ));
 
         let error = terminal.release().expect_err("injected reset failures");
 
