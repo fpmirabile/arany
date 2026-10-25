@@ -9,10 +9,11 @@ use std::path::Path;
 const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#;
+const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"RoleRouting","identity":"roles"},"expected_digest":null}"#;
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 75] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -267,6 +268,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 75] = [
     ),
     ("ProviderCallRecorded", 22, REFUSAL_V19, REFUSAL_V19),
     ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
+    ("ProviderSetupEditStarted", 2, ROLE_SETUP_V2, ROLE_SETUP_V2),
     (
         "RunStarted",
         23,
@@ -3143,4 +3145,21 @@ fn migrate_provider_prefix(mut started: Event) {
     assert_eq!(stored_rows(&reopened), original);
     let (_, view) = resolve_view(&reopened, fixture.session, 0, &mut 0).unwrap();
     assert!(view.unwrap().runs[0].config.is_some());
+}
+
+#[test]
+fn setup_identity_step_rejects_roster_in_a_source_version_without_it() {
+    for version in [1, 2] {
+        let step = REGISTRY
+            .event_step("ProviderSetupEditStarted", version)
+            .unwrap();
+        assert_eq!(
+            (step.canonical)(ROLE_SETUP_V1).as_deref(),
+            Some(ROLE_SETUP_V1)
+        );
+        let mut forged: Value = serde_json::from_str(ROLE_SETUP_V1).unwrap();
+        forged["target"] = serde_json::json!({"kind":"Roster","identity":"roster"});
+        assert!((step.canonical)(&forged.to_string()).is_none());
+        assert!((step.transform)(forged).is_none());
+    }
 }

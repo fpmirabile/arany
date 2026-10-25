@@ -666,3 +666,74 @@ async fn every_committed_prefix_of_a_roster_team_run_replays_without_dispatch() 
         }
     }
 }
+
+#[tokio::test]
+async fn independent_preset_selections_pin_distinct_child_assignments_in_one_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let primary = route(
+        ScriptedProvider::new(vec![
+            delegate(&[("inspect coding", None)]),
+            finish("coding answer"),
+            delegate(&[("inspect research", Some("spare"))]),
+            finish("research answer"),
+        ])
+        .with_profile("openai", "primary"),
+    );
+    let coding_child = answering("coding-child", &["coding facts"]);
+    let research_child = answering("research-child", &["research facts"]);
+    let mut coding = routes(&primary);
+    coding.roles.child = vec![coding_child.clone()];
+    pin_roster(&mut coding, None);
+    let coding_snapshot = coding.roster.as_ref().unwrap().snapshot.clone();
+    let engine = open(&state);
+    let first = run_routed(
+        &engine,
+        coding,
+        team(&workspace, None, 1),
+        RunControls::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.run.status, RunStatus::Finished);
+    let mut research = routes(&primary);
+    research.roles.child = vec![coding_child.clone()];
+    pin_roster(&mut research, Some(vec![research_child.clone()]));
+    let roster = research.roster.as_mut().unwrap();
+    roster.snapshot.preset = "research".into();
+    roster.snapshot.selection_digest = roster.snapshot.digest().unwrap();
+    let research_snapshot = roster.snapshot.clone();
+    let second = run_routed(
+        &engine,
+        research,
+        team(&workspace, Some(first.session_id), 1),
+        RunControls::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let (events, view) = reopen(&state, first.session_id).await;
+    assert_eq!(view.runs.len(), 2);
+    assert_eq!(
+        view.runs[0].config.as_ref().unwrap().roster.as_deref(),
+        Some(&coding_snapshot)
+    );
+    assert_eq!(
+        view.runs[1].config.as_ref().unwrap().roster.as_deref(),
+        Some(&research_snapshot)
+    );
+    assert_eq!(view.runs[0].agents[1].profile.as_deref(), Some("child"));
+    assert_eq!(view.runs[1].agents[1].profile.as_deref(), Some("spare"));
+    assert_eq!(spawned_children(&events), 2);
+    assert_eq!(
+        [
+            count(&primary),
+            count(&coding_child),
+            count(&research_child)
+        ],
+        [4, 1, 1]
+    );
+}

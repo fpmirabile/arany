@@ -882,6 +882,7 @@ pub(super) fn draw_setup_choices_frame(
     if area.width == 0 || area.height < 3 || choices.is_empty() {
         return;
     }
+    let notice = notice.filter(|_| area.height > 3);
     let compact = area.width < 20;
     let instruction = safe_truncate(instruction, MAX_ROW_WIDTH);
     let supporting_rows = if instruction.width() <= usize::from(area.width) {
@@ -909,7 +910,7 @@ pub(super) fn draw_setup_choices_frame(
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
     let row_count = if dense {
-        usize::from(area.height - 2)
+        usize::from(area.height.saturating_sub(2 + u16::from(notice.is_some())))
     } else {
         choices.len()
     };
@@ -937,6 +938,8 @@ pub(super) fn draw_setup_choices_frame(
                 Rect::new(area.x, instruction_y, area.width, instruction_height),
             );
         }
+    }
+    if !dense || notice.is_some() {
         let footer = notice.unwrap_or(if compact {
             "↑↓ Enter Esc"
         } else {
