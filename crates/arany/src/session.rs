@@ -67,10 +67,10 @@ pub(crate) use events::{
     pre_git_write_payload, pre_glob_payload, pre_host_git_payload, pre_host_payload,
     pre_host_prefix_payload, pre_multiedit_payload, pre_role_routing_payload,
     pre_typed_prefix_payload, provider_call_v18_payload, provider_call_v18_to_v19,
-    provider_call_v19_payload, provider_call_v19_to_v20, rebind_intent_pins, replace_intent_pin,
-    rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
-    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
-    run_started_v23_payload, run_started_v23_to_v24,
+    provider_call_v19_payload, provider_call_v19_to_v20, provider_call_v22_payload,
+    rebind_intent_pins, replace_intent_pin, rewind_started_v1_payload, rewind_started_v1_to_v2,
+    run_started_fits, run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    run_started_v19_to_v20, run_started_v23_payload, run_started_v23_to_v24,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]
@@ -90,8 +90,8 @@ pub use reducer::{
 };
 pub(crate) use reducer::{
     ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,
-    evidence_admitted, private_criterion_evidence, private_failure, verification_passed,
-    wave_settled,
+    evidence_admitted, private_criterion_evidence, private_failure, validate_editor_request,
+    verification_passed, wave_settled,
 };
 pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};
 

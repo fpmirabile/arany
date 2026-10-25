@@ -591,6 +591,20 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
             "Arany refused an operation that was not offered. The proposed action did not run."
         }
         Cause::AnswerInvalid => "Arany refused an invalid text answer.",
+        Cause::EditorDefinition => {
+            "Editor definition is unavailable or incompatible. No child started."
+        }
+        Cause::EditorDigest => "Editor definition digest does not match. No child started.",
+        Cause::EditorCommands => "Editor commands exceed admitted authority. No child started.",
+        Cause::EditorTurns => "Editor turns exceed the admitted ceiling. No child started.",
+        Cause::EditorLease => "Editor lease exceeds the admitted scope. No child started.",
+        Cause::EditorCriterion => {
+            "Editor criterion exceeds its lease or authority. No child started."
+        }
+        Cause::EditorResume => {
+            "Editor resume source is unavailable or ineligible. No child started."
+        }
+        Cause::EditorGrant => "Editor work requires an admitted write grant. No child started.",
         Cause::DelegateInvalid => {
             "Arany refused an invalid delegation. No children were started for it."
         }

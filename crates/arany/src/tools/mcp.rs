@@ -48,7 +48,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     })
 }
 
-const FRAME_BYTES: usize = 128 * 1024;
+pub(crate) const FRAME_BYTES: usize = 128 * 1024;
 const VERSION: &str = "2025-11-25";
 
 struct Connection {

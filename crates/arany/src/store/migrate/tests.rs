@@ -12,7 +12,7 @@ const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 74] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 75] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -261,10 +261,11 @@ const EVENT_FIXTURES: [EventFixture<'static>; 74] = [
     ),
     (
         "ProviderCallRecorded",
-        22,
+        23,
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
+    ("ProviderCallRecorded", 22, REFUSAL_V19, REFUSAL_V19),
     ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
     (
         "RunStarted",
@@ -404,6 +405,52 @@ fn provider_call_v19_identity_migration_preserves_bytes_and_rejects_new_reason()
         (list_step.transform)(serde_json::from_str(&forged).unwrap()),
         Some(serde_json::from_str(&forged).unwrap())
     );
+}
+
+#[test]
+fn editor_refusal_migration_preserves_bytes_and_rejects_forged_old_causes() {
+    let step = REGISTRY.event_step("ProviderCallRecorded", 22).unwrap();
+    let view_step = REGISTRY.event_step("ProviderCallRecorded", 23).unwrap();
+    assert_eq!((step.canonical)(REFUSAL_V19).as_deref(), Some(REFUSAL_V19));
+    assert_eq!(
+        (step.transform)(serde_json::from_str(REFUSAL_V19).unwrap()),
+        Some(serde_json::from_str(REFUSAL_V19).unwrap())
+    );
+    for cause in [
+        "editor_definition",
+        "editor_digest",
+        "editor_commands",
+        "editor_turns",
+        "editor_lease",
+        "editor_criterion",
+        "editor_resume",
+        "editor_grant",
+    ] {
+        let forged = REFUSAL_V19.replace("invalid_arguments", cause);
+        assert!((step.canonical)(&forged).is_none(), "{cause}");
+        assert!(
+            (step.transform)(serde_json::from_str(&forged).unwrap()).is_none(),
+            "{cause}"
+        );
+        assert_eq!(
+            (view_step.canonical)(&forged).as_deref(),
+            Some(forged.as_str()),
+            "{cause}"
+        );
+        assert_eq!(
+            (view_step.transform)(serde_json::from_str(&forged).unwrap()),
+            Some(serde_json::from_str(&forged).unwrap()),
+            "{cause}"
+        );
+        Event::decode(
+            "ProviderCallRecorded",
+            crate::test_support::payload_version("ProviderCallRecorded"),
+            &forged,
+            Some(RunId::new()),
+            Some(AgentRunId::new()),
+        )
+        .expect("current editor cause decodes");
+    }
 }
 
 #[test]

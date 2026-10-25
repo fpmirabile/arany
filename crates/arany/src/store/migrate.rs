@@ -303,6 +303,15 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             transform: crate::session::provider_call_v19_to_v20,
             canonical: crate::session::provider_call_v19_payload,
         },
+        EventStep {
+            kind: "ProviderCallRecorded",
+            from: 22,
+            transform: |value| {
+                crate::session::provider_call_v22_payload(&value.to_string())
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            },
+            canonical: crate::session::provider_call_v22_payload,
+        },
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),

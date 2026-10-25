@@ -2012,6 +2012,33 @@ pub(crate) fn provider_call_v19_to_v20(value: serde_json::Value) -> Option<serde
     serde_json::from_str(&canonical).ok()
 }
 
+pub(crate) fn provider_call_v22_payload(payload: &str) -> Option<String> {
+    use ProposalRefusalCause::*;
+    let record: ProviderCallRecord = parse(payload).ok()?;
+    if record.refusal.as_ref().is_some_and(|refusal| {
+        !matches!(
+            refusal.cause,
+            InvalidArguments
+                | InvalidPath
+                | Phase
+                | PlanInvalid
+                | PlanBudgetOutsideGoal
+                | PlanBudgetSpent
+                | PlanScopeExcludesCall
+                | PlanOutsideGrant
+                | ArgumentBytes
+                | LeaseOverlap
+                | NotOffered
+                | AnswerInvalid
+                | DelegateInvalid
+        )
+    }) {
+        return None;
+    }
+    record.validate().ok()?;
+    serialize(&record).ok()
+}
+
 pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()

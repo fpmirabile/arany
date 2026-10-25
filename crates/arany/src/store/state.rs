@@ -21,8 +21,8 @@ mod lock;
 #[cfg(test)]
 pub(crate) use build_cache::capture_archive;
 pub(crate) use build_cache::{
-    BuildCacheIdentity, BuildCacheLease, DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES,
-    archive_size_with_limit,
+    AGGREGATE_BYTES, BuildCacheIdentity, BuildCacheLease,
+    DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES, MAX_ARCHIVE_BYTES, archive_size_with_limit,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_async_with_limit};
