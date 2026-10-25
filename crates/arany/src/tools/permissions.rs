@@ -26,6 +26,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
+pub const MAX_HOST_PREFIX_BYTES: usize = crate::store::MAX_EVENT_BYTES / 2;
 pub const MAX_RULES: usize = 128;
 pub(crate) const MIN_HOST_PREFIX_TOKENS: usize = 2;
 pub const MAX_RULE_PATTERN_BYTES: usize = 1024;

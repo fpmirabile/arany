@@ -1657,6 +1657,111 @@ async fn host_prefix_state_targets_and_unadmitted_settings_changes_dispatch_noth
 }
 
 #[tokio::test]
+async fn host_prefix_byte_budget_preserves_settings_and_run_admission() {
+    use arany::permissions::{HostPrefixEdit, PermissionSettings};
+    let host = Host::new(None);
+    let first = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(prefix_call()), finish("done")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    let state = StateRoot::open_existing(&host.state).unwrap();
+    let rules = save_host_rules_at_byte_limit(&first.intents[0], &state, &host.workspace);
+    let file = host.state.join("permissions.json");
+    let before = std::fs::read(&file).unwrap();
+    host.engine.readmit_host_permissions().unwrap();
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(prefix_call()), finish("refused")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowPrefixInFolder],
+        )
+        .await;
+    let observation = last_tool(&seen).observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+    assert!(observation.attestation.is_none());
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let mut older: Value = serde_json::from_slice(&before).unwrap();
+    older["permissions"]["hostPrefixes"][0]["prefix"][1] =
+        json!(format!("{} ", rules[0].prefix[1]));
+    private_file(&file, &serde_json::to_vec(&older).unwrap());
+    let loaded = PermissionSettings::load(&state, &host.workspace).unwrap();
+    let removed = loaded
+        .save_host_edit(&state, &host.workspace, HostPrefixEdit::Remove { index: 0 })
+        .unwrap();
+    assert_eq!(removed.host_prefixes(), &rules[1..]);
+    let (events, view) = host.reopen(seen.outcome.session_id).await;
+    let config = view.runs[0].config.as_ref().unwrap();
+    assert_eq!(config.tool_policy.as_ref().unwrap().host_prefixes, rules);
+    let payload = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::RunStarted { .. } => Some(event.event.payload().unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(payload.len() < 2 * arany::permissions::MAX_HOST_PREFIX_BYTES);
+}
+
+fn save_host_rules_at_byte_limit(
+    intent: &arany::EffectIntent,
+    state: &StateRoot,
+    workspace: &Path,
+) -> Vec<arany::permissions::HostPrefixRule> {
+    use arany::permissions::{HostPrefixEdit, PermissionSettings, SettingsError};
+    const RULE_COUNT: usize = 8;
+    let mut rules = (0..RULE_COUNT)
+        .map(|index| {
+            let mut rule = arany::permissions::HostPrefixRule::from_intent(intent, 2).unwrap();
+            rule.prefix[1] = format!("bounded prefix {index} ");
+            rule
+        })
+        .collect::<Vec<_>>();
+    let spare =
+        arany::permissions::MAX_HOST_PREFIX_BYTES - serde_json::to_vec(&rules).unwrap().len();
+    for (index, rule) in rules.iter_mut().enumerate() {
+        rule.prefix[1]
+            .push_str(&" ".repeat(spare / RULE_COUNT + usize::from(index < spare % RULE_COUNT)));
+    }
+    assert_eq!(
+        serde_json::to_vec(&rules).unwrap().len(),
+        arany::permissions::MAX_HOST_PREFIX_BYTES
+    );
+    let mut settings = PermissionSettings::load(state, workspace).unwrap();
+    for (index, rule) in rules.iter().enumerate() {
+        if index + 1 == rules.len() {
+            let before = std::fs::read(state.path().join("permissions.json")).unwrap();
+            let mut overflow = rule.clone();
+            overflow.prefix[1].push(' ');
+            assert!(matches!(
+                settings.save_host_edit(
+                    state,
+                    workspace,
+                    HostPrefixEdit::Insert(Box::new(overflow)),
+                ),
+                Err(SettingsError::Invalid)
+            ));
+            assert_eq!(
+                std::fs::read(state.path().join("permissions.json")).unwrap(),
+                before
+            );
+        }
+        settings = settings
+            .save_host_edit(
+                state,
+                workspace,
+                HostPrefixEdit::Insert(Box::new(rule.clone())),
+            )
+            .unwrap();
+    }
+    rules
+}
+
+#[tokio::test]
 async fn host_prefix_overflow_and_unconfirmed_save_never_spawn() {
     for uncertain in [false, true] {
         let mut host = if uncertain {

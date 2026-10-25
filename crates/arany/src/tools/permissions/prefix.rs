@@ -379,6 +379,13 @@ fn edit_host(
             }
             if !entries.contains(&rule) {
                 entries.push(*rule);
+                if serde_json::to_vec(entries)
+                    .map_err(|_| SettingsError::Invalid)?
+                    .len()
+                    > super::MAX_HOST_PREFIX_BYTES
+                {
+                    return Err(SettingsError::Invalid);
+                }
             }
         }
         HostPrefixEdit::Replace { index, decision } => {
