@@ -7891,7 +7891,7 @@ mod goal_replay_tests {
             refspec: "fixed-view-v1".into(),
         });
         intent.limits.network = crate::tools::types::NetworkGrant::Host;
-        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
         apply(
             &mut view,
             verdict_event(
