@@ -1408,6 +1408,7 @@ mod tests {
             }
         }
 
+        const ENGINE_TEST_STACK_BYTES: usize = 8 * 1024 * 1024;
         const ROOT: &str = "ARANY_TEST_SAVED_ACCESS_ROOT";
         const CASE: &str = "ARANY_TEST_SAVED_ACCESS_CASE";
         const TEST: &str = "cli::attached::run::tests::saved_access_is_authorized_before_chat_without_exposing_secrets";
@@ -1490,6 +1491,8 @@ mod tests {
                 let mut command = Command::new(std::env::current_exe().unwrap());
                 command
                     .env_clear()
+                    // The fixture polls the Engine on a libtest thread instead of the product main thread.
+                    .env("RUST_MIN_STACK", ENGINE_TEST_STACK_BYTES.to_string())
                     .env(ROOT, temp.path())
                     .env(CASE, case.name())
                     .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
