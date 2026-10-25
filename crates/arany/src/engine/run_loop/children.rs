@@ -495,6 +495,11 @@ pub(super) fn decide_child_stop(
             cause: WorkerCause::Cancelled,
             stops_wave: true,
         },
+        StopHookRun::Passed if facts.cancelled => ChildStop::End {
+            disposition: AgentDisposition::Cancelled,
+            cause: WorkerCause::Cancelled,
+            stops_wave: true,
+        },
         StopHookRun::Passed if facts.actor_hook_stop => ChildStop::End {
             disposition: AgentDisposition::StoppedByHook,
             cause: WorkerCause::StoppedByHook,
@@ -3712,6 +3717,21 @@ mod decision_tests {
             (
                 StopHookRun::Passed,
                 None,
+                with(|f| f.cancelled = true),
+                end(Cancelled, WorkerCause::Cancelled, true),
+            ),
+            (
+                StopHookRun::Passed,
+                None,
+                with(|f| {
+                    f.cancelled = true;
+                    f.actor_hook_stop = true;
+                }),
+                end(Cancelled, WorkerCause::Cancelled, true),
+            ),
+            (
+                StopHookRun::Passed,
+                None,
                 with(|f| f.actor_hook_stop = true),
                 end(StoppedByHook, WorkerCause::StoppedByHook, false),
             ),
@@ -3738,6 +3758,12 @@ mod decision_tests {
                 StopHookRun::Uncertain,
                 None,
                 OPEN,
+                end(Failed, WorkerCause::ToolFailed, false),
+            ),
+            (
+                StopHookRun::Uncertain,
+                None,
+                with(|f| f.cancelled = true),
                 end(Failed, WorkerCause::ToolFailed, false),
             ),
             (StopHookRun::Blocked, None, OPEN, ChildStop::Reprompt),
