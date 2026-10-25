@@ -365,7 +365,16 @@ pub(super) async fn worker_case(case: &'static str) {
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
     if case.starts_with("clear_") {
-        let result = result.expect(case);
+        let result = result.unwrap_or_else(|error| {
+            let tail: Vec<_> = bundle
+                .events
+                .iter()
+                .rev()
+                .take(8)
+                .map(|event| event.event.kind())
+                .collect();
+            panic!("{case}: {error:?}; child calls {child_calls}; synthesis calls {synthesis_calls}; newest Events {tail:?}");
+        });
         assert_eq!(
             result.run.run.status,
             RunStatus::Finished,

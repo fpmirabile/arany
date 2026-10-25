@@ -7754,8 +7754,7 @@ mod goal_replay_tests {
         }
     }
 
-    #[test]
-    fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
+    fn background_primary_tool_session() -> (SessionView, GoalId, RunId, AgentRunId, AgentRunId) {
         let fixture = super::super::worker_tests::background_fixture();
         let mut view = SessionView::replay_open(fixture.session, &fixture.envelopes())
             .unwrap()
@@ -7782,6 +7781,12 @@ mod goal_replay_tests {
         .unwrap();
         apply(&mut view, tool_started(run, primary, &read)).unwrap();
         apply(&mut view, tool_finished(run, primary, &read, b"one")).unwrap();
+        (view, goal, run, primary, child)
+    }
+
+    #[test]
+    fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
+        let (mut view, goal, run, primary, child) = background_primary_tool_session();
         apply(
             &mut view,
             Event::GoalCompactionCallReserved {
@@ -7825,6 +7830,54 @@ mod goal_replay_tests {
         assert!(view.goals[0].unobserved_provider_calls.is_empty());
         apply(&mut view, primary_call).expect("primary resumes after its compaction");
         assert_eq!(view.goals[0].unobserved_provider_calls, [primary]);
+    }
+
+    #[test]
+    fn primary_compaction_accepts_only_continuable_worker_deferrals() {
+        use crate::provider::ProviderFailureReason;
+
+        for reason in [
+            Some(ProviderFailureReason::WorkerAnswerDeferred),
+            Some(ProviderFailureReason::WorkerDelegateRefused),
+            Some(ProviderFailureReason::WorkerToolRefused),
+            None,
+        ] {
+            let (mut view, goal, run, primary, child) = background_primary_tool_session();
+            apply(&mut view, reserve_child_call(goal, run, child)).unwrap();
+            apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
+            let mut deferred = record(
+                AgentPhase::RootSynthesis,
+                ProviderCallDisposition::InvalidResponse,
+                Some(0),
+            );
+            deferred.failure_reason = reason;
+            apply(
+                &mut view,
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: deferred,
+                },
+            )
+            .unwrap();
+            let reservation = Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            };
+            assert_eq!(
+                apply(&mut view, reservation).is_ok(),
+                reason.is_some(),
+                "{reason:?}"
+            );
+            if reason.is_some() {
+                let count = u32::try_from(view.runs[0].tools.len()).unwrap();
+                let compacted = covering_compaction(&view, goal, run, count);
+                apply(&mut view, compacted).expect("compaction settles after a worker deferral");
+                assert_eq!(view.goals[0].compaction_call_reserved, None);
+                assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+            }
+        }
     }
 
     #[test]
