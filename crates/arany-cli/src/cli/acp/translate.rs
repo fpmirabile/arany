@@ -818,6 +818,13 @@ struct ResponseContext<'a> {
     outbound: &'a mpsc::Sender<Value>,
 }
 
+struct ActiveResponseContext<'a> {
+    state: &'a Shared,
+    serve: &'a mpsc::Sender<ClientMessage>,
+    outbound: &'a mpsc::Sender<Value>,
+    stopping: &'a tokio::sync::watch::Receiver<bool>,
+}
+
 struct LoadResponse {
     id: RequestId,
     cwd: String,
@@ -964,6 +971,197 @@ async fn list_sessions_response(
     .await
 }
 
+async fn start_turn_response(
+    result: Value,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    let result: TurnResult = serde_json::from_value(result).map_err(|_| "invalid serve turn")?;
+    let cancel = {
+        let mut state = context.state.lock().expect("translator state");
+        let active = state.active.as_mut().ok_or("no active ACP prompt")?;
+        active.turn = Some(result.turn.id);
+        (active.cancelled && !*context.stopping.borrow()).then_some(TurnInterruptParams {
+            thread_id: active.session,
+            turn_id: result.turn.id,
+        })
+    };
+    if let Some(params) = cancel {
+        send_request(
+            context.state,
+            context.serve,
+            "turn/interrupt",
+            params,
+            Pending::Interrupt,
+        )
+        .await?;
+    }
+    let watch = {
+        let state = context.state.lock().expect("translator state");
+        state.active.as_ref().filter(|a| a.watch_plan).map(|a| {
+            (
+                a.session,
+                result.turn.id,
+                state.sessions.get(&a.session).map_or(0, |s| s.sequence),
+            )
+        })
+    };
+    if let Some((session, run, since)) = watch.filter(|_| !*context.stopping.borrow()) {
+        send_request(
+            context.state,
+            context.serve,
+            "events/subscribe",
+            EventsSubscribeParams {
+                thread_id: session,
+                since,
+            },
+            Pending::Watch { session, run },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn watch_turn_response(
+    session: SessionId,
+    run: RunId,
+    result: Value,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    if !context
+        .state
+        .lock()
+        .expect("translator state")
+        .active
+        .as_ref()
+        .is_some_and(|a| a.session == session && a.turn == Some(run))
+    {
+        return Ok(());
+    }
+    let page: EventsSubscribeResult =
+        serde_json::from_value(result).map_err(|_| "invalid serve events")?;
+    for event in &page.events {
+        if let Some(update) = project_plan(context.state, session, event)? {
+            emit(context.outbound, update).await?;
+        }
+    }
+    if let Some(since) = page.next_since.filter(|_| !*context.stopping.borrow()) {
+        send_request(
+            context.state,
+            context.serve,
+            "events/subscribe",
+            EventsSubscribeParams {
+                thread_id: session,
+                since,
+            },
+            Pending::Watch { session, run },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn recover_turn_response(
+    result: Value,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    let page: EventsSubscribeResult =
+        serde_json::from_value(result).map_err(|_| "invalid serve events")?;
+    let Some((session, run, prompt)) = ({
+        let state = context.state.lock().expect("translator state");
+        state
+            .active
+            .as_ref()
+            .and_then(|active| Some((active.session, active.turn?, active.generation)))
+    }) else {
+        return Ok(());
+    };
+    for event in &page.events {
+        if let Some(update) = project_plan(context.state, session, event)? {
+            emit(context.outbound, update).await?;
+        }
+        if event.run_id.as_deref() != Some(run.to_string().as_str()) {
+            continue;
+        }
+        let item = match event.kind.as_str() {
+            "MessageCommitted" => Some((
+                Item::AgentMessage {
+                    id: format!("{run}:answer"),
+                    text: event.payload["text"]
+                        .as_str()
+                        .ok_or("invalid committed answer")?
+                        .into(),
+                    phase: AgentMessagePhase::FinalAnswer,
+                },
+                false,
+            )),
+            "ToolStarted" => {
+                let intent: arany::EffectIntent =
+                    serde_json::from_value(event.payload["intent"].clone())
+                        .map_err(|_| "invalid committed Tool intent")?;
+                Some((
+                    crate::cli::serve::items::tool_item(&intent, None, false),
+                    true,
+                ))
+            }
+            "ToolFinished" => {
+                let mut payload = event.payload.clone();
+                if let Some(fields) = payload.as_object_mut() {
+                    fields.remove("checkpoint");
+                }
+                let observation: arany::ToolObservation = serde_json::from_value(payload)
+                    .map_err(|_| "invalid committed Tool observation")?;
+                Some((
+                    crate::cli::serve::items::tool_item(
+                        &observation.intent,
+                        Some(&observation),
+                        false,
+                    ),
+                    false,
+                ))
+            }
+            _ => None,
+        };
+        if let Some((item, started)) = item
+            && let Some(update) = project(context.state, session, run, item, started)
+        {
+            emit_answer(context.outbound, update).await?;
+        }
+    }
+    if let Some(last) = page.events.last()
+        && let Some(loaded) = context
+            .state
+            .lock()
+            .expect("translator state")
+            .sessions
+            .get_mut(&session)
+    {
+        loaded.sequence = last.sequence;
+    }
+    if let Some(since) = page.next_since.filter(|_| !*context.stopping.borrow()) {
+        recover(
+            context.state,
+            context.serve,
+            context.outbound,
+            prompt,
+            EventsSubscribeParams {
+                thread_id: session,
+                since,
+            },
+        )
+        .await?;
+    } else {
+        finish(
+            context.state,
+            context.serve,
+            context.outbound,
+            prompt,
+            page.next_since.is_some(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn output_message(
     message: Message,
     serve: mpsc::Sender<ClientMessage>,
@@ -980,6 +1178,12 @@ async fn output_message(
             let context = ResponseContext {
                 state: &state,
                 outbound: &outbound,
+            };
+            let active_context = ActiveResponseContext {
+                state: &state,
+                serve: &serve,
+                outbound: &outbound,
+                stopping: &stopping,
             };
             match pending {
                 Some(Pending::Initialize(id)) => initialize_response(id, &context).await?,
@@ -1017,166 +1221,12 @@ async fn output_message(
                 Some(Pending::List(id)) => {
                     list_sessions_response(id, reply.result, &context).await?
                 }
-                Some(Pending::Start) => {
-                    let result: TurnResult =
-                        serde_json::from_value(reply.result).map_err(|_| "invalid serve turn")?;
-                    let cancel = {
-                        let mut state = state.lock().expect("translator state");
-                        let active = state.active.as_mut().ok_or("no active ACP prompt")?;
-                        active.turn = Some(result.turn.id);
-                        (active.cancelled && !*stopping.borrow()).then_some(TurnInterruptParams {
-                            thread_id: active.session,
-                            turn_id: result.turn.id,
-                        })
-                    };
-                    if let Some(params) = cancel {
-                        send_request(&state, &serve, "turn/interrupt", params, Pending::Interrupt)
-                            .await?;
-                    }
-                    let watch = {
-                        let state = state.lock().expect("translator state");
-                        state.active.as_ref().filter(|a| a.watch_plan).map(|a| {
-                            (
-                                a.session,
-                                result.turn.id,
-                                state.sessions.get(&a.session).map_or(0, |s| s.sequence),
-                            )
-                        })
-                    };
-                    if let Some((session, run, since)) = watch.filter(|_| !*stopping.borrow()) {
-                        send_request(
-                            &state,
-                            &serve,
-                            "events/subscribe",
-                            EventsSubscribeParams {
-                                thread_id: session,
-                                since,
-                            },
-                            Pending::Watch { session, run },
-                        )
-                        .await?;
-                    }
-                }
+                Some(Pending::Start) => start_turn_response(reply.result, &active_context).await?,
                 Some(Pending::Watch { session, run }) => {
-                    if !state
-                        .lock()
-                        .expect("translator state")
-                        .active
-                        .as_ref()
-                        .is_some_and(|a| a.session == session && a.turn == Some(run))
-                    {
-                        return Ok(());
-                    }
-                    let page: EventsSubscribeResult =
-                        serde_json::from_value(reply.result).map_err(|_| "invalid serve events")?;
-                    for event in &page.events {
-                        if let Some(update) = project_plan(&state, session, event)? {
-                            emit(&outbound, update).await?;
-                        }
-                    }
-                    if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
-                        send_request(
-                            &state,
-                            &serve,
-                            "events/subscribe",
-                            EventsSubscribeParams {
-                                thread_id: session,
-                                since,
-                            },
-                            Pending::Watch { session, run },
-                        )
-                        .await?;
-                    }
+                    watch_turn_response(session, run, reply.result, &active_context).await?
                 }
                 Some(Pending::Recover) => {
-                    let page: EventsSubscribeResult =
-                        serde_json::from_value(reply.result).map_err(|_| "invalid serve events")?;
-                    let Some((session, run, prompt)) = ({
-                        let state = state.lock().expect("translator state");
-                        state.active.as_ref().and_then(|active| {
-                            Some((active.session, active.turn?, active.generation))
-                        })
-                    }) else {
-                        return Ok(());
-                    };
-                    for event in &page.events {
-                        if let Some(update) = project_plan(&state, session, event)? {
-                            emit(&outbound, update).await?;
-                        }
-                        if event.run_id.as_deref() != Some(run.to_string().as_str()) {
-                            continue;
-                        }
-                        let item = match event.kind.as_str() {
-                            "MessageCommitted" => Some((
-                                Item::AgentMessage {
-                                    id: format!("{run}:answer"),
-                                    text: event.payload["text"]
-                                        .as_str()
-                                        .ok_or("invalid committed answer")?
-                                        .into(),
-                                    phase: AgentMessagePhase::FinalAnswer,
-                                },
-                                false,
-                            )),
-                            "ToolStarted" => {
-                                let intent: arany::EffectIntent =
-                                    serde_json::from_value(event.payload["intent"].clone())
-                                        .map_err(|_| "invalid committed Tool intent")?;
-                                Some((
-                                    crate::cli::serve::items::tool_item(&intent, None, false),
-                                    true,
-                                ))
-                            }
-                            "ToolFinished" => {
-                                let mut payload = event.payload.clone();
-                                if let Some(fields) = payload.as_object_mut() {
-                                    fields.remove("checkpoint");
-                                }
-                                let observation: arany::ToolObservation =
-                                    serde_json::from_value(payload)
-                                        .map_err(|_| "invalid committed Tool observation")?;
-                                Some((
-                                    crate::cli::serve::items::tool_item(
-                                        &observation.intent,
-                                        Some(&observation),
-                                        false,
-                                    ),
-                                    false,
-                                ))
-                            }
-                            _ => None,
-                        };
-                        if let Some((item, started)) = item
-                            && let Some(update) = project(&state, session, run, item, started)
-                        {
-                            emit_answer(&outbound, update).await?;
-                        }
-                    }
-                    if let Some(last) = page.events.last()
-                        && let Some(loaded) = state
-                            .lock()
-                            .expect("translator state")
-                            .sessions
-                            .get_mut(&session)
-                    {
-                        loaded.sequence = last.sequence;
-                    }
-                    if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
-                        recover(
-                            &state,
-                            &serve,
-                            &outbound,
-                            prompt,
-                            EventsSubscribeParams {
-                                thread_id: session,
-                                since,
-                            },
-                        )
-                        .await?;
-                    } else {
-                        finish(&state, &serve, &outbound, prompt, page.next_since.is_some())
-                            .await?;
-                    }
+                    recover_turn_response(reply.result, &active_context).await?
                 }
                 _ => (),
             }
