@@ -4805,6 +4805,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         .expect("engine");
         let mut first_request = request(&workspace, "First question");
         first_request.goal.finish_after_run = false;
+        first_request.images = vec![arany::test_support::test_image()];
         let first = run_to_end(&engine, &provider, first_request)
             .await
             .expect("source Run");
@@ -4900,6 +4901,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         let mut parent_request = request(&workspace, "Later source question");
         parent_request.session_id = Some(first.session_id);
         parent_request.title = None;
+        parent_request.images = vec![arany::test_support::test_image()];
         run_to_end(&engine, &provider, parent_request)
             .await
             .expect("later source Run");
@@ -4975,6 +4977,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             store.load_session(first.session_id).await.unwrap()
         );
         let source = store.load_view(first.session_id).await.unwrap().unwrap();
+        assert_eq!(unsaved.images, source.runs[0].images);
         for head in [
             (source.last_sequence - 1, source.rewinds.prefix_digest()),
             (source.last_sequence, [0; 32]),
@@ -5004,6 +5007,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             )
             .await
             .unwrap();
+        assert_eq!(restored.images, source.runs[1].images);
         let restored = store
             .load_view(restored.session_id.unwrap())
             .await

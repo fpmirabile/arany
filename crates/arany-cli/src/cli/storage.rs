@@ -3,7 +3,7 @@ use crate::presentation::storage::render_storage;
 use crate::terminal::{AttachedTerminal, Composer, ComposerEdit, TerminalInput};
 use arany::{SessionView, StateRoot, StorageError, StorageReport};
 use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -95,12 +95,12 @@ pub(crate) async fn run(args: StorageArgs) -> Result<CommandOutput, String> {
 
 pub(super) async fn attached(
     terminal: &mut AttachedTerminal,
-    workspace: PathBuf,
+    (workspace, workspace_identity): (&Path, arany::WorkspaceIdentity),
     selected: PathBuf,
     view: &SessionView,
     composer: &mut Composer,
 ) -> Result<(), String> {
-    let mut inventory = Inventory::start(workspace, selected);
+    let mut inventory = Inventory::start(workspace.to_path_buf(), selected);
     terminal
         .draw_progress_with_draft(
             view,
@@ -129,7 +129,11 @@ pub(super) async fn attached(
                         terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Paste => {
-                        let _ = terminal.paste_into(composer);
+                        let notice = match terminal.paste_into_admitted_workspace(composer, workspace, workspace_identity) {
+                            Ok(_) => "Inspecting storage metadata; Esc or Ctrl+C cancels".to_owned(),
+                            Err(error) => format!("Error: {error}; draft unchanged; storage inventory running"),
+                        };
+                        terminal.draw_progress_with_draft(view, composer, &notice).map_err(|error| error.to_string())?;
                     }
                     input => {
                         if composer.apply(input) == ComposerEdit::Changed && !terminal.is_linear() {

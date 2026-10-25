@@ -610,7 +610,11 @@ async fn load_while_owned(
                         terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Paste => {
-                        let notice = match terminal.paste_into(composer) {
+                        let notice = match terminal.paste_into_admitted_workspace(
+                            composer,
+                            &admission.workspace,
+                            admission.workspace_identity,
+                        ) {
                             Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
                             Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
                         };

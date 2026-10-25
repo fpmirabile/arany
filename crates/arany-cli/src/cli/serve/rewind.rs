@@ -371,8 +371,9 @@ pub(super) async fn restore(
                     _ => result.notices.push(format!("Conversation fork {id} saved but could not be loaded; use thread/resume")),
                 }
             }
-            if conversation.images_omitted { result.notices.push("Images were not copied; attach them again".into()); }
-            result.conversation = Some(RewindConversation { thread_id: conversation.session_id, prompt: conversation.prompt, images_omitted: conversation.images_omitted });
+            let images_omitted = !conversation.images.is_empty();
+            if images_omitted { result.notices.push("Images were not copied; attach them again".into()); }
+            result.conversation = Some(RewindConversation { thread_id: conversation.session_id, prompt: conversation.prompt, images_omitted });
         }
         ConversationRewindOutcome::Failed(_) => result.notices.push("Code restored; conversation unchanged; use thread/rewind/preview and Restore conversation".into()),
         ConversationRewindOutcome::Unchanged if input.restore == RewindRestore::Both && result.rewind.outcome == RewindResultOutcome::Restored => result.notices.push("Code restored; conversation unchanged".into()),

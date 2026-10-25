@@ -868,7 +868,11 @@ fn draft_compaction_notice(
             Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
             Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
         }),
-        TerminalInput::Paste => match ui.terminal.paste_into(ui.composer) {
+        TerminalInput::Paste => match ui.terminal.paste_into_admitted_workspace(
+            ui.composer,
+            &ui.admission.workspace,
+            ui.admission.workspace_identity,
+        ) {
             Err(error) => Some(Feedback::History(format!(
                 "Error: {error}; draft unchanged"
             ))),
@@ -1148,6 +1152,10 @@ mod goal_request_tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace: temp.path().join("workspace"),
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: vec![std::path::PathBuf::from("already-included.rs")],
             tools: false,
             workspace_permissions: None,
@@ -1290,6 +1298,10 @@ mod goal_request_tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace: temp.path().join("workspace"),
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,

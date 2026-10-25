@@ -2197,6 +2197,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -2437,6 +2441,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -2478,6 +2486,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -2520,6 +2532,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,

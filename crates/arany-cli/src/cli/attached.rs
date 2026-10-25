@@ -1,4 +1,5 @@
 use super::provider::select::ProviderArg;
+use crate::cli::admit_workspace_identity;
 use crate::cli::provider::select::Selection;
 use crate::terminal::{AttachedTerminal, Composer, ComposerDraft, InteractiveCommand, Submission};
 use arany::{
@@ -163,6 +164,7 @@ struct Admission {
     explicit_state_dir: bool,
     roster: Option<String>,
     workspace: PathBuf,
+    workspace_identity: arany::WorkspaceIdentity,
     include_paths: Vec<PathBuf>,
     tools: bool,
     workspace_permissions: Option<arany::WorkspacePermissions>,
@@ -293,6 +295,7 @@ impl AttachedArgs {
         let explicit_state_dir = self.state_dir.is_some();
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace, self.state_dir).map_err(str::to_owned)?;
+        let workspace_identity = admit_workspace_identity(&workspace).map_err(str::to_owned)?;
         let provider = self.provider.map(|value| value.profile_label());
         let defaults = SessionDefaults {
             provider,
@@ -307,6 +310,7 @@ impl AttachedArgs {
             explicit_state_dir,
             roster: self.profile,
             workspace,
+            workspace_identity,
             include_paths: self.include_paths,
             tools: self.tools,
             workspace_permissions: None,
@@ -1594,6 +1598,10 @@ mod tests {
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
             workspace: workspace.clone(),
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -1628,6 +1636,10 @@ mod tests {
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
             workspace: workspace.clone(),
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -1657,6 +1669,10 @@ mod tests {
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
             workspace: workspace.clone(),
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -1702,6 +1718,10 @@ mod tests {
             state_dir,
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
