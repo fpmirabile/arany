@@ -66,6 +66,8 @@ The Engine owns admission, scheduling, context, Goal accounting and Run
 transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
 `GoalView`, with `Action::max_events` owning Event headroom. Primary, researcher and editor Tool steps share `execute_step`: reservation, committed intent,
 approval, dispatch, committed observation and continuation have one owner.
+Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
+it during admission, so the source dependency points from Engine to Tools.
 Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file or command view and its private cache restore, attests private mutation/capture and publishes only the primary's eligible changeset. Editor commands use the shared permission and delegated hook path; the coordinator gates answer on private evidence before handover, while primary verification remains independent. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
@@ -81,6 +83,9 @@ separate provisional data. The tap belongs to Journal rather than the Store
 thread so persistence does not own observer delivery. [Execution](../specs/execution.md#committed-event-stream),
 [telemetry](../specs/telemetry.md) and [diagnostics](../specs/diagnostics.md) own
 their observable contracts.
+Provider-owned diagnostic stage, count and response-shape types live in
+`provider/diagnostics.rs`; root `diagnostics.rs` retains record formatting and
+the bounded private sink.
 
 ```mermaid
 flowchart LR
@@ -127,6 +132,8 @@ flowchart LR
 
 Provider is the substitutable semantic inference interface. Wire adapters stay
 behind it; SQLite, replay, reducers and Tool dispatch remain concrete owners.
+`ProviderKind` owns native profile names and custom-profile syntax; telemetry
+maps those closed categories to its existing fixed labels.
 The CLI depends on `arany`; the library never depends on CLI, terminal,
 presentation or accounts, and has no ratatui, crossterm or keyring dependency.
 `accounts/` owns ChatGPT OAuth, saved API accounts and the credential helper.
@@ -189,7 +196,7 @@ modules.
 | Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
 | Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
 | SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
-| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
+| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
 
 [Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
 shared support. [Library](../../agents/arany.md) and

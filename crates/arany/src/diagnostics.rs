@@ -1,3 +1,4 @@
+use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage};
 use crate::store::StateRoot;
 use std::fmt::{self, Write};
 use std::sync::{Mutex, OnceLock};
@@ -22,50 +23,6 @@ pub fn enable_development_diagnostics(root: &StateRoot) {
 
 pub(crate) fn enabled() -> bool {
     cfg!(debug_assertions) && ROOT.get().is_some()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SubscriptionFailureStage {
-    RequestTransport,
-    Deadline,
-    HttpStatus,
-    Destination,
-    ContentEncoding,
-    ContentLength,
-    ReadTransport,
-    EndBeforeCompleted,
-    StreamLimit,
-    EventFraming,
-    EventJson,
-    EventType,
-    CredentialReflection,
-    RemoteFailure,
-    IncompleteResponse,
-    CompletedResponse,
-    ResponseEnvelope,
-    ResponseModel,
-    ResponseStatus,
-    ResponseIdentifier,
-    ResponseMessage,
-    ResponseContent,
-    ResponsePhase,
-    ResponseMissingFinalMessage,
-    ResponseDuplicateFinalMessage,
-    ResponseAmbiguousFinalMessage,
-    ResponseLateCommentary,
-    OutcomeContract,
-    OutcomeEncoding,
-    OutcomeFields,
-    OutcomeReadBounds,
-    OutcomeToolArguments,
-    OutcomeToolPath,
-    OutcomeToolDigest,
-    OutcomeToolEmptyEdit,
-    OutcomeToolTextSize,
-    OutcomeToolArgumentSize,
-    OutcomeToolProgram,
-    UsageContract,
-    LocalOutputLimit,
 }
 
 /// Closed stages accepted by the local debug log; no error text is stored.
@@ -241,25 +198,6 @@ impl ToolArgumentShape {
         }
         shape
     }
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct StreamCounts {
-    pub(crate) bytes: usize,
-    pub(crate) events: usize,
-    pub(crate) http_status: Option<u16>,
-    pub(crate) response_shape: Option<ResponseShape>,
-    pub(crate) tool_arguments: Option<ToolArgumentShape>,
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct ResponseShape {
-    pub(crate) messages: usize,
-    pub(crate) commentary: usize,
-    pub(crate) finals: usize,
-    pub(crate) unphased: usize,
-    pub(crate) done_messages: usize,
-    pub(crate) done_finals: usize,
 }
 
 pub(crate) fn stream_limit(bytes: usize, events: usize) {
@@ -772,22 +710,18 @@ mod tests {
         } else {
             assert!(!path.exists());
         }
-        write_failure(
-            &root,
-            SubscriptionFailureStage::EndBeforeCompleted,
-            StreamCounts {
-                bytes: 42,
-                events: 1,
-                http_status: None,
-                response_shape: None,
-                tool_arguments: None,
-            },
-        );
+        let mut failure = BoundedRecord(String::new());
+        writeln!(
+            failure,
+            "subscription stage=EndBeforeCompleted bytes=42 events=1 http_status=None"
+        )
+        .unwrap();
+        write_record(&root, failure);
         let bytes = std::fs::read(&path).unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(text.contains("stage=EndBeforeCompleted bytes=42 events=1"));
         assert!(text.contains("Local failure call stack"));
-        assert!(text.contains("diagnostics::write_failure"));
+        assert!(text.contains("diagnostics::write_record"));
         assert!(!text.contains("/home/") && !text.contains("/tmp/") && !text.contains(" at "));
         assert!(bytes.len() <= MAX_RECORD_BYTES);
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
@@ -812,6 +746,7 @@ mod tests {
                 && shape_log.contains("digest_valid: Some(false)")
         );
         assert!(shape_log.contains(&format!("old_bytes: Some({})", CANARY.len())));
+        assert!(shape_log.contains(&format!("new_bytes: Some({})", CANARY.len())));
         assert!(!shape_log.contains(CANARY));
         let host = crate::tools::ToolCall::GhPrCreate {
             repository: "github.com/example/project".into(),

@@ -208,6 +208,7 @@ impl Startup {
             &self.admission.state_dir,
             &self.admission.workspace,
             &mut journal,
+            &self.admission.defaults,
         )
         .await;
         self.setup_session_id = journal.session_id();

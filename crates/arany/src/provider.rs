@@ -9,6 +9,7 @@ mod catalog;
 mod conversation;
 mod custom;
 mod decode;
+pub(crate) mod diagnostics;
 mod effort;
 pub(crate) mod evidence;
 mod image;
@@ -114,6 +115,10 @@ impl ProviderKind {
 
     pub fn custom_name(profile: &str) -> Option<&str> {
         profile.strip_prefix("custom:")
+    }
+
+    pub fn custom_profile(name: &str) -> String {
+        format!("custom:{name}")
     }
 }
 
@@ -1384,6 +1389,8 @@ mod tests {
         assert_eq!(ProviderKind::custom_name("custom:"), Some(""));
         assert_eq!(ProviderKind::custom_name("custom:local"), Some("local"));
         assert_eq!(ProviderKind::custom_name("local"), None);
+        assert_eq!(ProviderKind::custom_profile("local"), "custom:local");
+        assert_eq!(ProviderKind::custom_profile(""), "custom:");
     }
 
     #[test]
