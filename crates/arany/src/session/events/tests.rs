@@ -2385,7 +2385,14 @@ mod payload_version_tests {
         for (event, field) in cases {
             let payload = event.payload().unwrap();
             assert_eq!(
-                Event::decode(event.kind(), 1, &payload, None, None).unwrap(),
+                Event::decode(
+                    event.kind(),
+                    payload_version(event.kind()).unwrap(),
+                    &payload,
+                    None,
+                    None
+                )
+                .unwrap(),
                 event
             );
             let mut document: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -2393,7 +2400,14 @@ mod payload_version_tests {
             document.as_object_mut().unwrap().remove(field);
             let omitted = serde_json::to_string(&document).unwrap();
             assert!(
-                Event::decode(event.kind(), 1, &omitted, None, None).is_err(),
+                Event::decode(
+                    event.kind(),
+                    payload_version(event.kind()).unwrap(),
+                    &omitted,
+                    None,
+                    None
+                )
+                .is_err(),
                 "{field} must be present"
             );
         }
@@ -2402,6 +2416,15 @@ mod payload_version_tests {
     #[test]
     fn provider_setup_events_use_registered_current_payloads() {
         let events = [
+            Event::ProviderSetupEditStarted {
+                operation_id: uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001")
+                    .expect("operation ID"),
+                target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::RoleRouting,
+                    identity: "roles".into(),
+                },
+                expected_digest: None,
+            },
             Event::ProviderSetupEditStarted {
                 operation_id: uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001")
                     .expect("operation ID"),
@@ -2419,13 +2442,21 @@ mod payload_version_tests {
             },
         ];
         let fixtures = [
+            r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"RoleRouting","identity":"roles"},"expected_digest":null}"#,
             r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#,
             r#"{"operation_id":"01900000-0000-7000-8000-000000000001","resulting_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"disposition":"Applied"}"#,
         ];
         for (event, fixture) in events.into_iter().zip(fixtures) {
             let payload = event.payload().expect("setup payload");
             let version = payload_version(event.kind()).expect("registered setup kind");
-            assert_eq!(version, 1);
+            assert_eq!(
+                version,
+                if event.kind() == "ProviderSetupEditStarted" {
+                    2
+                } else {
+                    1
+                }
+            );
             assert_eq!(payload, fixture);
             assert_eq!(
                 Event::decode(event.kind(), version, &payload, None, None).expect("decode"),

@@ -10,7 +10,9 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
+const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#;
+
+const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -226,6 +228,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
+    ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
 ];
 const GOAL_STARTED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_STARTED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","include_paths":null,"workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
@@ -2745,4 +2748,17 @@ fn file_removal_identity_steps_reject_new_calls_and_capabilities_in_old_payloads
         assert!((step.canonical)(&run.to_string()).is_none());
         assert!((step.transform)(run).is_none());
     }
+}
+
+#[test]
+fn setup_identity_step_rejects_routing_in_a_source_version_without_it() {
+    let step = REGISTRY.event_step("ProviderSetupEditStarted", 1).unwrap();
+    assert_eq!(
+        (step.canonical)(ROLE_SETUP_V1).as_deref(),
+        Some(ROLE_SETUP_V1)
+    );
+    let mut forged: Value = serde_json::from_str(ROLE_SETUP_V1).unwrap();
+    forged["target"] = serde_json::json!({"kind":"RoleRouting","identity":"roles"});
+    assert!((step.canonical)(&forged.to_string()).is_none());
+    assert!((step.transform)(forged).is_none());
 }
