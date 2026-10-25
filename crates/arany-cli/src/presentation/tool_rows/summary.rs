@@ -127,6 +127,9 @@ fn host(call: &ToolCall) -> String {
         ToolCall::GitPush { remote, branch } => format!("host Git push({branch} → {remote})"),
         ToolCall::GhPrCreate { repository, .. } => format!("host PR create({repository})"),
         ToolCall::GhPrList { repository, .. } => format!("host PR list({repository})"),
+        ToolCall::GhPrView { repository, number } => {
+            format!("host PR view #{number}({repository})")
+        }
         _ => unreachable!("host Git family operation"),
     }
 }

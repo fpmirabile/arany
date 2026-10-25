@@ -1946,38 +1946,57 @@ async fn move_history_projection_preserves_file_change_details() {
 }
 
 #[tokio::test]
-async fn gh_pr_list_projects_as_bounded_read() {
+async fn host_pr_reads_project_as_bounded_reads() {
     let _deadline = crate::cli::serve::tests::deadline();
-    let mut adapter = Adapter::new().await;
-    adapter
-        .prompt(json!([{"type":"text","text":"List pull requests"}]))
-        .await;
     let repository = "github.com/team/\u{001b}[2J\nproject";
-    let intent = adapter.intent(arany::ToolCall::GhPrList {
-        repository: repository.into(),
-        state: arany::PrState::Open,
-        base: None,
-        head: None,
-        limit: 10,
-    });
-    adapter.item(&intent, None).await;
-    let update = adapter.next().await["params"]["update"].clone();
-    assert_eq!(update["kind"], "read");
-    assert_eq!(
-        update["title"],
-        "List GitHub pull requests github.com/team/\\u{001b}[2J project"
-    );
-    assert!(
-        !update["title"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .any(char::is_control)
-    );
-    assert_eq!(update["rawInput"]["operation"], "gh_pr_list");
-    assert_eq!(update["rawInput"]["repository"], repository);
-    assert_eq!(update["locations"], json!([]));
-    adapter.close().await;
+    for (call, operation, label) in [
+        (
+            arany::ToolCall::GhPrList {
+                repository: repository.into(),
+                state: arany::PrState::Open,
+                base: None,
+                head: None,
+                limit: 10,
+            },
+            "gh_pr_list",
+            "List GitHub pull requests",
+        ),
+        (
+            arany::ToolCall::GhPrView {
+                repository: repository.into(),
+                number: 17,
+            },
+            "gh_pr_view",
+            "Inspect GitHub pull request",
+        ),
+    ] {
+        let mut adapter = Adapter::new().await;
+        adapter
+            .prompt(json!([{"type":"text","text":"Read pull requests"}]))
+            .await;
+        let intent = adapter.intent(call);
+        adapter.item(&intent, None).await;
+        let update = adapter.next().await["params"]["update"].clone();
+        assert_eq!(update["kind"], "read");
+        assert_eq!(
+            update["title"],
+            format!("{label} github.com/team/\\u{{001b}}[2J project")
+        );
+        assert!(
+            !update["title"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .any(char::is_control)
+        );
+        assert_eq!(update["rawInput"]["operation"], operation);
+        assert_eq!(update["rawInput"]["repository"], repository);
+        if operation == "gh_pr_view" {
+            assert_eq!(update["rawInput"]["number"], 17);
+        }
+        assert_eq!(update["locations"], json!([]));
+        adapter.close().await;
+    }
 }
 
 #[tokio::test]

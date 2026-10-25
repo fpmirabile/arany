@@ -5182,7 +5182,10 @@ mod goal_replay_tests {
                 changeset: Default::default(),
             })
             .unwrap()
-        } else if matches!(intent.call, ToolCall::GhPrList { .. }) {
+        } else if matches!(
+            intent.call,
+            ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. }
+        ) {
             String::from_utf8(content.to_vec()).unwrap()
         } else {
             serde_json::json!({ "sha256": crate::validate::hex_digest(content) }).to_string()
@@ -7802,6 +7805,171 @@ mod goal_replay_tests {
                 ),
                 "{source:?} in {mode:?}"
             );
+        }
+    }
+
+    fn pending_host_pr_view() -> (SessionView, RunId, AgentRunId, crate::tools::EffectIntent) {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let mut intent = child_intent(
+            run,
+            agent,
+            ToolCall::GhPrView {
+                repository: "github.com/o/r".into(),
+                number: 17,
+            },
+        );
+        intent.host = Some(crate::tools::types::HostIntent {
+            source_oid: "gh-pr-view-v1".into(),
+            refspec: "fixed-view-v1".into(),
+        });
+        intent.limits.network = crate::tools::types::NetworkGrant::Host;
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        apply(
+            &mut view,
+            verdict_event(
+                &intent,
+                Some(PermissionMode::Plan),
+                Decision::Allow,
+                PermissionSource::TypedPrefixRule,
+                PermissionSource::TypedPrefixRule,
+                true,
+            ),
+        )
+        .unwrap();
+        (view, run, agent, intent)
+    }
+
+    #[test]
+    fn host_pr_view_replays_only_with_typed_rule_and_host_receipt() {
+        let (mut view, run, agent, intent) = pending_host_pr_view();
+        let mut observation = observation_for(
+            intent.clone(),
+            br#"{"pull_request":{"number":17,"title":"Review","url":"https://github.com/o/r/pull/17","author":"octocat","state":"OPEN","draft":false,"base":"main","base_oid":"a","head":"topic","head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checks_head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","review_decision":null,"discussion_review_decision":null,"updated_at":"now","body":"","mergeable":"MERGEABLE","comments":{"items":[],"truncated":false},"reviews":{"items":[],"truncated":false},"checks":null,"stale":false,"truncated_fields":[]}}"#,
+        );
+        observation.attestation = Some(crate::tools::Attestation::Host(
+            crate::tools::UnguardedReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: "a".repeat(64),
+                pid: 1,
+                exit_code: Some(0),
+                descendants_confirmed_stopped: true,
+            },
+        ));
+        for (field, replacement) in [
+            ("number", serde_json::json!(18)),
+            (
+                "url",
+                serde_json::json!("https://github.com/other/repo/pull/17"),
+            ),
+        ] {
+            let mut invalid = observation.clone();
+            let mut output: serde_json::Value = serde_json::from_str(&invalid.output).unwrap();
+            output["pull_request"][field] = replacement;
+            invalid.output = output.to_string();
+            assert!(rejected(
+                &view,
+                Event::ToolFinished {
+                    checkpoint: None,
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: invalid,
+                }
+            ));
+        }
+        let mut stale = observation.clone();
+        let mut output: serde_json::Value = serde_json::from_str(&stale.output).unwrap();
+        output["pull_request"]["checks_head_oid"] =
+            serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        stale.output = output.to_string();
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation: stale,
+            }
+        ));
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation,
+            },
+        )
+        .expect("typed host PR view replays");
+    }
+
+    #[test]
+    fn host_pr_view_failure_text_is_operation_specific_on_replay() {
+        const RESULT_BUDGET: &str =
+            "host: pull request inspection did not fit the result budget; nothing was reported.";
+        for (output, exit_code, accepted) in [
+            (
+                "host: GitHub pull request inspection failed; no result was reported.",
+                7,
+                true,
+            ),
+            (
+                "host: GitHub pull request list failed; no result was reported.",
+                7,
+                false,
+            ),
+            (RESULT_BUDGET, 0, true),
+            (RESULT_BUDGET, 7, false),
+        ] {
+            let (mut view, run, agent, intent) = pending_host_pr_view();
+            let mut failure = observation_for(intent.clone(), b"view failed");
+            failure.disposition = crate::tools::ToolDisposition::Failed;
+            failure.output = output.into();
+            failure.attestation = Some(crate::tools::Attestation::Host(
+                crate::tools::UnguardedReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    executable_sha256: "a".repeat(64),
+                    pid: 2,
+                    exit_code: Some(exit_code),
+                    descendants_confirmed_stopped: true,
+                },
+            ));
+            if output == RESULT_BUDGET && accepted {
+                let mut missing_receipt = failure.clone();
+                missing_receipt.attestation = None;
+                assert!(rejected(
+                    &view,
+                    Event::ToolFinished {
+                        checkpoint: None,
+                        run_id: run,
+                        agent_run_id: agent,
+                        observation: missing_receipt,
+                    }
+                ));
+            }
+            let event = Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation: failure,
+            };
+            if accepted {
+                apply(&mut view, event).expect("view-specific failure replays");
+            } else {
+                assert!(rejected(&view, event), "{output}: exit {exit_code}");
+            }
         }
     }
 

@@ -465,7 +465,7 @@ impl RunLoop<'_> {
     ) -> Result<DispatchFacts<'a>, EngineError> {
         let intent = &phase.intent;
         let typed_host_read = phase.site == DispatchSite::Primary
-            && matches!(intent.call, ToolCall::GhPrList { .. })
+            && intent.call.is_host_pr_read()
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::TypedPrefixRule;
         let host_prefix_allow = phase.site == DispatchSite::Primary
@@ -638,8 +638,8 @@ impl RunLoop<'_> {
     ) -> Result<(), EngineError> {
         let unguarded = phase.intent.call.is_unguarded();
         let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
-        let primary_host_read = matches!(grant, Grant::Primary { .. })
-            && matches!(phase.intent.call, ToolCall::GhPrList { .. });
+        let primary_host_read =
+            matches!(grant, Grant::Primary { .. }) && phase.intent.call.is_host_pr_read();
         let mode = effective_permission_mode(runtime.permissions(), grant);
         let records_permission = mode.is_some()
             || unguarded

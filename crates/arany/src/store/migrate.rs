@@ -99,6 +99,12 @@ macro_rules! gh_pr_list_step {
     };
 }
 
+macro_rules! gh_pr_view_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_gh_pr_view_payload)
+    };
+}
+
 macro_rules! expiry_step {
     ($kind:literal, $from:literal) => {
         EventStep {
@@ -247,6 +253,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         gh_pr_list_step!("HookFinished", 16),
         gh_pr_list_step!("GoalPlanContractRecorded", 11),
         gh_pr_list_step!("ProviderCallRecorded", 21),
+        gh_pr_view_step!("ToolFinished", 28),
+        gh_pr_view_step!("HookStarted", 11),
+        gh_pr_view_step!("HookFinished", 17),
+        gh_pr_view_step!("GoalPlanContractRecorded", 12),
+        gh_pr_view_step!("ProviderCallRecorded", 23),
         expiry_step!("ToolFinished", 24),
         expiry_step!("HookStarted", 8),
         expiry_step!("HookFinished", 13),
@@ -364,7 +375,7 @@ const EVENT_FLOOR: [(&str, i64); 44] = [
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 22),
+    ("ToolStarted", 23),
     ("ContextCompacted", 7),
 ];
 
