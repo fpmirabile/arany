@@ -249,7 +249,9 @@ async fn inactive_host_archive_never_pins_authority_and_recreated_sources_refuse
     .await;
     assert!(matches!(
         second,
-        Err(EngineError::Tool(arany::ToolError::Configuration))
+        Err(EngineError::Tool(
+            arany::ToolError::InactiveHostArchiveConflict
+        ))
     ));
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     engine.close().await.unwrap();
