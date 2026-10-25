@@ -20,6 +20,7 @@
 | <a id="max_goal_active_ms"></a>[`MAX_GOAL_ACTIVE_MS`](#max_goal_active_ms) | 1800000 | ms | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_goal_runs"></a>[`MAX_GOAL_RUNS`](#max_goal_runs) | 16 | Runs | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_event_bytes"></a>[`MAX_EVENT_BYTES`](#max_event_bytes) | 65536 | bytes | `crates/arany/src/store.rs` |
+| <a id="max_compaction_event_bytes"></a>[`MAX_COMPACTION_EVENT_BYTES`](#max_compaction_event_bytes) | 409600 | bytes | `crates/arany/src/store.rs` |
 | <a id="max_session_lock_files"></a>[`MAX_SESSION_LOCK_FILES`](#max_session_lock_files) | 65536 | files | `crates/arany/src/store/state/lock.rs` |
 | <a id="max_state_overhead_files"></a>[`MAX_STATE_OVERHEAD_FILES`](#max_state_overhead_files) | 32 | files | `crates/arany/src/store/state/lock.rs` |
 | <a id="max_workspace_lock_files"></a>[`MAX_WORKSPACE_LOCK_FILES`](#max_workspace_lock_files) | 4096 | files | `crates/arany/src/store/state/lock.rs` |
