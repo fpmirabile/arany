@@ -461,45 +461,13 @@ impl RunLoop<'_> {
                 Some(save),
             ) => {
                 let saved = match save {
-                    save @ (RuleSave::Prefix(_) | RuleSave::HostPrefix) => {
-                        let expected = self
-                            .controls
-                            .host_settings
-                            .lock()
-                            .expect("host permissions lock")
-                            .as_ref()
-                            .filter(|settings| !settings.changed)
-                            .map(|settings| settings.digest);
-                        expected
-                            .ok_or(ToolError::ChangedInput)
-                            .and_then(|expected| {
-                                let saved = match save {
-                                    RuleSave::Prefix(prefix) => {
-                                        runtime.record_typed_prefix_rule(prefix, expected)
-                                    }
-                                    RuleSave::HostPrefix => {
-                                        runtime.record_host_prefix_rule(&intent, expected)
-                                    }
-                                    RuleSave::Session => {
-                                        unreachable!("session save handled separately")
-                                    }
-                                };
-                                saved.map(|digest| {
-                                    let mut pinned = self
-                                        .controls
-                                        .host_settings
-                                        .lock()
-                                        .expect("host permissions lock");
-                                    if let Some(settings) = pinned.as_mut()
-                                        && !settings.changed
-                                        && settings.digest == expected
-                                    {
-                                        settings.digest = Some(digest);
-                                    }
-                                })
-                            })
-                    }
                     RuleSave::Session => Ok(()),
+                    RuleSave::Prefix(prefix) => self.persist_rule(|expected| {
+                        runtime.record_typed_prefix_rule(prefix, expected)
+                    }),
+                    RuleSave::HostPrefix => self.persist_rule(|expected| {
+                        runtime.record_host_prefix_rule(&intent, expected)
+                    }),
                 };
                 if saved.is_ok() {
                     Verdict::Dispatch {
@@ -524,6 +492,34 @@ impl RunLoop<'_> {
             }
             (verdict, _) => verdict,
         })
+    }
+
+    fn persist_rule(
+        &self,
+        record: impl FnOnce(Option<[u8; 32]>) -> Result<[u8; 32], ToolError>,
+    ) -> Result<(), ToolError> {
+        let expected = self
+            .controls
+            .host_settings
+            .lock()
+            .expect("host permissions lock")
+            .as_ref()
+            .filter(|settings| !settings.changed)
+            .map(|settings| settings.digest)
+            .ok_or(ToolError::ChangedInput)?;
+        let digest = record(expected)?;
+        let mut pinned = self
+            .controls
+            .host_settings
+            .lock()
+            .expect("host permissions lock");
+        if let Some(settings) = pinned.as_mut()
+            && !settings.changed
+            && settings.digest == expected
+        {
+            settings.digest = Some(digest);
+        }
+        Ok(())
     }
 
     pub(super) fn terminal_mode(&self) -> Option<ApprovalMode> {
