@@ -2808,7 +2808,7 @@ fn assert_changed_protocol_requires_destination(pty: &mut SetupPty) {
     );
     cursor = pty.transcript.len();
     pty.input
-        .write_all(b"\x1b")
+        .write_all(b"\x03")
         .expect("cancel protocol change");
     wait_setup_choices(pty, cursor);
 }
