@@ -2844,29 +2844,36 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
     f.view();
 }
 
+pub(crate) fn background_fixture() -> Fixture {
+    let mut f = fixture();
+    for event in &mut f.events {
+        match event {
+            Event::ProviderCallRecorded { record, .. } => {
+                for plan in record.delegation.iter_mut().flatten() {
+                    if let ChildAssignment::Editor { assignment } = plan {
+                        assignment.mode = WorkerMode::Background;
+                    }
+                }
+            }
+            Event::AgentSpawned {
+                profile: None,
+                assignment: Some(pins),
+                ..
+            } => pins.request.mode = WorkerMode::Background,
+            _ => {}
+        }
+    }
+    f
+}
+
 #[test]
 fn worker_protocol_background_workers_let_the_primary_continue_before_release() {
     for background in [false, true] {
-        let mut f = fixture();
-        if background {
-            for event in &mut f.events {
-                match event {
-                    Event::ProviderCallRecorded { record, .. } => {
-                        for plan in record.delegation.iter_mut().flatten() {
-                            if let ChildAssignment::Editor { assignment } = plan {
-                                assignment.mode = WorkerMode::Background;
-                            }
-                        }
-                    }
-                    Event::AgentSpawned {
-                        profile: None,
-                        assignment: Some(pins),
-                        ..
-                    } => pins.request.mode = WorkerMode::Background,
-                    _ => {}
-                }
-            }
-        }
+        let mut f = if background {
+            background_fixture()
+        } else {
+            fixture()
+        };
         f.push(Event::GoalProviderCallReserved {
             goal_id: f.goal,
             run_id: f.run,

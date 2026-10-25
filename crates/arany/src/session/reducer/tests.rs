@@ -7756,8 +7756,12 @@ mod goal_replay_tests {
 
     #[test]
     fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
-        let (mut view, goal, run, child) = research_session();
-        let primary = view.runs[0].agents[0].id;
+        let fixture = super::super::worker_tests::background_fixture();
+        let mut view = SessionView::replay_open(fixture.session, &fixture.envelopes())
+            .unwrap()
+            .unwrap();
+        let (goal, run, primary, child) =
+            (fixture.goal, fixture.run, fixture.primary, fixture.child);
         let read = read_intent(run, primary, "src/lib.rs");
         apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
         apply(
@@ -7799,12 +7803,19 @@ mod goal_replay_tests {
         assert_eq!(view.goals[0].compaction_call_reserved, Some(run));
         assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
         assert!(rejected(&view, child_call));
-        let compacted = covering_compaction(&view, goal, run, 1);
+        let count = u32::try_from(view.runs[0].tools.len()).unwrap();
+        let compacted = covering_compaction(&view, goal, run, count);
         apply(&mut view, compacted).expect("primary compaction settles independently");
         assert_eq!(view.goals[0].compaction_call_reserved, None);
         assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::Finished),
+        )
+        .expect("child call settles independently");
+        assert!(view.goals[0].unobserved_provider_calls.is_empty());
         apply(&mut view, primary_call).expect("primary resumes after its compaction");
-        assert_eq!(view.goals[0].unobserved_provider_calls, [child, primary]);
+        assert_eq!(view.goals[0].unobserved_provider_calls, [primary]);
     }
 
     #[test]
