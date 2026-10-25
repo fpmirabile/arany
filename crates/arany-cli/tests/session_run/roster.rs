@@ -734,9 +734,8 @@ mod journey {
     };
 
     fn preset(child_profiles: &[&str]) -> Vec<u8> {
-        let route =
-            json!({"provider":"custom:local","model":"model-1","effort":null,"account_id":null});
-        serde_json::to_vec(&json!({"version":1,"profiles":[
+        let route = json!({"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null});
+        serde_json::to_vec(&json!({"version":2,"profiles":[
             {"name":"main","routes":[route]},
             {"name":"inspect","routes":[route]}
         ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":child_profiles}]})).unwrap()
