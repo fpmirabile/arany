@@ -49,7 +49,9 @@ fn read_pasted_workspace_image(
     let Some(path) = pasted_png_path(input, workspace)? else {
         return Ok(None);
     };
-    let file = open_pinned_workspace_png(workspace, &path, identity)?;
+    let Some(file) = open_pinned_workspace_png(workspace, &path, identity)? else {
+        return Ok(None);
+    };
     let initial_capacity = file
         .metadata()
         .map_err(|_| "PNG file is unavailable")?
@@ -103,7 +105,7 @@ fn open_pinned_workspace_png(
     workspace: &std::path::Path,
     relative: &std::path::Path,
     identity: arany::WorkspaceIdentity,
-) -> Result<std::fs::File, &'static str> {
+) -> Result<Option<std::fs::File>, &'static str> {
     use rustix::fs::{Mode, OFlags, fstat, open, openat};
     use std::os::unix::fs::MetadataExt;
 
@@ -125,7 +127,7 @@ fn open_pinned_workspace_png(
     let mut directory = std::fs::File::from(root);
     for component in &components[..components.len() - 1] {
         directory = std::fs::File::from(
-            openat(
+            match openat(
                 &directory,
                 *component,
                 OFlags::RDONLY
@@ -134,8 +136,11 @@ fn open_pinned_workspace_png(
                     | OFlags::NONBLOCK
                     | OFlags::NOFOLLOW,
                 Mode::empty(),
-            )
-            .map_err(|_| "PNG path is unavailable or unsafe")?,
+            ) {
+                Ok(directory) => directory,
+                Err(rustix::io::Errno::NOENT) => return Ok(None),
+                Err(_) => return Err("PNG path is unavailable or unsafe"),
+            },
         );
         if fstat(&directory)
             .map_err(|_| "PNG path is unavailable")?
@@ -146,13 +151,16 @@ fn open_pinned_workspace_png(
         }
     }
     let file = std::fs::File::from(
-        openat(
+        match openat(
             &directory,
             components[components.len() - 1],
             OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
             Mode::empty(),
-        )
-        .map_err(|_| "PNG path is unavailable or unsafe")?,
+        ) {
+            Ok(file) => file,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(_) => return Err("PNG path is unavailable or unsafe"),
+        },
     );
     let metadata = file.metadata().map_err(|_| "PNG file is unavailable")?;
     if !metadata.is_file() || metadata.dev() != root_stat.st_dev as u64 || metadata.nlink() != 1 {
@@ -161,7 +169,7 @@ fn open_pinned_workspace_png(
     if metadata.len() > arany::MAX_IMAGE_BYTES as u64 {
         return Err("image is too large; choose a smaller PNG");
     }
-    Ok(file)
+    Ok(Some(file))
 }
 
 #[cfg(test)]
@@ -178,25 +186,35 @@ mod workspace_image_tests {
         let bytes = STANDARD
             .decode(arany::test_support::test_image().base64())
             .unwrap();
-        std::fs::write(workspace.join("photo.png"), &bytes).unwrap();
+        std::fs::create_dir(workspace.join("sub")).unwrap();
+        for path in ["photo.png", "sub/photo.png", "PHOTO.PNG"] {
+            std::fs::write(workspace.join(path), &bytes).unwrap();
+        }
         let metadata = std::fs::metadata(&workspace).unwrap();
         let identity = arany::WorkspaceIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         };
-        let image = read_pasted_workspace_image("photo.png", &workspace, identity)
-            .unwrap()
-            .unwrap();
-        assert_eq!(image.byte_len(), bytes.len());
         let absolute = workspace.join("photo.png");
-        assert!(
-            read_pasted_workspace_image(absolute.to_str().unwrap(), &workspace, identity)
+        for path in [
+            "photo.png",
+            "sub/photo.png",
+            "PHOTO.PNG",
+            absolute.to_str().unwrap(),
+        ] {
+            let image = read_pasted_workspace_image(path, &workspace, identity)
                 .unwrap()
-                .is_some()
-        );
+                .unwrap();
+            assert_eq!(image.byte_len(), bytes.len());
+        }
         assert!(read_pasted_workspace_image("../photo.png", &workspace, identity).is_err());
         assert!(read_pasted_workspace_image("/tmp/photo.png", &workspace, identity).is_err());
-        assert!(read_pasted_workspace_image("missing.png", &workspace, identity).is_err());
+        for path in ["missing.png", "missing/photo.png", "Please resize logo.png"] {
+            assert_eq!(
+                read_pasted_workspace_image(path, &workspace, identity),
+                Ok(None)
+            );
+        }
         assert!(
             read_pasted_workspace_image(
                 "photo.png",
@@ -209,12 +227,44 @@ mod workspace_image_tests {
             .is_err()
         );
         std::os::unix::fs::symlink("photo.png", workspace.join("linked.png")).unwrap();
-        assert!(read_pasted_workspace_image("linked.png", &workspace, identity).is_err());
+        std::os::unix::fs::symlink("missing.png", workspace.join("dangling.png")).unwrap();
+        std::os::unix::fs::symlink("sub", workspace.join("linked-sub")).unwrap();
+        std::fs::hard_link(
+            workspace.join("sub/photo.png"),
+            workspace.join("hard-linked.png"),
+        )
+        .unwrap();
+        for path in [
+            "linked.png",
+            "dangling.png",
+            "linked-sub/photo.png",
+            "hard-linked.png",
+            "sub/photo.png",
+        ] {
+            assert!(
+                read_pasted_workspace_image(path, &workspace, identity).is_err(),
+                "{path}"
+            );
+        }
+        std::fs::write(workspace.join("malformed.png"), b"not a PNG").unwrap();
+        assert_eq!(
+            read_pasted_workspace_image("malformed.png", &workspace, identity),
+            Err("invalid or unsupported PNG image")
+        );
+        std::fs::File::create(workspace.join("oversized.png"))
+            .unwrap()
+            .set_len(arany::MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            read_pasted_workspace_image("oversized.png", &workspace, identity),
+            Err("image is too large; choose a smaller PNG")
+        );
         let replaced = temp.path().join("replaced-workspace");
         std::fs::rename(&workspace, replaced).unwrap();
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("photo.png"), &bytes).unwrap();
         assert!(read_pasted_workspace_image("photo.png", &workspace, identity).is_err());
+        assert!(read_pasted_workspace_image("missing.png", &workspace, identity).is_err());
     }
 }
 use commands::help_len;

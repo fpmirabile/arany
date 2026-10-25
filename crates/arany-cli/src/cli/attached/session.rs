@@ -657,7 +657,7 @@ impl AttachedSession {
             InteractiveCommand::Storage => {
                 crate::cli::storage::attached(
                     &mut self.terminal,
-                    self.admission.workspace.clone(),
+                    (&self.admission.workspace, self.admission.workspace_identity),
                     self.admission.state_dir.clone(),
                     &self.view,
                     &mut self.composer,

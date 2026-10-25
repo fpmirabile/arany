@@ -875,6 +875,10 @@ fn isolated_stage() {
             .count(),
         1
     );
+    assert!(
+        text.contains("Draft (not sent):\r\n  catalog draft\r\n  Image 1: PNG 1x1, 69 B\r\n"),
+        "retained draft does not contain the pasted image beside its existing text"
+    );
     assert!(!text.contains("Notice: Catalog loading; draft retained; Ctrl+C cancels"));
     unsaved("/root/state-six");
     assert!(text.contains("Provider: openai\r\nModel: gpt-offline-new\r\n"));

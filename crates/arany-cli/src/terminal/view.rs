@@ -1693,7 +1693,7 @@ fn draw_composer(
             > usize::from(composer_area.width).saturating_sub(12);
         if compact_image_chip {
             let index = composer.selected_image().unwrap_or(0);
-            position = format!(
+            let chip = format!(
                 " {}[Image #{}]",
                 if composer.selected_image().is_some() {
                     ">"
@@ -1702,6 +1702,14 @@ fn draw_composer(
                 },
                 index + 1
             );
+            position = if UnicodeWidthStr::width(chip.as_str())
+                + UnicodeWidthStr::width(position.as_str())
+                <= usize::from(composer_area.width)
+            {
+                format!("{chip}{position}")
+            } else {
+                chip
+            };
         } else {
             position = all_chips;
         }

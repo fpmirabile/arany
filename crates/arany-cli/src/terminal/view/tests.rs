@@ -1702,6 +1702,27 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         assert_eq!(composer.text(), "line0\nline1\nline2\nline3\nline4\nline5");
     }
 
+    composer.apply(TerminalInput::End);
+    for _ in 0..arany::MAX_MESSAGE_IMAGES {
+        composer
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+    }
+    for width in [16, 28, 32, 40, 80] {
+        for color in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                .unwrap();
+            let heading = buffer_row(terminal.backend().buffer(), 1);
+            assert!(heading.contains(">[Image #4]"), "{width}: {heading}");
+            assert!(
+                heading.contains(if width >= 40 { "rows 3-6/6" } else { "6/6" }),
+                "{width}: {heading}"
+            );
+        }
+    }
+
     composer.clear();
     for _ in 0..8 * 1024 {
         assert_eq!(
