@@ -1163,6 +1163,7 @@ fn host_admission_tool(
             approval_cause: None,
             cache_update: crate::CacheUpdate::NotApplicable,
         }),
+        started_sequence: Some(0),
         permission_verdict: Some(crate::permissions::PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),

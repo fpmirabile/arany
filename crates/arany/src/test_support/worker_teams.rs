@@ -1626,7 +1626,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 Some(Attestation::WorkerCommand { .. })
             ));
             assert_eq!(observation.cache_update, CacheUpdate::Discarded);
-            assert!(events.iter().any(|e| matches!(&e.event, Event::ToolPermissionDecided { verdict, .. } if verdict.intent_digest == observation.intent.digest())));
+            assert!(events.iter().any(|e| matches!(&e.event, Event::ToolStarted { verdict: Some(verdict), .. } if verdict.intent_digest == observation.intent.digest())));
         }
     }
     if case == "conflict" {
@@ -1806,10 +1806,8 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
             })
             .expect("named recovery checkpoint");
         let last = if checkpoint == "private_unknown"
-            && matches!(
-                original.events[last + 1].event,
-                Event::ToolPermissionDecided { .. }
-            ) {
+            && matches!(original.events[last + 1].event, Event::ToolStarted { .. })
+        {
             last + 1
         } else {
             last

@@ -641,13 +641,10 @@ impl RunLoop<'_> {
         let primary_host_read = matches!(grant, Grant::Primary { .. })
             && matches!(phase.intent.call, ToolCall::GhPrList { .. });
         let mode = effective_permission_mode(runtime.permissions(), grant);
-        if mode.is_none()
-            && !unguarded
-            && !primary_host_read
-            && !(matches!(grant, Grant::Primary { .. }) && git_write)
-        {
-            return Ok(());
-        }
+        let records_permission = mode.is_some()
+            || unguarded
+            || primary_host_read
+            || matches!(grant, Grant::Primary { .. }) && git_write;
         let approved = matches!(resolution.verdict, Verdict::Dispatch { .. });
         // An approving review that did not lead to dispatch is not an AI approval.
         let source = if !approved && resolution.source == PermissionSource::AiReview {
@@ -655,10 +652,12 @@ impl RunLoop<'_> {
         } else {
             resolution.source
         };
-        self.append(Event::ToolPermissionDecided {
+        self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: phase.intent.agent_run_id,
-            verdict: PermissionVerdict {
+            intent: phase.intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, &phase.intent)?,
+            verdict: records_permission.then(|| PermissionVerdict {
                 host: phase
                     .host_permission
                     .verdict(approved, unguarded, resolution.save),
@@ -671,7 +670,7 @@ impl RunLoop<'_> {
                 hook_restriction: phase.hooks.restriction,
                 hooks: phase.hooks.count,
                 narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
-            },
+            }),
         })
         .await
     }

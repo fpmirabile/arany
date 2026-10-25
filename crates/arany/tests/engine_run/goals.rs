@@ -7591,7 +7591,10 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     let verdicts: Vec<_> = events
         .iter()
         .filter_map(|envelope| match &envelope.event {
-            Event::ToolPermissionDecided { verdict, .. } => Some(verdict),
+            Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } => Some(verdict),
             _ => None,
         })
         .collect();

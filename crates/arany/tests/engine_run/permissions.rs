@@ -417,7 +417,10 @@ async fn a_read_denied_skill_resource_is_denied_before_any_guard_task() {
     let verdict = events
         .iter()
         .find_map(|envelope| match &envelope.event {
-            Event::ToolPermissionDecided { verdict, .. } => Some(verdict),
+            Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } => Some(verdict),
             _ => None,
         })
         .expect("Skill verdict");
@@ -586,14 +589,17 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
             .iter()
             .enumerate()
             .find_map(|(i, e)| match &e.event {
-                Event::ToolPermissionDecided { verdict, .. } => Some((i, verdict)),
+                Event::ToolStarted {
+                    verdict: Some(verdict),
+                    ..
+                } => Some((i, verdict)),
                 _ => None,
             })
             .unwrap();
         assert!(
             events[..verdict_index]
                 .iter()
-                .any(|e| matches!(e.event, Event::ToolStarted { .. }))
+                .any(|e| matches!(e.event, Event::ProviderCallRecorded { .. }))
         );
         assert!(
             events[verdict_index + 1..]
@@ -808,4 +814,73 @@ async fn assert_decline_summaries_retained(
     );
     assert!(sources.iter().any(|source| source.contains("Rust and UTC")));
     assert_eq!(requests[1].previous_summary.as_deref(), Some(summary));
+}
+
+#[tokio::test]
+async fn hook_free_permission_step_commits_four_events_and_replays_its_verdict() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+    let state = temp.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(&state.join("permissions.json"), b"{}");
+    let engine = engine_support::open(
+        root,
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(arany::ToolCall::Read {
+            path: "notes/facts.txt".into(),
+            offset: None,
+            limit: Some(32),
+        }),
+        arany::test_support::goals::finish_with("done"),
+    ]));
+    let mut input = request(&workspace, "Read the facts");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+    let start = events
+        .iter()
+        .position(|event| matches!(event.event, Event::ToolStarted { .. }))
+        .unwrap();
+    assert_eq!(
+        events[start - 2..=start + 1]
+            .iter()
+            .map(|event| event.event.kind())
+            .collect::<Vec<_>>(),
+        [
+            "GoalProviderCallReserved",
+            "ProviderCallRecorded",
+            "ToolStarted",
+            "ToolFinished"
+        ]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::ToolProposed { .. }))
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let verdict = view.runs[0].tools[0].permission_verdict.as_ref().unwrap();
+    let expected: [u8; 32] =
+        Sha256::digest(serde_json::to_vec(&view.runs[0].tools[0].intent).unwrap()).into();
+    assert_eq!(verdict.intent_digest, expected);
+    assert!(verdict.approved);
+    assert_eq!(view.runs[0].tools, outcome.run.tools);
 }

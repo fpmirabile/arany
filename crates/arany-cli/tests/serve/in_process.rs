@@ -1483,6 +1483,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -2592,8 +2593,8 @@ async fn approval_scenario(case: ApprovalCase, executor: Executor) {
         );
     }
     if let Some(approval) = wire_approval {
-        let event = events.iter().find(|event| matches!(&event.event, Event::ToolStarted { intent, .. } if json!(intent.id) == approval["params"]["itemId"])).unwrap();
-        let Event::ToolStarted { intent, .. } = &event.event else {
+        let event = events.iter().find(|event| matches!(&event.event, Event::ToolProposed { intent, .. } if json!(intent.id) == approval["params"]["itemId"])).unwrap();
+        let Event::ToolProposed { intent, .. } = &event.event else {
             unreachable!()
         };
         assert_eq!(approval["params"]["intent"], json!(intent));

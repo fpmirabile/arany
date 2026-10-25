@@ -23,6 +23,12 @@ pub(super) fn validate_finished(
     };
     super::super::super::checkpoint::validate_finished(current, observation, checkpoint.as_ref())?;
     let run = active_run(current, *run_id)?;
+    if super::pending_tool(run, *agent_run_id)?
+        .started_sequence
+        .is_none()
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     let configured = run
         .config
         .as_ref()
@@ -263,7 +269,7 @@ fn apply_primary_finished(
     Ok(())
 }
 
-pub(super) fn started(
+pub(super) fn proposed(
     current: &mut SessionView,
     run_id: RunId,
     agent_run_id: AgentRunId,
@@ -336,6 +342,7 @@ fn start_primary_tool(
         observation: None,
         review_call_index: None,
         permission_verdict: None,
+        started_sequence: None,
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,
@@ -387,4 +394,60 @@ fn valid_origin(
                 .and_then(|tool| tool.observation.as_ref())
                 .is_none_or(|observation| !observation.stops_run())
     }
+}
+
+pub(super) fn started(
+    current: &mut SessionView,
+    event: &Event,
+    prior: u64,
+) -> Result<(), ReplayError> {
+    let Event::ToolStarted {
+        run_id,
+        agent_run_id,
+        intent,
+        active_ceiling_ms,
+        verdict,
+    } = event
+    else {
+        return Err(ReplayError::InvalidTransition);
+    };
+    let pending = super::pending_tool(active_run(current, *run_id)?, *agent_run_id)
+        .is_ok_and(|tool| tool.intent.id == intent.id && tool.started_sequence.is_none());
+    if !pending
+        && verdict
+            .as_ref()
+            .is_some_and(|verdict| verdict.source == PermissionSource::Human)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if !pending {
+        proposed(
+            current,
+            *run_id,
+            *agent_run_id,
+            &intent.clone().into(),
+            *active_ceiling_ms,
+        )?;
+    }
+    let tool = super::pending_tool(active_run(current, *run_id)?, *agent_run_id)?;
+    if tool.intent != intent.clone().into() || tool.started_sequence.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if verdict.is_some() {
+        super::permission::apply(current, event)?;
+    } else {
+        let run = active_run(current, *run_id)?;
+        if super::permissions_pinned(run)
+            || super::definition_mode(run, *agent_run_id)?.is_some()
+            || intent.call.is_host()
+            || intent.call.is_unguarded()
+            || intent.call.is_git() && intent.call.facts().mutates
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    super::pending_tool(active_run(current, *run_id)?, *agent_run_id)?.started_sequence =
+        Some(prior);
+    super::record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
+    Ok(())
 }

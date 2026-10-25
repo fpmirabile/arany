@@ -21,6 +21,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const EDITOR_RUNTIME_DIVISOR: u64 = 4;
+const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
 // Cache restoration and publication need additional time within the delegation allowance.
 const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
 
@@ -227,8 +228,8 @@ impl RunLoop<'_> {
                 )
             }
         };
-        // This intent's ToolStarted can exceed the ordinary Event bound; an observation slot covers it.
-        let observations = observations.saturating_add(1);
+        // Proposal and start each carry the complete intent and can exceed the ordinary Event bound.
+        let observations = observations.saturating_add(MAX_INTENT_RECORDS_PER_TOOL);
         let mut kind = AdmissionKind::Operation;
         let tail = if worker {
             let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;
@@ -397,6 +398,78 @@ impl RunLoop<'_> {
         };
     }
 
+    pub(super) async fn propose_tool(&self, intent: &EffectIntent) -> Result<(), EngineError> {
+        let proposed = self.ledger().view(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.tools
+                    .iter()
+                    .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                    .any(|tool| tool.intent.id == intent.id)
+            })
+        })?;
+        if !proposed {
+            let runtime = self.controls.tools.ok_or(EngineError::CoordinatorFailed)?;
+            self.append(Event::ToolProposed {
+                run_id: self.run_id,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
+            })
+            .await?;
+            if matches!(
+                intent.target,
+                crate::session::worker::EffectTarget::WorkerView { .. }
+            ) {
+                self.worker
+                    .lock()
+                    .await
+                    .get_mut(&intent.agent_run_id)
+                    .ok_or(EngineError::CoordinatorFailed)?
+                    .note_intent(intent);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn tool_ceiling(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<u64, EngineError> {
+        let post_call = match &intent.call {
+            ToolCall::ApplyChangeset {
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest,
+                        ..
+                    },
+            } => self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| {
+                        run.tools
+                            .iter()
+                            .find(|tool| tool.intent.digest() == *source_intent_digest)
+                    })
+                    .map(|tool| tool.intent.call.clone())
+            })?,
+            _ => None,
+        };
+        let (_, pre_ms, post_ms) = self.hook_admission(
+            runtime,
+            &intent.call,
+            post_call.as_ref().unwrap_or(&intent.call),
+        );
+        let action_ms = if intent.agent_run_id == self.primary_id {
+            tool_action_ms(runtime, intent)
+                .saturating_add(pre_ms)
+                .saturating_add(post_ms)
+        } else {
+            0
+        };
+        self.ledger().active_ceiling(action_ms)
+    }
+
     async fn record_delegation_deadline(
         &self,
         grant: &Grant<'_>,
@@ -419,11 +492,29 @@ impl RunLoop<'_> {
         {
             return Ok(Err(refusal));
         }
+        let verdict =
+            effective_permission_mode(runtime.permissions(), grant).map(|mode| PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                mode: Some(mode),
+                decision: permission.decision,
+                basis: permission.basis,
+                source: if permission.decision == Decision::Ask {
+                    PermissionSource::UnavailableApproval
+                } else {
+                    permission.basis
+                },
+                approved: false,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            });
         self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: child.agent_run_id,
             intent: intent.clone().into(),
             active_ceiling_ms: self.ledger().active_ceiling(0)?,
+            verdict,
         })
         .await?;
         if child.kind.is_editor() {
@@ -433,29 +524,6 @@ impl RunLoop<'_> {
                 .get_mut(&child.agent_run_id)
                 .ok_or(EngineError::CoordinatorFailed)?
                 .note_intent(&intent);
-        }
-        if let Some(mode) = effective_permission_mode(runtime.permissions(), grant) {
-            self.append(Event::ToolPermissionDecided {
-                run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
-                verdict: PermissionVerdict {
-                    host: None,
-                    intent_digest: intent.digest(),
-                    mode: Some(mode),
-                    decision: permission.decision,
-                    basis: permission.basis,
-                    source: if permission.decision == Decision::Ask {
-                        PermissionSource::UnavailableApproval
-                    } else {
-                        permission.basis
-                    },
-                    approved: false,
-                    hook_restriction: None,
-                    hooks: 0,
-                    narrowed: false,
-                },
-            })
-            .await?;
         }
         self.append(Event::ToolFinished {
             run_id: self.run_id,
@@ -489,7 +557,7 @@ impl RunLoop<'_> {
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
+        let (hook_events, _, _) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
             .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
             .await?
@@ -498,28 +566,6 @@ impl RunLoop<'_> {
         }
         let agent_run_id = intent.agent_run_id;
         let intent_id = intent.id;
-        // A researcher's Tool runs inside its delegation's reservation.
-        let action_ms = match grant {
-            Grant::Primary { .. } => tool_action_ms(runtime, &intent)
-                .saturating_add(pre_ms)
-                .saturating_add(post_ms),
-            Grant::Researcher { .. } => 0,
-        };
-        self.append(Event::ToolStarted {
-            run_id: self.run_id,
-            agent_run_id,
-            intent: intent.clone().into(),
-            active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
-        })
-        .await?;
-        if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
-        }
         let mut narrowed = None;
         let mut candidate = None;
         let Admission::Reserved(verdict) = self
@@ -528,6 +574,19 @@ impl RunLoop<'_> {
         else {
             return Ok(Err(StopCause::ActiveTime));
         };
+        if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
+            self.worker
+                .lock()
+                .await
+                .get_mut(&agent_run_id)
+                .ok_or(EngineError::CoordinatorFailed)?
+                .note_intent(match &verdict {
+                    Verdict::Dispatch { intent, .. } => intent,
+                    Verdict::Deny(answer) | Verdict::Narrow(answer, _) => {
+                        &answer.observation.intent
+                    }
+                });
+        }
         let answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {

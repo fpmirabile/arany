@@ -249,7 +249,7 @@
             "ToolStarted",
             "ToolFinished",
             "SupervisorVerdictRecorded",
-            "ToolPermissionDecided",
+            "ToolProposed",
             "HookStarted",
             "HookFinished",
             "AgentFinished",
@@ -2771,5 +2771,5 @@
     }
   },
   "title": "arany-protocol",
-  "version": "1"
+  "version": "2"
 }

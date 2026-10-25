@@ -212,6 +212,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
         record(ProviderCallDisposition::ToolRequested),
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: primary,
             intent: intent.into(),
@@ -698,6 +699,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let mut integrated = prefix[..TOOL_STARTED].to_vec();
     integrated.extend([
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: primary,
             intent: command_intent.clone(),
@@ -709,6 +711,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             command_result.clone(),
         ),
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: primary,
             intent: integration_intent.clone(),

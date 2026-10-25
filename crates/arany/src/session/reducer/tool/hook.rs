@@ -33,7 +33,9 @@ pub(super) fn started(
         (tool, adjacent && succeeded)
     } else {
         let tool = pending_tool(run, agent_run_id)?;
-        let fresh = tool.permission_verdict.is_none() && tool.observation.is_none();
+        let fresh = tool.started_sequence.is_none()
+            && tool.permission_verdict.is_none()
+            && tool.observation.is_none();
         (tool, fresh)
     };
     let finished_restriction = tool.hooks.iter().any(|view| {

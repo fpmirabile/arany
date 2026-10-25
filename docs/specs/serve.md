@@ -77,7 +77,7 @@ inventing a completion.
 | `arany generate-schema` | Writes one pretty-printed JSON Schema document plus a final newline to stdout; stderr is empty on success; no State, credentials or Engine are opened. |
 | `arany generate-schema --out DIR` | Creates DIR as needed and atomically replaces `DIR/arany-protocol.schema.json` using an exclusively created temporary file in DIR; success leaves stdout and stderr empty. Refuses an existing symlink or non-file target. Failure exits 1 with a compiled `error: …` diagnostic on stderr. Success exits 0. |
 
-The document is titled `arany-protocol`, carries schema artifact `version: "1"`,
+The document is titled `arany-protocol`, carries schema artifact `version: "2"`,
 uses JSON Schema draft 2020-12 and sorted object keys, and contains `$defs`,
 `methods`, `notifications` and `serverRequests`. Registry entries reference
 schemas in `$defs`; the document root validates JSON-RPC envelopes. Consumers
@@ -264,8 +264,8 @@ never reused across turns. Requests go only to the client owning the turn.
 
 All carry `{threadId,turnId,itemId,startedAtMs,intent,lines}`.
 `intent` is the exact journaled immutable EffectIntent; `itemId` is its UUID,
-`turnId` its Run, `startedAtMs` the matching committed ToolStarted timestamp,
-and there is no expiry field. `lines` uses the terminal's sanitized human
+`turnId` its Run, `startedAtMs` the matching committed `ToolProposed` timestamp,
+and there is no expiry field. The proposal commits before approval; `ToolStarted` follows the decision and carries its verdict. A proposal that never starts is omitted from historical Tool items. `lines` uses the terminal's sanitized human
 approval renderer, including its full unguarded warning when applicable.
 Failure to recover the matching committed intent, or a request above the
 message size limit, records unavailable approval without sending a request.
@@ -371,7 +371,7 @@ pre-beta; stored formats follow the [journal migration contract](./execution.md#
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Provider setup blocks continuation | Pending and Uncertain setup edits refuse ordinary/autonomous turns, Goal resume and thread reload with `providerSetupBlocked`; Events remain unchanged and inference/compaction Provider calls stay at zero | [`setup_edits_block_loaded_thread_prompts_without_events_or_provider_calls`](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
-| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; late accept to a live primary request dispatches once; decline denies, invalid result/EOF/unsent delivery are unavailable, cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; proposal-only death is resumable without a Tool effect; approval payload equals the committed proposal intent and timestamp; late accept to a live primary request dispatches once; decline denies, invalid result/EOF/unsent delivery are unavailable, cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Session lifecycle | Close frees a slot after 64 loaded threads, retains durable history and cancels an active submission before releasing it; list pages include only admitted Workspace metadata, enforce page/line/cursor bounds, reject foreign and invalid cursors and never execute | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |

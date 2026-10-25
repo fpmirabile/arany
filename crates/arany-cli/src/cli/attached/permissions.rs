@@ -945,6 +945,7 @@ mod tests {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,

@@ -22,7 +22,6 @@ pub(super) fn apply(
 ) -> Result<(), ReplayError> {
     lifecycle::validate_finished(current, event)?;
     match event {
-        Event::ToolPermissionDecided { .. } => permission::apply(current, event)?,
         Event::HookStarted {
             run_id,
             agent_run_id,
@@ -33,18 +32,19 @@ pub(super) fn apply(
             agent_run_id,
             outcome,
         } => hook::finished(current, *run_id, *agent_run_id, outcome, prior)?,
-        Event::ToolStarted {
+        Event::ToolProposed {
             run_id,
             agent_run_id,
             intent,
             active_ceiling_ms,
-        } => lifecycle::started(
+        } => lifecycle::proposed(
             current,
             *run_id,
             *agent_run_id,
             &intent.clone().into(),
             *active_ceiling_ms,
         )?,
+        Event::ToolStarted { .. } => lifecycle::started(current, event, prior)?,
         Event::ToolFinished { .. } => lifecycle::finished(current, event, prior)?,
         _ => return Err(ReplayError::InvalidTransition),
     }
@@ -398,6 +398,7 @@ pub(super) fn before_lifecycle_event(
     }) && matches!(
         event,
         Event::GoalProviderCallReserved { .. }
+            | Event::ToolProposed { .. }
             | Event::ToolStarted { .. }
             | Event::HookStarted { .. }
             | Event::AgentSpawned { .. }

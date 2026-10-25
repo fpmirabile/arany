@@ -170,6 +170,8 @@ Budget-stop prompt results retain their existing `max_tokens` or `max_turn_reque
 
 ### Tool updates and permissions
 
+The underlying serve schema artifact is version 2: permission verdicts are fields of `ToolStarted`, and `ToolPermissionDecided` is absent. A permission request refers to a committed `ToolProposed` intent and timestamp; it may precede the Tool's started update. Proposals that never start create no historical Tool item. ACP's negotiated protocol version remains 1.
+
 Only committed serve items produce Tool updates. `item/started` becomes
 `tool_call` with the immutable intent ID, compiled title plus bounded escaped
 intent fields, kind, pending status and locations. Command calls are `execute`,

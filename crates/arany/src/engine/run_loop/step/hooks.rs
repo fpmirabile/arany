@@ -420,6 +420,7 @@ impl RunLoop<'_> {
         if !self.task_fits_all(&runtime, intent.agent_run_id, &plans) {
             return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
         }
+        self.propose_tool(intent).await?;
         self.run_pre_tool_hooks(
             PreHook {
                 grant,

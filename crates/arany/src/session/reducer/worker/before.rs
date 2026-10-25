@@ -422,6 +422,7 @@ pub(super) fn check(
         && matches!(
             event,
             Event::AgentSpawned { .. }
+                | Event::ToolProposed { .. }
                 | Event::ToolStarted { .. }
                 | Event::GoalProviderCallReserved { .. }
                 | Event::ProviderFallbackUsed { .. }

@@ -33,6 +33,7 @@ mod goal_recovery_tests {
         let tool = ToolView {
             checkpoint: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             intent: intent.clone(),
@@ -1518,6 +1519,7 @@ mod goal_replay_tests {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -1526,7 +1528,7 @@ mod goal_replay_tests {
         assert!(rejected(&elsewhere, fallback.clone()));
         apply(
             &mut view,
-            Event::ToolStarted {
+            Event::ToolProposed {
                 run_id: run,
                 agent_run_id: child,
                 intent: read.clone().into(),
@@ -1537,6 +1539,7 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, child)).expect("review reservation");
         apply(&mut view, fallback).expect("child review fallback");
         assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+        apply(&mut view, tool_started(run, child, &read)).unwrap();
         apply(
             &mut view,
             Event::ToolFinished {
@@ -1576,7 +1579,7 @@ mod goal_replay_tests {
         .expect("child Tool request");
         apply(
             &mut view,
-            Event::ToolStarted {
+            Event::ToolProposed {
                 run_id: run,
                 agent_run_id: child,
                 intent: read.into(),
@@ -1906,6 +1909,7 @@ mod goal_replay_tests {
         review.runs[0].tools.push(ToolView {
             checkpoint: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             intent,
@@ -2830,6 +2834,141 @@ mod goal_replay_tests {
         assert!(budget.spent(usage(60_000)));
     }
 
+    fn budget_closed_proposal_prefix(
+        goal: GoalId,
+        run: RunId,
+        agent: AgentRunId,
+    ) -> (Vec<Event>, EffectIntent) {
+        let mut pinned = config(CollaborationPolicy::Single, true);
+        pinned.tool_policy.as_mut().unwrap().permissions_digest = Some([3; 32]);
+        let mut events = vec![goal_started(
+            goal,
+            GoalBudget {
+                max_provider_calls: Some(1),
+                ..GoalBudget::default()
+            },
+        )];
+        events.extend(start_run(goal, run, agent, pinned));
+        let intent = read_intent(run, agent, "src/lib.rs");
+        events.extend([
+            reserve_child_call(goal, run, agent),
+            requesting_step(run, agent, 1),
+            tool_proposed(run, agent, &intent),
+        ]);
+        (events, intent)
+    }
+
+    fn proposal_pre_hook_events(
+        intent: &EffectIntent,
+        disposition: Option<ToolDisposition>,
+    ) -> Vec<Event> {
+        use crate::tools::permissions::{HookEvent, HookInvocation, HookOutcome, HookResult};
+        let mut events = Vec::new();
+        let hook_intent = child_intent(
+            intent.run_id,
+            intent.agent_run_id,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "true".into()],
+                cwd: String::new(),
+            },
+        );
+        events.push(Event::HookStarted {
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            hook: HookInvocation {
+                active_ceiling_ms: None,
+                event: HookEvent::PreToolUse,
+                group: 0,
+                handler: 0,
+                subject_digest: intent.digest(),
+                intent: hook_intent.clone(),
+                input_digest: [9; 32],
+            },
+        });
+        if let Some(disposition) = disposition {
+            let mut observation = observation_for(hook_intent, b"");
+            observation.disposition = disposition;
+            observation.attestation = None;
+            observation.cache_update = CacheUpdate::NotAttempted;
+            events.push(Event::HookFinished {
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                outcome: HookOutcome {
+                    boundary_active_ms: None,
+                    result: HookResult::for_event(HookEvent::PreToolUse, &observation),
+                    observation,
+                },
+            });
+        }
+        events
+    }
+
+    #[test]
+    fn budget_continuation_of_a_proposal_requires_settled_hooks() {
+        #[derive(Clone, Copy, Debug)]
+        enum Pending {
+            Approval,
+            Hook,
+            UncertainHook,
+        }
+        for pending in [Pending::Approval, Pending::Hook, Pending::UncertainHook] {
+            let (session, goal, run, agent) = (
+                SessionId::new(),
+                GoalId::new(),
+                RunId::new(),
+                AgentRunId::new(),
+            );
+            let (mut events, intent) = budget_closed_proposal_prefix(goal, run, agent);
+            if !matches!(pending, Pending::Approval) {
+                events.extend(proposal_pre_hook_events(
+                    &intent,
+                    matches!(pending, Pending::UncertainHook).then_some(ToolDisposition::Uncertain),
+                ));
+            }
+            events.push(Event::GoalFinished {
+                goal_id: goal,
+                status: GoalStatus::Failed,
+                active_ms: 0,
+                report: GoalReport {
+                    summary: "Goal budget is exhausted.".into(),
+                    changes: Vec::new(),
+                    evidence: Vec::new(),
+                    unresolved: Vec::new(),
+                    cached_input_tokens: 0,
+                },
+                exhausted: true,
+                budget_refusal: None,
+            });
+            let mut history = session_with(session, events);
+            let view = SessionView::replay(session, &history).unwrap().unwrap();
+            let continuable = matches!(pending, Pending::Approval);
+            assert_eq!(
+                view.continuable_goal().map(|goal| goal.id),
+                continuable.then_some(goal),
+                "{pending:?}"
+            );
+            history.push(EventEnvelope {
+                session_id: session,
+                sequence: view.last_sequence + 1,
+                run_id: None,
+                agent_run_id: None,
+                created_at_ms: 0,
+                event: goal_started(GoalId::new(), GoalBudget::default()),
+            });
+            let Event::GoalStarted { continues, .. } = &mut history.last_mut().unwrap().event
+            else {
+                unreachable!()
+            };
+            *continues = Some(goal);
+            assert_eq!(
+                SessionView::replay_open(session, &history).is_ok(),
+                continuable,
+                "{pending:?}"
+            );
+        }
+    }
+
     #[test]
     fn goal_continuation_replays_only_from_the_unclaimed_budget_closed_source() {
         let (source, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
@@ -2953,6 +3092,7 @@ mod goal_replay_tests {
                 }),
                 review_call_index: None,
                 permission_verdict: None,
+                started_sequence: Some(0),
                 hooks: Vec::new(),
                 hook_sequence: None,
                 finished_sequence: Some(2),
@@ -2985,6 +3125,7 @@ mod goal_replay_tests {
             }),
             review_call_index: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: Some(2),
@@ -3013,6 +3154,7 @@ mod goal_replay_tests {
             }),
             review_call_index: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: Some(2),
@@ -3548,6 +3690,7 @@ mod goal_replay_tests {
                 ),
             },
             Event::ToolStarted {
+                verdict: None,
                 run_id,
                 agent_run_id,
                 intent: intent.into(),
@@ -4222,6 +4365,7 @@ mod goal_replay_tests {
                 &mut view,
                 &mut envelopes,
                 Event::ToolStarted {
+                    verdict: None,
                     run_id: run,
                     agent_run_id: actor,
                     intent: intent.clone().into(),
@@ -4549,6 +4693,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: child,
                 intent: read.clone().into(),
@@ -4581,6 +4726,7 @@ mod goal_replay_tests {
         )
         .expect("child Tool request");
         let started = Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: child,
             intent: read.clone().into(),
@@ -4605,6 +4751,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &after_request,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: child,
                 intent: write.into(),
@@ -4624,6 +4771,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &after_request,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: child,
                 intent: mcp.into(),
@@ -4642,6 +4790,7 @@ mod goal_replay_tests {
             assert!(rejected(
                 &after_request,
                 Event::ToolStarted {
+                    verdict: None,
                     run_id: run,
                     agent_run_id: child,
                     intent: intent.into(),
@@ -4738,6 +4887,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: child,
                 intent: intent.clone().into(),
@@ -4795,6 +4945,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: child,
                 intent: outside.clone().into(),
@@ -4856,6 +5007,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolStarted {
+                    verdict: None,
                     run_id: run,
                     agent_run_id: child,
                     intent: read.clone().into(),
@@ -4907,6 +5059,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: child,
                 intent: read.clone().into(),
@@ -5125,6 +5278,7 @@ mod goal_replay_tests {
                 tools: vec![ToolView {
                     checkpoint: None,
                     permission_verdict: None,
+                    started_sequence: Some(0),
                     hooks: Vec::new(),
                     hook_sequence: None,
                     intent: read_intent,
@@ -5278,6 +5432,7 @@ mod goal_replay_tests {
                     tools: vec![ToolView {
                         checkpoint: None,
                         permission_verdict: None,
+                        started_sequence: Some(0),
                         hooks: Vec::new(),
                         hook_sequence: None,
                         intent: write.intent.clone(),
@@ -5493,6 +5648,7 @@ mod goal_replay_tests {
                 assert!(rejected(
                     &view,
                     Event::ToolStarted {
+                        verdict: None,
                         run_id: run,
                         agent_run_id: agent,
                         active_ceiling_ms: 0,
@@ -5734,10 +5890,12 @@ mod goal_replay_tests {
             )
             .unwrap();
             let intent = read_intent(run, agent, "src/lib.rs");
-            let verdict = Event::ToolPermissionDecided {
+            let verdict = Event::ToolStarted {
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
                 run_id: run,
                 agent_run_id: agent,
-                verdict: PermissionVerdict {
+                verdict: Some(PermissionVerdict {
                     host: None,
                     intent_digest: intent.digest(),
                     decision: Decision::Deny,
@@ -5748,12 +5906,12 @@ mod goal_replay_tests {
                     hook_restriction: None,
                     hooks: 0,
                     narrowed: false,
-                },
+                }),
             };
             assert_eq!(
                 Event::decode(
-                    "ToolPermissionDecided",
-                    crate::session::payload_version("ToolPermissionDecided").unwrap(),
+                    "ToolStarted",
+                    crate::session::payload_version("ToolStarted").unwrap(),
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -5761,18 +5919,37 @@ mod goal_replay_tests {
                 .unwrap(),
                 verdict
             );
-            assert!(rejected(&view, verdict.clone()));
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            assert!(rejected(&view, tool_started(run, agent, &intent)));
+            assert!(rejected(
+                &view,
+                verdict_event(
+                    &intent,
+                    Some(PermissionMode::Default),
+                    Decision::Ask,
+                    PermissionSource::Mode,
+                    PermissionSource::Human,
+                    true
+                )
+            ));
+            apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
             let succeeded = tool_finished(run, agent, &intent, b"ok");
             assert!(rejected(&view, succeeded.clone()));
             let mut wrong_intent = verdict.clone();
-            if let Event::ToolPermissionDecided { verdict, .. } = &mut wrong_intent {
+            if let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = &mut wrong_intent
+            {
                 verdict.intent_digest = [4; 32];
             }
             assert!(rejected(&view, wrong_intent));
             for mode in [PermissionMode::Auto, PermissionMode::Default] {
                 let mut unreviewed = verdict.clone();
-                if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
+                if let Event::ToolStarted {
+                    verdict: Some(verdict),
+                    ..
+                } = &mut unreviewed
+                {
                     verdict.decision = Decision::Ask;
                     verdict.mode = Some(mode);
                     verdict.basis = PermissionSource::Mode;
@@ -5781,7 +5958,11 @@ mod goal_replay_tests {
                 }
                 assert!(unreviewed.payload().is_ok());
                 assert!(rejected(&view, unreviewed.clone()));
-                if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
+                if let Event::ToolStarted {
+                    verdict: Some(verdict),
+                    ..
+                } = &mut unreviewed
+                {
                     verdict.basis = PermissionSource::Rule;
                 }
                 assert!(unreviewed.payload().is_err());
@@ -5887,10 +6068,12 @@ mod goal_replay_tests {
                 decision: Decision::Deny,
                 reason: Some("blocked".into()),
             };
-            let verdict = |decision, restriction, hooks, basis| Event::ToolPermissionDecided {
+            let verdict = |decision, restriction, hooks, basis| Event::ToolStarted {
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
                 run_id: run,
                 agent_run_id: agent,
-                verdict: PermissionVerdict {
+                verdict: Some(PermissionVerdict {
                     host: None,
                     intent_digest: intent.digest(),
                     decision,
@@ -5901,10 +6084,10 @@ mod goal_replay_tests {
                     hook_restriction: restriction,
                     hooks,
                     narrowed: false,
-                },
+                }),
             };
             assert!(rejected(&view, started(intent.digest(), &hook_intent)));
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
             hook_observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
@@ -5947,10 +6130,12 @@ mod goal_replay_tests {
             ));
             let other = observation_for(second.clone(), b"");
             assert!(rejected(&view, finished(other, deny.clone())));
-            let ask_verdict = |source| Event::ToolPermissionDecided {
+            let ask_verdict = |source| Event::ToolStarted {
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
                 run_id: run,
                 agent_run_id: agent,
-                verdict: PermissionVerdict {
+                verdict: Some(PermissionVerdict {
                     host: None,
                     intent_digest: intent.digest(),
                     decision: Decision::Ask,
@@ -5961,7 +6146,7 @@ mod goal_replay_tests {
                     hook_restriction: Some(Decision::Ask),
                     hooks: 1,
                     narrowed: false,
-                },
+                }),
             };
             assert!(ask_verdict(PermissionSource::Human).payload().is_ok());
             assert!(ask_verdict(PermissionSource::AiReview).payload().is_err());
@@ -6057,7 +6242,7 @@ mod goal_replay_tests {
             .payload()
             .unwrap();
             assert!(matches!(
-                Event::decode("ToolPermissionDecided", 2, &payload, Some(run), Some(agent)),
+                Event::decode("ToolStarted", 2, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
             ));
 
@@ -6169,17 +6354,19 @@ mod goal_replay_tests {
                     result,
                 },
             };
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
             assert!(rejected(
                 &view,
                 started(HookEvent::PostToolUse, intent.digest())
             ));
             apply(
                 &mut view,
-                Event::ToolPermissionDecided {
+                Event::ToolStarted {
+                    intent: intent.clone().into(),
+                    active_ceiling_ms: 0,
                     run_id: run,
                     agent_run_id: agent,
-                    verdict: PermissionVerdict {
+                    verdict: Some(PermissionVerdict {
                         host: None,
                         intent_digest: intent.digest(),
                         decision: Decision::Allow,
@@ -6190,7 +6377,7 @@ mod goal_replay_tests {
                         hook_restriction: None,
                         hooks: 0,
                         narrowed: false,
-                    },
+                    }),
                 },
             )
             .unwrap();
@@ -6310,13 +6497,15 @@ mod goal_replay_tests {
             read_intent(run, agent, "src/lib.rs"),
             read_intent(run, agent, "src/lib.rs"),
         );
-        apply(&mut view, tool_started(run, agent, &first)).unwrap();
+        apply(&mut view, tool_proposed(run, agent, &first)).unwrap();
         apply(
             &mut view,
-            Event::ToolPermissionDecided {
+            Event::ToolStarted {
+                intent: first.clone().into(),
+                active_ceiling_ms: 0,
                 run_id: run,
                 agent_run_id: agent,
-                verdict: PermissionVerdict {
+                verdict: Some(PermissionVerdict {
                     host: None,
                     intent_digest: first.digest(),
                     decision: Decision::Allow,
@@ -6327,13 +6516,13 @@ mod goal_replay_tests {
                     hook_restriction: None,
                     hooks: 0,
                     narrowed: false,
-                },
+                }),
             },
         )
         .unwrap();
         apply(&mut view, tool_finished(run, agent, &first, b"x")).unwrap();
         let mut settled = view.clone();
-        apply(&mut settled, tool_started(run, agent, &second)).unwrap();
+        apply(&mut settled, tool_proposed(run, agent, &second)).unwrap();
         apply(
             &mut view,
             Event::HookStarted {
@@ -6359,7 +6548,7 @@ mod goal_replay_tests {
             },
         )
         .unwrap();
-        assert!(rejected(&view, tool_started(run, agent, &second)));
+        assert!(rejected(&view, tool_proposed(run, agent, &second)));
     }
 
     struct Unguarded {
@@ -6413,7 +6602,15 @@ mod goal_replay_tests {
                     cwd: String::new(),
                 },
             );
-            apply(&mut view, tool_started(run, agent, &guarded)).unwrap();
+            apply(
+                &mut view,
+                if configured {
+                    tool_proposed(run, agent, &guarded)
+                } else {
+                    tool_started(run, agent, &guarded)
+                },
+            )
+            .unwrap();
             if configured {
                 apply(
                     &mut view,
@@ -6457,7 +6654,7 @@ mod goal_replay_tests {
                 prefix_rule: None,
             },
         );
-        let start = tool_started(run, agent, &host);
+        let start = tool_proposed(run, agent, &host);
         if matches!(
             prior,
             Some((
@@ -6517,7 +6714,7 @@ mod goal_replay_tests {
             apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
             apply(&mut view, requesting_step(run, agent, 1)).unwrap();
             let intent = read_intent(run, agent, "src/lib.rs");
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
             let hook = child_intent(
                 run,
                 agent,
@@ -6576,7 +6773,11 @@ mod goal_replay_tests {
                 PermissionSource::Mode,
                 true,
             );
-            if let Event::ToolPermissionDecided { verdict, .. } = &mut verdict {
+            if let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = &mut verdict
+            {
                 verdict.hooks = 1;
             }
             apply(&mut view, verdict).unwrap();
@@ -6594,7 +6795,7 @@ mod goal_replay_tests {
                     prefix_rule: None,
                 },
             );
-            apply(&mut view, tool_started(run, agent, &host)).unwrap();
+            apply(&mut view, tool_proposed(run, agent, &host)).unwrap();
             for source in [
                 PermissionSource::AiReview,
                 PermissionSource::Rule,
@@ -6718,10 +6919,12 @@ mod goal_replay_tests {
         source: crate::tools::permissions::PermissionSource,
         approved: bool,
     ) -> Event {
-        Event::ToolPermissionDecided {
+        Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
             run_id: intent.run_id,
             agent_run_id: intent.agent_run_id,
-            verdict: crate::tools::permissions::PermissionVerdict {
+            verdict: Some(crate::tools::permissions::PermissionVerdict {
                 host: (approved && intent.call.is_unguarded()).then_some(
                     crate::tools::permissions::HostApproval {
                         rule: None,
@@ -6739,7 +6942,7 @@ mod goal_replay_tests {
                 hook_restriction: None,
                 hooks: 0,
                 narrowed: false,
-            },
+            }),
         }
     }
 
@@ -6755,7 +6958,11 @@ mod goal_replay_tests {
             PermissionSource::Human,
             true,
         );
-        let Event::ToolPermissionDecided { verdict, .. } = &mut human else {
+        let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut human
+        else {
             unreachable!()
         };
         verdict.host.as_mut().unwrap().session = true;
@@ -6766,7 +6973,11 @@ mod goal_replay_tests {
             PermissionSource::SessionApproval,
         ] {
             let mut candidate = human.clone();
-            let Event::ToolPermissionDecided { verdict, .. } = &mut candidate else {
+            let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = &mut candidate
+            else {
                 unreachable!()
             };
             verdict.basis = basis;
@@ -6802,7 +7013,7 @@ mod goal_replay_tests {
         next.limits.runtime_ms /= 2;
         apply(
             &mut scenario.view,
-            tool_started(scenario.run, scenario.agent, &next),
+            tool_proposed(scenario.run, scenario.agent, &next),
         )
         .unwrap();
         let mut reused = verdict_event(
@@ -6813,13 +7024,21 @@ mod goal_replay_tests {
             PermissionSource::SessionApproval,
             true,
         );
-        let Event::ToolPermissionDecided { verdict, .. } = &mut reused else {
+        let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut reused
+        else {
             unreachable!()
         };
         verdict.host.as_mut().unwrap().source_intent = Some(scenario.host.digest());
         assert!(!rejected(&scenario.view, reused.clone()));
         let mut gated = reused.clone();
-        let Event::ToolPermissionDecided { verdict, .. } = &mut gated else {
+        let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut gated
+        else {
             unreachable!()
         };
         verdict.approved = false;
@@ -6841,7 +7060,11 @@ mod goal_replay_tests {
         ] {
             let mut view = scenario.view.clone();
             let mut event = reused.clone();
-            let Event::ToolPermissionDecided { verdict, .. } = &mut event else {
+            let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = &mut event
+            else {
                 unreachable!()
             };
             match case {
@@ -7074,7 +7297,7 @@ mod goal_replay_tests {
         assert!(rejected(&refused, finish(host_run.clone())));
         apply(&mut approved, finish(host_run.clone())).expect("the approved host run finishes");
 
-        let integration = Event::ToolStarted {
+        let integration = Event::ToolProposed {
             run_id: good.run,
             agent_run_id: good.agent,
             intent: child_intent(
@@ -7118,7 +7341,7 @@ mod goal_replay_tests {
                 prefix_rule: None,
             },
         );
-        assert!(rejected(&child, tool_started(run, researcher, &forged)));
+        assert!(rejected(&child, tool_proposed(run, researcher, &forged)));
     }
 
     fn host_prefix_scenario() -> (Unguarded, crate::tools::permissions::PermissionVerdict) {
@@ -7146,14 +7369,18 @@ mod goal_replay_tests {
             .as_mut()
             .unwrap()
             .host_prefixes = vec![rule.clone()];
-        let Event::ToolPermissionDecided { mut verdict, .. } = verdict_event(
+        let Event::ToolStarted {
+            verdict: Some(mut verdict),
+            ..
+        } = verdict_event(
             &scenario.host,
             Some(PermissionMode::Default),
             Decision::Allow,
             PermissionSource::HostPrefixRule,
             PermissionSource::HostPrefixRule,
             true,
-        ) else {
+        )
+        else {
             unreachable!()
         };
         verdict.host.as_mut().unwrap().rule = Some(rule);
@@ -7228,10 +7455,12 @@ mod goal_replay_tests {
     #[test]
     fn host_prefix_replay_checks_each_approval_proof() {
         use crate::tools::permissions::PermissionMode;
-        let event = |scenario: &Unguarded, verdict| Event::ToolPermissionDecided {
+        let event = |scenario: &Unguarded, verdict| Event::ToolStarted {
+            intent: scenario.host.clone().into(),
+            active_ceiling_ms: 0,
             run_id: scenario.run,
             agent_run_id: scenario.agent,
-            verdict,
+            verdict: Some(verdict),
         };
         for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
             let (scenario, mut verdict) = host_prefix_scenario();
@@ -7293,11 +7522,13 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         let intent = read_intent(run, agent, "src/lib.rs");
-        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
-        let verdict = |mode, decision, basis, source, approved| Event::ToolPermissionDecided {
+        apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
+        let verdict = |mode, decision, basis, source, approved| Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
             run_id: run,
             agent_run_id: agent,
-            verdict: PermissionVerdict {
+            verdict: Some(PermissionVerdict {
                 host: None,
                 intent_digest: intent.digest(),
                 decision,
@@ -7308,7 +7539,7 @@ mod goal_replay_tests {
                 hook_restriction: None,
                 hooks: 0,
                 narrowed: false,
-            },
+            }),
         };
         let exact = |approved| {
             verdict(
@@ -7385,7 +7616,7 @@ mod goal_replay_tests {
                 refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
             });
             intent.limits.network = crate::tools::types::NetworkGrant::Host;
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
             for source in [
                 PermissionSource::Mode,
                 PermissionSource::Rule,
@@ -7462,7 +7693,7 @@ mod goal_replay_tests {
             observed.disposition = ToolDisposition::Uncertain;
             observed.output = "host: remote outcome unknown; never retry automatically".into();
             apply(&mut view, event(observed)).unwrap();
-            assert!(rejected(&view, tool_started(run, agent, &intent)));
+            assert!(rejected(&view, tool_proposed(run, agent, &intent)));
         }
     }
 
@@ -7496,7 +7727,7 @@ mod goal_replay_tests {
             refspec: "fixed-list".into(),
         });
         intent.limits.network = crate::tools::types::NetworkGrant::Host;
-        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
         assert_host_pr_list_forbidden_verdicts(&view, &intent);
         let typed = verdict_event(
             &intent,
@@ -7604,7 +7835,7 @@ mod goal_replay_tests {
             refspec: "fixed-list".into(),
         });
         intent.limits.network = crate::tools::types::NetworkGrant::Host;
-        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
         apply(
             &mut view,
             verdict_event(
@@ -7675,7 +7906,17 @@ mod goal_replay_tests {
             .expect("pending host read");
         let intent = crate::tools::EffectIntent::from(intent);
         for event in &mut fixture.events {
-            if let Event::ToolPermissionDecided { verdict, .. } = event {
+            if let Event::ToolProposed {
+                intent: proposed, ..
+            } = event
+            {
+                *proposed = intent.clone().into();
+            }
+            if let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = event
+            {
                 verdict.intent_digest = intent.digest();
             }
         }
@@ -7773,7 +8014,17 @@ mod goal_replay_tests {
             .expect("pending host read");
         let intent = crate::tools::EffectIntent::from(intent);
         for event in &mut fixture.events {
-            if let Event::ToolPermissionDecided { verdict, .. } = event {
+            if let Event::ToolProposed {
+                intent: proposed, ..
+            } = event
+            {
+                *proposed = intent.clone().into();
+            }
+            if let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = event
+            {
                 verdict.intent_digest = intent.digest();
             }
         }
@@ -7831,7 +8082,7 @@ mod goal_replay_tests {
             apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
             apply(&mut view, requesting_step(run, agent, 1)).unwrap();
             let intent = child_intent(run, agent, call);
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
             (view, intent)
         };
         let typed = PermissionSource::TypedPrefixRule;
@@ -8009,11 +8260,21 @@ mod goal_replay_tests {
         )
         .unwrap();
         let intent = child_intent(run, researcher, commit);
-        assert!(rejected(&child, tool_started(run, researcher, &intent)));
+        assert!(rejected(&child, tool_proposed(run, researcher, &intent)));
+    }
+
+    fn tool_proposed(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {
+        Event::ToolProposed {
+            run_id: run,
+            agent_run_id: agent,
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
+        }
     }
 
     fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: agent,
             intent: intent.clone().into(),
@@ -8203,6 +8464,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: first.clone().into(),
@@ -8841,6 +9103,7 @@ mod goal_replay_tests {
             },
         );
         let start = |intent: EffectIntent| Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: actor,
             intent: intent.into(),
@@ -9004,6 +9267,7 @@ mod goal_replay_tests {
             "no Provider disclosure before parsing"
         );
         let start = |intent: EffectIntent| Event::ToolStarted {
+            verdict: None,
             run_id: intent.run_id,
             agent_run_id: intent.agent_run_id,
             intent: intent.into(),
@@ -9098,6 +9362,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolStarted {
+                    verdict: None,
                     run_id: intent.run_id,
                     agent_run_id: intent.agent_run_id,
                     intent: intent.clone().into(),

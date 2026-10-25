@@ -899,13 +899,14 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                     .unwrap();
                 let decided = events
                     .iter()
-                    .position(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
+                    .position(|event| matches!(event.event, Event::ToolStarted { .. }))
                     .unwrap();
                 let finished = events
                     .iter()
                     .position(|event| matches!(event.event, Event::ToolFinished { .. }))
                     .unwrap();
-                assert!(started < decided && decided < finished, "{case}");
+                assert_eq!(started, decided, "{case}");
+                assert!(decided < finished, "{case}");
             }
         }
     }
@@ -1085,8 +1086,13 @@ async fn permission_dispatch_denied_replay_uses_pinned_verdict_and_safe_output()
     assert!(!text.contains("Read(./notes/**)"));
     let without_verdict: Vec<_> = events
         .iter()
-        .filter(|event| !matches!(event.event, Event::ToolPermissionDecided { .. }))
         .cloned()
+        .map(|mut event| {
+            if let Event::ToolStarted { verdict, .. } = &mut event.event {
+                *verdict = None;
+            }
+            event
+        })
         .collect();
     assert!(SessionView::replay(result.session_id, &without_verdict).is_err());
     let mut forged = events.clone();
@@ -1305,11 +1311,13 @@ async fn permission_dispatch_missing_settings_preserves_existing_approval_flow()
             "done"
         );
         let (events, view) = fixture.reopen(result.session_id).await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
-        );
+        assert!(!events.iter().any(|event| matches!(
+            event.event,
+            Event::ToolStarted {
+                verdict: Some(_),
+                ..
+            }
+        )));
         assert_eq!(
             view.runs[0]
                 .config
@@ -1424,7 +1432,7 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
                     .contains("permission_rule_denied: no operation was dispatched")
             }));
         }
-        assert!(events.iter().any(|event| matches!(&event.event, Event::ToolPermissionDecided { agent_run_id, .. } if *agent_run_id == child.id)));
+        assert!(events.iter().any(|event| matches!(&event.event, Event::ToolStarted { agent_run_id, verdict: Some(_), .. } if *agent_run_id == child.id)));
     }
 }
 
@@ -2168,17 +2176,12 @@ async fn hook_pre_tool_use_exit_two_denies_in_the_guard_with_ordered_evidence() 
         hook.observation.intent.limits.network,
         arany::NetworkGrant::None
     );
-    let order: Vec<_> = [
-        "HookStarted",
-        "HookFinished",
-        "ToolPermissionDecided",
-        "ToolFinished",
-    ]
-    .iter()
-    .map(|kind| case.position(kind))
-    .collect();
+    let order: Vec<_> = ["HookStarted", "HookFinished", "ToolStarted", "ToolFinished"]
+        .iter()
+        .map(|kind| case.position(kind))
+        .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-    assert!(case.position("ToolStarted") < order[0]);
+    assert!(case.position("ToolProposed") < order[0]);
 
     let mut dropped = case.events.clone();
     dropped.retain(|event| !matches!(event.event, Event::HookFinished { .. }));
@@ -2197,7 +2200,11 @@ async fn hook_pre_tool_use_exit_two_denies_in_the_guard_with_ordered_evidence() 
     assert!(forged_finish.event.payload().is_err());
     let mut miscounted = case.events.clone();
     for event in &mut miscounted {
-        if let Event::ToolPermissionDecided { verdict, .. } = &mut event.event {
+        if let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut event.event
+        {
             verdict.hooks = 0;
         }
     }
@@ -4305,7 +4312,7 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
     let verdicts = case
         .events
         .iter()
-        .filter(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
+        .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
         .count();
     let dispatched = case
         .tools

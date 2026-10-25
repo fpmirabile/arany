@@ -487,6 +487,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 ));
             }
             if let Some(tool) = run.tools.last()
+                && tool.started_sequence.is_some()
                 && tool.observation.as_ref().is_none_or(|observation| {
                     matches!(
                         observation.disposition,
@@ -1529,6 +1530,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
         intent,
         review_call_index: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: Some(1),

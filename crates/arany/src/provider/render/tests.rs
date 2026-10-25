@@ -850,6 +850,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 observation: Some(observed),
                 review_call_index: None,
                 permission_verdict: None,
+                started_sequence: Some(0),
                 hooks: Vec::new(),
                 hook_sequence: None,
                 finished_sequence: Some(3),
@@ -869,6 +870,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 observation: None,
                 review_call_index: None,
                 permission_verdict: None,
+                started_sequence: Some(0),
                 hooks: Vec::new(),
                 hook_sequence: None,
                 finished_sequence: None,
@@ -904,6 +906,13 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     ] {
         assert!(!block.contains(internal), "{internal} leaked into history");
     }
+    let mut proposed = run.clone();
+    proposed.tools[1].started_sequence = None;
+    let projection: Value = serde_json::from_str(&history_tool_block(&proposed)).unwrap();
+    assert_eq!(
+        projection["tool_records"][1]["execution"],
+        "not dispatched; proposal only"
+    );
     assert_historical_permission_feedback(run.clone());
     assert_approval_summary_retained(run);
 }
@@ -1012,6 +1021,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
             observation: Some(observed),
             review_call_index: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: Some(3),

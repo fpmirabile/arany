@@ -1810,6 +1810,7 @@ mod payload_version_tests {
         observation.attestation = None;
         let events = [
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: observation.intent.clone().into(),
@@ -1989,17 +1990,20 @@ mod payload_version_tests {
             prefix_rule: None,
         };
         let started = Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: agent,
-            intent: intent.into(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 1,
         };
-        let verdict = Event::ToolPermissionDecided {
+        let verdict = Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
             run_id: run,
             agent_run_id: agent,
-            verdict: crate::tools::permissions::PermissionVerdict {
+            verdict: Some(crate::tools::permissions::PermissionVerdict {
                 host: None,
-                intent_digest: [3; 32],
+                intent_digest: intent.digest(),
                 decision: crate::tools::permissions::Decision::Allow,
                 mode: None,
                 basis: crate::tools::permissions::PermissionSource::SessionApproval,
@@ -2008,7 +2012,7 @@ mod payload_version_tests {
                 hook_restriction: None,
                 hooks: 0,
                 narrowed: false,
-            },
+            }),
         };
         for event in [&started, &verdict] {
             let payload = event.payload().expect("payload");
@@ -2024,10 +2028,7 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(started.version()));
-        assert_eq!(
-            payload_version("ToolPermissionDecided"),
-            Some(verdict.version())
-        );
+        assert_eq!(payload_version("ToolPermissionDecided"), None);
     }
 
     #[test]
@@ -2161,6 +2162,7 @@ mod payload_version_tests {
                 active_ceiling_ms: 125_000,
             },
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: read_observation(run, agent).intent.into(),
@@ -2513,6 +2515,7 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
         ("AgentSpawned", "/assignment", "cache_generation"),
         ("AgentSpawned", "/assignment/grant", "commands"),
         ("ToolStarted", "/intent/target", "cache_generation"),
+        ("ToolStarted", "", "verdict"),
         ("ToolFinished", "/intent/target", "cache_generation"),
         ("WorkerHandoverRecorded", "", "criterion_evidence"),
     ] {

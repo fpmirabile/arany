@@ -176,7 +176,6 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             1,
             crate::session::pre_role_routing_payload
         ),
-        variant_step!("ToolStarted", 19, crate::session::pre_file_removal_payload),
         variant_step!("ToolFinished", 26, crate::session::pre_file_removal_payload),
         variant_step!("HookStarted", 9, crate::session::pre_file_removal_payload),
         variant_step!("HookFinished", 15, crate::session::pre_file_removal_payload),
@@ -198,7 +197,6 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             transform: crate::session::rewind_started_v1_to_v2,
             canonical: crate::session::rewind_started_v1_payload,
         },
-        variant_step!("ToolStarted", 15, crate::session::pre_multiedit_payload),
         variant_step!("ToolFinished", 21, crate::session::pre_multiedit_payload),
         variant_step!("HookStarted", 5, crate::session::pre_multiedit_payload),
         variant_step!("HookFinished", 10, crate::session::pre_multiedit_payload),
@@ -220,7 +218,6 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             transform: crate::session::goal_started_v7_to_v8,
             canonical: crate::session::goal_started_v7_payload,
         },
-        variant_step!("ToolStarted", 16, crate::session::pre_host_git_payload),
         variant_step!("ToolFinished", 22, crate::session::pre_host_git_payload),
         variant_step!("HookStarted", 6, crate::session::pre_host_git_payload),
         variant_step!("HookFinished", 11, crate::session::pre_host_git_payload),
@@ -235,25 +232,16 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             crate::session::pre_host_git_payload
         ),
         variant_step!("RunStarted", 21, crate::session::pre_host_payload),
-        variant_step!("ToolStarted", 17, crate::session::pre_host_payload),
         variant_step!("ToolFinished", 23, crate::session::pre_host_payload),
-        variant_step!("ToolPermissionDecided", 5, crate::session::pre_host_payload),
-        variant_step!(
-            "ToolPermissionDecided",
-            6,
-            crate::session::pre_host_prefix_payload
-        ),
         variant_step!("AgentSpawned", 13, crate::session::pre_host_payload),
         variant_step!("HookStarted", 7, crate::session::pre_host_payload),
         variant_step!("HookFinished", 12, crate::session::pre_host_payload),
         variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
-        gh_pr_list_step!("ToolStarted", 20),
         gh_pr_list_step!("ToolFinished", 27),
         gh_pr_list_step!("HookStarted", 10),
         gh_pr_list_step!("HookFinished", 16),
         gh_pr_list_step!("GoalPlanContractRecorded", 11),
         gh_pr_list_step!("ProviderCallRecorded", 21),
-        expiry_step!("ToolStarted", 18),
         expiry_step!("ToolFinished", 24),
         expiry_step!("HookStarted", 8),
         expiry_step!("HookFinished", 13),
@@ -300,7 +288,6 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             },
             canonical: crate::session::provider_call_v22_payload,
         },
-        glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),
         glob_step!("HookFinished", 8),
@@ -320,21 +307,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             canonical: crate::session::run_started_v19_payload,
         },
         glob_step!("ProviderCallRecorded", 13),
-        git_write_step!("ToolStarted", 14),
         git_write_step!("ToolFinished", 20),
         git_write_step!("HookStarted", 4),
         git_write_step!("HookFinished", 9),
         git_write_step!("GoalPlanContractRecorded", 7),
         git_write_step!("ProviderCallRecorded", 14),
-        EventStep {
-            kind: "ToolPermissionDecided",
-            from: 4,
-            transform: |value| {
-                crate::session::pre_typed_prefix_payload(&value.to_string())
-                    .and_then(|text| serde_json::from_str(&text).ok())
-            },
-            canonical: crate::session::pre_typed_prefix_payload,
-        },
     ],
 };
 
@@ -374,7 +351,7 @@ const EVENT_FLOOR: [(&str, i64); 44] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 4),
+    ("ToolProposed", 1),
     ("HookStarted", 3),
     ("HookFinished", 8),
     ("ToolFinished", 19),
@@ -382,7 +359,7 @@ const EVENT_FLOOR: [(&str, i64); 44] = [
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 13),
+    ("ToolStarted", 22),
     ("ContextCompacted", 7),
 ];
 
