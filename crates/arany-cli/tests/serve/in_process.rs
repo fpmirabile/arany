@@ -3066,14 +3066,7 @@ async fn approval_scenario_channel(
                 .all(|request| !format!("{request:?}").contains("private fact"))
         );
     }
-    if matches!(
-        case,
-        ApprovalCase::Decline
-            | ApprovalCase::Invalid
-            | ApprovalCase::ClientError
-            | ApprovalCase::Undelivered
-            | ApprovalCase::Remember
-    ) {
+    if continued && !accepted {
         let requests = requests.lock().unwrap();
         let result = requests[1]
             .input
@@ -3086,11 +3079,15 @@ async fn approval_scenario_channel(
             .observations
             .last()
             .unwrap();
-        assert!(result.output.contains(if case == ApprovalCase::Decline {
+        let reason = if case == ApprovalCase::Decline {
             "user_declined"
         } else {
             "channel_unavailable"
-        }));
+        };
+        assert!(
+            result.output.contains(reason),
+            "{case:?} {executor:?} {channel:?}: missing correlated denial cause {reason}"
+        );
         assert!(!format!("{:?}", requests).contains("Human channel unavailable"));
     }
     assert_eq!(provider.responses.lock().unwrap().is_empty(), continued);
