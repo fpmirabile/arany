@@ -2,7 +2,9 @@ use super::{CustomProfile, CustomProfileError, MessagesAuth, PinnedDestination, 
 use crate::provider::ProviderError;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    ProviderRequest, ProviderResponse, Usage, anthropic::wire as messages, openai::wire,
+    ProviderRequest, ProviderResponse, Usage,
+    anthropic::wire as messages,
+    openai::{chat, wire},
     raw_reflects_secret, render,
 };
 use reqwest::{
@@ -34,6 +36,7 @@ pub(super) enum TransportError {
     Transport,
     StreamEnded,
     InvalidOutcome,
+    InvalidResponseContract,
 }
 
 impl CustomTransport {
@@ -95,15 +98,19 @@ impl CustomTransport {
             Protocol::AnthropicMessages { .. } => {
                 messages::run_body_with_optional_effort(request, &conversation, effort)
             }
+            Protocol::OpenaiChatCompletions { .. } => {
+                chat::run_body(request, &conversation, effort)
+            }
         }
         .map_err(|_| TransportError::Rejected)?;
-        let received = if stream {
-            body["stream"] = Value::Bool(true);
-            self.send_streamed(body, &request.model, preview, request.max_output_tokens)
-                .await?
-        } else {
-            self.send(body).await?
-        };
+        let received =
+            if stream && !matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. }) {
+                body["stream"] = Value::Bool(true);
+                self.send_streamed(body, &request.model, preview, request.max_output_tokens)
+                    .await?
+            } else {
+                self.send(body).await?
+            };
         let response = match &self.protocol {
             Protocol::OpenaiResponses => {
                 let scope = wire::RunScope::new(request, &conversation, &self.key);
@@ -136,8 +143,24 @@ impl CustomTransport {
                     received.counts,
                 )
             }
+            Protocol::OpenaiChatCompletions { .. } => {
+                let offered: Vec<_> = conversation.tools.iter().flatten().cloned().collect();
+                chat::decode_run(
+                    &received.bytes,
+                    request,
+                    &self.key,
+                    &offered,
+                    &conversation.outcome,
+                )
+            }
         }
-        .map_err(|_| TransportError::InvalidOutcome)?;
+        .map_err(|error| {
+            if matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. }) {
+                response_decode_failure(error)
+            } else {
+                TransportError::InvalidOutcome
+            }
+        })?;
         if !valid_usage(response.usage, request.max_output_tokens) {
             self.log_messages_failure(
                 crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
@@ -171,6 +194,7 @@ impl CustomTransport {
             Protocol::AnthropicMessages { .. } => {
                 messages::compaction_body_with_optional_effort(request, effort)
             }
+            Protocol::OpenaiChatCompletions { .. } => chat::compaction_body(request, effort),
         };
         let received = self.send(body).await?;
         let response = match &self.protocol {
@@ -181,8 +205,17 @@ impl CustomTransport {
                 request.max_output_tokens,
                 received.counts,
             ),
+            Protocol::OpenaiChatCompletions { .. } => {
+                chat::decode_compaction(&received.bytes, &request.model, request.max_output_tokens)
+            }
         }
-        .map_err(|_| TransportError::InvalidOutcome)?;
+        .map_err(|error| {
+            if matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. }) {
+                response_decode_failure(error)
+            } else {
+                TransportError::InvalidOutcome
+            }
+        })?;
         if !valid_usage(response.usage, request.max_output_tokens) {
             self.log_messages_failure(
                 crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
@@ -217,6 +250,7 @@ impl CustomTransport {
                 request,
                 crate::provider::MAX_PROVIDER_REQUEST_BYTES,
             ),
+            Protocol::OpenaiChatCompletions { .. } => wire::encode_request(request),
         }
         .map_err(|_| TransportError::InvalidOutcome)?;
         let request = self
@@ -243,6 +277,7 @@ impl CustomTransport {
                     }
                 }
             }
+            Protocol::OpenaiChatCompletions { .. } => request.bearer_auth(&self.key),
         })
     }
 
@@ -283,6 +318,7 @@ impl CustomTransport {
                 bytes: reply.bytes,
                 counts: reply.counts,
             }),
+            Protocol::OpenaiChatCompletions { .. } => Err(ProviderError::Rejected),
         }
         .map_err(stream_failure)?;
         self.validate_streamed_messages(&received)?;
@@ -383,6 +419,20 @@ impl CustomTransport {
             );
             return Err(status_failure(response).await);
         }
+        if matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. })
+            && !response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .is_some_and(|value| {
+                    value.to_str().is_ok_and(|value| {
+                        value.split(';').next().is_some_and(|media_type| {
+                            media_type.trim().eq_ignore_ascii_case("application/json")
+                        })
+                    })
+                })
+        {
+            return Err(TransportError::InvalidOutcome);
+        }
         let status = response.status().as_u16();
         let bytes = super::super::read_identity_body(response, MAX_RESPONSE_BYTES)
             .await
@@ -436,6 +486,13 @@ impl CustomTransport {
             },
             bytes,
         })
+    }
+}
+
+fn response_decode_failure(error: ProviderError) -> TransportError {
+    match error {
+        ProviderError::InvalidResponseContract => TransportError::InvalidResponseContract,
+        _ => TransportError::InvalidOutcome,
     }
 }
 

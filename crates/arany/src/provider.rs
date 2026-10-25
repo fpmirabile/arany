@@ -1038,6 +1038,7 @@ pub enum ProviderWireProvenance {
     ResponsesCompletedStoreFalseRequested,
     MessagesEndTurnStorageUnspecified,
     MessagesToolUseStorageUnspecified,
+    ChatCompletionsStopStorageUnspecified,
 }
 
 impl ProviderWireProvenance {

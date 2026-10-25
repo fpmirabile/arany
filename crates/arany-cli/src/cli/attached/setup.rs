@@ -1551,9 +1551,10 @@ async fn choose_custom_protocol(
         "Custom route protocol",
         "Choose one closed request format",
         &[(b'1', "OpenAI Responses"), (b'2', "Anthropic Messages")],
-        initial.map(|draft| match draft.protocol {
-            CustomProtocol::OpenaiResponses => b'1',
-            CustomProtocol::AnthropicMessages => b'2',
+        initial.and_then(|draft| match draft.protocol {
+            CustomProtocol::OpenaiResponses => Some(b'1'),
+            CustomProtocol::AnthropicMessages => Some(b'2'),
+            CustomProtocol::OpenaiChatCompletions => None,
         }),
     )
     .await?;

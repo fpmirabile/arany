@@ -1400,6 +1400,17 @@ mod provider_call_tests {
         record.input_tokens = Some(100);
         record.output_tokens = Some(10);
         assert!(record.validate().is_ok());
+        record.wire_provenance =
+            Some(crate::provider::ProviderWireProvenance::ChatCompletionsStopStorageUnspecified);
+        let encoded = serde_json::to_value(&record).expect("Chat provenance payload");
+        assert_eq!(
+            encoded["wire_provenance"],
+            "chat_completions_stop_storage_unspecified"
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderCallRecord>(encoded).expect("Chat provenance replay"),
+            record
+        );
         record.disposition = ProviderCallDisposition::TimedOut;
         assert!(record.validate().is_err());
         record.disposition = ProviderCallDisposition::Finished;

@@ -130,6 +130,7 @@ fn transport_error(error: TransportError) -> ProviderError {
         TransportError::Transport => ProviderError::Transport,
         TransportError::StreamEnded => ProviderError::StreamEnded,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
+        TransportError::InvalidResponseContract => ProviderError::InvalidResponseContract,
     }
 }
 

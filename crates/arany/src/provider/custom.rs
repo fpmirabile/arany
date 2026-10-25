@@ -40,6 +40,7 @@ pub struct CustomProfile {
 pub enum CustomProtocol {
     OpenaiResponses,
     AnthropicMessages,
+    OpenaiChatCompletions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +133,19 @@ enum ProfileEntry {
         capability_evidence_version: u32,
         efforts: Vec<Effort>,
     },
+    #[serde(rename = "openai-chat-completions")]
+    OpenaiChatCompletions {
+        base_url: String,
+        auth: MessagesAuth,
+        name: String,
+        model: String,
+        credential_env: String,
+        outcome_encoding: OutcomeEncoding,
+        privacy: Privacy,
+        max_output_tokens: u32,
+        capability_evidence_version: u32,
+        efforts: Vec<Effort>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,6 +154,9 @@ enum Protocol {
     AnthropicMessages {
         base_url: String,
         auth: MessagesAuth,
+    },
+    OpenaiChatCompletions {
+        base_url: String,
     },
 }
 
@@ -377,6 +394,39 @@ impl CustomProfile {
                     privacy,
                 )
             }
+            ProfileEntry::OpenaiChatCompletions {
+                name,
+                base_url,
+                auth,
+                model,
+                credential_env,
+                outcome_encoding,
+                privacy,
+                max_output_tokens,
+                capability_evidence_version,
+                efforts,
+            } => {
+                if auth != MessagesAuth::Bearer {
+                    return Err(CustomProfileError::InvalidConfiguration);
+                }
+                let (base_url, endpoint) = chat_completions_endpoint(&base_url)
+                    .ok_or(CustomProfileError::InvalidConfiguration)?;
+                (
+                    Self {
+                        name,
+                        endpoint,
+                        protocol: Protocol::OpenaiChatCompletions { base_url },
+                        model,
+                        credential_env,
+                        capability_evidence_version,
+                        efforts,
+                    },
+                    max_output_tokens,
+                    outcome_encoding,
+                    OutcomeEncoding::JsonSchema,
+                    privacy,
+                )
+            }
         };
         if !valid_name(&profile.name)
             || matches!(profile.name.as_str(), "openai" | "anthropic")
@@ -412,6 +462,11 @@ impl CustomProfile {
             Protocol::AnthropicMessages { base_url, auth } => {
                 (CustomProtocol::AnthropicMessages, base_url.clone(), *auth)
             }
+            Protocol::OpenaiChatCompletions { base_url } => (
+                CustomProtocol::OpenaiChatCompletions,
+                base_url.clone(),
+                MessagesAuth::Bearer,
+            ),
         };
         CustomProfileDraft {
             name: self.name.clone(),
@@ -476,6 +531,9 @@ impl CustomProfile {
         match self.protocol {
             Protocol::OpenaiResponses => self.endpoint.clone(),
             Protocol::AnthropicMessages { .. } => messages_endpoint(&self.endpoint)
+                .map(|(_, endpoint)| endpoint)
+                .unwrap_or_else(|| self.endpoint.clone()),
+            Protocol::OpenaiChatCompletions { .. } => chat_completions_endpoint(&self.endpoint)
                 .map(|(_, endpoint)| endpoint)
                 .unwrap_or_else(|| self.endpoint.clone()),
         }
@@ -586,6 +644,14 @@ impl CustomProfileDraft {
                 messages_endpoint(&self.endpoint).is_some_and(|(base, _)| &base == base_url)
                     && self.messages_auth == *auth
             }
+            (
+                CustomProtocol::OpenaiChatCompletions,
+                Protocol::OpenaiChatCompletions { base_url },
+            ) => {
+                self.messages_auth == MessagesAuth::Bearer
+                    && chat_completions_endpoint(&self.endpoint)
+                        .is_some_and(|(base, _)| &base == base_url)
+            }
             _ => false,
         };
         protocol_matches
@@ -628,6 +694,14 @@ impl CustomProfileDraft {
                 entry.insert("outcome_encoding".into(), "native_tools".into());
                 serde_json::Value::Object(entry)
             }
+            CustomProtocol::OpenaiChatCompletions => {
+                let mut entry = common.as_object().cloned().unwrap_or_default();
+                entry.insert("protocol".into(), "openai-chat-completions".into());
+                entry.insert("base_url".into(), self.endpoint.clone().into());
+                entry.insert("auth".into(), "bearer".into());
+                entry.insert("outcome_encoding".into(), "json_schema".into());
+                serde_json::Value::Object(entry)
+            }
         }
     }
 }
@@ -663,6 +737,18 @@ fn messages_endpoint(base: &str) -> Option<(String, String)> {
         return None;
     }
     let endpoint = format!("{normalized}/v1/messages");
+    valid_url(&endpoint, false).then(|| (normalized.to_owned(), endpoint))
+}
+
+fn chat_completions_endpoint(base: &str) -> Option<(String, String)> {
+    if !valid_url(base, true) {
+        return None;
+    }
+    let normalized = base.strip_suffix('/').unwrap_or(base);
+    if normalized.ends_with("/chat/completions") {
+        return None;
+    }
+    let endpoint = format!("{normalized}/chat/completions");
     valid_url(&endpoint, false).then(|| (normalized.to_owned(), endpoint))
 }
 
@@ -1361,5 +1447,55 @@ mod tests {
         std::fs::remove_file(&profile_path).expect("replace temporary profile");
         symlink(temp.path().join("missing"), &profile_path).expect("profile symlink");
         assert!(CustomProfile::load_named(&state, "local").is_err());
+    }
+
+    #[test]
+    fn chat_completions_profile_derives_endpoint_and_rejects_noncanonical_bases() {
+        let profile = VALID
+            .replace("openai-responses", "openai-chat-completions")
+            .replace(
+                "\"endpoint\":\"http://127.0.0.1:9321/v1/responses\"",
+                "\"base_url\":\"http://127.0.0.1:9321/v1\",\"auth\":\"bearer\"",
+            );
+        let parsed = CustomProfile::parse_document(profile.as_bytes())
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            parsed.endpoint(),
+            "http://127.0.0.1:9321/v1/chat/completions"
+        );
+        assert!(matches!(
+            &parsed.protocol,
+            Protocol::OpenaiChatCompletions { base_url }
+                if base_url == "http://127.0.0.1:9321/v1"
+        ));
+        let draft = parsed.draft();
+        let serialized = encode_profiles(std::slice::from_ref(&draft)).unwrap();
+        assert_eq!(
+            CustomProfile::parse_document(&serialized).unwrap(),
+            [parsed]
+        );
+        for base in [
+            "http://127.0.0.1:9321/v1/chat/completions",
+            "http://127.0.0.1:9321/v1?key=value",
+        ] {
+            let invalid = profile.replace("http://127.0.0.1:9321/v1\"", &format!("{base}\""));
+            assert!(
+                CustomProfile::parse_document(invalid.as_bytes()).is_err(),
+                "{base}"
+            );
+        }
+        assert!(
+            CustomProfile::parse_document(profile.replace(",\"auth\":\"bearer\"", "").as_bytes())
+                .is_err()
+        );
+        assert!(
+            CustomProfile::parse_document(
+                profile
+                    .replace("\"auth\":\"bearer\"", "\"auth\":\"x-api-key\"")
+                    .as_bytes()
+            )
+            .is_err()
+        );
     }
 }

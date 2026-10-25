@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(crate) mod chat;
 mod limits;
 mod responses;
 mod subscription;
