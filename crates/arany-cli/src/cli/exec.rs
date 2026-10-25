@@ -1472,6 +1472,7 @@ mod tests {
         );
         let classification = classify_committed_state(&committed).expect("committed state");
         let report = render_committed_outcome(committed, classification).expect("JSONL report");
+        assert_jsonl_committed_answer(&report.stdout, "first");
         let first_event: serde_json::Value =
             serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
                 .expect("JSONL Event");
