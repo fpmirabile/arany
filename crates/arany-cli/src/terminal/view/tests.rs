@@ -828,9 +828,9 @@ fn dense_setup_choices_keep_error_feedback_and_selection_visible() {
         (3, "Role routing"),
         (4, "Roster profiles"),
     ];
-    for width in [16, 40] {
+    for (width, height) in [(16, 3), (40, 3), (16, 4), (40, 4), (16, 8), (40, 8)] {
         for (selected, expected) in [(0, "> API accounts"), (3, "> Roster")] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| {
                     draw_setup_choices_frame(
@@ -845,12 +845,16 @@ fn dense_setup_choices_keep_error_feedback_and_selection_visible() {
                     );
                 })
                 .unwrap();
-            let visible = (0..8)
+            let visible = (0..height)
                 .map(|row| buffer_row(terminal.backend().buffer(), row))
                 .collect::<Vec<_>>()
                 .join(" ");
-            assert!(visible.contains(expected), "{width}: {visible}");
-            assert!(visible.contains("Use Up/Down"), "{width}: {visible}");
+            assert!(visible.contains(expected), "{width}x{height}: {visible}");
+            assert_eq!(
+                visible.contains("Use Up/Down"),
+                height > 3,
+                "{width}x{height}: {visible}"
+            );
             assert!(visible.contains("Enter") && visible.contains("Esc"));
         }
     }

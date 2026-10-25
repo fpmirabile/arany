@@ -882,6 +882,7 @@ pub(super) fn draw_setup_choices_frame(
     if area.width == 0 || area.height < 3 || choices.is_empty() {
         return;
     }
+    let notice = notice.filter(|_| area.height > 3);
     let compact = area.width < 20;
     let instruction = safe_truncate(instruction, MAX_ROW_WIDTH);
     let supporting_rows = if instruction.width() <= usize::from(area.width) {
