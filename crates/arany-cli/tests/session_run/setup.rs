@@ -2323,7 +2323,7 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
 
 #[cfg(debug_assertions)]
 #[test]
-fn fresh_setup_root_saves_its_first_custom_route_without_provider_egress() {
+fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
@@ -2339,7 +2339,7 @@ fn fresh_setup_root_saves_its_first_custom_route_without_provider_egress() {
         routes_at,
         b"Input:\r\n",
     );
-    let saved_at = add_custom_route(&mut pty, b"1\r");
+    let saved_at = add_custom_route(&mut pty, b"1\r", b"3\r");
     let (pages, _) = acknowledge_linear_pages(
         &mut pty.output,
         &mut pty.input,
@@ -2351,6 +2351,8 @@ fn fresh_setup_root_saves_its_first_custom_route_without_provider_egress() {
         pages > 1,
         "save result exercises complete paged acknowledgment"
     );
+    let before_edit = std::fs::read(state.join("provider-profiles.json")).unwrap();
+    edit_custom_chat_route_unchanged(&mut pty);
     pty.input.write_all(b"3\r").expect("leave custom routes");
     let (result, transcript) = finish_setup_pty_with_transcript(pty);
     assert!(result.status.success(), "fresh custom setup failed");
@@ -2358,6 +2360,13 @@ fn fresh_setup_root_saves_its_first_custom_route_without_provider_egress() {
         .expect("first custom route record");
     assert!(profile.contains("first-route"));
     assert!(profile.contains("model-synthetic"));
+    let document: serde_json::Value = serde_json::from_str(&profile).unwrap();
+    assert_eq!(
+        document["profiles"][0]["protocol"],
+        "openai-chat-completions"
+    );
+    assert_eq!(document["profiles"][0]["auth"], "bearer");
+    assert_eq!(profile.as_bytes(), before_edit);
     assert!(!profile.contains(FIRST_ROUTE_KEY_CANARY));
     assert!(!String::from_utf8_lossy(&transcript).contains(FIRST_ROUTE_KEY_CANARY));
     assert_setup_journal(&state, &workspace);
@@ -2381,7 +2390,7 @@ fn configured_unsaved_conversation_survives_custom_save_and_back() {
     let routes_at = pty.transcript.len();
     pty.input.write_all(b"2\r").expect("open custom routes");
     wait_setup_choices(&mut pty, routes_at);
-    let saved_at = add_custom_route(&mut pty, b"2\r");
+    let saved_at = add_custom_route(&mut pty, b"2\r", b"1\r");
     wait_setup_choices(&mut pty, saved_at);
     let back_at = pty.transcript.len();
     pty.input
@@ -2608,7 +2617,7 @@ fn assert_setup_journal(state: &Path, workspace: &Path) {
 }
 
 #[cfg(debug_assertions)]
-fn add_custom_route(pty: &mut SetupPty, choice: &[u8]) -> usize {
+fn add_custom_route(pty: &mut SetupPty, choice: &[u8], protocol: &[u8]) -> usize {
     let mut prompt_at = pty.transcript.len();
     pty.input.write_all(choice).expect("add custom route");
     wait_for(
@@ -2628,14 +2637,16 @@ fn add_custom_route(pty: &mut SetupPty, choice: &[u8]) -> usize {
     );
     prompt_at = pty.transcript.len();
     pty.input
-        .write_all(b"1\r")
-        .expect("select Responses protocol");
+        .write_all(protocol)
+        .expect("select custom protocol");
+    let destination: &[u8] = if protocol == b"3\r" {
+        b"http://127.0.0.1:9000/v1\r"
+    } else {
+        b"http://127.0.0.1:9000/v1/responses\r"
+    };
     let fields = [
         (b"Custom route name".as_slice(), b"first-route\r".as_slice()),
-        (
-            b"Custom route destination".as_slice(),
-            b"http://127.0.0.1:9000/v1/responses\r".as_slice(),
-        ),
+        (b"Custom route destination".as_slice(), destination),
         (
             b"Custom route model".as_slice(),
             b"model-synthetic\r".as_slice(),
@@ -2698,6 +2709,60 @@ fn add_custom_route(pty: &mut SetupPty, choice: &[u8]) -> usize {
         .write_all(b"2\r")
         .expect("confirm route declaration");
     saved_at
+}
+
+#[cfg(debug_assertions)]
+fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
+    let mut cursor = pty.transcript.len();
+    pty.input
+        .write_all(b"1\r")
+        .expect("select saved Chat route");
+    wait_setup_choices(pty, cursor);
+    cursor = pty.transcript.len();
+    pty.input.write_all(b"4\r").expect("edit saved Chat route");
+    wait_setup_choices(pty, cursor);
+    assert!(
+        String::from_utf8_lossy(&pty.transcript[cursor..])
+            .contains("empty Enter selects 3. OpenAI Chat Completions")
+    );
+    cursor = pty.transcript.len();
+    pty.input.write_all(b"\r").expect("retain Chat protocol");
+    for _ in 0..4 {
+        acknowledge_linear_pages(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+            (cursor, b"Input:\r\n"),
+        );
+        cursor = pty.transcript.len();
+        pty.input.write_all(b"\r").expect("retain saved field");
+    }
+    wait_setup_choices(pty, cursor);
+    assert!(String::from_utf8_lossy(&pty.transcript[cursor..]).contains("Declared efforts"));
+    cursor = pty.transcript.len();
+    pty.input
+        .write_all(b"\r")
+        .expect("retain no effort override");
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (cursor, b"empty Enter selects 1. Back\r\nInput:\r\n"),
+    );
+    cursor = pty.transcript.len();
+    pty.input
+        .write_all(b"2\r")
+        .expect("save unchanged Chat route");
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (cursor, b"empty Enter selects 1. first-route"),
+    );
+    assert!(String::from_utf8_lossy(&pty.transcript).contains("Arany adds /chat/completions"));
 }
 
 #[cfg(debug_assertions)]

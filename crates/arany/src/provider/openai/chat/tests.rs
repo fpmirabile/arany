@@ -82,6 +82,10 @@ fn request_body_uses_the_non_streaming_chat_contract() {
 fn answer_decoder_requires_one_exactly_metered_choice() {
     let request = request();
     let conversation = render::conversation(&request).unwrap();
+    let body = run_body(&request, &conversation, None).unwrap();
+    for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+        assert!(body.get(field).is_none());
+    }
     let offered = Vec::new();
     let schema = conversation.outcome.clone();
     let decode = |value: &Value| {
@@ -208,7 +212,9 @@ fn tool_review_uses_strict_json_schema_and_decodes_a_typed_verdict() {
         body["response_format"]["json_schema"]["schema"],
         conversation.outcome
     );
-    assert!(body.get("tools").is_none());
+    for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+        assert!(body.get(field).is_none());
+    }
 
     let mut reply = answer_reply();
     reply["choices"][0]["message"]["content"] = json!(r#"{"verdict":"approve"}"#);

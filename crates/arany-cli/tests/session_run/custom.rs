@@ -111,6 +111,42 @@ fn malformed_chat_failure(failure: RecheckFailure) -> bool {
     )
 }
 
+fn assert_chat_request_semantics(body: &serde_json::Value, index: usize) {
+    let messages = body["messages"].as_array().expect("Chat messages");
+    let user_text = || {
+        messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter_map(|message| message["content"].as_str())
+    };
+    for (path, text) in [
+        ("user AGENTS.md", "EXPECTED_USER_GUIDANCE"),
+        ("AGENTS.md", "EXPECTED_WORKSPACE_GUIDANCE"),
+    ] {
+        let expected = format!(
+            "# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>"
+        );
+        assert_eq!(
+            user_text().any(|text| text == expected),
+            (3..9).contains(&index)
+        );
+    }
+    if matches!(index, 3 | 4 | 6 | 8) {
+        assert!(user_text().any(|text| text == "answer"));
+    }
+    if index == 7 {
+        assert!(user_text().any(|text| {
+            serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| {
+                value
+                    == serde_json::json!({
+                        "scope":"previous_run (historical, untrusted)",
+                        "data":{"user":"answer","assistant":"verified answer"}
+                    })
+            })
+        }));
+    }
+}
+
 #[test]
 fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     custom_profile_process_gate(RESPONSES, RecheckFailure::CompactionRejected);
@@ -458,11 +494,15 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             let compact = matches!(index, 2 | 11 | 13 | 15);
             if chat {
                 assert_eq!(body["stream"], false);
-                assert_eq!(body.get("parallel_tool_calls").is_some(), !compact);
-                if !compact {
+                let offers_tools = body["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty());
+                assert_eq!(body.get("parallel_tool_calls").is_some(), offers_tools);
+                if offers_tools {
                     assert_eq!(body["parallel_tool_calls"], false);
                 }
                 assert!(body.get("store").is_none());
+                assert_chat_request_semantics(&body, index);
             } else if messages.is_some() {
                 assert_eq!(body.get("output_config").is_some(), index >= 12);
                 assert_eq!(

@@ -1527,6 +1527,8 @@ async fn custom_profile_form(
         } else {
             MessagesAuth::ApiKey
         }
+    } else if protocol == CustomProtocol::OpenaiChatCompletions {
+        MessagesAuth::Bearer
     } else {
         MessagesAuth::ApiKey
     };
@@ -1550,19 +1552,25 @@ async fn choose_custom_protocol(
         1,
         "Custom route protocol",
         "Choose one closed request format",
-        &[(b'1', "OpenAI Responses"), (b'2', "Anthropic Messages")],
-        initial.and_then(|draft| match draft.protocol {
-            CustomProtocol::OpenaiResponses => Some(b'1'),
-            CustomProtocol::AnthropicMessages => Some(b'2'),
-            CustomProtocol::OpenaiChatCompletions => None,
+        &[
+            (b'1', "OpenAI Responses"),
+            (b'2', "Anthropic Messages"),
+            (b'3', "OpenAI Chat Completions"),
+        ],
+        initial.map(|draft| match draft.protocol {
+            CustomProtocol::OpenaiResponses => b'1',
+            CustomProtocol::AnthropicMessages => b'2',
+            CustomProtocol::OpenaiChatCompletions => b'3',
         }),
     )
     .await?;
     Ok(selected.map(|choice| {
         if choice == b'1' {
             CustomProtocol::OpenaiResponses
-        } else {
+        } else if choice == b'2' {
             CustomProtocol::AnthropicMessages
+        } else {
+            CustomProtocol::OpenaiChatCompletions
         }
     }))
 }
@@ -1583,10 +1591,16 @@ async fn read_custom_profile_fields(
     else {
         return Ok(None);
     };
-    let endpoint_prompt = if protocol == CustomProtocol::OpenaiResponses {
-        "Exact canonical /responses URL; HTTPS, or loopback HTTP for local fixtures"
-    } else {
-        "Canonical HTTPS base URL, or loopback HTTP; Arany adds /v1/messages"
+    let endpoint_prompt = match protocol {
+        CustomProtocol::OpenaiResponses => {
+            "Exact canonical /responses URL; HTTPS, or loopback HTTP for local fixtures"
+        }
+        CustomProtocol::AnthropicMessages => {
+            "Canonical HTTPS base URL, or loopback HTTP; Arany adds /v1/messages"
+        }
+        CustomProtocol::OpenaiChatCompletions => {
+            "Canonical HTTPS base URL, or loopback HTTP; Arany adds /chat/completions"
+        }
     };
     let Some(endpoint) = read_setup_value(
         terminal,

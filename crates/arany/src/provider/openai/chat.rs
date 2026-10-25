@@ -21,7 +21,6 @@ pub(crate) fn run_body(
         "messages": messages(conversation)?,
         "max_completion_tokens": request.max_output_tokens,
         "stream": false,
-        "parallel_tool_calls": false,
     });
     let functions: Vec<_> = outcome_specs(&conversation.outcome)
         .into_iter()
@@ -39,6 +38,7 @@ pub(crate) fn run_body(
     } else if !functions.is_empty() {
         body["tools"] = Value::Array(functions);
         body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(false);
     }
     if let Some(effort) = effort {
         body["reasoning_effort"] = json!(effort.as_str());
