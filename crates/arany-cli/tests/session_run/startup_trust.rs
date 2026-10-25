@@ -1822,7 +1822,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "host rules first-save cancellation",
-        &shows("Host command rules apply from the next Run"),
+        &shows("Host command rules unchanged"),
     );
     assert!(!file.exists());
     input.write_all(b"/permissions\r").unwrap();
@@ -2017,7 +2017,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "host rules notice",
-        &shows("Host command rules apply from the next Run"),
+        &shows("Host command rules unchanged"),
     );
     assert_eq!(std::fs::read(&file).unwrap(), before_host_editor);
     input.write_all(b"\x03").unwrap();

@@ -175,7 +175,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
     ("ToolStarted", 17, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 23, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("ToolPermissionDecided", 5, VERDICT_V4, VERDICT_V4),
-    ("ToolPermissionDecided", 6, VERDICT_V4, VERDICT_V4),
+    ("ToolPermissionDecided", 6, VERDICT_V6_HOST, VERDICT_V6_HOST),
     ("AgentSpawned", 13, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("HookStarted", 7, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
     ("HookFinished", 12, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
@@ -366,6 +366,7 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     }
 }
 const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
+const VERDICT_V6_HOST: &str = r#"{"host":{"epoch":"01900000-0000-7000-8000-000000000001","session":false,"source_intent":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]},"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"session_approval","source":"session_approval","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
 const REFUSAL_V18: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
 const REFUSAL_V19: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
 const PROVIDER_CALL_V19: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":null,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
@@ -2716,22 +2717,14 @@ fn host_prefix_migration_preserves_source_bytes_but_never_fabricates_authority()
         assert!((step.transform)(forged.clone()).is_none());
         assert!((step.canonical)(&forged.to_string()).is_none());
     }
-    let mut verdict: crate::tools::permissions::PermissionVerdict =
-        serde_json::from_str(VERDICT_V4).unwrap();
-    verdict.source = crate::tools::permissions::PermissionSource::SessionApproval;
-    verdict.basis = verdict.source;
-    verdict.host = Some(crate::tools::permissions::HostApproval {
-        rule: None,
-        epoch: uuid::Uuid::now_v7(),
-        session: false,
-        source_intent: Some([3; 32]),
-    });
-    let text = serde_json::to_string(&verdict).unwrap();
-    assert_eq!((step.canonical)(&text).as_deref(), Some(text.as_str()));
     assert_eq!(
-        (step.transform)(serde_json::to_value(&verdict).unwrap()),
-        Some(serde_json::from_str(&text).unwrap())
+        (step.canonical)(VERDICT_V6_HOST).as_deref(),
+        Some(VERDICT_V6_HOST)
     );
+    let legacy: Value = serde_json::from_str(VERDICT_V6_HOST).unwrap();
+    assert_eq!((step.transform)(legacy.clone()), Some(legacy));
+    let mut verdict: crate::tools::permissions::PermissionVerdict =
+        serde_json::from_str(VERDICT_V6_HOST).unwrap();
     let mut pin = crate::tools::types::test_host_pin();
     pin.executable = "/usr/bin/printf".into();
     verdict.host.as_mut().unwrap().rule = Some(

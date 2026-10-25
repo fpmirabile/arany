@@ -275,62 +275,24 @@ pub(super) async fn manage_host_rules(
 ) -> Result<HostRuleEditOutcome, SetupError> {
     let mut notice = "Host rules authorize every eligible suffix in this folder and exact cwd. They apply next Run. This is not confinement.".to_owned();
     let mut saved = false;
+    let mut last_error = None;
     loop {
         let Ok(state) = StateRoot::open_existing(state_dir) else {
-            return Ok(HostRuleEditOutcome::Confirmed(host_rule_reload_failure(
-                "state unavailable",
+            return Ok(HostRuleEditOutcome::Confirmed(host_rule_edit_notice(
+                Some("state unavailable"),
                 saved,
             )));
         };
         let settings = match PermissionSettings::load(&state, workspace) {
             Ok(settings) => settings,
             Err(error) => {
-                return Ok(HostRuleEditOutcome::Confirmed(host_rule_reload_failure(
-                    &error.to_string(),
+                return Ok(HostRuleEditOutcome::Confirmed(host_rule_edit_notice(
+                    Some(&error.to_string()),
                     saved,
                 )));
             }
         };
-        let mut rows = vec![(ADD, "Add from a recent eligible host command".to_owned())];
-        rows.extend(
-            settings
-                .host_prefixes()
-                .iter()
-                .enumerate()
-                .map(|(index, rule)| {
-                    (
-                        ENTRY_BASE + u8::try_from(index).expect("rules bounded"),
-                        format!(
-                            "{} {} · {} · cwd {}",
-                            decision_label(rule.decision),
-                            crate::presentation::escape_terminal(
-                                &serde_json::to_string(&rule.prefix).expect("prefix")
-                            ),
-                            scope_label(Some(rule.workspace()), workspace),
-                            crate::presentation::escape_terminal(&rule.cwd)
-                        ),
-                    )
-                }),
-        );
-        rows.push((BACK, "Back".into()));
-        let labels = rows
-            .iter()
-            .map(|(key, label)| (*key, label.as_str()))
-            .collect::<Vec<_>>();
-        let instruction = [
-            if settings.exists() { "" } else { SETTINGS_NOTE },
-            notice.as_str(),
-        ]
-        .join(" ");
-        let choice = super::setup::choose_focused(
-            terminal,
-            2,
-            "Host command rules",
-            &instruction,
-            &labels,
-            None,
-        )
-        .await?;
+        let choice = choose_host_rule(terminal, &settings, workspace, &notice).await?;
         let edit = match choice {
             Some(ADD) => add_host_edit(terminal, view, workspace).await?,
             Some(value) if value >= ENTRY_BASE => {
@@ -343,24 +305,80 @@ pub(super) async fn manage_host_rules(
                 })
             }
             _ => {
-                return Ok(HostRuleEditOutcome::Confirmed(
-                    "Host command rules apply from the next Run".into(),
-                ));
+                return Ok(HostRuleEditOutcome::Confirmed(host_rule_edit_notice(
+                    last_error.as_deref(),
+                    saved,
+                )));
             }
         };
         let Some(edit) = edit else { continue };
         match settings.save_host_edit(&state, workspace, edit) {
             Ok(_) => {
                 saved = true;
-                notice = "Host rules saved; they apply next Run.".into();
+                last_error = None;
+                notice = host_rule_edit_notice(None, saved);
             }
             Err(SettingsError::NotConfirmed) => return Ok(HostRuleEditOutcome::Uncertain),
-            Err(error) => notice = format!("Error: {error}; nothing dispatched."),
+            Err(error) => {
+                last_error = Some(error.to_string());
+                notice = host_rule_edit_notice(last_error.as_deref(), saved);
+            }
         }
     }
 }
 
-fn host_rule_reload_failure(reason: &str, saved: bool) -> String {
+async fn choose_host_rule(
+    terminal: &mut AttachedTerminal,
+    settings: &PermissionSettings,
+    workspace: &Path,
+    notice: &str,
+) -> Result<Option<u8>, SetupError> {
+    let mut rows = vec![(ADD, "Add from a recent eligible host command".to_owned())];
+    rows.extend(
+        settings
+            .host_prefixes()
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                (
+                    ENTRY_BASE + u8::try_from(index).expect("rules bounded"),
+                    format!(
+                        "{} {} · {} · cwd {}",
+                        decision_label(rule.decision),
+                        crate::presentation::escape_terminal(
+                            &serde_json::to_string(&rule.prefix).expect("prefix")
+                        ),
+                        scope_label(Some(rule.workspace()), workspace),
+                        crate::presentation::escape_terminal(&rule.cwd)
+                    ),
+                )
+            }),
+    );
+    rows.push((BACK, "Back".into()));
+    let labels = rows
+        .iter()
+        .map(|(key, label)| (*key, label.as_str()))
+        .collect::<Vec<_>>();
+    let instruction = [if settings.exists() { "" } else { SETTINGS_NOTE }, notice].join(" ");
+    super::setup::choose_focused(
+        terminal,
+        2,
+        "Host command rules",
+        &instruction,
+        &labels,
+        None,
+    )
+    .await
+}
+
+fn host_rule_edit_notice(reason: Option<&str>, saved: bool) -> String {
+    let Some(reason) = reason else {
+        return if saved {
+            "Host command rules saved; they apply from the next Run".into()
+        } else {
+            "Host command rules unchanged".into()
+        };
+    };
     let status = if saved {
         "earlier host rule edits were saved; reopen /permissions to verify their current state"
     } else {
@@ -871,19 +889,27 @@ mod tests {
     use arany::permissions::{Decision, TypedGitPrefix, TypedPrefixEdit};
 
     #[test]
-    fn host_rule_reload_failures_report_prior_saves_without_claiming_current_state() {
+    fn host_rule_editor_feedback_distinguishes_failed_saved_and_unchanged_edits() {
         for reason in ["state unavailable", "permission settings are invalid"] {
             assert_eq!(
-                super::host_rule_reload_failure(reason, false),
+                super::host_rule_edit_notice(Some(reason), false),
                 format!("Error: {reason}; host rules unchanged")
             );
             assert_eq!(
-                super::host_rule_reload_failure(reason, true),
+                super::host_rule_edit_notice(Some(reason), true),
                 format!(
                     "Error: {reason}; earlier host rule edits were saved; reopen /permissions to verify their current state"
                 )
             );
         }
+        assert_eq!(
+            super::host_rule_edit_notice(None, false),
+            "Host command rules unchanged"
+        );
+        assert_eq!(
+            super::host_rule_edit_notice(None, true),
+            "Host command rules saved; they apply from the next Run"
+        );
     }
 
     fn host_candidate(value: &str, cwd: &str) -> arany::ToolView {
