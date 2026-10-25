@@ -762,7 +762,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             .expect("durable automatic compaction")
             .expect("new boundary");
         assert_eq!(compacted.covered_run_id, second.run.id);
-        assert_eq!(compacted.provider, "scripted");
+        assert_eq!(compacted.provider, "openai");
         assert_eq!(compacted.input_tokens, Some(100));
         assert_eq!(compacted.output_tokens, Some(8));
         assert!(matches!(
@@ -876,7 +876,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 text: "Answer four".into(),
             }),
         ])
-        .with_profile("changed-provider", "changed-model")
+        .with_profile("anthropic", "changed-model")
         .with_compactions(vec![Err(ProviderError::RemoteHttp(403))]);
         let observed = Arc::clone(&provider.requests);
         let resumed_compacts = Arc::clone(&provider.compact_requests);
@@ -893,8 +893,14 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             .await
             .expect("resumed Run");
         assert_eq!(
-            third.run.config.as_ref().expect("config").provider,
-            "changed-provider"
+            third
+                .run
+                .config
+                .as_ref()
+                .expect("config")
+                .provider
+                .profile(),
+            "anthropic"
         );
         assert_eq!(
             third
@@ -1216,7 +1222,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         assert_eq!(outcome.run.status, RunStatus::Finished);
         assert_eq!(outcome.run.agents.len(), 4);
         let team_config = outcome.run.config.as_ref().expect("resumed team config");
-        assert_eq!(team_config.provider, "gated");
+        assert_eq!(team_config.provider.profile(), "anthropic");
         assert_ne!(team_config.provider, resumed.runs[0].config.as_ref().expect("seed config").provider);
         assert_eq!(team_config.compaction_event_sequence, Some(summary_sequence));
         while live.runs.last().unwrap().status != RunStatus::Finished {
@@ -1300,7 +1306,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             ProviderOutcome::Answer(Answer { text: "Later parent answer".into() }),
             ProviderOutcome::Answer(Answer { text: "Branch answer".into() }),
         ])
-        .with_profile("gated", "test-model")
+        .with_profile("anthropic", "test-model")
         .with_compactions(vec![Err(ProviderError::RemoteHttp(403))]);
         let continued_requests = Arc::clone(&provider.requests);
         let compact_requests = Arc::clone(&provider.compact_requests);
@@ -2020,7 +2026,7 @@ mod goals {
             static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
                     arany::ProviderIdentity::new(
-                        "scripted",
+                        "openai",
                         "exact-cap-model",
                         arany::Provenance::native(),
                     )
@@ -2783,11 +2789,11 @@ mod routing {
                 crate::tool_outcome(write),
                 finish("done"),
             ])
-            .with_profile("scripted", "primary"),
+            .with_profile("openai", "primary"),
         );
         // The clock pauses only for the review's backoff; the Guard runs after it resumes.
         let mut review = ScriptedProvider::new(vec![])
-            .with_profile("scripted", "review")
+            .with_profile("openai", "review")
             .with_before_call(0, tokio::time::pause);
         review.responses = Mutex::new(
             (0..=arany::MAX_PROVIDER_RETRIES)
@@ -2797,7 +2803,7 @@ mod routing {
         let review = route(review);
         let fallback = route(
             ScriptedProvider::new(vec![ProviderOutcome::Review(arany::ReviewVerdict::Approve)])
-                .with_profile("scripted", "review-fallback")
+                .with_profile("openai", "review-fallback")
                 .with_before_call(0, tokio::time::resume),
         );
         let engine = engine_support::open(
@@ -2890,7 +2896,7 @@ mod routing {
                 }),
                 finish("done"),
             ])
-            .with_profile("scripted", "primary"),
+            .with_profile("openai", "primary"),
         );
         // The clock pauses after the Guard Read, only for the backoff before the switch.
         let mut first = ScriptedProvider::new(vec![tool_outcome(arany::ToolCall::Read {
@@ -2898,7 +2904,7 @@ mod routing {
             offset: None,
             limit: None,
         })])
-        .with_profile("scripted", "spare-first")
+        .with_profile("openai", "spare-first")
         .with_before_call(1, tokio::time::pause);
         first
             .responses
@@ -2908,7 +2914,7 @@ mod routing {
         let first = route(first);
         let fallback = route(
             ScriptedProvider::new(vec![finish("read facts")])
-                .with_profile("scripted", "spare-fallback")
+                .with_profile("openai", "spare-fallback")
                 .with_before_call(0, tokio::time::resume),
         );
         let engine = engine_support::open(
@@ -2972,10 +2978,10 @@ mod routing {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
         let state = temp.path().join("state");
         let primary =
-            route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+            route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "primary"));
         let first = route(
             ScriptedProvider::new(vec![])
-                .with_profile("scripted", "compaction")
+                .with_profile("openai", "compaction")
                 .with_compactions(
                     (0..=arany::MAX_PROVIDER_RETRIES)
                         .map(|_| Err(ProviderError::RemoteHttp(503)))
@@ -2984,7 +2990,7 @@ mod routing {
         );
         let second = route(
             ScriptedProvider::new(vec![])
-                .with_profile("scripted", "compaction-fallback")
+                .with_profile("openai", "compaction-fallback")
                 .with_compactions(vec![Ok(CompactionResponse {
                     summary: "Fork summary".into(),
                     response_id: None,
@@ -3054,10 +3060,10 @@ mod routing {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
         let state = temp.path().join("state");
         let primary =
-            route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+            route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "primary"));
         let first = route(
             ScriptedProvider::new(vec![])
-                .with_profile("scripted", "compaction")
+                .with_profile("openai", "compaction")
                 .with_compactions(
                     (0..=arany::MAX_PROVIDER_RETRIES)
                         .map(|_| Err(ProviderError::RemoteHttp(503)))
@@ -3066,7 +3072,7 @@ mod routing {
         );
         let second = route(
             ScriptedProvider::new(vec![])
-                .with_profile("scripted", "compaction-fallback")
+                .with_profile("openai", "compaction-fallback")
                 .with_compactions(vec![Ok(CompactionResponse {
                     summary: "Parent summary".into(),
                     response_id: None,

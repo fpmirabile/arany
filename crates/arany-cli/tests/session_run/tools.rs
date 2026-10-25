@@ -181,7 +181,7 @@ impl Provider for Journey {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "tool-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -607,7 +607,7 @@ impl Provider for Proposal {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "guard-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -711,7 +711,7 @@ impl Provider for OverTimeoutCommand {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "goal-resource-model",
                     arany::Provenance::native(),
                 )
@@ -873,7 +873,7 @@ impl Provider for InProcessReads {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "read-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "read-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -1067,7 +1067,7 @@ impl arany::Provider for ExactTokenTool {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "goal-budget-model",
                     arany::Provenance::native(),
                 )
@@ -1196,7 +1196,7 @@ impl Provider for GoalWorkspaceLease {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "goal-lease-model",
                     arany::Provenance::native(),
                 )
@@ -1555,7 +1555,7 @@ impl Provider for BoundedLoop {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "guard-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -2841,7 +2841,7 @@ impl Provider for ApprovalJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "guard-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "guard-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -3165,7 +3165,7 @@ impl Provider for GitJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "tool-model", arany::Provenance::native())
             });
         &IDENTITY
     }

@@ -31,15 +31,15 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
                 }),
                 finish("done"),
             ])
-            .with_profile("scripted", "primary-model"),
+            .with_profile("openai", "primary-model"),
         );
         let child = route(
             ScriptedProvider::new(vec![finish("child report")])
-                .with_profile("scripted", "child-model"),
+                .with_profile("openai", "child-model"),
         );
         let compact = route(
             ScriptedProvider::new(vec![])
-                .with_profile("scripted", "compact-model")
+                .with_profile("openai", "compact-model")
                 .with_compactions(vec![Ok(CompactionResponse {
                     summary: "summary".into(),
                     response_id: None,
@@ -50,7 +50,7 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
         let mut bindings = routes(&primary);
         bindings.roles.child = vec![child.clone()];
         bindings.roles.compaction = vec![compact.clone()];
-        let spare = route(ScriptedProvider::new(vec![]).with_profile("scripted", "unused-model"));
+        let spare = route(ScriptedProvider::new(vec![]).with_profile("openai", "unused-model"));
         if named {
             pin_roster(&mut bindings, Some(vec![spare.clone()]));
         }
@@ -176,14 +176,14 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
-        let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "first");
+        let mut primary = ScriptedProvider::new(vec![]).with_profile("openai", "first");
         primary.responses = unavailable_attempts(1);
         let primary = route(primary);
-        let mut second = ScriptedProvider::new(vec![]).with_profile("scripted", "second");
+        let mut second = ScriptedProvider::new(vec![]).with_profile("openai", "second");
         second.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
         let second = route(second);
         let third =
-            route(ScriptedProvider::new(vec![finish("third")]).with_profile("scripted", "third"));
+            route(ScriptedProvider::new(vec![finish("third")]).with_profile("openai", "third"));
         let mut bindings = routes(&primary);
         bindings.roles.primary.extend([
             second.clone() as Arc<dyn Provider>,
@@ -255,18 +255,18 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
             }),
             finish("done"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
-    let mut child = ScriptedProvider::new(vec![]).with_profile("scripted", "child");
+    let mut child = ScriptedProvider::new(vec![]).with_profile("openai", "child");
     child.responses = unavailable_attempts(2);
     let child = route(child);
     let fallback = route(
         ScriptedProvider::new(vec![finish("child fallback"), finish("child fallback")])
-            .with_profile("scripted", "child-fallback"),
+            .with_profile("openai", "child-fallback"),
     );
     let compaction = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact")
+            .with_profile("openai", "compact")
             .with_compactions(
                 (0..=MAX_PROVIDER_RETRIES)
                     .map(|_| Err(ProviderError::RemoteHttp(503)))
@@ -275,7 +275,7 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact-fallback")
+            .with_profile("openai", "compact-fallback")
             .with_compactions(vec![Ok(CompactionResponse {
                 summary: "compacted".into(),
                 response_id: None,
@@ -365,10 +365,10 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
     let primary =
-        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "primary"));
     let compaction = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact")
+            .with_profile("openai", "compact")
             .with_compactions(
                 (0..=MAX_PROVIDER_RETRIES)
                     .map(|_| Err(ProviderError::RemoteHttp(503)))
@@ -378,7 +378,7 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact-fallback")
+            .with_profile("openai", "compact-fallback")
             .with_compactions(vec![
                 Err(ProviderError::RemoteHttp(503)),
                 summary_response(),
@@ -440,15 +440,15 @@ async fn refused_fallback_admission_settles_the_known_compaction_failure() {
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
     let primary =
-        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "primary"));
     let compaction = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact")
+            .with_profile("openai", "compact")
             .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact-fallback")
+            .with_profile("openai", "compact-fallback")
             .with_compactions(vec![summary_response()]),
     );
     let mut bindings = routes(&primary);
@@ -568,7 +568,7 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
     };
     // The clock pauses after the Tool result, for the backoff only.
     let mut primary = ScriptedProvider::new(vec![])
-        .with_profile("scripted", "primary")
+        .with_profile("openai", "primary")
         .with_before_call(1, tokio::time::pause);
     primary.responses = unavailable_attempts(1);
     primary
@@ -579,7 +579,7 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
     let primary = route(primary);
     let fallback = route(
         ScriptedProvider::new(vec![finish("done")])
-            .with_profile("scripted", "fallback")
+            .with_profile("openai", "fallback")
             .with_before_call(0, tokio::time::resume),
     );
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
@@ -646,9 +646,8 @@ async fn roster_disagreeing_with_role_chains_is_refused_before_any_call() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    let first =
-        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "first"));
-    let other = route(ScriptedProvider::new(vec![]).with_profile("scripted", "other"));
+    let first = route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "first"));
+    let other = route(ScriptedProvider::new(vec![]).with_profile("openai", "other"));
     let mut bindings = routes(&first);
     pin_roster(&mut bindings, None);
     bindings.roles.child = vec![other];
@@ -667,10 +666,10 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
-    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "first");
+    let mut first = ScriptedProvider::new(vec![]).with_profile("openai", "first");
     first.responses = unavailable_attempts(1);
     let first = route(first);
-    let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "next"));
+    let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "next"));
     let mut bindings = routes(&first);
     bindings.roles.primary.push(next.clone());
     pin_roster(&mut bindings, None);
@@ -733,8 +732,8 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     }
     store.close().await.unwrap();
     let first =
-        route(ScriptedProvider::new(vec![finish("recovered")]).with_profile("scripted", "first"));
-    let next = route(ScriptedProvider::new(vec![]).with_profile("scripted", "next"));
+        route(ScriptedProvider::new(vec![finish("recovered")]).with_profile("openai", "first"));
+    let next = route(ScriptedProvider::new(vec![]).with_profile("openai", "next"));
     let mut bindings = routes(&first);
     bindings.roles.primary.push(next.clone());
     pin_roster(&mut bindings, None);
@@ -823,7 +822,7 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
-        let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "primary-model");
+        let mut primary = ScriptedProvider::new(vec![]).with_profile("openai", "primary-model");
         primary.responses = Mutex::new((0..=retries).map(|_| Err(error())).collect());
         if partial {
             primary.preview = Some(arany::PreviewText {
@@ -834,7 +833,7 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
         let primary = route(primary);
         let fallback = route(
             ScriptedProvider::new(vec![finish("fallback answer")])
-                .with_profile("scripted", "fallback-model"),
+                .with_profile("openai", "fallback-model"),
         );
         let bindings = arany::AdmittedProviders::from_roles(Providers::all(vec![
             primary.clone() as Arc<dyn Provider>,
@@ -951,9 +950,9 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
             }),
             finish("done"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
-    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
+    let mut first = ScriptedProvider::new(vec![]).with_profile("openai", "shared-first");
     first.responses = unavailable_attempts(3);
     let first = route(first);
     let (started, mut starts) = mpsc::unbounded_channel();
@@ -1263,7 +1262,7 @@ struct PreviewGate {
 impl PreviewGate {
     fn route(model: &str, failing: bool) -> Arc<dyn Provider> {
         Arc::new(Self {
-            identity: arany::ProviderIdentity::new("gate", model, arany::Provenance::native()),
+            identity: arany::ProviderIdentity::new("openai", model, arany::Provenance::native()),
             failing,
         })
     }
@@ -1334,10 +1333,10 @@ async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() 
                 }),
                 finish("done"),
             ])
-            .with_profile("scripted", "primary"),
+            .with_profile("openai", "primary"),
         );
         let fallback = route(
-            ScriptedProvider::new(vec![finish("fallback")]).with_profile("scripted", "fallback"),
+            ScriptedProvider::new(vec![finish("fallback")]).with_profile("openai", "fallback"),
         );
         let assigned = if assigned_routes == 1 {
             vec![PreviewGate::route("single", false)]
@@ -1393,11 +1392,11 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
         }),
         finish("done"),
     ])
-    .with_profile("scripted", "primary");
+    .with_profile("openai", "primary");
     primary.identity.limits.concurrency = 1;
     let primary = route(primary);
     // Each researcher's first call and its three same-route retries on the shared first route.
-    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
+    let mut first = ScriptedProvider::new(vec![]).with_profile("openai", "shared-first");
     first.responses = unavailable_attempts(2);
     let first = route(first);
     let fallback = |model| {
@@ -1410,7 +1409,7 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
                 }),
                 finish("read facts"),
             ])
-            .with_profile("scripted", model),
+            .with_profile("openai", model),
         )
     };
     let default = fallback("default-fallback");
@@ -1572,7 +1571,7 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let mut primary =
-            ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary");
+            ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "primary");
         if case.starts_with("custom Messages") {
             primary.identity.profile = "custom:messages".into();
             primary.identity.provenance =
@@ -1622,7 +1621,10 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         let run = &view.runs[0];
         let primary_id = run.agents[0].id;
         if case.starts_with("custom Messages") {
-            assert_eq!(run.config.as_ref().unwrap().provider, "custom:messages");
+            assert_eq!(
+                run.config.as_ref().unwrap().provider.profile(),
+                "custom:messages"
+            );
             assert_eq!(
                 run.config
                     .as_ref()
@@ -1824,7 +1826,7 @@ async fn a_pause_in_the_retry_backoff_starts_no_further_reservation_or_dispatch(
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let mut failing =
-            ScriptedProvider::new(vec![finish("never")]).with_profile("scripted", "failing");
+            ScriptedProvider::new(vec![finish("never")]).with_profile("openai", "failing");
         failing
             .responses
             .get_mut()
@@ -1844,7 +1846,7 @@ async fn a_pause_in_the_retry_backoff_starts_no_further_reservation_or_dispatch(
                     }),
                     finish("never synthesized"),
                 ])
-                .with_profile("scripted", "primary"),
+                .with_profile("openai", "primary"),
             )
         } else {
             failing.clone()
@@ -1925,10 +1927,10 @@ async fn a_single_route_boundary_compaction_retries_a_transient_failure_then_sav
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
     let primary =
-        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "primary"));
     let compaction = route(
         ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact")
+            .with_profile("openai", "compact")
             .with_compactions(vec![
                 Err(ProviderError::RemoteHttp(503)),
                 summary_response(),

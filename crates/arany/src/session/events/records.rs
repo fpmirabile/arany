@@ -229,7 +229,7 @@ pub struct RunConfig {
     pub roster: Option<Box<crate::provider::RosterSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<crate::provider::ProviderRoutes>,
-    pub provider: String,
+    pub provider: crate::provider::ProviderRecord,
     pub model: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub effort: Option<crate::provider::Effort>,
@@ -357,6 +357,9 @@ impl RunConfig {
     }
 
     pub(crate) fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
+        if !self.provider.valid() {
+            return None;
+        }
         use crate::provider::Provenance;
         let provenance = match (
             &self.custom_profile_provenance,
@@ -371,7 +374,7 @@ impl RunConfig {
             _ => return None,
         };
         Some(crate::provider::ProviderIdentity {
-            profile: self.provider.clone(),
+            profile: self.provider.profile(),
             model: self.model.clone(),
             effort: self.effort,
             provenance,
@@ -464,8 +467,7 @@ impl RunConfig {
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
-            || ProviderKind::parse(&self.provider) == Some(ProviderKind::Custom)
-                && self.tool_policy.is_some()
+            || self.provider.kind == ProviderKind::Custom && self.tool_policy.is_some()
             || self.include_digests.len() > 16
             || !self.instruction_scope_valid()
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS

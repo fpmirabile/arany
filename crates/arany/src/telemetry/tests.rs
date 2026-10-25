@@ -70,7 +70,7 @@ impl Provider for WaitingTraceProvider {
         static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 crate::provider::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "test-model",
                     crate::provider::Provenance::native(),
                 )
@@ -91,7 +91,7 @@ impl Provider for GatedFailureProvider {
         static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 let mut identity = crate::provider::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "test-model",
                     crate::provider::Provenance::native(),
                 );
@@ -614,7 +614,7 @@ fn identity(profile: &str, model: &str) -> ProviderIdentity {
 }
 
 fn child_routes() -> ProviderRoutes {
-    let mut routes = Providers::all(vec![identity("other", "model-1")]);
+    let mut routes = Providers::all(vec![identity("openai", "model-1")]);
     routes.child = vec![identity("anthropic", "child-model")];
     routes
 }
@@ -626,7 +626,7 @@ fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
         agent_definitions: None,
         roster: None,
         providers,
-        provider: "other".into(),
+        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
         model: "model-1".into(),
         effort: None,
         custom_profile_provenance: None,
@@ -1008,7 +1008,7 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
         assert!(has_attribute(
             first_provider,
             "gen_ai.provider.name",
-            "other".into()
+            "openai".into()
         ));
         assert!(has_attribute(
             first_provider,
@@ -1184,7 +1184,7 @@ fn a_segment_without_its_run_receipt_stays_abandoned() {
 #[test]
 fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
     let (telemetry, exporter) = in_memory();
-    let mut routes = Providers::all(vec![identity("other", "model-1")]);
+    let mut routes = Providers::all(vec![identity("openai", "model-1")]);
     routes.primary = vec![
         identity("openai", "primary-a"),
         identity("anthropic", "primary-b"),
@@ -1398,7 +1398,7 @@ fn a_child_fallback_switch_keeps_other_agents_on_their_requested_routes() {
     for (sequence, profile, model) in [
         (child_call, "openai", "child-fallback"),
         (sibling_call, "anthropic", "child-model"),
-        (primary_call, "other", "model-1"),
+        (primary_call, "openai", "model-1"),
     ] {
         let span = providers
             .iter()

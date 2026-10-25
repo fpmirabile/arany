@@ -71,7 +71,8 @@ pub use render::semantic;
 pub(crate) use render::{history_refusal_block, history_tool_block, history_unanswered_block};
 pub use streaming::{PreviewText, ResponsePreview};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     OpenAi,
     Anthropic,
@@ -118,6 +119,48 @@ impl ProviderKind {
 
     pub fn custom_profile(name: &str) -> String {
         format!("custom:{name}")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRecord {
+    pub kind: ProviderKind,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub custom_name: Option<String>,
+}
+
+impl ProviderRecord {
+    pub fn parse(profile: &str) -> Option<Self> {
+        let record = Self {
+            kind: ProviderKind::parse(profile)?,
+            custom_name: ProviderKind::custom_name(profile).map(str::to_owned),
+        };
+        record.valid().then_some(record)
+    }
+
+    pub fn profile(&self) -> String {
+        match self.kind {
+            ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::ChatGpt => self
+                .kind
+                .native_name()
+                .expect("native Provider kind")
+                .to_owned(),
+            ProviderKind::Custom => ProviderKind::custom_profile(
+                self.custom_name
+                    .as_deref()
+                    .expect("validated custom Provider name"),
+            ),
+        }
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        match self.kind {
+            ProviderKind::Custom => self.custom_name.as_deref().is_some_and(valid_profile_name),
+            ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::ChatGpt => {
+                self.custom_name.is_none()
+            }
+        }
     }
 }
 

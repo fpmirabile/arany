@@ -2192,7 +2192,8 @@ impl Engine {
                 .as_ref()
                 .map(|roster| Box::new(roster.snapshot.clone())),
             providers: (!inherited).then_some(routes),
-            provider: identity.profile.clone(),
+            provider: crate::provider::ProviderRecord::parse(&identity.profile)
+                .ok_or(EngineError::InvalidRequest)?,
             model: identity.model.clone(),
             effort: identity.effort,
             custom_profile_provenance: identity.custom_provenance().cloned(),

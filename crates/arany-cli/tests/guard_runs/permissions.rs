@@ -1615,15 +1615,15 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
             }),
             finish("answer"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
     let child = route(
         ScriptedProvider::new(vec![tool_outcome(call("catalog")), finish("report")])
-            .with_profile("scripted", "child"),
+            .with_profile("openai", "child"),
     );
     // The clock pauses only for the review's backoff; the Guard runs after it resumes.
     let mut review = ScriptedProvider::new(vec![])
-        .with_profile("scripted", "review")
+        .with_profile("openai", "review")
         .with_before_call(0, tokio::time::pause);
     review.responses = Mutex::new(
         (0..=arany::MAX_PROVIDER_RETRIES)
@@ -1633,7 +1633,7 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
     let review = route(review);
     let fallback = route(
         ScriptedProvider::new(vec![verdict("approve")])
-            .with_profile("scripted", "review-fallback")
+            .with_profile("openai", "review-fallback")
             .with_before_call(0, tokio::time::resume),
     );
     let mut bindings = routes(&primary);

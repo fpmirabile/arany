@@ -205,7 +205,7 @@ impl Provider for CacheCanary {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "cache-canary-model",
                     arany::Provenance::native(),
                 )

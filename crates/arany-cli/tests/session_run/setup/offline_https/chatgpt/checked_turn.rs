@@ -1102,7 +1102,7 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
         assert_eq!(run.status, arany::RunStatus::Finished);
         assert_eq!(run.assistant_message.as_deref(), Some(answer));
         let config = run.config.as_ref().expect("pinned ChatGPT Run config");
-        assert_eq!(config.provider, "chatgpt");
+        assert_eq!(config.provider.profile(), "chatgpt");
         assert_eq!(config.model, "gpt-6.1-sol");
         assert_eq!(config.effort, Some(arany::Effort::Medium));
         assert_eq!(config.saved_api_account_id, None);
@@ -1164,7 +1164,7 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
     assert_eq!(team.status, arany::RunStatus::Finished);
     assert_eq!(team.assistant_message.as_deref(), Some(TEAM_ANSWER));
     let config = team.config.as_ref().expect("pinned team config");
-    assert_eq!(config.provider, "chatgpt");
+    assert_eq!(config.provider.profile(), "chatgpt");
     assert_eq!(config.model, "gpt-6.1-sol");
     assert_eq!(config.effort, Some(arany::Effort::Medium));
     assert_eq!(config.saved_api_account_id, None);
@@ -1255,7 +1255,7 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
     assert_eq!(failed.status, arany::RunStatus::Failed);
     assert_eq!(failed.assistant_message, None);
     let config = failed.config.as_ref().expect("failed Run config");
-    assert_eq!(config.provider, "chatgpt");
+    assert_eq!(config.provider.profile(), "chatgpt");
     assert_eq!(config.model, "gpt-6.1-sol");
     assert_eq!(config.effort, Some(arany::Effort::Medium));
     assert_eq!(config.saved_api_account_id, None);
