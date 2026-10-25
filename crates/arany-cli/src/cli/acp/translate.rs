@@ -1172,238 +1172,288 @@ async fn output_message(
     state: Shared,
     stopping: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
+    let response_context = ResponseContext {
+        state: &state,
+        outbound: &outbound,
+    };
+    let active_context = ActiveResponseContext {
+        state: &state,
+        serve: &serve,
+        outbound: &outbound,
+        stopping: &stopping,
+    };
     match message {
-        Message::Response(reply) => {
-            let RequestId::Integer(id) = reply.id else {
-                return Ok(());
-            };
-            let pending = state.lock().expect("translator state").pending.remove(&id);
-            let context = ResponseContext {
-                state: &state,
-                outbound: &outbound,
-            };
-            let active_context = ActiveResponseContext {
-                state: &state,
-                serve: &serve,
-                outbound: &outbound,
-                stopping: &stopping,
-            };
-            match pending {
-                Some(Pending::Initialize(id)) => initialize_response(id, &context).await?,
-                Some(Pending::New(id, cwd, mode)) => {
-                    new_session_response(id, cwd, mode, reply.result, &context).await?
-                }
-                Some(Pending::Load {
+        Message::Response(reply) => on_response(reply, &response_context, &active_context).await?,
+        Message::Error(reply) => on_error(reply, &active_context).await?,
+        Message::Notification(note) => on_notification(note, &active_context).await?,
+        Message::Request(request) => permission_request(&state, &serve, &outbound, request).await?,
+    }
+    Ok(())
+}
+
+async fn on_response(
+    reply: Response,
+    context: &ResponseContext<'_>,
+    active_context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    let RequestId::Integer(id) = reply.id else {
+        return Ok(());
+    };
+    let pending = context
+        .state
+        .lock()
+        .expect("translator state")
+        .pending
+        .remove(&id);
+    match pending {
+        Some(Pending::Initialize(id)) => initialize_response(id, context).await?,
+        Some(Pending::New(id, cwd, mode)) => {
+            new_session_response(id, cwd, mode, reply.result, context).await?
+        }
+        Some(Pending::Load {
+            id,
+            cwd,
+            replay,
+            mode,
+        }) => {
+            load_session_response(
+                LoadResponse {
                     id,
                     cwd,
                     replay,
                     mode,
-                }) => {
-                    load_session_response(
-                        LoadResponse {
-                            id,
-                            cwd,
-                            replay,
-                            mode,
-                        },
-                        reply.result,
-                        &context,
-                    )
-                    .await?;
-                }
-                Some(Pending::Mode {
-                    id,
-                    session,
-                    config,
-                }) => {
-                    mode_response(id, session, config, reply.result, &context).await?;
-                }
-                Some(Pending::Close(id, session)) => {
-                    close_session_response(id, session, &context).await?
-                }
-                Some(Pending::List(id)) => {
-                    list_sessions_response(id, reply.result, &context).await?
-                }
-                Some(Pending::Start) => start_turn_response(reply.result, &active_context).await?,
-                Some(Pending::Watch { session, run }) => {
-                    watch_turn_response(session, run, reply.result, &active_context).await?
-                }
-                Some(Pending::Recover) => {
-                    recover_turn_response(reply.result, &active_context).await?
-                }
-                _ => (),
-            }
+                },
+                reply.result,
+                context,
+            )
+            .await?;
         }
-        Message::Error(reply) => {
-            let Some(RequestId::Integer(id)) = reply.id else {
-                return Ok(());
-            };
-            let pending = state.lock().expect("translator state").pending.remove(&id);
-            match pending {
-                Some(
-                    Pending::Initialize(id)
-                    | Pending::New(id, ..)
-                    | Pending::Load { id, .. }
-                    | Pending::Mode { id, .. }
-                    | Pending::List(id),
-                ) => emit(&outbound, remap(id, reply.error)).await?,
-                Some(Pending::Close(id, session)) => {
-                    state
-                        .lock()
-                        .expect("translator state")
-                        .closing
-                        .remove(&session);
-                    emit(&outbound, remap(id, reply.error)).await?
-                }
-                Some(Pending::Start) => {
-                    let active = state
-                        .lock()
-                        .expect("translator state")
-                        .active
-                        .take()
-                        .ok_or("no active ACP prompt")?;
-                    let response = if active.cancelled {
-                        wire::response(active.id, json!({"stopReason":"cancelled"}))
-                    } else {
-                        remap(active.id, reply.error)
-                    };
-                    emit(&outbound, response).await?;
-                    if let Some(close) = active.close {
-                        unload(&state, &serve, close, active.session).await?;
-                    }
-                }
-                Some(Pending::Recover) => {
-                    eprintln!(
-                        "Arany could not reconcile all committed ACP updates; check Session history"
-                    );
-                    let prompt = state
-                        .lock()
-                        .expect("translator state")
-                        .active
-                        .as_ref()
-                        .map(|a| a.generation);
-                    if let Some(prompt) = prompt {
-                        finish(&state, &serve, &outbound, prompt, true).await?;
-                    }
-                }
-                Some(Pending::Watch { session, run }) => {
-                    if let Some(active) = &mut state.lock().expect("translator state").active
-                        && active.session == session
-                        && active.turn == Some(run)
-                    {
-                        active.resync = true;
-                    }
-                }
-                _ => (),
-            }
+        Some(Pending::Mode {
+            id,
+            session,
+            config,
+        }) => mode_response(id, session, config, reply.result, context).await?,
+        Some(Pending::Close(id, session)) => close_session_response(id, session, context).await?,
+        Some(Pending::List(id)) => list_sessions_response(id, reply.result, context).await?,
+        Some(Pending::Start) => start_turn_response(reply.result, active_context).await?,
+        Some(Pending::Watch { session, run }) => {
+            watch_turn_response(session, run, reply.result, active_context).await?
         }
-        Message::Notification(note)
-            if matches!(note.method.as_str(), "item/started" | "item/completed") =>
-        {
-            let started = note.method == "item/started";
-            let (thread, turn, item) = if started {
-                let item: ItemStartedNotification =
-                    serde_json::from_value(note.params.unwrap_or(Value::Null))
-                        .map_err(|_| "invalid serve item")?;
-                (item.thread_id, item.turn_id, item.item)
+        Some(Pending::Recover) => recover_turn_response(reply.result, active_context).await?,
+        _ => (),
+    }
+    Ok(())
+}
+
+async fn on_error(reply: ErrorResponse, context: &ActiveResponseContext<'_>) -> Result<(), String> {
+    let Some(RequestId::Integer(id)) = reply.id else {
+        return Ok(());
+    };
+    let pending = context
+        .state
+        .lock()
+        .expect("translator state")
+        .pending
+        .remove(&id);
+    match pending {
+        Some(
+            Pending::Initialize(id)
+            | Pending::New(id, ..)
+            | Pending::Load { id, .. }
+            | Pending::Mode { id, .. }
+            | Pending::List(id),
+        ) => emit(context.outbound, remap(id, reply.error)).await?,
+        Some(Pending::Close(id, session)) => {
+            context
+                .state
+                .lock()
+                .expect("translator state")
+                .closing
+                .remove(&session);
+            emit(context.outbound, remap(id, reply.error)).await?
+        }
+        Some(Pending::Start) => {
+            let active = context
+                .state
+                .lock()
+                .expect("translator state")
+                .active
+                .take()
+                .ok_or("no active ACP prompt")?;
+            let response = if active.cancelled {
+                wire::response(active.id, json!({"stopReason":"cancelled"}))
             } else {
-                let item: ItemCompletedNotification =
-                    serde_json::from_value(note.params.unwrap_or(Value::Null))
-                        .map_err(|_| "invalid serve item")?;
-                (item.thread_id, item.turn_id, item.item)
+                remap(active.id, reply.error)
             };
-            if !started {
-                let withdrawal_id = {
-                    let state = state.lock().expect("translator state");
-                    state
-                        .permission
-                        .as_ref()
-                        .filter(|p| item.id() == p.item_id)
-                        .map(|p| p.serve_id.clone())
-                };
-                if let Some(id) = withdrawal_id
-                    && let Some(note) = withdraw_permission(&state, Some(&id), true)
-                {
-                    emit(&outbound, note).await?;
-                }
-            }
-            if let Some(update) = project(&state, thread, turn, item, started) {
-                emit_answer(&outbound, update).await?;
+            emit(context.outbound, response).await?;
+            if let Some(close) = active.close {
+                unload(context.state, context.serve, close, active.session).await?;
             }
         }
-        Message::Notification(note) if note.method == "turn/completed" => {
-            let result: TurnNotification =
-                serde_json::from_value(note.params.unwrap_or(Value::Null))
-                    .map_err(|_| "invalid serve completion")?;
-            let since = {
-                let mut state = state.lock().expect("translator state");
-                if let Some(active) = &mut state.active
-                    && active.session == result.thread_id
-                    && active.turn == Some(result.turn.id)
-                {
-                    let recover = active.watch_plan
-                        || active.resync
-                        || (!active.answered && result.turn.status == TurnStatus::Completed);
-                    active.completion = Some(result.turn);
-                    let prompt = active.generation;
-                    Some((
-                        prompt,
-                        recover.then_some(
-                            state
-                                .sessions
-                                .get(&result.thread_id)
-                                .map_or(0, |s| s.sequence),
-                        ),
-                    ))
-                } else {
-                    None
-                }
-            };
-            let Some((prompt, since)) = since else {
-                return Ok(());
-            };
-            if let Some(withdrawal) = withdraw_permission(&state, None, true) {
-                emit(&outbound, withdrawal).await?;
-            }
-            if let Some(since) = since.filter(|_| !*stopping.borrow()) {
-                recover(
-                    &state,
-                    &serve,
-                    &outbound,
-                    prompt,
-                    EventsSubscribeParams {
-                        thread_id: result.thread_id,
-                        since,
-                    },
-                )
-                .await?;
-            } else {
-                finish(&state, &serve, &outbound, prompt, since.is_some()).await?;
+        Some(Pending::Recover) => {
+            eprintln!("Arany could not reconcile all committed ACP updates; check Session history");
+            let prompt = context
+                .state
+                .lock()
+                .expect("translator state")
+                .active
+                .as_ref()
+                .map(|a| a.generation);
+            if let Some(prompt) = prompt {
+                finish(context.state, context.serve, context.outbound, prompt, true).await?;
             }
         }
-        Message::Notification(note) if note.method == "events/resync" => {
-            if let Some(active) = &mut state.lock().expect("translator state").active {
+        Some(Pending::Watch { session, run }) => {
+            if let Some(active) = &mut context.state.lock().expect("translator state").active
+                && active.session == session
+                && active.turn == Some(run)
+            {
                 active.resync = true;
             }
         }
-        Message::Notification(note) if note.method == "events/committed" => {
-            let params: EventsCommittedNotification =
-                serde_json::from_value(note.params.unwrap_or(Value::Null))
-                    .map_err(|_| "invalid serve event")?;
-            if let Some(update) = project_plan(&state, params.thread_id, &params.event)? {
-                emit(&outbound, update).await?;
-            }
-        }
-        Message::Notification(note) if note.method == "$/cancel_request" => {
-            if let Ok(params) = parse::<wire::CancelRequest>(note.params)
-                && let Some(withdrawal) =
-                    withdraw_permission(&state, Some(&params.request_id), true)
-            {
-                emit(&outbound, withdrawal).await?;
-            }
-        }
-        Message::Request(request) => permission_request(&state, &serve, &outbound, request).await?,
         _ => (),
+    }
+    Ok(())
+}
+
+async fn on_notification(
+    note: Notification,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    match note.method.as_str() {
+        "item/started" | "item/completed" => item_notification(note, context).await?,
+        "turn/completed" => turn_completed_notification(note, context).await?,
+        "events/resync" => {
+            if let Some(active) = &mut context.state.lock().expect("translator state").active {
+                active.resync = true;
+            }
+        }
+        "events/committed" => committed_event_notification(note, context).await?,
+        "$/cancel_request" => cancel_request_notification(note, context).await?,
+        _ => (),
+    }
+    Ok(())
+}
+
+async fn item_notification(
+    note: Notification,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    let started = note.method == "item/started";
+    let (thread, turn, item) = if started {
+        let item: ItemStartedNotification =
+            serde_json::from_value(note.params.unwrap_or(Value::Null))
+                .map_err(|_| "invalid serve item")?;
+        (item.thread_id, item.turn_id, item.item)
+    } else {
+        let item: ItemCompletedNotification =
+            serde_json::from_value(note.params.unwrap_or(Value::Null))
+                .map_err(|_| "invalid serve item")?;
+        (item.thread_id, item.turn_id, item.item)
+    };
+    if !started {
+        let withdrawal_id = {
+            let state = context.state.lock().expect("translator state");
+            state
+                .permission
+                .as_ref()
+                .filter(|permission| item.id() == permission.item_id)
+                .map(|permission| permission.serve_id.clone())
+        };
+        if let Some(id) = withdrawal_id
+            && let Some(note) = withdraw_permission(context.state, Some(&id), true)
+        {
+            emit(context.outbound, note).await?;
+        }
+    }
+    if let Some(update) = project(context.state, thread, turn, item, started) {
+        emit_answer(context.outbound, update).await?;
+    }
+    Ok(())
+}
+
+async fn turn_completed_notification(
+    note: Notification,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    let result: TurnNotification = serde_json::from_value(note.params.unwrap_or(Value::Null))
+        .map_err(|_| "invalid serve completion")?;
+    let since = {
+        let mut state = context.state.lock().expect("translator state");
+        if let Some(active) = &mut state.active
+            && active.session == result.thread_id
+            && active.turn == Some(result.turn.id)
+        {
+            let recover = active.watch_plan
+                || active.resync
+                || (!active.answered && result.turn.status == TurnStatus::Completed);
+            active.completion = Some(result.turn);
+            let prompt = active.generation;
+            Some((
+                prompt,
+                recover.then_some(
+                    state
+                        .sessions
+                        .get(&result.thread_id)
+                        .map_or(0, |session| session.sequence),
+                ),
+            ))
+        } else {
+            None
+        }
+    };
+    let Some((prompt, since)) = since else {
+        return Ok(());
+    };
+    if let Some(withdrawal) = withdraw_permission(context.state, None, true) {
+        emit(context.outbound, withdrawal).await?;
+    }
+    if let Some(since) = since.filter(|_| !*context.stopping.borrow()) {
+        recover(
+            context.state,
+            context.serve,
+            context.outbound,
+            prompt,
+            EventsSubscribeParams {
+                thread_id: result.thread_id,
+                since,
+            },
+        )
+        .await?;
+    } else {
+        finish(
+            context.state,
+            context.serve,
+            context.outbound,
+            prompt,
+            since.is_some(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn committed_event_notification(
+    note: Notification,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    let params: EventsCommittedNotification =
+        serde_json::from_value(note.params.unwrap_or(Value::Null))
+            .map_err(|_| "invalid serve event")?;
+    if let Some(update) = project_plan(context.state, params.thread_id, &params.event)? {
+        emit(context.outbound, update).await?;
+    }
+    Ok(())
+}
+
+async fn cancel_request_notification(
+    note: Notification,
+    context: &ActiveResponseContext<'_>,
+) -> Result<(), String> {
+    if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+        && let Some(withdrawal) = withdraw_permission(context.state, Some(&params.request_id), true)
+    {
+        emit(context.outbound, withdrawal).await?;
     }
     Ok(())
 }
