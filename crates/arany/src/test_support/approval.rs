@@ -31,11 +31,16 @@ pub async fn seed_host_prefix(
 ) -> crate::ToolCall {
     use super::scenario::{ScriptedProvider, request, tool_outcome};
     use crate::{ApprovalMode, ApprovalReply, RunControls, StateRoot, ToolGrant};
-    use std::sync::Arc;
+    use std::{io::Write, os::unix::fs::OpenOptionsExt, sync::Arc};
 
     let root = StateRoot::admit(state).expect("private State");
-    root.record(crate::RecordKind::ToolsConfig)
-        .replace(br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.path().join("tools.json"))
+        .expect("private host Tool configuration")
+        .write_all(br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#)
         .expect("host Tool configuration");
     let engine = super::engine::open(
         root,

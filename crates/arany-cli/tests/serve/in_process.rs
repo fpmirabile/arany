@@ -1778,12 +1778,11 @@ async fn session_host_turn(
     input: &mpsc::Sender<ClientMessage>,
     output: &mut mpsc::Receiver<Message>,
     thread: &Value,
-    id: i64,
     expected_prompts: usize,
 ) {
     input
         .send(request(
-            id,
+            3,
             "turn/start",
             json!({"threadId":thread,"input":[{"type":"text","text":"Inspect host value"}]}),
         ))
@@ -2215,16 +2214,16 @@ async fn approval_scenario(case: ApprovalCase, host: bool) {
         }
         let mut receipt = None;
         if case == ApprovalCase::Session {
-            session_host_turn(&input, &mut output, &thread, 4, 0).await;
-            input.send(request(5, "thread/resume", json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"default","collaboration":"single"}))).await.unwrap();
+            session_host_turn(&input, &mut output, &thread, 0).await;
+            input.send(request(6, "thread/resume", json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"default","collaboration":"single"}))).await.unwrap();
             loop {
                 let message = next(&mut output).await;
                 assert!(message.get("error").is_none(), "{message}");
-                if message["id"] == 5 {
+                if message["id"] == 6 {
                     break;
                 }
             }
-            session_host_turn(&input, &mut output, &thread, 6, 1).await;
+            session_host_turn(&input, &mut output, &thread, 1).await;
             input
                 .send(request(
                     7,
