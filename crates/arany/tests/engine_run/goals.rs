@@ -2568,6 +2568,7 @@ async fn run_autonomous_with_setup_refusal(
     let (entered, release) = arany::FaultPlan::gate_autonomous_continuation(session);
     let mut input = autonomous_input(workspace);
     input.session_id = Some(session);
+    input.title = None;
     let run = run_with(
         engine,
         provider,
