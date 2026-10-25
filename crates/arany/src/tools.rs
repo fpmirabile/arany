@@ -118,6 +118,10 @@ pub enum ToolError {
     #[error("Tool configuration is invalid or unsafe")]
     Configuration,
     #[error(
+        "Saved host command rule {rule} conflicts with a declared interpreter or Git executable; open /permissions > Host command rules to review and remove it"
+    )]
+    HostPrefixConflict { rule: usize },
+    #[error(
         "Inactive host-rule archive at archive/inactive-host-commands is unconfirmed. Stop Arany, preserve the source and archive intact, and restore a verified backup or obtain manual recovery; never remove pending markers to resume."
     )]
     InactiveHostArchiveUnconfirmed,
@@ -861,21 +865,22 @@ impl ToolRuntime {
         let root = fs::open_directory(workspace)?;
         let account = admission_paths(workspace, state, &config, &root)?;
         let workspace_identity = fs::workspace_identity(&root)?;
-        let permissions = permissions.map(|mut snapshot| {
-            let mut config = (*snapshot.config).clone();
-            config.scope_to(workspace, workspace_identity);
-            snapshot.config = std::sync::Arc::new(config);
-            snapshot
-        });
-        if permissions.as_ref().is_some_and(|snapshot| {
-            snapshot
-                .config
-                .host
-                .iter()
-                .any(|rule| !rule.admitted_by(&config))
-        }) {
-            return Err(ToolError::Configuration);
-        }
+        let permissions = permissions
+            .map(|mut snapshot| {
+                let mut scoped = (*snapshot.config).clone();
+                scoped.scope_to(workspace, workspace_identity);
+                if let Some(index) = snapshot
+                    .config
+                    .host
+                    .iter()
+                    .position(|rule| scoped.host.contains(rule) && !rule.admitted_by(&config))
+                {
+                    return Err(ToolError::HostPrefixConflict { rule: index + 1 });
+                }
+                snapshot.config = std::sync::Arc::new(scoped);
+                Ok(snapshot)
+            })
+            .transpose()?;
         let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
@@ -1812,6 +1817,7 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
         ToolError::GuardBootstrap(failure) => failure.failure_stage(),
         ToolError::GuardRejected(stage) => stage.failure_stage(),
         ToolError::Configuration
+        | ToolError::HostPrefixConflict { .. }
         | ToolError::InactiveHostArchiveUnconfirmed
         | ToolError::InactiveHostArchiveConflict => "admission",
         ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => "pinned input",

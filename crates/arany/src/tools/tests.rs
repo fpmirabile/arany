@@ -4933,6 +4933,95 @@ fn host_pin_requires_explicit_nullable_permissions_digest() {
 }
 
 #[tokio::test]
+async fn conflicting_host_rules_name_the_saved_entry_and_remain_removable() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("note.txt"), "workspace fact").unwrap();
+    let state = crate::store::StateRoot::admit(&root.join("state")).unwrap();
+    let config = conflicting_host_rule_config(&state, &workspace);
+    let file = state.path().join("permissions.json");
+    let before = std::fs::read(&file).unwrap();
+    let admit = || {
+        super::ToolRuntime::admit(
+            config.clone(),
+            super::load_permissions(&state).unwrap(),
+            None,
+            &workspace,
+            &state,
+            root.join("missing-guard"),
+        )
+    };
+    let error = admit()
+        .err()
+        .expect("the current folder has a conflicting rule");
+    assert!(matches!(
+        error,
+        super::ToolError::HostPrefixConflict { rule: 2 }
+    ));
+    assert_eq!(super::failure_stage(&error), "admission");
+    assert_eq!(
+        error.to_string(),
+        "Saved host command rule 2 conflicts with a declared interpreter or Git executable; open /permissions > Host command rules to review and remove it"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let settings = super::permissions::PermissionSettings::load(&state, &workspace).unwrap();
+    let removed = settings
+        .save_host_edit(
+            &state,
+            &workspace,
+            super::permissions::HostPrefixEdit::Remove { index: 1 },
+        )
+        .unwrap();
+    assert_eq!(removed.host_prefixes().len(), 1);
+    let runtime = admit().expect("removing the conflicting rule restores Tool admission");
+    assert!(runtime.receipt().host_prefixes.is_empty());
+    assert_eq!(
+        run_in_process(
+            &runtime,
+            ToolCall::Read {
+                path: "note.txt".into(),
+                offset: None,
+                limit: None,
+            }
+        )
+        .await
+        .disposition,
+        ToolDisposition::Succeeded
+    );
+}
+
+fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path::Path) -> Config {
+    use std::os::unix::fs::PermissionsExt;
+    let root = workspace.parent().unwrap();
+    let executable = root.join("inspect");
+    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut pin = super::unguarded::pin("inspect", workspace, root.to_str().unwrap()).unwrap();
+    pin.state_roots = [
+        state.path().to_str().unwrap().into(),
+        root.join("account").to_str().unwrap().into(),
+    ];
+    let identity = super::workspace_identity(workspace).unwrap();
+    let rule = json!({
+        "version":super::unguarded::HOST_POLICY_VERSION,
+        "prefix":["inspect","value"],"decision":"allow","pin":pin,
+        "workspace_device":identity.device,"workspace_inode":identity.inode,"cwd":""
+    });
+    let mut other = rule.clone();
+    other["pin"]["workspace"] = json!(root.join("other-workspace"));
+    let before = serde_json::to_vec(&json!({"permissions":{"hostPrefixes":[other,rule]}})).unwrap();
+    let file = state.path().join("permissions.json");
+    std::fs::write(&file, &before).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    serde_json::from_value(json!({
+        "version":1,"workspace_paths":["."],"write":false,"skills":[],"mcp":[],
+        "commands":[{"name":"inspect","executable":executable,"sha256":pin.sha256,"interpreter":true,"inputs":[]}]
+    })).unwrap()
+}
+
+#[tokio::test]
 async fn an_unavailable_skill_root_does_not_disable_other_tools_or_renew_its_pin() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

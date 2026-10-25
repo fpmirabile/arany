@@ -87,6 +87,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
         Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
         Err(
             ToolError::MissingConfiguration
+            | ToolError::HostPrefixConflict { .. }
             | ToolError::InactiveHostArchiveUnconfirmed
             | ToolError::InactiveHostArchiveConflict
             | ToolError::AccountBusy
