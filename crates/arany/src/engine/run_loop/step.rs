@@ -468,6 +468,10 @@ impl RunLoop<'_> {
             && matches!(intent.call, ToolCall::GhPrList { .. })
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::TypedPrefixRule;
+        let host_prefix_allow = phase.site == DispatchSite::Primary
+            && intent.call.is_unguarded()
+            && phase.permission.decision == Decision::Allow
+            && phase.permission.basis == PermissionSource::HostPrefixRule;
         Ok(DispatchFacts {
             site: phase.site,
             permission: phase.permission,
@@ -477,6 +481,7 @@ impl RunLoop<'_> {
             typed_host_read,
             host_unpinned: intent.call.is_host() && intent.host.is_none(),
             human_only_unavailable: !typed_host_read
+                && !host_prefix_allow
                 && ((intent.call.is_host() && self.controls.approvals.is_none())
                     || self.controls.approvals.is_some_and(|approvals| {
                         !approvals.admits_human_only(

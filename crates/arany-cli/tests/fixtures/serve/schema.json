@@ -9,6 +9,7 @@
     "ApprovalDecision": {
       "enum": [
         "accept",
+        "acceptForSession",
         "decline",
         "cancel"
       ],
@@ -17,6 +18,15 @@
     "ApprovalParams": {
       "additionalProperties": false,
       "properties": {
+        "availableDecisions": {
+          "items": {
+            "$ref": "#/$defs/ApprovalDecision"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "intent": {
           "additionalProperties": true,
           "type": "object"
@@ -72,6 +82,9 @@
     },
     "ClientCapabilities": {
       "properties": {
+        "hostCommandSessionApproval": {
+          "type": "boolean"
+        },
         "optOutNotificationMethods": {
           "items": {
             "type": "string"

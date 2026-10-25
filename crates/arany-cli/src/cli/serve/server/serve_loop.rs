@@ -24,6 +24,7 @@ struct ServerLoop {
     shutdown: bool,
     opt_out: Vec<String>,
     initialized: bool,
+    host_session_approval: bool,
     next_server_id: Arc<std::sync::atomic::AtomicI64>,
     // Drop workers and the active turn before releasing the Engine.
     workers: tokio::task::JoinSet<Result<arany::RunResult, EngineError>>,
@@ -197,6 +198,11 @@ impl ServerLoop {
             return Err(Fault::state(Reason::AlreadyInitialized));
         }
         let params: InitializeParams = params(request.params)?;
+        self.host_session_approval = params
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.host_command_session_approval)
+            && self.threads.approval_channel == ApprovalChannel::Human;
         self.opt_out = params
             .capabilities
             .and_then(|c| c.opt_out_notification_methods)
@@ -468,6 +474,9 @@ impl ServerLoop {
         if encode_line(&response).is_err() {
             return Err(Fault::engine(EngineError::ContextTooLarge));
         }
+        if self.active.is_none() {
+            self.engine.revoke_host_approvals().map_err(Fault::engine)?;
+        }
         self.threads.map.insert(thread_id, loaded);
         self.inbound
             .wait(
@@ -500,7 +509,11 @@ impl ServerLoop {
         let goal = input.goal(loaded, &view)?;
         let submitted_goal = goal.id;
         let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
-        let approvals = approvals.once_only();
+        let approvals = if self.host_session_approval {
+            approvals.without_prefix_rules()
+        } else {
+            approvals.once_only()
+        };
         let approvals = if self.threads.approval_channel == ApprovalChannel::Restricted {
             approvals.without_human_only()
         } else {
@@ -836,6 +849,7 @@ pub(in crate::cli) async fn run_configured(
         workers: tokio::task::JoinSet::new(),
         next_server_id: Arc::new(std::sync::atomic::AtomicI64::new(1)),
         initialized: false,
+        host_session_approval: false,
         opt_out: Vec::new(),
         shutdown: false,
     };
