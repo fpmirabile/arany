@@ -1839,6 +1839,38 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    for kind in [
+        "ToolStarted",
+        "ToolFinished",
+        "RunStarted",
+        "GoalStarted",
+        "GoalFinished",
+        "GoalPlanContractRecorded",
+        "AgentSpawned",
+    ] {
+        let (from, fixture) = EVENT_FIXTURES
+            .iter()
+            .filter(|(fixture_kind, _, _, _)| *fixture_kind == kind)
+            .map(|(_, from, _, expected)| (*from, *expected))
+            .max_by_key(|(from, _)| *from)
+            .expect("canonical payload fixture");
+        assert_eq!(from + 1, crate::session::payload_version(kind).unwrap());
+        let (run_id, agent_run_id) = match kind {
+            "GoalStarted" | "GoalFinished" => (None, None),
+            "RunStarted" | "AgentSpawned" => (
+                Some(RunId::new()),
+                (kind == "AgentSpawned").then(AgentRunId::new),
+            ),
+            "GoalPlanContractRecorded" => (Some(RunId::new()), None),
+            _ => (
+                Some("01a15ecf-a92a-7707-8af6-ce3d36320b67".parse().unwrap()),
+                Some("01a15ecf-a92a-7707-8af6-ce3e0c00af83".parse().unwrap()),
+            ),
+        };
+        let event = Event::decode(kind, from + 1, fixture, run_id, agent_run_id)
+            .expect("current fixture decodes");
+        assert_eq!(event.payload().unwrap(), fixture, "{kind}");
+    }
     assert_eq!(
         uncovered_schema(&CHECKPOINT_SCHEMA, checkpoints::SCHEMA_VERSION),
         Vec::<String>::new()
