@@ -160,7 +160,8 @@ impl CustomTransport {
         request: &CompactionRequest,
         effort: Option<Effort>,
     ) -> Result<CompactionResponse, TransportError> {
-        if !(1..=crate::session::MAX_COMPACTION_OUTPUT_TOKENS).contains(&request.max_output_tokens)
+        if !(1..=crate::session::MAX_COMPACTION_OUTPUT_TOKENS.min(super::CUSTOM_OUTPUT_TOKEN_CAP))
+            .contains(&request.max_output_tokens)
         {
             return Err(TransportError::InvalidOutcome);
         }
