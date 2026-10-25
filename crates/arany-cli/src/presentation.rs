@@ -1,7 +1,7 @@
 use crate::protocol::EventLine;
 use arany::{
-    AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, ProviderKind,
-    RunStatus, RunView, SessionView,
+    AgentStatus, Event, EventEnvelope, GoalId, ProviderCallDisposition, ProviderCallRecord,
+    ProviderKind, RunStatus, RunView, SessionView,
 };
 use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
@@ -40,6 +40,9 @@ pub enum Output {
     Text,
     Jsonl,
 }
+
+pub const BUDGET_REFUSAL_UNCOMMITTED: &str =
+    "Goal budget admission refused (uncommitted); no Goal receipt is available";
 
 pub fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
@@ -384,6 +387,18 @@ pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String>
         "\nNo answer was committed; completed actions remain in the Session."
     });
     Some(text)
+}
+
+pub fn budget_refusal_feedback(view: &SessionView, goal: Option<GoalId>) -> Option<String> {
+    view.runs
+        .iter()
+        .rev()
+        .find(|run| {
+            view.budget_stop_goal(run).is_some_and(|candidate| {
+                Some(candidate.id) == goal && candidate.budget_refusal.is_some()
+            })
+        })
+        .and_then(|run| session_run_feedback(view, run))
 }
 
 pub fn run_feedback(run: &RunView) -> Option<String> {
@@ -1427,6 +1442,44 @@ mod goal_status_tests {
             session_run_feedback(&view, &view.runs[0]).unwrap(),
             "Arany status: Goal budget refused Provider: Provider calls; exhausted; used at refusal 64, pinned limit 64; requested 1; required minimum 1; final settled usage 64.\nThe committed answer is preserved."
         );
+    }
+
+    #[test]
+    fn budget_refusal_feedback_requires_the_requested_goal_and_refusal_record() {
+        let mut view = session_with_goal(true);
+        let mut run = crate::presentation::team_view().runs.remove(0);
+        run.status = RunStatus::Failed;
+        run.failure = Some(arany::RunFailure::BudgetExhausted);
+        run.assistant_message = None;
+        let goal_id = view.goals[0].id;
+        view.goals[0].run_ids = vec![run.id];
+        view.goals[0].provider_calls = 64;
+        view.goals[0].status = GoalStatus::Failed;
+        view.goals[0].budget_closed = true;
+        view.runs = vec![run];
+
+        assert_eq!(budget_refusal_feedback(&view, Some(goal_id)), None);
+        assert_eq!(budget_refusal_feedback(&view, None), None);
+
+        view.goals[0].budget_refusal = Some(arany::BudgetRefusal {
+            dimension: arany::GoalLimit::Calls,
+            cause: arany::BudgetRefusalCause::Exhausted,
+            action: arany::BudgetAction::Provider,
+            run_id: Some(view.runs[0].id),
+            agent_run_id: Some(view.runs[0].agents[0].id),
+            used: 64,
+            limit: 64,
+            requested: Some(1),
+            required_minimum: Some(1),
+            token_usage_unknown: false,
+            charge_basis: arany::BudgetChargeBasis::Observed,
+        });
+
+        assert_eq!(
+            budget_refusal_feedback(&view, Some(goal_id)),
+            session_run_feedback(&view, &view.runs[0])
+        );
+        assert_eq!(budget_refusal_feedback(&view, Some(GoalId::new())), None);
     }
 }
 

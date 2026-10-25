@@ -482,7 +482,7 @@ impl RunLoop<'_> {
             && (!runtime.allows(call)
                 || researcher
                     && !call.is_child_research()
-                    && !matches!(grant, Grant::Researcher { child, .. } if child.editor && child.definition.as_ref().is_some_and(|definition| definition.allows_worker(call))))
+                    && !matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor() && child.definition.as_ref().is_some_and(|definition| definition.allows_worker(call))))
         {
             decision = decision.narrow(Decision::Deny);
             basis = PermissionSource::PinnedGrant;
