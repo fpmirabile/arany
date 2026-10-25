@@ -8427,24 +8427,31 @@ mod goal_replay_tests {
         use crate::tools::{Attestation, EnforcementCause, FileReceipt, GuardReceipt};
         let (mut view, goal, run, agent) = primary_tool_session(true);
         let path = "src/new";
-        view.goals[0]
-            .plan_contract
-            .as_mut()
-            .unwrap()
-            .paths
-            .push(path.into());
+        let contract = view.goals[0].plan_contract.as_mut().unwrap();
+        contract.paths.push(path.into());
         let call = ToolCall::Mkdir { path: path.into() };
         let mut intent = child_intent(run, agent, call);
-        intent.enforcement_digest = FileReceipt::enforcement_digest();
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(&mut view, requesting_step(run, agent, 1)).unwrap();
-        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
         let finish = |observation| Event::ToolFinished {
             checkpoint: None,
             run_id: run,
             agent_run_id: agent,
             observation,
         };
+        let mut historical = view.clone();
+        apply(&mut historical, tool_started(run, agent, &intent)).unwrap();
+        let mut observed = observation_for(intent.clone(), b"");
+        observed.output = serde_json::json!({"created":true}).to_string();
+        assert!(matches!(observed.attestation, Some(Attestation::Guard(_))));
+        let finished = finish(observed);
+        let bytes = finished.payload().unwrap();
+        let (kind, version) = (finished.kind(), finished.version());
+        let decoded = Event::decode(kind, version, &bytes, Some(run), Some(agent)).unwrap();
+        assert_eq!(decoded.payload().unwrap(), bytes);
+        apply(&mut historical, decoded).expect("historical Guard Mkdir receipt");
+        intent.enforcement_digest = FileReceipt::enforcement_digest();
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
         let mut observed = observation_for(intent.clone(), b"");
         observed.output = serde_json::json!({"created":true}).to_string();
         let mut guarded = observed.clone();
