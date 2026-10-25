@@ -41,6 +41,7 @@ async fn disappearing_keyring_saves_block_new_and_existing_setup_sessions() {
             SCRIPT
         );
         assert_eq!(std::env::var_os("HOME"), Some(root.clone().into()));
+        assert_eq!(std::env::temp_dir(), root);
         for existing in [false, true] {
             assert_disappearing_keyring_save(&root, existing).await;
             assert!(std::fs::metadata(root.join("accepted")).unwrap().len() > 0);
@@ -60,6 +61,7 @@ async fn disappearing_keyring_saves_block_new_and_existing_setup_sessions() {
         .env_clear()
         .env(ROOT, &root)
         .env("HOME", &root)
+        .env("TMPDIR", &root)
         .env("ARANY_TEST_EXE", &helper)
         .current_dir(&root);
     let output = crate::test_process::file_output(&mut command, None);
