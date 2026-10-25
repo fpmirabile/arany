@@ -73,6 +73,11 @@ fn image_chip_rectangles_match_only_visible_full_chips() {
 
 #[test]
 fn image_preview_cells_are_hidden_and_skipped_for_terminal_graphics() {
+    let history_text = |buffer: &ratatui::buffer::Buffer| {
+        (3..10)
+            .map(|column| buffer[(column, 4)].symbol())
+            .collect::<String>()
+    };
     let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
     terminal
         .draw(|frame| {
@@ -90,20 +95,14 @@ fn image_preview_cells_are_hidden_and_skipped_for_terminal_graphics() {
         })
         .unwrap();
     assert!(hidden);
-    assert_eq!(
-        buffer_row(terminal.backend().buffer(), 4).get(3..10),
-        Some("History")
-    );
+    assert_eq!(history_text(terminal.backend().buffer()), "History");
 
     terminal
         .draw(|frame| {
             frame.render_widget(Paragraph::new("History text"), Rect::new(3, 4, 8, 1));
         })
         .unwrap();
-    assert_eq!(
-        buffer_row(terminal.backend().buffer(), 4).get(3..10),
-        Some("History")
-    );
+    assert_eq!(history_text(terminal.backend().buffer()), "History");
 }
 
 #[test]
