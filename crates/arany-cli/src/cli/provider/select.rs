@@ -173,7 +173,9 @@ async fn select_provider_inner(
         }
         Some(ProviderKind::Anthropic) => {
             let credentials = native_key(selection.profile, selection.account_id).await?;
-            let provider = AnthropicProvider::from_credentials_with_effort(
+            let root = admit_evidence_root(state_dir)?;
+            let provider = AnthropicProvider::from_credentials_with_evidence(
+                root,
                 selection.model.to_owned(),
                 selection.effort,
                 credentials,
@@ -215,6 +217,10 @@ async fn select_provider_inner(
             Ok(Arc::new(provider))
         }
     }
+}
+
+fn admit_evidence_root(state_dir: &Path) -> Result<StateRoot, SelectionError> {
+    StateRoot::admit(state_dir).map_err(|_| SelectionError::StateUnavailable)
 }
 
 async fn native_key(
@@ -275,14 +281,24 @@ pub(crate) async fn select_env_provider(
             .and_then(|key| OpenAiProvider::from_api_key_with_effort(model.to_owned(), effort, key))
             .map_err(|_| SelectionError::OpenAiEnvKeyUnavailable)?,
         ),
-        ProviderArg::Anthropic => Arc::new(
-            AnthropicProvider::from_env_with_effort(model.to_owned(), effort).map_err(|error| {
-                match error {
+        ProviderArg::Anthropic => {
+            let credentials =
+                NativeApiCredentials::from_env("anthropic").map_err(|error| match error {
                     arany::ProviderError::Rejected => SelectionError::InvalidAnthropicWorkspace,
                     _ => SelectionError::AnthropicEnvKeyUnavailable,
-                }
-            })?,
-        ),
+                })?;
+            let root = admit_evidence_root(state_dir)?;
+            Arc::new(
+                AnthropicProvider::from_credentials_with_evidence(
+                    root,
+                    model.to_owned(),
+                    effort,
+                    credentials,
+                    None,
+                )
+                .map_err(|_| SelectionError::AnthropicEnvKeyUnavailable)?,
+            )
+        }
         ProviderArg::Chatgpt => Arc::new(
             chatgpt::provider_for_run(
                 workspace,
@@ -309,6 +325,52 @@ pub(crate) async fn select_env_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn anthropic_selection_starts_without_state_and_rejects_unsafe_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("state");
+        let root = admit_evidence_root(&missing).unwrap();
+        let credentials =
+            NativeApiCredentials::new("anthropic", "fixture-key".into(), None).unwrap();
+        let provider = AnthropicProvider::from_credentials_with_evidence(
+            root,
+            "claude-sonnet-5".into(),
+            Some(Effort::Low),
+            credentials,
+            None,
+        )
+        .unwrap();
+        assert_eq!(provider.context_window_tokens_for_run().await, None);
+
+        let empty = temp.path().join("empty-state");
+        std::fs::create_dir(&empty).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let root = admit_evidence_root(&empty).unwrap();
+        assert!(root.path().join("events.sqlite3").exists());
+        let credentials =
+            NativeApiCredentials::new("anthropic", "fixture-key".into(), None).unwrap();
+        let provider = AnthropicProvider::from_credentials_with_evidence(
+            root,
+            "claude-sonnet-5".into(),
+            Some(Effort::Low),
+            credentials,
+            None,
+        )
+        .unwrap();
+        assert_eq!(provider.context_window_tokens_for_run().await, None);
+
+        #[cfg(unix)]
+        {
+            let unsafe_state = temp.path().join("unsafe-state");
+            std::os::unix::fs::symlink(temp.path(), &unsafe_state).unwrap();
+            assert!(admit_evidence_root(&unsafe_state).is_err());
+        }
+    }
 
     #[test]
     fn selection_error_display_preserves_cli_text() {

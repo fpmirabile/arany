@@ -3382,7 +3382,8 @@ mod delegation_bound_tests {
                     },
                     &ledger,
                     None,
-                );
+                )
+                .unwrap();
                 let mut child = ChildWork {
                     agent_run_id: AgentRunId::new(),
                     objective: "Inspect notes".into(),

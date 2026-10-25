@@ -121,7 +121,7 @@ impl Provider for ChatGptProvider {
                 max_output_tokens: self.identity.limits.max_output_tokens,
             },
             &request,
-            crate::provider::request_ceiling(self.context_window_tokens),
+            crate::provider::request_ceiling(request.input.context_window_tokens),
             (preview, limits),
         )
         .await

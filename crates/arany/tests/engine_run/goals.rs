@@ -7941,6 +7941,80 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
     }
 }
 
+#[tokio::test]
+async fn supervisor_failed_or_unknown_verdict_append_stops_without_another_call() {
+    for committed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "stable");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let gate = if committed {
+            Some(arany::FaultPlan::gate_goal_append_acknowledgment(
+                session,
+                |event| matches!(event, Event::SupervisorVerdictRecorded { .. }),
+            ))
+        } else {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::SupervisorVerdictRecorded { .. })
+            });
+            None
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..4).map(|_| crate::tool_outcome(facts_read())).collect(),
+        ));
+        let mut input = request(&workspace, "Inspect repeatedly");
+        input.include_paths.clear();
+        input.session_id = Some(session);
+        input.title = None;
+        {
+            let pending = run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(pending);
+            if let Some((entered, release)) = gate {
+                tokio::select! {
+                    result = &mut pending => panic!("Run ended before verdict acknowledgment: {:?}", result.map(|r| r.run.status)),
+                    entered = entered => entered.expect("verdict committed"),
+                }
+                assert_eq!(provider.requests.lock().unwrap().len(), 3);
+                drop(release);
+            }
+            assert!(matches!(
+                pending.await,
+                Err(EngineError::Store(arany::StoreError::Closed))
+            ));
+        }
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, session).await;
+        assert_action_bounds(&events, false, false);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        let last = events.last().unwrap();
+        assert_eq!(
+            matches!(last.event, Event::SupervisorVerdictRecorded { .. }),
+            committed
+        );
+        assert_eq!(matches!(last.event, Event::ToolFinished { .. }), !committed);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
+                .count(),
+            usize::from(committed)
+        );
+    }
+}
+
 // A paused clock keeps rendered active-time digits equal across both Runs; they set each Read's result cap.
 #[tokio::test(start_paused = true)]
 async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_outcome() {
@@ -8417,6 +8491,67 @@ fn clearings(events: &[arany::EventEnvelope]) -> Vec<(usize, u32)> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn anthropic_evidence_refreshes_between_runs_and_replays_each_window() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts\n");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            finish_with("Checked the facts"),
+            finish_with("Checked the facts again"),
+        ])
+        .with_profile("anthropic", "claude-sonnet-5")
+        .with_context_window_snapshots(vec![Some(100_000), None]),
+    );
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut first_input = request(&workspace, "Check the facts");
+    first_input.include_paths.clear();
+    let first = run_with(&engine, &provider, first_input, RunControls::default())
+        .await
+        .expect("Anthropic context window admitted");
+    assert_eq!(first.run.status, RunStatus::Finished);
+    let mut second_input = request(&workspace, "Check the facts again");
+    second_input.include_paths.clear();
+    let second = run_with(&engine, &provider, second_input, RunControls::default())
+        .await
+        .expect("Anthropic context window revalidated");
+    assert_eq!(second.run.status, RunStatus::Finished);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests[0].input.context_window_tokens, Some(100_000));
+        assert_eq!(requests[1].input.context_window_tokens, None);
+    }
+    engine.close().await.expect("engine shutdown");
+
+    let (first_events, first_view) = replayed(&state_path, first.session_id).await;
+    let (second_events, second_view) = replayed(&state_path, second.session_id).await;
+    assert_eq!(
+        first_view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .context_window_tokens,
+        Some(100_000)
+    );
+    assert_eq!(
+        second_view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .context_window_tokens,
+        None
+    );
+    assert!(first_events.iter().any(|event| matches!(
+        &event.event,
+        Event::RunStarted { config, .. } if config.context_window_tokens == Some(100_000)
+    )));
+    assert!(second_events.iter().any(|event| matches!(
+        &event.event,
+        Event::RunStarted { config, .. } if config.context_window_tokens.is_none()
+    )));
 }
 
 #[tokio::test]

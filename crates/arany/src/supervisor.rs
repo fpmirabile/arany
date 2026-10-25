@@ -335,58 +335,61 @@ impl SupervisorVerdicts {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SupervisorDecision {
+    Continue,
+    Record {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        verdict: SupervisorVerdict,
+    },
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SupervisorState {
     declared_roots: u16,
     windows: Vec<(AgentRunId, VecDeque<Step>)>,
     verdicts: u16,
-    pending: Option<(RunId, AgentRunId, SupervisorVerdict)>,
 }
 impl SupervisorState {
-    pub(crate) fn pending_event(&self) -> Option<Event> {
-        let (run_id, agent_run_id, verdict) = self.pending.as_ref()?;
-        Some(Event::SupervisorVerdictRecorded {
-            run_id: *run_id,
-            agent_run_id: *agent_run_id,
-            verdict: verdict.clone(),
-        })
-    }
-    pub(crate) fn after(&mut self, view: &SessionView, envelope: &EventEnvelope) {
-        if matches!(envelope.event, Event::RunStarted { .. }) {
-            *self = Self::default();
+    pub(crate) fn from_committed(view: &SessionView) -> Self {
+        Self {
+            declared_roots: declared_roots(view),
+            ..Self::default()
         }
-        self.pending = None;
-        let Some(run) = view.runs.last() else { return };
+    }
+
+    pub(crate) fn decide_verdict(
+        &mut self,
+        view: &SessionView,
+        envelope: &EventEnvelope,
+    ) -> SupervisorDecision {
+        if matches!(envelope.event, Event::RunStarted { .. }) {
+            *self = Self::from_committed(view);
+        }
+        let Some(run) = view.runs.last() else {
+            return SupervisorDecision::Continue;
+        };
         self.verdicts = count(run.supervisor.verdicts().len());
         if run.config.as_ref().is_none_or(|c| c.supervisor.is_none()) {
-            return;
-        }
-        if matches!(
-            envelope.event,
-            Event::RunStarted { .. } | Event::GoalPlanContractRecorded { .. }
-        ) && let Some(run_id) = envelope.run_id
-        {
-            let roots = view
-                .goals
-                .iter()
-                .find(|goal| goal.run_ids.contains(&run_id))
-                .and_then(|goal| goal.plan_contract.as_ref())
-                .map_or(1, |plan| plan.paths.len().max(1));
-            self.declared_roots = count(roots);
-            return;
+            return SupervisorDecision::Continue;
         }
         if envelope.run_id != Some(run.id) {
-            return;
+            return SupervisorDecision::Continue;
+        }
+        if matches!(envelope.event, Event::GoalPlanContractRecorded { .. }) {
+            self.declared_roots = declared_roots(view);
+            return SupervisorDecision::Continue;
         }
         let Some(actor) = envelope.agent_run_id else {
-            return;
+            return SupervisorDecision::Continue;
         };
         let Some((site, step, footprint)) = subject(run, actor, envelope, self.declared_roots)
         else {
-            return;
+            return SupervisorDecision::Continue;
         };
         let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.clone()) else {
-            return;
+            return SupervisorDecision::Continue;
         };
         self.observe(
             run.id,
@@ -394,40 +397,7 @@ impl SupervisorState {
             envelope.sequence,
             (site, step, footprint),
             &policy,
-        );
-    }
-
-    pub(crate) fn tool_verdict_follows(
-        &self,
-        view: &SessionView,
-        sequence: u64,
-        observation: &crate::tools::ToolObservation,
-    ) -> bool {
-        let run = view.runs.last().expect("active Run");
-        let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.as_ref()) else {
-            return false;
-        };
-        let actor = observation.intent.agent_run_id;
-        let envelope = EventEnvelope {
-            session_id: view.id,
-            run_id: Some(run.id),
-            agent_run_id: Some(actor),
-            sequence,
-            created_at_ms: 0,
-            event: Event::ToolFinished {
-                run_id: run.id,
-                agent_run_id: actor,
-                observation: observation.clone(),
-                checkpoint: None,
-            },
-        };
-        let Some((site, step, footprint)) = subject(run, actor, &envelope, self.declared_roots)
-        else {
-            return false;
-        };
-        let mut state = self.clone();
-        state.observe(run.id, actor, sequence, (site, step, footprint), policy);
-        state.pending.is_some()
+        )
     }
 
     fn observe(
@@ -437,7 +407,7 @@ impl SupervisorState {
         sequence: u64,
         subject: (Site, Step, Option<DisproportionFeatures>),
         policy: &SupervisorPolicy,
-    ) {
+    ) -> SupervisorDecision {
         let (site, step, footprint) = subject;
         let index = match self.windows.iter().position(|(id, _)| *id == actor) {
             Some(index) => index,
@@ -455,10 +425,10 @@ impl SupervisorState {
         let signals = evaluate(window, footprint, policy);
         let signals = new_facts(signals, site, sequence);
         if !signals.is_empty() && self.verdicts < MAX_VERDICTS {
-            self.pending = Some((
+            SupervisorDecision::Record {
                 run_id,
-                actor,
-                SupervisorVerdict {
+                agent_run_id: actor,
+                verdict: SupervisorVerdict {
                     subject_sequence: sequence,
                     site,
                     evaluator: 1,
@@ -466,9 +436,25 @@ impl SupervisorState {
                     signals,
                     capped: self.verdicts == MAX_VERDICTS - 1,
                 },
-            ));
+            }
+        } else {
+            SupervisorDecision::Continue
         }
     }
+}
+
+fn declared_roots(view: &SessionView) -> u16 {
+    let roots = view
+        .runs
+        .last()
+        .and_then(|run| {
+            view.goals
+                .iter()
+                .find(|goal| goal.run_ids.contains(&run.id))
+        })
+        .and_then(|goal| goal.plan_contract.as_ref())
+        .map_or(1, |plan| plan.paths.len().max(1));
+    count(roots)
 }
 
 // Call-pattern signals report new facts only: the subject must be part of the evidence.
