@@ -377,21 +377,23 @@ fn classic_chat_enables_no_mouse_or_alternate_scroll_mode() {
 
 #[test]
 fn disabled_mouse_fullscreen_uses_alternate_scroll_only() {
-    let (temp, state, workspace) = session_fixture(true);
-    let mut chat = Chat::start(
-        temp.path(),
-        &state,
-        &workspace,
-        &[("ARANY_DISABLE_MOUSE", "1")],
-    );
-    chat.wait_for(0, &[b"\x1b[?1049h", b"\x1b[?1007h"], "alternate scroll");
-    chat.wait_armed(0, "armed fullscreen picker");
-    chat.adopt_product(&state);
-    chat.assert_active(&[1007], "startup picker");
-    chat.step("picker close", b"\r", &[EMPTY_COMPOSER], &[1007]);
-    let modes = chat.exit();
-    assert_eq!(modes.active, Vec::<u32>::new(), "alternate scroll restored");
-    assert_eq!(modes.enabled, [1007], "no mouse reporting mode");
+    for value in ["", "1"] {
+        let (temp, state, workspace) = session_fixture(true);
+        let mut chat = Chat::start(
+            temp.path(),
+            &state,
+            &workspace,
+            &[("ARANY_DISABLE_MOUSE", value)],
+        );
+        chat.wait_for(0, &[b"\x1b[?1049h", b"\x1b[?1007h"], "alternate scroll");
+        chat.wait_armed(0, "armed fullscreen picker");
+        chat.adopt_product(&state);
+        chat.assert_active(&[1007], "startup picker");
+        chat.step("picker close", b"\r", &[EMPTY_COMPOSER], &[1007]);
+        let modes = chat.exit();
+        assert_eq!(modes.active, Vec::<u32>::new(), "alternate scroll restored");
+        assert_eq!(modes.enabled, [1007], "no mouse reporting mode: {value:?}");
+    }
 }
 
 fn position(bytes: &[u8], needle: &[u8]) -> Option<usize> {
