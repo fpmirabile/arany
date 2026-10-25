@@ -1060,6 +1060,47 @@ async fn watch_turn_response(
     Ok(())
 }
 
+fn recovered_item(
+    event: &arany_cli::protocol::EventLine,
+    run: RunId,
+) -> Result<Option<(Item, bool)>, String> {
+    Ok(match event.kind.as_str() {
+        "MessageCommitted" => Some((
+            Item::AgentMessage {
+                id: format!("{run}:answer"),
+                text: event.payload["text"]
+                    .as_str()
+                    .ok_or("invalid committed answer")?
+                    .into(),
+                phase: AgentMessagePhase::FinalAnswer,
+            },
+            false,
+        )),
+        "ToolStarted" => {
+            let intent: arany::EffectIntent =
+                serde_json::from_value(event.payload["intent"].clone())
+                    .map_err(|_| "invalid committed Tool intent")?;
+            Some((
+                crate::cli::serve::items::tool_item(&intent, None, false),
+                true,
+            ))
+        }
+        "ToolFinished" => {
+            let mut payload = event.payload.clone();
+            if let Some(fields) = payload.as_object_mut() {
+                fields.remove("checkpoint");
+            }
+            let observation: arany::ToolObservation = serde_json::from_value(payload)
+                .map_err(|_| "invalid committed Tool observation")?;
+            Some((
+                crate::cli::serve::items::tool_item(&observation.intent, Some(&observation), false),
+                false,
+            ))
+        }
+        _ => None,
+    })
+}
+
 async fn recover_turn_response(
     result: Value,
     context: &ActiveResponseContext<'_>,
@@ -1082,45 +1123,7 @@ async fn recover_turn_response(
         if event.run_id.as_deref() != Some(run.to_string().as_str()) {
             continue;
         }
-        let item = match event.kind.as_str() {
-            "MessageCommitted" => Some((
-                Item::AgentMessage {
-                    id: format!("{run}:answer"),
-                    text: event.payload["text"]
-                        .as_str()
-                        .ok_or("invalid committed answer")?
-                        .into(),
-                    phase: AgentMessagePhase::FinalAnswer,
-                },
-                false,
-            )),
-            "ToolStarted" => {
-                let intent: arany::EffectIntent =
-                    serde_json::from_value(event.payload["intent"].clone())
-                        .map_err(|_| "invalid committed Tool intent")?;
-                Some((
-                    crate::cli::serve::items::tool_item(&intent, None, false),
-                    true,
-                ))
-            }
-            "ToolFinished" => {
-                let mut payload = event.payload.clone();
-                if let Some(fields) = payload.as_object_mut() {
-                    fields.remove("checkpoint");
-                }
-                let observation: arany::ToolObservation = serde_json::from_value(payload)
-                    .map_err(|_| "invalid committed Tool observation")?;
-                Some((
-                    crate::cli::serve::items::tool_item(
-                        &observation.intent,
-                        Some(&observation),
-                        false,
-                    ),
-                    false,
-                ))
-            }
-            _ => None,
-        };
+        let item = recovered_item(event, run)?;
         if let Some((item, started)) = item
             && let Some(update) = project(context.state, session, run, item, started)
         {
