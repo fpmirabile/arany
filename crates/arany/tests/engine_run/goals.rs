@@ -7538,6 +7538,72 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
 }
 
 #[tokio::test]
+async fn cancellation_after_clearing_refuses_compaction_before_reservation() {
+    const GATE_TIMEOUT: Duration = Duration::from_secs(180);
+    let _deadline = engine_support::deadline("cancelled compaction admission", GATE_TIMEOUT);
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = paged_read_workspace(temp.path());
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let session = engine
+        .create_session(workspace.clone(), None)
+        .await
+        .unwrap();
+    let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+        matches!(event, Event::ToolResultsCleared { .. })
+    });
+    let provider = Arc::new(
+        ScriptedProvider::new(paged_read_outcomes()).with_compactions(vec![Ok(
+            CompactionResponse {
+                summary: "Earlier pages remain recorded in the journal.".into(),
+                response_id: None,
+                usage: arany::Usage::default(),
+                wire_provenance: None,
+            },
+        )]),
+    );
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.session_id = Some(session);
+    input.title = None;
+    input.include_paths.clear();
+    let cancellation = RunCancellation::new();
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        cancellation: cancellation.clone(),
+        ..Default::default()
+    };
+    let watcher = async move {
+        let observed = tokio::time::timeout(GATE_TIMEOUT, entered)
+            .await
+            .is_ok_and(|result| result.is_ok());
+        cancellation.cancel();
+        let _ = release.send(());
+        observed
+    };
+    let (outcome, reached) = tokio::join!(run_with(&engine, &provider, input, controls), watcher);
+    assert!(reached, "clearing reaches its committed acknowledgment");
+    let outcome = outcome.expect("cancelled Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, session).await;
+    assert_eq!(view.runs[0].status, RunStatus::Cancelled);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Interrupted);
+    assert!(view.goals[0].budget_refusal.is_none());
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
+    let calls = provider.requests.lock().unwrap().len();
+    assert!(calls > 0 && calls <= READS);
+    assert_eq!(view.goals[0].provider_calls, u32::try_from(calls).unwrap());
+    assert_eq!(view.runs[0].tools.len(), calls);
+    assert!(!events.iter().any(|envelope| matches!(
+        envelope.event,
+        Event::GoalCompactionCallReserved { .. }
+            | Event::GoalContextCompacted { .. }
+            | Event::GoalFinished { .. }
+            | Event::MessageCommitted { .. }
+    )));
+}
+
+#[tokio::test]
 async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());

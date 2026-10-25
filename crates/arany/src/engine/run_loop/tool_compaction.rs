@@ -380,6 +380,9 @@ impl RunLoop<'_> {
     ) -> Result<Result<(), SizingRefusal>, EngineError> {
         let ledger = self.ledger();
         let reservation = ledger.reserve(Action::Compaction, self.primary_id).await?;
+        if self.controls.cancellation.is_cancelled() {
+            return Ok(Err(SizingRefusal::Cancelled));
+        }
         let Admission::Reserved(reservation) = reservation else {
             return Ok(Ok(()));
         };
