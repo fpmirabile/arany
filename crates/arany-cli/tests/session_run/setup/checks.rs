@@ -641,7 +641,10 @@ fn wait_check_dispatch(listener: &TcpListener, pty: &mut SetupPty) -> std::net::
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("manager check accept: {error}"),
         }

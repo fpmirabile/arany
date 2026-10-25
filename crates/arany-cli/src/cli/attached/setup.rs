@@ -2838,9 +2838,13 @@ async fn review_linear_confirmation(
                 terminal.discard_draft_input();
                 notice = Some("Invalid choice line; Ctrl+C cancels");
             }
-            TerminalInput::Resize => return Ok(None),
+            TerminalInput::Resize => {
+                terminal.discard_approval_typeahead().await?;
+                return Ok(None);
+            }
             TerminalInput::Suspend => {
                 terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
+                terminal.discard_approval_typeahead().await?;
                 return Ok(None);
             }
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {

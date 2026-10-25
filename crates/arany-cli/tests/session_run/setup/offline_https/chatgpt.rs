@@ -404,6 +404,13 @@ fn advance_setup_warning_pages(
             .write(true)
             .open(tty_path)
             .expect("open setup terminal");
+        let queued_at = transcript.len();
+        input
+            .write_all(b"Accept")
+            .expect("queue old confirmation input");
+        wait_for_stage(
+            output, input, transcript, answered, queued_at, b"Accept", None,
+        );
         let resized_at = transcript.len();
         rustix::termios::tcsetwinsize(
             &tty,
@@ -421,6 +428,11 @@ fn advance_setup_warning_pages(
             transcript,
             answered,
             (resized_at, confirmation),
+        );
+        assert!(
+            !String::from_utf8_lossy(&transcript[resized_at..])
+                .contains("Notice: Read every page before accepting"),
+            "queued confirmation input reached the restarted warning"
         );
     }
 }
