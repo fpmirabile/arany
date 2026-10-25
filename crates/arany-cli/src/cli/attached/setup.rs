@@ -615,7 +615,7 @@ async fn inspect_native_account(terminal: &mut AttachedTerminal) -> Result<(), S
     };
     let details = format!(
         "Provider: {}\nModel: {}\nEffort: {}\nStorage: {}\nCredential: stored; hidden",
-        escape_terminal(&account.provider),
+        escape_terminal(&account.provider.profile()),
         escape_terminal(&account.model),
         account
             .effort
@@ -652,15 +652,17 @@ async fn select_native_account(
     {
         return Ok(None);
     }
-    let credentials = credentials::load_selected(account.id, &account.provider)
+    let credentials = credentials::load_selected(account.id, &account.provider.profile())
         .await
         .map_err(|error| SetupError::from(error.to_string()))?;
-    let Some(catalog) = load_catalog(terminal, &account.provider, &credentials).await? else {
+    let Some(catalog) = load_catalog(terminal, &account.provider.profile(), &credentials).await?
+    else {
         return Ok(None);
     };
     let notice = format!(
         "{} ready: {} · use /model to change.",
-        account.provider, account.model
+        account.provider.profile(),
+        account.model
     );
     Ok(Some(SetupSelection::Native {
         defaults: defaults(&account),
@@ -2924,7 +2926,7 @@ fn native_catalog_default<'a>(provider: &str, items: &'a [ModelEntry]) -> Option
 
 fn defaults(account: &SavedAccount) -> SessionDefaults {
     SessionDefaults {
-        provider: Some(account.provider.clone()),
+        provider: Some(account.provider.profile()),
         model: Some(account.model.clone()),
         effort: account.effort,
         account_id: Some(account.id),
