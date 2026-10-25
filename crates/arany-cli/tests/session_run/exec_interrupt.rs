@@ -200,6 +200,7 @@ fn approval_wait_death_helper() {
         let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
         let mut input = request(&workspace, "Read the facts");
         input.session_id = Some(session);
+        input.title = None;
         input.include_paths.clear();
         let (result, ()) = tokio::join!(
             engine_support::run_with(
@@ -360,6 +361,7 @@ async fn resume_after_approval_death(
     let mut input = request(workspace, "Read the facts");
     input.include_paths.clear();
     input.session_id = Some(session);
+    input.title = None;
     input.goal = arany::GoalRequest::resume(goal, true);
     let result = engine_support::run_with(
         &engine,

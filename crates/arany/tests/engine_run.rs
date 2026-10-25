@@ -1352,16 +1352,16 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         // same-route retry facts per call; the boundary is the largest prefix that still admits the Run.
         // A single plain Run commits 11 Events and one Team child 17.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9986, CollaborationPolicy::Single, false, false, false, false),
-            (9985, CollaborationPolicy::Single, true, false, false, false),
+            (9987, CollaborationPolicy::Single, false, false, false, false),
+            (9986, CollaborationPolicy::Single, true, false, false, false),
             (9977, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
             (9975, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9985, CollaborationPolicy::Single, false, true, false, false),
-            (9984, CollaborationPolicy::Single, true, true, false, false),
-            (9985, CollaborationPolicy::Single, false, false, true, false),
-            (9984, CollaborationPolicy::Single, true, false, true, false),
-            (9922, CollaborationPolicy::Single, false, false, false, true),
-            (9921, CollaborationPolicy::Single, true, false, false, true),
+            (9986, CollaborationPolicy::Single, false, true, false, false),
+            (9985, CollaborationPolicy::Single, true, true, false, false),
+            (9986, CollaborationPolicy::Single, false, false, true, false),
+            (9985, CollaborationPolicy::Single, true, false, true, false),
+            (9923, CollaborationPolicy::Single, false, false, false, true),
+            (9922, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
@@ -1421,7 +1421,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             if admitted {
                 assert_eq!(result.unwrap().run.status, RunStatus::Finished, "case {index}");
             } else {
-                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "case {index}");
+                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "case {index}: {result:?}");
             }
             engine.close().await.unwrap();
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();

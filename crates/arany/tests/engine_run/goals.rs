@@ -7998,7 +7998,7 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
 #[tokio::test]
 async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
     // The continuation tail includes its call's three same-route retry facts.
-    const REFUSED: usize = 10 + arany::MAX_PROVIDER_RETRIES as usize;
+    const REFUSED: usize = 9 + arany::MAX_PROVIDER_RETRIES as usize;
     async fn run(root: &Path, free: Option<(usize, usize)>) -> Vec<arany::EventEnvelope> {
         use std::os::unix::fs::PermissionsExt;
         let workspace = facts_workspace(root, "stable");

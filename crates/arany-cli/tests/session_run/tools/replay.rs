@@ -750,45 +750,53 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.runs[0].tools.len(), 2);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 3);
+    let add_review = |row: &mut Vec<Event>, started: usize| {
+        let start = row[started].clone();
+        let Event::ToolStarted {
+            run_id,
+            agent_run_id,
+            intent,
+            active_ceiling_ms,
+            ..
+        } = &start
+        else {
+            unreachable!()
+        };
+        row.splice(
+            started..=started,
+            [
+                Event::ToolProposed {
+                    run_id: *run_id,
+                    agent_run_id: *agent_run_id,
+                    intent: intent.clone(),
+                    active_ceiling_ms: *active_ceiling_ms,
+                },
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: primary,
+                    active_ceiling_ms: 0,
+                },
+                review.clone(),
+                start,
+            ],
+        );
+    };
     let mut reviewed_integration = integrated.clone();
-    reviewed_integration.splice(
-        COMMAND_FINISHED..COMMAND_FINISHED,
-        [
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-                active_ceiling_ms: 0,
-            },
-            review.clone(),
-        ],
-    );
-    reviewed_integration.splice(
-        INTEGRATION_FINISHED + 2..INTEGRATION_FINISHED + 2,
-        [
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-                active_ceiling_ms: 0,
-            },
-            review.clone(),
-        ],
-    );
+    add_review(&mut reviewed_integration, INTEGRATION_STARTED);
+    add_review(&mut reviewed_integration, COMMAND_STARTED);
     let view = replay(reviewed_integration).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 5);
     let mut duplicate_review = integrated.clone();
+    add_review(&mut duplicate_review, INTEGRATION_STARTED);
+    assert!(
+        replay(duplicate_review.clone()).is_ok(),
+        "integration admits one review even when its command had none"
+    );
     duplicate_review.splice(
-        INTEGRATION_STARTED + 1..INTEGRATION_STARTED + 1,
+        INTEGRATION_STARTED + 3..INTEGRATION_STARTED + 3,
         [
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-                active_ceiling_ms: 0,
-            },
-            review.clone(),
             Event::GoalProviderCallReserved {
                 goal_id: goal,
                 run_id: run,
@@ -800,7 +808,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     );
     assert!(
         replay(duplicate_review).is_err(),
-        "integration admits one review even when its command had none"
+        "integration rejects a duplicate review before dispatch"
     );
     let interrupted = replay(integrated[..INTEGRATION_FINISHED].to_vec())
         .unwrap()
