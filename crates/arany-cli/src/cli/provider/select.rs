@@ -336,7 +336,7 @@ mod tests {
         let provider = AnthropicProvider::from_credentials_with_evidence(
             root,
             "claude-sonnet-5".into(),
-            Some(Effort::None),
+            Some(Effort::Low),
             credentials,
             None,
         )
@@ -357,7 +357,7 @@ mod tests {
         let provider = AnthropicProvider::from_credentials_with_evidence(
             root,
             "claude-sonnet-5".into(),
-            Some(Effort::None),
+            Some(Effort::Low),
             credentials,
             None,
         )
