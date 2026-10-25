@@ -345,6 +345,15 @@ impl RunView {
             })
     }
 
+    pub(crate) fn tool_step_boundaries(&self) -> Vec<Option<usize>> {
+        self.live_tool_records()
+            .map(|(index, _)| {
+                let covered = index + 1;
+                goal::ends_whole_step(self, covered).then_some(covered)
+            })
+            .collect()
+    }
+
     // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
     pub(crate) fn hooks_settled(&self) -> bool {
         self.lifecycle_hooks.iter().all(|hook| {

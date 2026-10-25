@@ -2,7 +2,7 @@ use super::{
     AgentStatus, GoalView, RunStatus, RunView, SessionView, ToolView, active_run, current_goal_mut,
     current_run, is_integration_tool, pending_tool_requests,
 };
-use crate::provider::AgentPhase;
+use crate::provider::{AgentPhase, ProviderFailureReason};
 use crate::session::events::{
     AgentRole, AgentRunId, CompactionStatus, Event, GoalBudget, GoalId, GoalPhase,
     GoalPlanContract, GoalReport, GoalStatus, ProviderCallDisposition, ReplayError, RunId,
@@ -294,12 +294,13 @@ impl SessionView {
                 return Err(ReplayError::InvalidTransition);
             }
         }
+        let primary_id = run.primary().map(|agent| agent.id);
         let goal = current_goal_mut(self, *goal_id)?;
         if goal.status != GoalStatus::Running
             || goal.active_run != Some(*run_id)
             || !agent_active
             || goal.unobserved_provider_calls.contains(agent_run_id)
-            || goal.compaction_call_reserved.is_some()
+            || goal.compaction_call_reserved.is_some() && primary_id == Some(*agent_run_id)
             || call_budget_exhausted(goal)
         {
             return Err(ReplayError::InvalidTransition);
@@ -402,47 +403,56 @@ impl SessionView {
             .filter(|run| run.id == *run_id)
             .ok_or(ReplayError::InvalidTransition)?;
         let run_status = run.status;
-        let active_run_ready =
-            run_status == RunStatus::Active
-                && !run.model_tools().is_empty()
-                && run
-                    .model_tools()
+        let active_run_ready = run_status == RunStatus::Active
+            && !run.model_tools().is_empty()
+            && run
+                .model_tools()
+                .iter()
+                .all(|tool| tool.observation.is_some())
+            && run
+                .model_tools()
+                .last()
+                .is_some_and(ToolView::settled_without_stop)
+            && run.hooks_settled()
+            && run.primary().is_some_and(|primary| {
+                let Some(request_index) = primary
+                    .provider_calls
                     .iter()
-                    .all(|tool| tool.observation.is_some())
-                && run
-                    .model_tools()
-                    .last()
-                    .is_some_and(ToolView::settled_without_stop)
-                && run.hooks_settled()
-                && run.primary().is_some_and(|primary| {
-                    let Some(request_index) = primary.provider_calls.iter().rposition(|call| {
-                        call.disposition == ProviderCallDisposition::ToolRequested
-                    }) else {
-                        return false;
-                    };
-                    let calls_settled =
-                        primary.provider_calls[request_index + 1..]
-                            .iter()
-                            .all(|call| {
-                                call.phase == AgentPhase::ToolReview
+                    .rposition(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+                else {
+                    return false;
+                };
+                let calls_settled =
+                    primary.provider_calls[request_index + 1..]
+                        .iter()
+                        .all(|call| {
+                            call.phase == AgentPhase::ToolReview
                                 && call.disposition == ProviderCallDisposition::Finished
                                 || call.disposition == ProviderCallDisposition::Rejected
                                     && call.refusal.is_some()
                                 || call.disposition == ProviderCallDisposition::InvalidResponse
                                     && call.failure_reason
-                                        == Some(
-                                            crate::provider::ProviderFailureReason::OutcomeContract,
-                                        )
+                                        == Some(ProviderFailureReason::OutcomeContract)
                                     && primary.outcome_correction_pending()
-                            });
-                    primary.status == AgentStatus::Active
-                        && matches!(
-                            primary.provider_calls[request_index].phase,
-                            AgentPhase::RootPlan | AgentPhase::RootSynthesis
-                        )
-                        && calls_settled
-                        && pending_tool_requests(run) == Some(0)
-                });
+                                || call.phase == AgentPhase::RootSynthesis
+                                    && call.disposition == ProviderCallDisposition::InvalidResponse
+                                    && matches!(
+                                        call.failure_reason,
+                                        Some(
+                                            ProviderFailureReason::WorkerAnswerDeferred
+                                                | ProviderFailureReason::WorkerDelegateRefused
+                                                | ProviderFailureReason::WorkerToolRefused
+                                        )
+                                    )
+                        });
+                primary.status == AgentStatus::Active
+                    && matches!(
+                        primary.provider_calls[request_index].phase,
+                        AgentPhase::RootPlan | AgentPhase::RootSynthesis
+                    )
+                    && calls_settled
+                    && pending_tool_requests(run) == Some(0)
+            });
         let primary_id = run.primary().ok_or(ReplayError::InvalidTransition)?.id;
         let goal = current_goal_mut(self, *goal_id)?;
         if goal.status != GoalStatus::Running
@@ -992,7 +1002,7 @@ pub(super) fn apply(
 }
 
 // A compaction prefix must end on a whole step to preserve Tool-request correlation.
-fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
+pub(super) fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;
     };

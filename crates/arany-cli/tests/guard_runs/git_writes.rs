@@ -267,23 +267,6 @@ async fn git_writes_commit_branch_and_switch_through_the_guard_and_replay_withou
     );
     assert_eq!(provider_calls, 5);
 
-    assert_eq!(
-        repo.git(&["log", "-1", "--format=%s|%an <%ae>", "main"]),
-        "third|Arany Journey <journey@example.invalid>\n"
-    );
-    assert_eq!(repo.git(&["symbolic-ref", "HEAD"]), "refs/heads/older\n");
-    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), first);
-    assert_eq!(
-        std::fs::read_to_string(repo.workspace.join("src/a.txt")).unwrap(),
-        "alpha\n"
-    );
-    assert_eq!(repo.git(&["status", "--porcelain=v1"]), "");
-    assert_eq!(
-        std::fs::read_dir(&repo.markers).unwrap().count(),
-        0,
-        "repository hooks and monitors never ran"
-    );
-
     let after = tree_snapshot(&repo.workspace);
     let (events, view) = repo.reopen(engine, outcome.session_id).await;
     assert_eq!(
@@ -322,6 +305,24 @@ async fn git_writes_commit_branch_and_switch_through_the_guard_and_replay_withou
             Some(PermissionSource::Human)
         ]
     );
+
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s|%an <%ae>", "main"]),
+        "third|Arany Journey <journey@example.invalid>\n"
+    );
+    assert_eq!(repo.git(&["symbolic-ref", "HEAD"]), "refs/heads/older\n");
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), first);
+    assert_eq!(
+        std::fs::read_to_string(repo.workspace.join("src/a.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert_eq!(repo.git(&["status", "--porcelain=v1"]), "");
+    assert_eq!(
+        std::fs::read_dir(&repo.markers).unwrap().count(),
+        0,
+        "repository hooks and monitors never ran"
+    );
+
     let committed = output(&tools[0]);
     assert_eq!(committed["branch"], "main");
     assert_eq!(

@@ -1097,7 +1097,10 @@ impl AttachedTerminal {
                 return Ok(TerminalInput::PanelSelectionChanged);
             }
         };
-        if let Some(result) = self.panel_pointer_input(input).await {
+        if let Some(result) = self
+            .panel_pointer_input(input, mouse_capture_enabled())
+            .await
+        {
             return Ok(result);
         }
         if let Some(linear) = &mut self.linear {
@@ -1559,11 +1562,15 @@ impl AttachedTerminal {
         }
     }
 
-    async fn panel_pointer_input(&mut self, input: TerminalInput) -> Option<TerminalInput> {
+    async fn panel_pointer_input(
+        &mut self,
+        input: TerminalInput,
+        mouse_enabled: bool,
+    ) -> Option<TerminalInput> {
         if !self.panel_selection.enabled
             || self.is_linear()
             || self.mode != TerminalMode::Fullscreen
-            || !mouse_capture_enabled()
+            || !mouse_enabled
         {
             return None;
         }
@@ -4238,31 +4245,42 @@ mod panel_selection_tests {
                 terminal.panel_selection.area = Some(Rect::new(0, 0, 4_096, 25));
                 terminal.panel_selection.lines = vec!["a".repeat(4_096); 25];
 
+                let click = TerminalInput::PointerClick {
+                    column: 0,
+                    row: 0,
+                    clicks: 1,
+                };
+                assert_eq!(
+                    terminal.panel_pointer_input(click, false).await,
+                    None,
+                    "disabled capture ignores panel clicks"
+                );
+                assert!(!terminal.panel_selection.selecting());
+                assert_eq!(
+                    terminal.panel_pointer_input(click, true).await,
+                    Some(TerminalInput::PanelSelectionChanged)
+                );
                 assert_eq!(
                     terminal
-                        .panel_pointer_input(TerminalInput::PointerClick {
-                            column: 0,
-                            row: 0,
-                            clicks: 1
-                        })
+                        .panel_pointer_input(
+                            TerminalInput::PointerDrag {
+                                column: 4_095,
+                                row: 24,
+                            },
+                            true
+                        )
                         .await,
                     Some(TerminalInput::PanelSelectionChanged)
                 );
                 assert_eq!(
                     terminal
-                        .panel_pointer_input(TerminalInput::PointerDrag {
-                            column: 4_095,
-                            row: 24,
-                        })
-                        .await,
-                    Some(TerminalInput::PanelSelectionChanged)
-                );
-                assert_eq!(
-                    terminal
-                        .panel_pointer_input(TerminalInput::PointerRelease {
-                            column: 4_095,
-                            row: 24,
-                        })
+                        .panel_pointer_input(
+                            TerminalInput::PointerRelease {
+                                column: 4_095,
+                                row: 24,
+                            },
+                            true
+                        )
                         .await,
                     None,
                     "Copy on select is disabled"
@@ -4271,7 +4289,7 @@ mod panel_selection_tests {
 
                 assert_eq!(
                     terminal
-                        .panel_pointer_input(TerminalInput::CopySelection)
+                        .panel_pointer_input(TerminalInput::CopySelection, true)
                         .await,
                     Some(TerminalInput::PanelSelectionChanged),
                     "explicit copy still runs"
@@ -4282,12 +4300,16 @@ mod panel_selection_tests {
                     Some(super::COPY_TOO_LARGE)
                 );
                 assert_eq!(
-                    terminal.panel_pointer_input(TerminalInput::Escape).await,
+                    terminal
+                        .panel_pointer_input(TerminalInput::Escape, true)
+                        .await,
                     Some(TerminalInput::PanelSelectionChanged)
                 );
                 assert!(!terminal.panel_selection.selecting());
                 assert_eq!(
-                    terminal.panel_pointer_input(TerminalInput::Escape).await,
+                    terminal
+                        .panel_pointer_input(TerminalInput::Escape, true)
+                        .await,
                     None,
                     "the next Escape reaches the panel's close handler"
                 );

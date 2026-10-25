@@ -680,7 +680,7 @@ impl ToolRuntime {
     pub(crate) fn step_context_reserve(command_integration: bool, feedback: usize) -> usize {
         512 + feedback
             + if command_integration {
-                types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
+                types::MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES + 128 * 6 + 512
             } else {
                 0
             }

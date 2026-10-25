@@ -14,6 +14,10 @@ pub mod worker_teams;
 pub use crate::provider::test_image;
 pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
 
+pub const fn max_changeset_bytes() -> usize {
+    crate::tools::types::MAX_CHANGESET_BYTES
+}
+
 pub async fn record_setup_edit_state(
     store: &crate::Store,
     session_id: crate::SessionId,
@@ -67,6 +71,13 @@ pub fn payload_version(kind: &str) -> i64 {
 
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
+}
+
+pub fn tool_continuation_reserve(max_output_tokens: u32, feedback: usize) -> usize {
+    crate::tools::ToolRuntime::continuation_reserve(
+        crate::provider::max_turn_bytes(max_output_tokens),
+        feedback,
+    )
 }
 
 pub fn history_tool_block(run: &crate::RunView) -> String {
