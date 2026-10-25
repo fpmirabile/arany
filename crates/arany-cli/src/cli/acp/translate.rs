@@ -755,7 +755,7 @@ pub(super) async fn output(
                 message = inbound.recv(), if !closed => match message {
                     Some(Message::Request(request)) => {
                         if withdrawal.is_some() {
-                            approval_response(&serve, request.id, "unavailable").await?;
+                            approval_response(&serve, request.id, ApprovalDecision::Unavailable).await?;
                         } else {
                             permission_request(&state, &serve, &outbound, request).await?;
                         }
@@ -1742,9 +1742,9 @@ fn project(
 async fn approval_response(
     serve: &mpsc::Sender<ClientMessage>,
     id: RequestId,
-    decision: &str,
+    decision: ApprovalDecision,
 ) -> Result<(), String> {
-    let message = if decision == "unavailable" {
+    let message = if decision == ApprovalDecision::Unavailable {
         Message::Error(ErrorResponse {
             jsonrpc: Default::default(),
             id: Some(id),
@@ -1758,7 +1758,7 @@ async fn approval_response(
         Message::Response(Response {
             jsonrpc: Default::default(),
             id,
-            result: json!({"decision":decision}),
+            result: json!(ApprovalResult { decision }),
         })
     };
     serve
@@ -1777,13 +1777,13 @@ async fn permission_reply(
         Some(outcome)
             if outcome["outcome"] == "selected" && outcome["optionId"] == "allow_once" =>
         {
-            "accept"
+            ApprovalDecision::Accept
         }
         Some(outcome) if outcome["outcome"] == "selected" && outcome["optionId"] == "deny" => {
-            "decline"
+            ApprovalDecision::Decline
         }
-        Some(outcome) if outcome["outcome"] == "cancelled" => "cancel",
-        _ => "unavailable",
+        Some(outcome) if outcome["outcome"] == "cancelled" => ApprovalDecision::Cancel,
+        _ => ApprovalDecision::Unavailable,
     };
     let pending = {
         let mut state = locked(state);
@@ -1791,7 +1791,7 @@ async fn permission_reply(
             return Ok(());
         }
         let pending = state.permission.take_if(|p| p.id == id && p.sent);
-        if decision == "cancel"
+        if decision == ApprovalDecision::Cancel
             && pending.is_some()
             && let Some(active) = &mut state.active
         {
@@ -1823,7 +1823,7 @@ async fn permission_request(
     request: Request,
 ) -> Result<(), String> {
     let Ok(params) = parse::<ApprovalParams>(request.params) else {
-        return approval_response(serve, request.id, "unavailable").await;
+        return approval_response(serve, request.id, ApprovalDecision::Unavailable).await;
     };
     let intent: arany::EffectIntent = serde_json::from_value(params.intent.clone())
         .map_err(|_| "invalid serve approval intent")?;
@@ -1880,7 +1880,7 @@ async fn permission_request(
         }
     };
     let Some(message) = prepared else {
-        return approval_response(serve, request.id, "unavailable").await;
+        return approval_response(serve, request.id, ApprovalDecision::Unavailable).await;
     };
     let delivered = {
         let mut state = locked(state);
@@ -1902,7 +1902,7 @@ async fn permission_request(
         }
     };
     if !delivered {
-        approval_response(serve, request.id, "unavailable").await?;
+        approval_response(serve, request.id, ApprovalDecision::Unavailable).await?;
     }
     Ok(())
 }

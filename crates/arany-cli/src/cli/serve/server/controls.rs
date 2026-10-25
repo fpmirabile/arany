@@ -149,6 +149,7 @@ mod tests {
             thread_id,
             result: worker.abort_handle(),
             events: engine.subscribe(),
+            display: None,
             cancel: arany::RunCancellation::new(),
             approvals: std::sync::Arc::new(
                 crate::cli::serve::approvals::Approvals::empty_for_test(),
