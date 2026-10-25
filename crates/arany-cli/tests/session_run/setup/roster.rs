@@ -43,7 +43,14 @@ fn roster_manager_creates_previews_saves_and_removes_without_activation_in_every
         assert_result_contains(&result, "current conversation selection is unchanged");
         assert_result_contains(&result, "arany --profile research");
         assert!(finish_setup_pty(pty).status.success());
-        assert_edits(&state, &workspace, &[ProviderSetupTargetKind::Roster]);
+        assert_edits(
+            &state,
+            &workspace,
+            &[(
+                ProviderSetupTargetKind::Roster,
+                ProviderSetupDisposition::Applied,
+            )],
+        );
         let saved = std::fs::read(state.join("provider-roster.json")).unwrap();
         let record: serde_json::Value = serde_json::from_slice(&saved).unwrap();
         assert_eq!(
@@ -59,9 +66,18 @@ fn roster_manager_creates_previews_saves_and_removes_without_activation_in_every
             &state,
             &workspace,
             &[
-                ProviderSetupTargetKind::Roster,
-                ProviderSetupTargetKind::RoleRouting,
-                ProviderSetupTargetKind::Roster,
+                (
+                    ProviderSetupTargetKind::Roster,
+                    ProviderSetupDisposition::Applied,
+                ),
+                (
+                    ProviderSetupTargetKind::RoleRouting,
+                    ProviderSetupDisposition::Applied,
+                ),
+                (
+                    ProviderSetupTargetKind::Roster,
+                    ProviderSetupDisposition::Applied,
+                ),
             ],
         );
     }
@@ -246,7 +262,87 @@ fn remove_presets(
     assert!(!state.join("provider-roster.json").exists());
 }
 
-fn assert_edits(state: &Path, workspace: &Path, expected: &[ProviderSetupTargetKind]) {
+#[test]
+fn concurrent_clear_failure_retains_the_edited_roster_and_settles_before_save() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    let route = json!({"provider":"openai","model":"gpt-5.4","effort":"none","account_id":null});
+    let record = json!({"version":1,"profiles":[
+        {"name":"main","routes":[route]}, {"name":"inspect","routes":[route]}
+    ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","inspect"]}]});
+    super::super::private_file(
+        &state.join("provider-roster.json"),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let routing = br#"{"version":1,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
+    super::super::private_file(&state.join("provider-routing.json"), routing);
+    let presentation = Presentation::ScreenReader;
+    let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Manager);
+    edit_saved_child(&mut pty, presentation);
+    let from = presentation.choose(&mut pty, 5);
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (from, b"empty Enter selects 1. Back\r\nInput:\r\n"),
+    );
+    let concurrent = [routing.as_slice(), b"\n"].concat();
+    super::super::private_file(&state.join("provider-routing.json"), &concurrent);
+    let from = pty.transcript.len();
+    pty.input.write_all(b"2\r").unwrap();
+    let (from, result) = acknowledge_result(&mut pty, presentation, from);
+    assert_result_contains(&result, "changed");
+    presentation.menu(&mut pty, from, "Roster profiles");
+    let from = presentation.choose(&mut pty, 4);
+    confirm(&mut pty, presentation, from, "Save roster?", true);
+    let from = pty.transcript.len();
+    let (_, result) = acknowledge_result(&mut pty, presentation, from);
+    assert_result_contains(&result, "Saved");
+    assert!(finish_setup_pty(pty).status.success());
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join("provider-roster.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["presets"][0]["providers"]["child"], "inspect");
+    assert_eq!(
+        std::fs::read(state.join("provider-routing.json")).unwrap(),
+        concurrent
+    );
+    assert_edits(
+        &state,
+        &workspace,
+        &[
+            (
+                ProviderSetupTargetKind::RoleRouting,
+                ProviderSetupDisposition::Failed,
+            ),
+            (
+                ProviderSetupTargetKind::Roster,
+                ProviderSetupDisposition::Applied,
+            ),
+        ],
+    );
+}
+
+fn edit_saved_child(pty: &mut SetupPty, presentation: Presentation) {
+    select(pty, presentation, 4, "Roster profiles");
+    select(pty, presentation, 2, "Named presets");
+    select(pty, presentation, 1, "Preset action");
+    select(pty, presentation, 1, "Preset roles");
+    select(pty, presentation, 2, "Role profile");
+    select(pty, presentation, 2, "Preset roles");
+    select(pty, presentation, 6, "Named presets");
+    select(pty, presentation, 3, "Roster profiles");
+}
+
+fn assert_edits(
+    state: &Path,
+    workspace: &Path,
+    expected: &[(ProviderSetupTargetKind, ProviderSetupDisposition)],
+) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -262,32 +358,36 @@ fn assert_edits(state: &Path, workspace: &Path, expected: &[ProviderSetupTargetK
                 assert!(sessions.is_empty(), "cancelled setup creates no Session");
             }
             let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
-            let mut targets = vec![];
+            let mut edits = vec![];
             for session in sessions {
                 let events = store.load_session(session.id).await.unwrap();
                 let view = SessionView::replay(session.id, &events).unwrap().unwrap();
                 assert!(view.runs.is_empty());
                 assert_eq!(view.defaults, SessionDefaults::default());
                 assert!(!view.provider_setup_blocks_continuation());
+                let mut pending = None;
                 for event in events {
                     match event.event {
-                        Event::ProviderSetupEditStarted { target, .. } => targets.push(target.kind),
+                        Event::ProviderSetupEditStarted { target, .. } => {
+                            pending = Some(target.kind)
+                        }
                         Event::ProviderSetupEditFinished { disposition, .. } => {
-                            assert_eq!(disposition, ProviderSetupDisposition::Applied)
+                            edits
+                                .push((pending.take().expect("matching edit intent"), disposition));
                         }
                         _ => {}
                     }
                 }
             }
             store.close().await.unwrap();
-            assert_eq!(targets.len(), expected.len());
-            for kind in [
-                ProviderSetupTargetKind::Roster,
-                ProviderSetupTargetKind::RoleRouting,
-            ] {
+            assert_eq!(edits.len(), expected.len());
+            for expected_edit in expected {
                 assert_eq!(
-                    targets.iter().filter(|target| **target == kind).count(),
-                    expected.iter().filter(|target| **target == kind).count()
+                    edits.iter().filter(|edit| *edit == expected_edit).count(),
+                    expected
+                        .iter()
+                        .filter(|edit| *edit == expected_edit)
+                        .count(),
                 );
             }
         });

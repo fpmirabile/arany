@@ -30,6 +30,24 @@ pub(crate) struct Preset {
 }
 
 impl Preset {
+    fn bounded_references(&self) -> Result<BTreeSet<String>, String> {
+        let referenced = self
+            .providers
+            .values()
+            .into_iter()
+            .flatten()
+            .chain(self.child_profiles.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if referenced.len() > MAX_ELIGIBLE_PROFILES {
+            return Err(format!(
+                "Preset {} references more than {MAX_ELIGIBLE_PROFILES} distinct profiles; remove a role reference or an eligible child",
+                crate::presentation::escape_terminal(&self.name),
+            ));
+        }
+        Ok(referenced)
+    }
+
     fn validate_child_default(&self) -> Result<(), String> {
         let primary = self.providers.primary.as_ref().ok_or(INVALID)?;
         let child = self.providers.child.as_ref().unwrap_or(primary);
@@ -173,6 +191,7 @@ impl RosterDraft {
         }
         for preset in &self.presets {
             preset.validate_child_default()?;
+            preset.bounded_references()?;
         }
         let mut profiles = self.profiles.clone();
         for profile in &mut profiles {
@@ -340,6 +359,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
             return Err(INVALID.into());
         }
         preset.validate_child_default().map_err(|_| INVALID)?;
+        let referenced = preset.bounded_references().map_err(|_| INVALID)?;
         let primary = preset.providers.primary.ok_or(INVALID)?;
         let providers = Providers {
             child: preset.providers.child.unwrap_or_else(|| primary.clone()),
@@ -358,13 +378,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         {
             return Err(INVALID.into());
         }
-        let referenced: BTreeSet<_> = providers
-            .values()
-            .into_iter()
-            .chain(preset.child_profiles.iter())
-            .cloned()
-            .collect();
-        if referenced.len() > MAX_ELIGIBLE_PROFILES || !referenced.is_subset(&names) {
+        if !referenced.is_subset(&names) {
             return Err(INVALID.into());
         }
         result.push(SelectedRoster {
@@ -864,6 +878,53 @@ mod tests {
             draft.presets[0].providers.child = Some("unsafe\nchild".into());
             let error = draft.encode().unwrap_err();
             assert!(!error.contains(['\u{001b}', '\n']));
+        }
+    }
+
+    #[test]
+    fn roster_draft_names_excess_references_and_preserves_both_repair_paths() {
+        let source: Config = serde_json::from_value(record()).unwrap();
+        let profiles = (0..=MAX_ELIGIBLE_PROFILES)
+            .map(|index| {
+                let mut profile = source.profiles[0].clone();
+                profile.name = format!("profile-{index}");
+                profile
+            })
+            .collect::<Vec<_>>();
+        for role in [arany::ProviderRole::Review, arany::ProviderRole::Compaction] {
+            let mut preset = source.presets[0].clone();
+            preset.providers.primary = Some(profiles[0].name.clone());
+            preset.child_profiles = profiles[..MAX_ELIGIBLE_PROFILES]
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect();
+            *preset.providers.get_mut(role) = Some(profiles[MAX_ELIGIBLE_PROFILES].name.clone());
+            let bytes = serde_json::to_vec(&Config {
+                version: 1,
+                profiles: profiles.clone(),
+                presets: vec![preset.clone()],
+            })
+            .unwrap();
+            assert!(matches!(presets(&bytes), Err(message) if message == INVALID));
+            let mut draft = RosterDraft {
+                profiles: profiles.clone(),
+                presets: vec![preset],
+                expected: None,
+            };
+            let expected = format!(
+                "Preset coding references more than {MAX_ELIGIBLE_PROFILES} distinct profiles; remove a role reference or an eligible child"
+            );
+            assert_eq!(draft.encode().unwrap_err(), expected);
+            assert_eq!(draft.preview().unwrap_err(), expected);
+            draft.presets[0].name.push('\u{001b}');
+            assert!(!draft.encode().unwrap_err().contains('\u{001b}'));
+            draft.presets[0].name.pop();
+            *draft.presets[0].providers.get_mut(role) = None;
+            assert!(draft.encode().unwrap().is_some());
+            *draft.presets[0].providers.get_mut(role) =
+                Some(profiles[MAX_ELIGIBLE_PROFILES].name.clone());
+            draft.presets[0].child_profiles.pop();
+            assert!(draft.encode().unwrap().is_some());
         }
     }
 

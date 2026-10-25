@@ -59,8 +59,13 @@ pub(super) async fn manage(
                 }
             }
             b'5' => {
-                let routing = RoutingDraft::load(&state).map_err(|error| error.to_string())?;
-                routing::clear(terminal, &state, journal, &routing).await?;
+                let result = match RoutingDraft::load(&state) {
+                    Ok(routing) => routing::clear(terminal, &state, journal, &routing)
+                        .await
+                        .map(|_| ()),
+                    Err(error) => Err(error.to_string().into()),
+                };
+                retain_draft(terminal, result).await?;
             }
             _ => return Ok(()),
         }
