@@ -29,6 +29,20 @@ pub(super) fn valid(call: &ToolCall) -> bool {
         }
         ToolCall::Search { path, .. } => valid_relative(path, true) && super::search::valid(call),
         ToolCall::Mkdir { path } => valid_relative(path, false),
+        ToolCall::Delete {
+            path,
+            expected_digest,
+        } => valid_relative(path, false) && valid_digest(expected_digest),
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => {
+            valid_relative(source, false)
+                && valid_relative(destination, false)
+                && !source.eq_ignore_ascii_case(destination)
+                && valid_digest(expected_digest)
+        }
         ToolCall::Write {
             path,
             expected_digest,
@@ -142,6 +156,12 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
                     }
                 }),
             ),
+        ],
+        "delete" => vec![path, ("expected_digest", string())],
+        "move" => vec![
+            ("source", string()),
+            ("destination", string()),
+            ("expected_digest", string()),
         ],
         "write" => vec![
             path,
@@ -1470,6 +1490,7 @@ pub(super) fn native(
 ) -> Result<String, ToolError> {
     let root = open_directory(workspace)?;
     match call {
+        ToolCall::Delete { .. } | ToolCall::Move { .. } => remove_or_move(&root, call),
         ToolCall::Write {
             path,
             expected_digest,
@@ -1579,6 +1600,50 @@ pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, To
         }
         _ => Err(ToolError::Operation),
     }
+}
+
+fn remove_or_move(root: &Dir, call: &ToolCall) -> Result<String, ToolError> {
+    let (source, destination, expected) = match call {
+        ToolCall::Delete {
+            path,
+            expected_digest,
+        } => (path, None, expected_digest),
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => (source, Some(destination), expected_digest),
+        _ => return Err(ToolError::Configuration),
+    };
+    let before = rewind_file(root, source)?.ok_or(ToolError::NotFound)?;
+    if before.sha256 != *expected {
+        return Err(ToolError::Conflict);
+    }
+    let removed = crate::session::rewind::FileState {
+        sha256: before.sha256.clone(),
+        bytes: before
+            .bytes_with_limit(MAX_FILE_BYTES)
+            .ok_or(ToolError::Limit)?
+            .len() as u32,
+        executable: before.executable,
+    };
+    let mut files = Vec::new();
+    if let Some(destination) = destination {
+        files.push(FileChange {
+            path: destination.clone(),
+            before: None,
+            after: Some(before.clone()),
+        });
+    }
+    files.push(FileChange {
+        path: source.clone(),
+        before: Some(before),
+        after: None,
+    });
+    worker_publication_paths(root, &files)?;
+    apply_files(root, &files)?;
+    serde_json::to_string(&crate::session::rewind::RemovedFileResult { removed })
+        .map_err(|_| ToolError::Uncertain)
 }
 
 struct ChangeParent {

@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 51] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 59] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -29,6 +29,44 @@ const EVENT_FIXTURES: [EventFixture<'static>; 51] = [
     ),
     ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
     ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    (
+        "ToolStarted",
+        19,
+        include_str!("toolstarted-without-expiry.json"),
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        26,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        9,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        15,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        10,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        20,
+        PROVIDER_CALL_V19,
+        PROVIDER_CALL_V19,
+    ),
+    ("RunStarted", 22, HOST_RUNSTARTED, HOST_RUNSTARTED),
+    ("AgentSpawned", 14, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("GoalStarted", 7, GOAL_STARTED_V7, GOAL_STARTED_V8),
     ("ToolStarted", 16, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 22, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
@@ -1504,7 +1542,7 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
         let (run, agent) = intent_scope(&migrated).unwrap();
         Event::decode(
             kind,
-            version + 1,
+            payload_version(kind).unwrap(),
             &migrated.to_string(),
             Some(run),
             Some(agent),
@@ -1640,7 +1678,7 @@ fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceil
             let (run, agent) = intent_scope(&migrated).unwrap();
             Event::decode(
                 kind,
-                version + 1,
+                payload_version(kind).unwrap(),
                 &migrated.to_string(),
                 Some(run),
                 Some(agent),
@@ -2540,9 +2578,7 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
     host["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))});
     host["intent"]["call"] = serde_json::json!({"operation":"git_push","remote":"https://github.com/o/r","branch":"main"});
     host["intent"]["limits"]["network"] = serde_json::json!("host");
-    let expiry = REGISTRY
-        .event_step("ToolStarted", payload_version("ToolStarted").unwrap() - 1)
-        .unwrap();
+    let expiry = REGISTRY.event_step("ToolStarted", 18).unwrap();
     assert!((expiry.canonical)(&host.to_string()).is_some());
     let migrated = (expiry.transform)(host.clone()).unwrap();
     assert!(migrated["intent"].get("expires_at_ms").is_none());
@@ -2554,4 +2590,32 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
         migrated, host,
         "host approval loses only the shared clock expiry"
     );
+    let removal = REGISTRY.event_step("ToolStarted", 19).unwrap();
+    assert!((removal.canonical)(&migrated.to_string()).is_some());
+    assert_eq!((removal.transform)(migrated.clone()), Some(migrated));
+}
+
+#[test]
+fn file_removal_identity_steps_reject_new_calls_and_capabilities_in_old_payloads() {
+    for operation in ["delete", "move"] {
+        let call = if operation == "delete" {
+            serde_json::json!({"operation":operation,"path":"src/source","expected_digest":"0".repeat(64)})
+        } else {
+            serde_json::json!({"operation":operation,"source":"src/source","destination":"src/target","expected_digest":"0".repeat(64)})
+        };
+        let mut started: Value =
+            serde_json::from_str(include_str!("toolstarted-without-expiry.json")).unwrap();
+        started["intent"]["call"] = call;
+        let step = REGISTRY.event_step("ToolStarted", 19).unwrap();
+        assert!((step.canonical)(&started.to_string()).is_none());
+        assert!((step.transform)(started).is_none());
+        let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
+        run["config"]["worker_policy"] = serde_json::json!({
+            "parent_grant":{"read_paths":["src"],"write_paths":["src"],"tools":[operation],"skills":[],"mcp_servers":[],"commands":[],"permission_mode":null},
+            "concurrency":1,"max_turns":4,"max_tools":3,"data_bytes":1024
+        });
+        let step = REGISTRY.event_step("RunStarted", 22).unwrap();
+        assert!((step.canonical)(&run.to_string()).is_none());
+        assert!((step.transform)(run).is_none());
+    }
 }

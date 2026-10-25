@@ -111,6 +111,8 @@ pub(super) fn outcome(
                     | ToolCall::Glob { .. }
                     | ToolCall::Write { .. }
                     | ToolCall::Edit { .. }
+                    | ToolCall::Delete { .. }
+                    | ToolCall::Move { .. }
                     | ToolCall::MultiEdit { .. }
                     | ToolCall::Mkdir { .. }
             ) =>
