@@ -290,12 +290,13 @@ impl SessionView {
                 return Err(ReplayError::InvalidTransition);
             }
         }
+        let primary_id = run.primary().map(|agent| agent.id);
         let goal = current_goal_mut(self, *goal_id)?;
         if goal.status != GoalStatus::Running
             || goal.active_run != Some(*run_id)
             || !agent_active
             || goal.unobserved_provider_calls.contains(agent_run_id)
-            || goal.compaction_call_reserved.is_some()
+            || goal.compaction_call_reserved.is_some() && primary_id == Some(*agent_run_id)
             || call_budget_exhausted(goal)
         {
             return Err(ReplayError::InvalidTransition);

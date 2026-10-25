@@ -7755,6 +7755,59 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
+        let (mut view, goal, run, child) = research_session();
+        let primary = view.runs[0].agents[0].id;
+        let read = read_intent(run, primary, "src/lib.rs");
+        apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
+        apply(
+            &mut view,
+            Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: primary,
+                record: ProviderCallRecord {
+                    requested_tools: 1,
+                    ..record(
+                        AgentPhase::RootSynthesis,
+                        ProviderCallDisposition::ToolRequested,
+                        Some(0),
+                    )
+                },
+            },
+        )
+        .unwrap();
+        apply(&mut view, tool_started(run, primary, &read)).unwrap();
+        apply(&mut view, tool_finished(run, primary, &read, b"one")).unwrap();
+        apply(
+            &mut view,
+            Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            },
+        )
+        .unwrap();
+        let primary_call = reserve_child_call(goal, run, primary);
+        let child_call = reserve_child_call(goal, run, child);
+        assert!(rejected(&view, primary_call.clone()));
+        let calls = view.goals[0].provider_calls;
+        let mut exhausted = view.clone();
+        exhausted.goals[0].budget.max_provider_calls = Some(calls);
+        assert!(rejected(&exhausted, child_call.clone()));
+        apply(&mut view, child_call.clone()).expect("child continues during primary compaction");
+        assert_eq!(view.goals[0].provider_calls, calls + 1);
+        assert_eq!(view.goals[0].compaction_call_reserved, Some(run));
+        assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+        assert!(rejected(&view, child_call));
+        let compacted = covering_compaction(&view, goal, run, 1);
+        apply(&mut view, compacted).expect("primary compaction settles independently");
+        assert_eq!(view.goals[0].compaction_call_reserved, None);
+        assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+        apply(&mut view, primary_call).expect("primary resumes after its compaction");
+        assert_eq!(view.goals[0].unobserved_provider_calls, [child, primary]);
+    }
+
+    #[test]
     fn compaction_prefix_never_splits_a_step() {
         let (view, goal, run) = compacting_session();
         assert!(
