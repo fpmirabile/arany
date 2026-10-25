@@ -417,6 +417,23 @@ fn finish_setup_pty(pty: SetupPty) -> Output {
 
 #[cfg(debug_assertions)]
 fn finish_setup_pty_with_transcript(mut pty: SetupPty) -> (Output, Vec<u8>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pty
+        .child
+        .child()
+        .try_wait()
+        .expect("product status")
+        .is_none()
+    {
+        pump(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+        );
+        assert!(Instant::now() < deadline, "setup product exit deadline");
+        thread::yield_now();
+    }
     let result = wait_product(pty.child.take());
     crate::drain_pty(&mut pty.output, &mut pty.transcript);
     (result, pty.transcript)

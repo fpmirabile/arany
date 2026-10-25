@@ -490,17 +490,16 @@ fn manager_check_back_before_consent_leaves_no_check_facts_or_requests() {
     }
 }
 
-fn finish_check_pty(mut pty: SetupPty) {
-    let result = wait_product(pty.child.take());
-    crate::drain_pty(&mut pty.output, &mut pty.transcript);
-    assert_private_output(&pty.transcript);
+fn finish_check_pty(pty: SetupPty) {
+    let (result, transcript) = finish_setup_pty_with_transcript(pty);
+    assert_private_output(&transcript);
     assert_private_output(&result.stdout);
     assert_private_output(&result.stderr);
     assert!(
         result.status.success(),
         "manager lifecycle failed: {:?}; {}",
         result.status.code(),
-        tail(&pty.transcript)
+        tail(&transcript)
     );
 }
 

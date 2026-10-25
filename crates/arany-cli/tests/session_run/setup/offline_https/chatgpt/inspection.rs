@@ -193,8 +193,7 @@ fn inspection_case(presentation: Presentation, storage: &str, access: Access) {
     perform_inspection(&mut pty, presentation, access, inspected, storage);
     assert_eq!(session_snapshot(&state, id), before);
     pty.input.write_all(b"/exit\r").unwrap();
-    let result = wait_product(pty.child.take());
-    crate::drain_pty(&mut pty.output, &mut pty.transcript);
+    let (result, transcript) = crate::setup::finish_setup_pty_with_transcript(pty);
     assert!(result.status.success());
     assert!(
         account_root
@@ -224,7 +223,7 @@ fn inspection_case(presentation: Presentation, storage: &str, access: Access) {
         "inspection called the conversation Provider"
     );
     assert!(
-        !pty.transcript
+        !transcript
             .windows(ACCESS.len())
             .any(|bytes| bytes == ACCESS.as_bytes()),
         "token disclosed"
