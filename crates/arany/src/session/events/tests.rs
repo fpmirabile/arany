@@ -1372,6 +1372,10 @@ mod provider_call_tests {
                 ProviderCallDisposition::InvalidResponse,
             ),
             (
+                ProviderFailureReason::OutcomeDecode,
+                ProviderCallDisposition::InvalidResponse,
+            ),
+            (
                 ProviderFailureReason::ResponseContract,
                 ProviderCallDisposition::InvalidResponse,
             ),

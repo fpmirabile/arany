@@ -2,9 +2,9 @@
 
 ## Metadata
 
-- Status: `S1 implemented`; the ranked Read omission cause is fixed offline; owner live re-run remains pending
+- Status: `S1 and S2 implemented`; the ranked Read omission cause is fixed offline; owner live re-run remains pending for S3
 - Owner: `TBD`
-- Last updated: `2026-10-23`
+- Last updated: `2026-10-25`
 
 ## Outcome and scope
 
