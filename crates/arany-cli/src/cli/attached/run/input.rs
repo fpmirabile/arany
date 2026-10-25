@@ -317,6 +317,11 @@ impl RunProgress<'_> {
             Err(_) => return Err(InputFailure::Shutdown("terminal input failed".to_owned())),
         };
         ui.composer.observe_input(input);
+        if input == TerminalInput::PanelSelectionChanged {
+            return self
+                .draw(ui, None)
+                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".to_owned()));
+        }
         if ui.terminal.agent_chat_open()
             || self.approval_ui.pending.is_some()
             || ui.terminal.help_open()

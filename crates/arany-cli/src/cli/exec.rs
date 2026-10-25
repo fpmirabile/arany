@@ -802,8 +802,9 @@ async fn run_signalled(
 mod tests {
     use super::*;
     use arany::{
-        AgentPhase, Answer, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-        RunId, RunStop, SessionView, Tapped,
+        AgentPhase, Answer, Event, ProviderError, ProviderOutcome, ProviderRequest,
+        ProviderResponse, RunId, RunStop, SessionView, Tapped,
+        test_support::scenario::ScriptedProvider,
     };
     use std::{
         collections::VecDeque,
@@ -1437,59 +1438,48 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
-    async fn exec_with_exhaustion_at_finish(
-        mut exec: ExecArgs,
-        provider: Arc<dyn Provider>,
-        elapsed: std::time::Duration,
+    async fn run_with_budget_spent_after_answer(
+        exec: ExecArgs,
+        admission: Admission,
+        provider: ScriptedProvider,
+        active_time: std::time::Duration,
     ) -> CommandOutput {
-        let engine = arany::test_support::engine::open(
-            StateRoot::admit(exec.state_dir.as_ref().expect("state path")).expect("state"),
-            EngineConfig {
-                guard_executable: std::env::current_exe().ok(),
-                ..EngineConfig::default()
-            },
-        )
-        .expect("engine");
-        let session = engine
-            .create_session(exec.workspace.clone().expect("Workspace"), None)
-            .await
-            .expect("Session");
-        exec.session_id = Some(session.to_string());
-        let admission = exec.admit().expect("valid autonomous command");
-        let (entered, release) =
-            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(
-                    event,
-                    arany::Event::AgentFinished {
-                        disposition: arany::AgentDisposition::Finished,
-                        ..
-                    }
-                )
+        let requests = Arc::clone(&provider.requests);
+        let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
+        let provider = provider.with_before_call(1, move || {
+            let session = requests
+                .lock()
+                .expect("requests")
+                .last()
+                .expect("call")
+                .session_id;
+            let gate = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::MessageCommitted { .. })
             });
-        let running = run_on_engine(
-            exec,
-            admission,
-            AdmittedProviders::single(provider),
-            engine,
-            None,
-        );
-        tokio::pin!(running);
+            gate_tx.try_send(gate).expect("one answer gate");
+        });
+        let run = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
+        tokio::pin!(run);
+        let (entered, release) = tokio::select! {
+            gate = gate_rx.recv() => gate.expect("answer gate installed"),
+            result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
+        };
         tokio::select! {
-            result = &mut running => panic!("exec ended before terminal settlement: {:?}", result.err()),
-            entered = entered => entered.expect("accepted answer reached terminal settlement"),
+            entered = entered => entered.expect("accepted answer committed"),
+            result = &mut run => panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success)),
         }
         tokio::time::pause();
-        tokio::time::advance(elapsed).await;
+        tokio::time::advance(active_time).await;
         tokio::time::resume();
-        release.send(()).expect("release terminal acknowledgment");
-        running.await.expect("Finished Run with an exhausted Goal")
+        release.send(()).expect("release accepted answer");
+        run.await.expect("completed Run with an exhausted Goal")
     }
 
     fn exec_budget_fixture(
         state_dir: PathBuf,
         workspace: PathBuf,
         budget: GoalBudget,
-    ) -> (ExecArgs, Arc<dyn Provider>) {
+    ) -> (ExecArgs, ScriptedProvider) {
         use std::os::unix::fs::PermissionsExt;
         let root = StateRoot::admit(&state_dir).expect("state");
         let tools = state_dir.join("tools.json");
@@ -1534,7 +1524,7 @@ mod tests {
         exec.goal = Some("Inspect the notes".into());
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
-        (exec, Arc::new(provider))
+        (exec, provider)
     }
 
     async fn exec_budget_report(
@@ -1544,16 +1534,17 @@ mod tests {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
         let state_dir = temp.path().join("state");
         let (exec, provider) = exec_budget_fixture(state_dir.clone(), workspace, budget);
+        let admission = exec.admit().expect("valid autonomous command");
         let report = if let Some(active_ms) = budget.max_active_ms {
-            exec_with_exhaustion_at_finish(
+            run_with_budget_spent_after_answer(
                 exec,
+                admission,
                 provider,
                 std::time::Duration::from_millis(active_ms),
             )
             .await
         } else {
-            let admission = exec.admit().expect("valid autonomous command");
-            run_with_provider(exec, admission, provider, Telemetry::disabled())
+            run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
                 .await
                 .expect("completed Run with an exhausted Goal")
         };
