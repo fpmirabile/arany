@@ -140,7 +140,7 @@ impl Chat {
                 .any(|part| part == b"\x1b_Gi=31,s=1,v=1,a=q")
         {
             self.input
-                .write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[?0u\x1b[?1;4c")
+                .write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[?0u\x1b[?62;52;c")
                 .expect("answer Kitty graphics probe");
             self.kitty_reply_sent = true;
         }

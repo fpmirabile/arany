@@ -650,6 +650,13 @@ fn mouse_capture_enabled() -> bool {
     !std::env::var_os("ARANY_DISABLE_MOUSE").is_some_and(|value| value != "0")
 }
 
+#[cfg(unix)]
+fn graphics_probe_allowed(mode: TerminalMode) -> bool {
+    mode == TerminalMode::Fullscreen
+        && mouse_capture_enabled()
+        && std::env::var_os("TMUX").is_none()
+}
+
 fn hovered_image_at(chips: &[(usize, Rect)], column: u16, row: u16) -> Option<usize> {
     chips.iter().find_map(|(index, area)| {
         area.contains(ratatui::layout::Position::new(column, row))
@@ -1342,10 +1349,7 @@ impl AttachedTerminal {
             .then(|| ModeGuard::acquire(BRACKETED_PASTE))
             .transpose()?;
         #[cfg(unix)]
-        let graphics_probe = mode_label.is_none()
-            && mode == TerminalMode::Fullscreen
-            && mouse_capture_enabled()
-            && std::env::var_os("TMUX").is_none();
+        let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
         #[cfg(unix)]
         let keyboard = keyboard_mode(&input, graphics_probe)?;
         #[cfg(unix)]
@@ -1781,9 +1785,7 @@ impl AttachedTerminal {
         self.scrollback_dump = false;
         #[cfg(unix)]
         {
-            let graphics_probe = self.mode == TerminalMode::Fullscreen
-                && mouse_capture_enabled()
-                && std::env::var_os("TMUX").is_none();
+            let graphics_probe = graphics_probe_allowed(self.mode);
             self.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
             self.graphics_protocol = self
                 .reader()

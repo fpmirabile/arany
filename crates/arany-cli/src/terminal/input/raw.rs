@@ -646,8 +646,10 @@ fn reply_or_mouse(text: &str, end: u8) -> Option<ReaderEvent> {
         let reply = match end {
             b'u' if parts.next().is_none() => super::KeyboardReply::Flags,
             b'c' => {
-                let attributes = std::iter::once(first)
-                    .chain(parts)
+                let attributes = parameters
+                    .strip_suffix(';')
+                    .unwrap_or(parameters)
+                    .split(';')
                     .map(|part| {
                         (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
                             .then(|| part.parse::<u32>().ok())
@@ -842,6 +844,8 @@ mod tests {
         for (bytes, replies) in [
             (b"\x1b[?0u\x1b[?1;2c".as_slice(), 2),
             (b"\x1b[?31u", 1),
+            (b"\x1b[?62;c", 1),
+            (b"\x1b[?62;52;c", 1),
             (b"\x1b[?u\x1b[?1;2u\x1b[?4294967296u\x1b[?;c\x1b[?1;;c", 0),
         ] {
             let mut decoder = Decoder::default();
@@ -882,13 +886,15 @@ mod tests {
         let mut oversized = b"\x1b_G".to_vec();
         oversized.extend([b'A'; MAX_GRAPHICS_REPLY_BYTES + 1]);
         oversized.extend_from_slice(b"\x1b\\");
-        for (bytes, expected) in [
-            (b"\x1b_Gi=31;OK\x1b\\".as_slice(), true),
-            (b"\x1b_Gi=31;O\x1b\\", false),
-            (oversized.as_slice(), false),
-            (b"\x1b_Gi=32;OK\x1b\\", false),
-            (b"\x1b_Xi=31;OK\x1b\\", false),
-            (b"\x1b[?1;4c", false),
+        for (bytes, expected, attributes) in [
+            (b"\x1b_Gi=31;OK\x1b\\".as_slice(), true, None),
+            (b"\x1b_Gi=31;O\x1b\\", false, None),
+            (oversized.as_slice(), false, None),
+            (b"\x1b_Gi=32;OK\x1b\\", false, None),
+            (b"\x1b_Xi=31;OK\x1b\\", false, None),
+            (b"\x1b[?1;4c", false, Some([1, 4].as_slice())),
+            (b"\x1b[?62;c", false, Some([62].as_slice())),
+            (b"\x1b[?62;52;c", false, Some([62, 52].as_slice())),
         ] {
             let mut decoder = Decoder::default();
             let events: Vec<_> = bytes
@@ -901,11 +907,11 @@ mod tests {
                     .any(|event| matches!(event, ReaderEvent::GraphicsReply)),
                 expected
             );
-            if bytes == b"\x1b[?1;4c" {
+            if let Some(expected_attributes) = attributes {
                 assert!(matches!(
                     events.as_slice(),
                     [ReaderEvent::KeyboardReply(super::super::KeyboardReply::DeviceAttributes(attributes))]
-                    if attributes == &[1, 4]
+                    if attributes == expected_attributes
                 ));
             }
         }
