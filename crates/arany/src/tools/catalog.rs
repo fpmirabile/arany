@@ -4,7 +4,7 @@ use crate::validate::valid_name;
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Family {
+pub enum Family {
     File,
     Process,
     Skill,
@@ -299,6 +299,10 @@ static WORKER_BASE: OperationFacts = OperationFacts {
 };
 
 impl ToolCall {
+    pub const fn family(&self) -> Family {
+        self.facts().family
+    }
+
     pub const fn site(&self) -> Site {
         self.facts().site
     }

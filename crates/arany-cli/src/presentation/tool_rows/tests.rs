@@ -9,6 +9,82 @@ mod peer_row_tests {
     use arany::{ToolCall, ToolDisposition};
 
     #[test]
+    fn publication_summaries_follow_the_file_family() {
+        use arany::worker::{ChangesetSource, WorkerDataPurpose, WorkerDataRef};
+
+        let handover = ToolCall::ApplyChangeset {
+            source: ChangesetSource::WorkerHandover {
+                assignment_id: arany::AgentRunId::new(),
+                handover_sequence: 7,
+                data: WorkerDataRef {
+                    assignment_id: arany::AgentRunId::new(),
+                    purpose: WorkerDataPurpose::Handover,
+                    first_sequence: 1,
+                    seal_sequence: 2,
+                    chunks: 1,
+                    bytes: 1,
+                    sha256: [1; 32],
+                },
+            },
+        };
+        let rewind = ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind {
+                plan_digest: [3; 32],
+                bytes: 1,
+                sha256: [4; 32],
+            },
+        };
+
+        for (call, expected) in [
+            (rewind, "⏺ Rewind publication()\n  ⎿ applied"),
+            (handover, "⏺ Worker changeset publication()\n  ⎿ applied"),
+            (
+                command_receipt_call(),
+                "⏺ Publish(1 command file changes)\n  ⎿ applied",
+            ),
+        ] {
+            assert_eq!(tool_summary(&tool_fixture(call, "")), expected);
+        }
+    }
+
+    #[test]
+    fn command_receipt_approval_keeps_exact_file_details() {
+        assert_eq!(
+            tool_approval_lines(&tool_fixture(command_receipt_call(), "").intent),
+            [
+                "Proposed action",
+                "Publish 1 command file changes",
+                "Create src/new.txt",
+                "After: 1 B · sha256 ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb · executable false",
+                "+ a",
+                "",
+                "Allow once for this exact action",
+            ]
+        );
+    }
+
+    fn command_receipt_call() -> ToolCall {
+        ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest: [2; 32],
+                changeset: arany::CommandChangeset {
+                    files: vec![arany::FileChange {
+                        path: "src/new.txt".into(),
+                        before: None,
+                        after: Some(arany::FileVersion {
+                            sha256:
+                                "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+                                    .into(),
+                            content: "YQ==".into(),
+                            executable: false,
+                        }),
+                    }],
+                },
+            },
+        }
+    }
+
+    #[test]
     fn named_limit_rows_and_cache_problem_markers_have_the_same_linear_copy() {
         use arany::{CacheUpdate, LimitCause};
         let mut tool = tool_fixture(
