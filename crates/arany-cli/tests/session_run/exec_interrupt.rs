@@ -247,10 +247,6 @@ fn death_during_approval_leaves_no_started_effect_and_resume_reproposes() {
             .env_clear()
             .env("RUST_MIN_STACK", APPROVAL_DEATH_STACK_BYTES.to_string())
             .env(APPROVAL_DEATH_ROOT, temp.path())
-            .env(
-                "ARANY_TEST_ACCOUNT_ROOT",
-                arany::test_support::isolate_account_root(),
-            )
             .current_dir(&workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
