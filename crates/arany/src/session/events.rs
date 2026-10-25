@@ -1823,22 +1823,14 @@ pub(crate) fn pre_host_git_payload(kind: &str, payload: &str) -> Option<String> 
 }
 
 pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String> {
-    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
-        serialize(&parse::<T>(payload).ok()?).ok()
-    }
-    let text = match kind {
-        "ToolStarted" => again::<ToolStartedPayload>(payload),
-        "ToolFinished" => again::<ToolFinishedPayload>(payload),
-        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
-        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
-        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
-        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
-        _ => None,
-    }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, &["gh_pr_list"], None)).then_some(text)
+    before_typed_pr_read(kind, payload, "gh_pr_list")
 }
 
 pub(crate) fn pre_gh_pr_view_payload(kind: &str, payload: &str) -> Option<String> {
+    before_typed_pr_read(kind, payload, "gh_pr_view")
+}
+
+fn before_typed_pr_read(kind: &str, payload: &str, operation: &str) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()
     }
@@ -1851,7 +1843,7 @@ pub(crate) fn pre_gh_pr_view_payload(kind: &str, payload: &str) -> Option<String
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, &["gh_pr_view"], None)).then_some(text)
+    (!mentions(&serde_json::from_str(&text).ok()?, &[operation], None)).then_some(text)
 }
 
 pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {

@@ -1227,41 +1227,37 @@ mod tests {
 
     #[test]
     fn host_read_allow_edits_require_provider_disclosure_confirmation() {
-        let entries = [arany::permissions::TypedPrefixEntry {
-            prefix: TypedGitPrefix::PrList,
-            decision: Decision::Ask,
-            folder: None,
-        }];
-        assert!(requires_host_read_disclosure(
-            &TypedPrefixEdit::Insert {
-                prefix: TypedGitPrefix::PrList,
-                decision: Decision::Allow,
-                folder: false,
-            },
-            &[]
-        ));
-        assert!(requires_host_read_disclosure(
-            &TypedPrefixEdit::Replace {
-                index: 0,
-                decision: Decision::Allow,
-            },
-            &entries
-        ));
-        assert!(!requires_host_read_disclosure(
-            &TypedPrefixEdit::Replace {
-                index: 0,
-                decision: Decision::Deny,
-            },
-            &entries
-        ));
-        assert!(requires_host_read_disclosure(
-            &TypedPrefixEdit::Insert {
-                prefix: TypedGitPrefix::PrView,
-                decision: Decision::Allow,
-                folder: false,
-            },
-            &[]
-        ));
+        for prefix in [TypedGitPrefix::PrList, TypedGitPrefix::PrView] {
+            assert!(requires_host_read_disclosure(
+                &TypedPrefixEdit::Insert {
+                    prefix,
+                    decision: Decision::Allow,
+                    folder: false,
+                },
+                &[]
+            ));
+            for previous in [Decision::Ask, Decision::Deny] {
+                let entries = [arany::permissions::TypedPrefixEntry {
+                    prefix,
+                    decision: previous,
+                    folder: None,
+                }];
+                assert!(requires_host_read_disclosure(
+                    &TypedPrefixEdit::Replace {
+                        index: 0,
+                        decision: Decision::Allow,
+                    },
+                    &entries
+                ));
+                assert!(!requires_host_read_disclosure(
+                    &TypedPrefixEdit::Replace {
+                        index: 0,
+                        decision: Decision::Deny,
+                    },
+                    &entries
+                ));
+            }
+        }
         assert!(HOST_READ_DISCLOSURE.contains("private pull request data"));
         assert!(HOST_READ_DISCLOSURE.contains("current Provider"));
     }

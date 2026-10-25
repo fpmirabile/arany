@@ -2106,6 +2106,25 @@ struct ProcessDispatch {
     input: Option<Vec<u8>>,
 }
 
+async fn write_process_input(
+    mut stdin: impl tokio::io::AsyncWrite + Unpin,
+    input: &[u8],
+) -> Result<(), ToolError> {
+    use tokio::io::AsyncWriteExt;
+
+    let result = async {
+        stdin.write_all(input).await?;
+        stdin.shutdown().await
+    }
+    .await;
+    // The reaped exit status decides an early reader close.
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(_) => Err(ToolError::Operation),
+    }
+}
+
 async fn supervise_input(dispatch: ProcessDispatch) -> ToolObservation {
     let ProcessDispatch {
         deadline,
@@ -2130,13 +2149,7 @@ async fn supervise_input(dispatch: ProcessDispatch) -> ToolObservation {
         let stdin = input.as_ref().and_then(|_| child.stdin.take());
         let write_input = async {
             if let Some(input) = input {
-                let mut stdin = stdin.ok_or(ToolError::Operation)?;
-                tokio::io::AsyncWriteExt::write_all(&mut stdin, &input)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                tokio::io::AsyncWriteExt::shutdown(&mut stdin)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
+                write_process_input(stdin.ok_or(ToolError::Operation)?, &input).await?;
             }
             Ok::<_, ToolError>(())
         };
@@ -3877,7 +3890,7 @@ done
                 number: 17,
             },
         );
-        let (prepared, digest, _) = prepare(
+        let (prepared, digest, environment) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3886,15 +3899,35 @@ done
         )
         .await
         .unwrap();
-        let command = synthetic_peer(
+        let input = environment.unwrap().input;
+        let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
+        drop(reader);
+        write_process_input(writer, &input).await.unwrap();
+        let mut command = synthetic_peer(
             &prepared,
             Path::new("/bin/sh"),
             &["-c".into(), "exit 7".into()],
         );
-        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        command.stdin(Stdio::piped());
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(u64::from(intent.effective_timeout_ms()));
+        let observation = supervise_input(ProcessDispatch {
+            deadline,
+            command,
+            intent,
+            executable_sha256: digest,
+            cancellation: Cancellation::new(),
+            input: Some(input),
+        })
+        .await;
         assert_eq!(observation.disposition, ToolDisposition::Failed);
         assert_eq!(observation.output, PR_VIEW_FAILED);
         assert!(observation.valid());
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::Host(ref receipt))
+                if receipt.exit_code == Some(7) && receipt.descendants_confirmed_stopped
+        ));
         let mut wrong_operation = observation;
         wrong_operation.output = PR_LIST_FAILED.into();
         assert!(!wrong_operation.valid());

@@ -235,7 +235,7 @@ impl Repo {
     async fn run_pr_view(
         &self,
         human: bool,
-        cancel_on_query: bool,
+        query_listener: Option<&tokio::net::UnixListener>,
         mut reply: impl FnMut(&arany::ToolApproval) -> arany::ApprovalReply,
     ) -> (
         Result<arany::RunOutcome, EngineError>,
@@ -262,8 +262,6 @@ impl Repo {
         ]));
         let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
         let cancellation = arany::RunCancellation::new();
-        let marker = self._temp.path().join("gh-invocations");
-        let marker_start = std::fs::read(&marker).map_or(0, |bytes| bytes.len());
         let mut input = request(&self.workspace, "Inspect pull request 17");
         input.include_paths.clear();
         let controls = RunControls {
@@ -276,7 +274,9 @@ impl Repo {
         let outcome = {
             let running = run_with(&engine, &provider, input, controls);
             tokio::pin!(running);
-            let mut cancellation_sent = false;
+            let query_gate = async { pr_view_query_gate(query_listener.unwrap()).await };
+            tokio::pin!(query_gate);
+            let mut held_query = None;
             loop {
                 tokio::select! {
                     result = &mut running => break result,
@@ -285,18 +285,9 @@ impl Repo {
                         let answer = reply(&approval);
                         approval.decide(answer);
                     }
-                    _ = async {
-                        loop {
-                            if std::fs::read(&marker).is_ok_and(|bytes| {
-                                bytes.len() >= marker_start + 2 && bytes.ends_with(b"vg")
-                            }) {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                        }
-                    }, if cancel_on_query && !cancellation_sent => {
+                    stream = &mut query_gate, if query_listener.is_some() && held_query.is_none() => {
                         cancellation.cancel();
-                        cancellation_sent = true;
+                        held_query = Some(stream);
                     }
                 }
             }
@@ -394,10 +385,8 @@ int main(int argc, char **argv) {
     const char *config = getenv("GH_CONFIG_DIR");
     char auth_path[4096];
     char auth[4096];
-    char block_path[4096];
     char sync_path[4096];
     if (!config || snprintf(auth_path, sizeof(auth_path), "%s/hosts.yml", config) >= (int)sizeof(auth_path)) return 43;
-    if (snprintf(block_path, sizeof(block_path), "%s.block", marker_path) >= (int)sizeof(block_path)) return 43;
     if (snprintf(sync_path, sizeof(sync_path), "%s.sync", marker_path) >= (int)sizeof(sync_path)) return 43;
     FILE *file = fopen(auth_path, "r");
     if (!file) return 44;
@@ -434,11 +423,6 @@ int main(int argc, char **argv) {
         if (braces || parentheses) return 46;
         marker = 'g';
         if (access(sync_path, F_OK) == 0 && sync_peer(marker_path, marker)) return 47;
-        if (access(block_path, F_OK) == 0) {
-            file = fopen(marker_path, "a");
-            if (!file || fputc(marker, file) == EOF || fclose(file)) return 45;
-            sleep(30);
-        }
         puts("{\"data\":{\"repository\":{\"pullRequest\":{\"headRefOid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reviewDecision\":\"REVIEW_REQUIRED\",\"comments\":{\"pageInfo\":{\"hasPreviousPage\":false},\"nodes\":[{\"author\":{\"login\":\"reviewer\"},\"createdAt\":\"2026-10-25T12:00:00Z\",\"body\":\"Please update the test\"}]},\"reviews\":{\"pageInfo\":{\"hasPreviousPage\":false},\"nodes\":[{\"author\":{\"login\":\"reviewer\"},\"submittedAt\":\"2026-10-25T12:00:00Z\",\"state\":\"CHANGES_REQUESTED\",\"body\":\"Needs work\"}]},\"commits\":{\"nodes\":[{\"commit\":{\"statusCheckRollup\":{\"contexts\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"IN_PROGRESS\",\"conclusion\":null}]}}}}]}}}}}");
     } else return 42;
     file = fopen(marker_path, "a");
@@ -527,7 +511,7 @@ fn configure_pr_view(repo: &Repo) {
 
 async fn refuse_pr_view_without_human(repo: &Repo) {
     let (denied, asked, _, engine) = repo
-        .run_pr_view(false, false, |_| panic!("headless view cannot ask"))
+        .run_pr_view(false, None, |_| panic!("headless view cannot ask"))
         .await;
     assert_eq!(asked, 0);
     assert!(!repo._temp.path().join("gh-invocations").exists());
@@ -552,7 +536,7 @@ async fn refuse_pr_view_without_human(repo: &Repo) {
 async fn remember_pr_view(repo: &Repo) {
     repo.settings(json!({"permissions":{"defaultMode":"default"}}));
     let (first, asked, provider, engine) = repo
-        .run_pr_view(true, false, |approval| {
+        .run_pr_view(true, None, |approval| {
             assert_eq!(
                 approval.remember_prefix,
                 Some(arany::permissions::TypedGitPrefix::PrView)
@@ -617,7 +601,7 @@ async fn remember_pr_view(repo: &Repo) {
 
 async fn use_remembered_pr_view(repo: &Repo) {
     let (second, asked, _, engine) = repo
-        .run_pr_view(false, false, |_| panic!("typed view rule pre-approves"))
+        .run_pr_view(false, None, |_| panic!("typed view rule pre-approves"))
         .await;
     assert_eq!(asked, 0);
     let (_, reopened) = repo.reopen(engine, second.unwrap().session_id).await;
@@ -636,10 +620,16 @@ async fn use_remembered_pr_view(repo: &Repo) {
 }
 
 async fn cancel_and_replay_pr_view(repo: &Repo) {
-    std::fs::write(repo._temp.path().join("gh-invocations.block"), b"block").unwrap();
+    let listener = pr_view_sync_listener(repo);
     let (cancelled, asked, provider, engine) = repo
-        .run_pr_view(false, true, |_| panic!("typed view rule pre-approves"))
+        .run_pr_view(false, Some(&listener), |_| {
+            panic!("typed view rule pre-approves")
+        })
         .await;
+    drop(listener);
+    for suffix in ["sync", "sync.sock"] {
+        std::fs::remove_file(repo._temp.path().join(format!("gh-invocations.{suffix}"))).unwrap();
+    }
     assert_eq!(asked, 0);
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     let session = match cancelled {
@@ -657,7 +647,7 @@ async fn cancel_and_replay_pr_view(repo: &Repo) {
     };
     let marker = repo._temp.path().join("gh-invocations");
     let before_replay = std::fs::read(&marker).unwrap();
-    assert_eq!(before_replay, b"vgvgvg");
+    assert_eq!(before_replay, b"vgvgv");
     let (events, view) = repo.reopen(engine, session).await;
     let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
     assert_eq!(observation.disposition, ToolDisposition::Uncertain);
@@ -689,14 +679,38 @@ async fn cancel_and_replay_pr_view(repo: &Repo) {
         ToolDisposition::Uncertain
     );
     assert_eq!(std::fs::read(marker).unwrap(), before_replay);
-    std::fs::remove_file(repo._temp.path().join("gh-invocations.block")).unwrap();
+}
+
+fn pr_view_sync_listener(repo: &Repo) -> tokio::net::UnixListener {
+    std::fs::write(repo._temp.path().join("gh-invocations.sync"), b"sync").unwrap();
+    tokio::net::UnixListener::bind(repo._temp.path().join("gh-invocations.sync.sock")).unwrap()
+}
+
+async fn accept_pr_view_phase(
+    listener: &tokio::net::UnixListener,
+    expected: u8,
+) -> tokio::net::UnixStream {
+    use tokio::io::AsyncReadExt;
+
+    let mut stream = listener.accept().await.unwrap().0;
+    let mut phase = [0];
+    stream.read_exact(&mut phase).await.unwrap();
+    assert_eq!(phase, [expected]);
+    stream
+}
+
+async fn pr_view_query_gate(listener: &tokio::net::UnixListener) -> tokio::net::UnixStream {
+    use tokio::io::AsyncWriteExt;
+
+    let mut scalar = accept_pr_view_phase(listener, b'v').await;
+    scalar.write_all(b"r").await.unwrap();
+    drop(scalar);
+    accept_pr_view_phase(listener, b'g').await
 }
 
 async fn host_pr_view_shared_deadline(repo: &Repo) {
     let marker = repo._temp.path().join("gh-invocations");
-    let socket_path = repo._temp.path().join("gh-invocations.sync.sock");
-    std::fs::write(repo._temp.path().join("gh-invocations.sync"), b"sync").unwrap();
-    let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+    let listener = pr_view_sync_listener(repo);
     let marker_before = std::fs::read(&marker).unwrap();
     let (outcome, provider, engine) = drive_pr_view_shared_deadline(repo, &listener).await;
     let session = match outcome {
@@ -766,7 +780,7 @@ async fn drive_pr_view_clock(
     engine: &Engine,
     provider: &Arc<ScriptedProvider>,
 ) -> (Result<arany::RunOutcome, EngineError>, bool) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let cancellation = arany::RunCancellation::new();
     let mut input = request(
@@ -792,38 +806,55 @@ async fn drive_pr_view_clock(
         tokio::pin!(running);
         let mut scalar = tokio::select! {
             result = &mut running => panic!("view ended before scalar dispatch: {result:?}"),
-            accepted = listener.accept() => accepted.unwrap().0,
+            accepted = accept_pr_view_phase(listener, b'v') => accepted,
         };
-        let mut phase = [0];
-        scalar.read_exact(&mut phase).await.unwrap();
-        assert_eq!(phase, [b'v']);
         tokio::time::advance(Duration::from_secs(15)).await;
         scalar.write_all(b"r").await.unwrap();
         drop(scalar);
 
         let mut graph = tokio::select! {
             result = &mut running => panic!("view ended before supplemental dispatch: {result:?}"),
-            accepted = listener.accept() => accepted.unwrap().0,
+            accepted = accept_pr_view_phase(listener, b'g') => accepted,
         };
-        graph.read_exact(&mut phase).await.unwrap();
-        assert_eq!(phase, [b'g']);
         tokio::time::advance(Duration::from_secs(6)).await;
-        tokio::time::resume();
-        let (outcome, watchdog_expired) =
-            match tokio::time::timeout(Duration::from_secs(3), &mut running).await {
-                Ok(outcome) => (outcome, false),
-                Err(_) => {
-                    cancellation.cancel();
-                    (running.await, true)
-                }
-            };
-        let mut byte = [0];
-        assert_eq!(graph.read(&mut byte).await.unwrap(), 0);
-        (outcome, watchdog_expired)
+        finish_pr_view_deadline(&mut running, &mut graph, &cancellation).await
     };
     clock_keeper.abort_all();
     assert!(clock_keeper.join_next().await.is_some());
     (outcome, watchdog_expired)
+}
+
+async fn finish_pr_view_deadline(
+    running: &mut (impl std::future::Future<Output = Result<arany::RunOutcome, EngineError>> + Unpin),
+    graph: &mut tokio::net::UnixStream,
+    cancellation: &arany::RunCancellation,
+) -> (Result<arany::RunOutcome, EngineError>, bool) {
+    use tokio::io::AsyncReadExt;
+
+    const FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let mut byte = [0];
+    // The isolated parent bounds this wait while virtual time stays frozen.
+    let completed = tokio::select! {
+        outcome = &mut *running => Some(outcome),
+        ended = graph.read(&mut byte) => {
+            assert_eq!(ended.unwrap(), 0);
+            None
+        }
+    };
+    tokio::time::resume();
+    let result = match completed {
+        Some(outcome) => (outcome, false),
+        None => match tokio::time::timeout(FINISH_TIMEOUT, &mut *running).await {
+            Ok(outcome) => (outcome, false),
+            Err(_) => {
+                cancellation.cancel();
+                (running.await, true)
+            }
+        },
+    };
+    assert_eq!(graph.read(&mut byte).await.unwrap(), 0);
+    result
 }
 
 async fn refuse_without_human_or_settings(repo: &Repo) {
