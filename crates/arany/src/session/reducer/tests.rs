@@ -6314,11 +6314,30 @@ mod goal_replay_tests {
         }
     }
 
+    fn post_tool_hook(intent: &EffectIntent) -> crate::tools::permissions::HookInvocation {
+        crate::tools::permissions::HookInvocation {
+            active_ceiling_ms: None,
+            event: crate::tools::permissions::HookEvent::PostToolUse,
+            group: 0,
+            handler: 0,
+            subject_digest: intent.digest(),
+            intent: child_intent(
+                intent.run_id,
+                intent.agent_run_id,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 0".into()],
+                    cwd: String::new(),
+                },
+            ),
+            input_digest: [9; 32],
+        }
+    }
+
     #[test]
     fn no_tool_starts_while_a_post_tool_use_hook_is_open() {
         use crate::tools::permissions::{
-            Decision, HookEvent, HookInvocation, PermissionMode, PermissionSource,
-            PermissionVerdict,
+            Decision, PermissionMode, PermissionSource, PermissionVerdict,
         };
         let (mut view, goal, run, agent) = primary_tool_session(true);
         view.runs[0]
@@ -6366,28 +6385,122 @@ mod goal_replay_tests {
             Event::HookStarted {
                 run_id: run,
                 agent_run_id: agent,
-                hook: HookInvocation {
-                    active_ceiling_ms: None,
-                    event: HookEvent::PostToolUse,
-                    group: 0,
-                    handler: 0,
-                    subject_digest: first.digest(),
-                    intent: child_intent(
-                        run,
-                        agent,
-                        ToolCall::Command {
-                            program: "sh".into(),
-                            args: vec!["-c".into(), "exit 0".into()],
-                            cwd: String::new(),
-                        },
-                    ),
-                    input_digest: [9; 32],
-                },
+                hook: post_tool_hook(&first),
             },
         )
         .unwrap();
         assert!(rejected(&view, reserve_child_call(goal, run, agent)));
         assert!(rejected(&view, tool_started(run, agent, &second)));
+    }
+
+    #[test]
+    fn batch_reservations_wait_for_post_tool_hook_settlement() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        const FIRST_CEILING_MS: u64 = 1000;
+        const SECOND_CEILING_MS: u64 = 500;
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        let first = read_intent(run, agent, "src/lib.rs");
+        let second = read_intent(run, agent, "src/main.rs");
+        for intent in [&first, &second] {
+            apply(&mut view, tool_started(run, agent, intent)).unwrap();
+        }
+        let reservation =
+            |intent: &EffectIntent, active_ceiling_ms| Event::ToolActiveTimeReserved {
+                run_id: run,
+                agent_run_id: agent,
+                intent_digest: intent.digest(),
+                active_ceiling_ms,
+            };
+        apply(&mut view, reservation(&first, FIRST_CEILING_MS)).unwrap();
+        apply(
+            &mut view,
+            verdict_event(
+                &first,
+                Some(PermissionMode::Default),
+                Decision::Allow,
+                PermissionSource::Mode,
+                PermissionSource::Mode,
+                true,
+            ),
+        )
+        .unwrap();
+        apply(&mut view, tool_finished(run, agent, &first, b"Fact")).unwrap();
+        let hook = post_tool_hook(&first);
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: agent,
+                hook: hook.clone(),
+            },
+        )
+        .unwrap();
+        let before = view.clone();
+        assert!(apply(&mut view, reservation(&second, SECOND_CEILING_MS)).is_err());
+        assert_eq!(view, before, "an open hook's ceiling remains intact");
+        assert_post_hook_reservation_after_finish(
+            &view,
+            &hook,
+            reservation(&second, SECOND_CEILING_MS),
+            SECOND_CEILING_MS,
+        );
+    }
+
+    fn assert_post_hook_reservation_after_finish(
+        view: &SessionView,
+        hook: &crate::tools::permissions::HookInvocation,
+        reservation: Event,
+        expected: u64,
+    ) {
+        use crate::tools::permissions::{HookOutcome, HookResult};
+        let run = hook.intent.run_id;
+        let agent = hook.intent.agent_run_id;
+        for completed in [false, true] {
+            let mut settled = view.clone();
+            let mut observation = observation_for(hook.intent.clone(), b"");
+            if !completed {
+                observation.disposition = ToolDisposition::Uncertain;
+                observation.attestation = None;
+                observation.cache_update = CacheUpdate::NotAttempted;
+            }
+            let result = HookResult::for_event(hook.event, &observation);
+            apply(
+                &mut settled,
+                Event::HookFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    outcome: HookOutcome {
+                        boundary_active_ms: None,
+                        observation,
+                        result,
+                    },
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                apply(&mut settled, reservation.clone()).is_ok(),
+                completed,
+                "hook completed: {completed}"
+            );
+            assert_eq!(
+                settled.goals[0].active_ceiling_ms,
+                if completed {
+                    expected
+                } else {
+                    view.goals[0].active_ceiling_ms
+                }
+            );
+        }
     }
 
     struct Unguarded {

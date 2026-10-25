@@ -33,6 +33,7 @@ pub(super) fn apply(
                 .primary()
                 .is_none_or(|primary| primary.id != *agent_run_id)
                 || super::pending_tool_requests(run) != Some(0)
+                || !run.hooks_settled()
                 || run.tools.iter().any(ToolView::dispatch_in_progress)
             {
                 return Err(ReplayError::InvalidTransition);
