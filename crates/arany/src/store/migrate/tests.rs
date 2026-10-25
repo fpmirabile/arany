@@ -2360,6 +2360,13 @@ fn diagnostic_schema_upgrade_preserves_sessions_and_discards_unproven_evidence()
 
 #[test]
 fn anthropic_window_schema_upgrade_discards_old_evidence() {
+    let bounds = format!(
+        "BETWEEN {} AND {}",
+        crate::provider::MIN_CONTEXT_WINDOW_TOKENS,
+        crate::provider::MAX_CONTEXT_WINDOW_TOKENS,
+    );
+    assert!(SCHEMA_SQL.contains(&bounds));
+    assert!(include_str!("schema_v7.sql").contains(&bounds));
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
     let History { root, sessions } = forked_history(&path);

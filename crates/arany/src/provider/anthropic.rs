@@ -6,7 +6,6 @@ use super::{
 };
 use reqwest::Client;
 use serde_json::Value;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 pub(super) mod wire;
@@ -19,7 +18,7 @@ pub struct AnthropicProvider {
     effort: Effort,
     key: String,
     workspace_id: Option<String>,
-    evidence_state_dir: Option<PathBuf>,
+    evidence_root: Option<crate::store::StateRoot>,
 }
 
 impl AnthropicProvider {
@@ -104,14 +103,13 @@ impl AnthropicProvider {
         credentials: NativeApiCredentials,
         saved_api_account_id: Option<Uuid>,
     ) -> Result<Self, ProviderError> {
-        let evidence_state_dir = root.path().to_path_buf();
         let mut provider = Self::from_credentials_with_effort(
             model,
             selected_effort,
             credentials,
             saved_api_account_id,
         )?;
-        provider.evidence_state_dir = Some(evidence_state_dir);
+        provider.evidence_root = Some(root);
         Ok(provider)
     }
 
@@ -146,9 +144,8 @@ impl AnthropicProvider {
         credentials: NativeApiCredentials,
         saved_api_account_id: Option<Uuid>,
     ) -> Result<Self, ProviderError> {
-        let evidence_state_dir = root.path().to_path_buf();
         super::native_check::verify_credentials_for_run(
-            root,
+            root.try_clone().map_err(|_| ProviderError::Unavailable)?,
             "anthropic",
             &model,
             effort,
@@ -157,7 +154,7 @@ impl AnthropicProvider {
         )
         .await?;
         let mut provider = Self::with_resolved_effort(model, effort, credentials)?;
-        provider.evidence_state_dir = Some(evidence_state_dir);
+        provider.evidence_root = Some(root);
         provider.identity.provenance = Provenance::Native {
             saved_api_account_id,
         };
@@ -195,7 +192,7 @@ impl AnthropicProvider {
             effort,
             key: credentials.key,
             workspace_id: credentials.anthropic_workspace_id,
-            evidence_state_dir: None,
+            evidence_root: None,
         })
     }
 
@@ -386,13 +383,12 @@ impl Provider for AnthropicProvider {
     }
 
     async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        let root =
-            crate::store::StateRoot::open_existing(self.evidence_state_dir.as_deref()?).ok()?;
+        let root = self.evidence_root.as_ref()?;
         let credentials =
             NativeApiCredentials::new("anthropic", self.key.clone(), self.workspace_id.clone())
                 .ok()?;
         super::native_check::context_window_for_run(
-            &root,
+            root,
             "anthropic",
             &self.identity.model,
             self.effort,

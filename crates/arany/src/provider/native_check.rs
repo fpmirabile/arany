@@ -319,6 +319,7 @@ pub(crate) async fn context_window_for_run(
     credentials: &NativeApiCredentials,
     account_id: Option<Uuid>,
 ) -> Option<u32> {
+    root.readmit().ok()?;
     let fingerprint =
         fingerprint_credentials(profile, model, effort, credentials, account_id).ok()?;
     let store = Store::open_read_only(root.try_clone().ok()?).ok()?;
@@ -789,6 +790,57 @@ mod tests {
                 "another workspace must not reuse evidence"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn anthropic_window_rejects_replacement_state_root() {
+        let temp = tempfile::tempdir().expect("private root");
+        let credentials =
+            NativeApiCredentials::new("anthropic", "synthetic-native-key".into(), None).unwrap();
+        let fingerprint = fingerprint_credentials(
+            "anthropic",
+            "example-model",
+            Effort::High,
+            &credentials,
+            None,
+        )
+        .unwrap();
+        let checked_at_ms = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let mut providers = Vec::new();
+        for (name, window) in [("state", 100_000), ("replacement", 200_000)] {
+            let root = StateRoot::admit(&temp.path().join(name)).unwrap();
+            let store = Store::open(root.try_clone().unwrap()).unwrap();
+            store
+                .record_native_evidence(NativeEvidenceRecord {
+                    fingerprint,
+                    context_window_tokens: Some(window),
+                    checked_at_ms,
+                    expires_at_ms: checked_at_ms + 60_000,
+                })
+                .await
+                .unwrap();
+            store.close().await.unwrap();
+            let provider = AnthropicProvider::from_checked_credentials_with_effort(
+                root,
+                "example-model".into(),
+                Effort::High,
+                credentials.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(provider.context_window_tokens_for_run().await, Some(window));
+            providers.push(provider);
+        }
+        std::fs::rename(temp.path().join("state"), temp.path().join("original")).unwrap();
+        std::fs::rename(temp.path().join("replacement"), temp.path().join("state")).unwrap();
+        assert_eq!(providers[0].context_window_tokens_for_run().await, None);
     }
 
     #[derive(Clone, Copy)]
