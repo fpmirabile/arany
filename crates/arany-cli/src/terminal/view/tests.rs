@@ -821,6 +821,46 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
 }
 
 #[test]
+fn dense_setup_choices_keep_error_feedback_and_selection_visible() {
+    let choices = [
+        (1, "API accounts"),
+        (2, "Custom routes"),
+        (3, "Role routing"),
+        (4, "Roster profiles"),
+    ];
+    for (width, height) in [(16, 3), (40, 3), (16, 4), (40, 4), (16, 8), (40, 8)] {
+        for (selected, expected) in [(0, "> API accounts"), (3, "> Roster")] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_setup_choices_frame(
+                        frame,
+                        frame.area(),
+                        "Provider setup",
+                        "Manage access, custom routes, role routing and roster presets",
+                        &choices,
+                        selected,
+                        Some("Use Up/Down and Enter to select"),
+                        Palette { color: false },
+                    );
+                })
+                .unwrap();
+            let visible = (0..height)
+                .map(|row| buffer_row(terminal.backend().buffer(), row))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(visible.contains(expected), "{width}x{height}: {visible}");
+            assert_eq!(
+                visible.contains("Use Up/Down"),
+                height > 3,
+                "{width}x{height}: {visible}"
+            );
+            assert!(visible.contains("Enter") && visible.contains("Esc"));
+        }
+    }
+}
+
+#[test]
 fn dense_settings_choices_keep_the_change_keys_visible() {
     let choices = [
         (1, "Slash menu"),

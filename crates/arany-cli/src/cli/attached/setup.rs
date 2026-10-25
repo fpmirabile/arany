@@ -1,3 +1,4 @@
+mod roster;
 mod routing;
 
 use crate::accounts::chatgpt::{
@@ -159,6 +160,45 @@ impl SetupJournal {
         )
         .await
         .map_err(|_| SetupError::Presentation("could not journal Provider setup edit".into()))
+    }
+
+    async fn finish_record(
+        &self,
+        operation: uuid::Uuid,
+        bytes: Option<&[u8]>,
+        result: Result<(), StoreError>,
+        label: &str,
+    ) -> Result<(), SetupError> {
+        match result {
+            Ok(()) => {
+                self.finish(
+                    operation,
+                    Some(Sha256::digest(bytes.unwrap_or_default()).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await
+            }
+            Err(error) => {
+                let uncertain = matches!(error, StoreError::ReplaceUnconfirmed);
+                self.finish(
+                    operation,
+                    None,
+                    if uncertain {
+                        ProviderSetupDisposition::Uncertain
+                    } else {
+                        ProviderSetupDisposition::Failed
+                    },
+                )
+                .await?;
+                if uncertain {
+                    Err(SetupError::Uncertain(format!(
+                        "{label} publication is unknown; inspect saved state and start a new Session; no retry was attempted"
+                    )))
+                } else {
+                    Err(error.to_string().into())
+                }
+            }
+        }
     }
 
     async fn finish(
@@ -547,11 +587,12 @@ pub(super) async fn resolve(
         terminal,
         1,
         "Provider setup",
-        "Manage access, custom routes and role routing",
+        "Manage access, custom routes, role routing and roster presets",
         &[
             (b'1', "API accounts"),
             (b'2', "Custom routes"),
             (b'3', "Role routing"),
+            (b'4', "Roster profiles"),
         ],
     )
     .await?
@@ -563,6 +604,10 @@ pub(super) async fn resolve(
         b'2' => custom_routes_setup(terminal, state_dir, journal).await,
         b'3' => {
             routing::manage(terminal, state_dir, journal, current).await?;
+            Ok(None)
+        }
+        b'4' => {
+            roster::manage(terminal, state_dir, journal, current).await?;
             Ok(None)
         }
         _ => Err("invalid Provider setup choice".into()),
