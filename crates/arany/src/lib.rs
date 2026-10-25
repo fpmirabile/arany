@@ -122,7 +122,7 @@ pub fn valid_tool_name(value: &str) -> bool {
     validate::valid_name(value)
 }
 
-pub use tools::catalog::Site;
+pub use tools::catalog::{Family, Site};
 
 // Validates each Event like replay but skips its whole-history compaction checks; for presentation views only.
 pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(), ReplayError> {
