@@ -1673,16 +1673,11 @@ fn draw_composer(
         compact_image_chip |= UnicodeWidthStr::width(all_chips.as_str())
             > usize::from(composer_area.width).saturating_sub(12);
         if compact_image_chip {
-            let index = composer.selected_image().unwrap_or(0);
-            let chip = format!(
-                " {}[Image #{}]",
-                if composer.selected_image().is_some() {
-                    ">"
-                } else {
-                    ""
-                },
-                index + 1
-            );
+            let chip = match (composer.selected_image(), composer.images().len()) {
+                (Some(index), _) => format!(" >[Image #{}]", index + 1),
+                (None, 1) => " [Image #1]".to_owned(),
+                (None, count) => format!(" [{count} images]"),
+            };
             position = if UnicodeWidthStr::width(chip.as_str())
                 + UnicodeWidthStr::width(position.as_str())
                 <= usize::from(composer_area.width)

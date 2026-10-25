@@ -2333,6 +2333,25 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                     .map(|y| buffer_row(terminal.backend().buffer(), y))
                     .collect::<Vec<_>>();
                 assert!(rows[3].contains(">[Image #3]"), "{width}: {rows:?}");
+                assert_eq!(
+                    composer.apply(TerminalInput::Character('!')),
+                    ComposerEdit::Changed
+                );
+                terminal
+                    .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                    .unwrap();
+                let heading = buffer_row(terminal.backend().buffer(), 3);
+                assert!(!heading.contains('>'), "{width}: {heading}");
+                if width < 80 {
+                    assert!(heading.contains("[4 images]"), "{width}: {heading}");
+                } else {
+                    for index in 1..=composer.images().len() {
+                        assert!(
+                            heading.contains(&format!("[Image #{index}]")),
+                            "{width}: {heading}"
+                        );
+                    }
+                }
                 if !color {
                     assert!(
                         terminal
