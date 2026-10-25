@@ -318,6 +318,7 @@ int main(int argc, char **argv) {
     .replace("__MARKER__", &marker);
     std::fs::write(&source, source_text).unwrap();
     let output = std::process::Command::new("cc")
+        .env("PATH", "/usr/bin:/bin")
         .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
         .arg(&source)
         .arg("-o")
