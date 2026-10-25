@@ -25,6 +25,7 @@ pub struct CustomProfileCheck {
     profile_name: String,
     expires_at_ms: i64,
     receipt: CheckReceipt,
+    view: crate::CheckView,
 }
 
 impl CustomProfileCheck {
@@ -38,6 +39,10 @@ impl CustomProfileCheck {
     pub fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
     }
+
+    pub fn view(&self) -> &crate::CheckView {
+        &self.view
+    }
 }
 
 pub async fn check_custom_profile(
@@ -50,9 +55,17 @@ pub async fn check_custom_profile(
 pub async fn check_custom_profile_with_cancellation(
     root: StateRoot,
     name: &str,
-    mut cancellation: crate::RunCancellation,
+    cancellation: crate::RunCancellation,
 ) -> Result<CustomProfileCheck, CustomProfileError> {
     let profile = CustomProfile::load_named(&root, name)?;
+    check_custom_profile_value_with_cancellation(root, profile, cancellation).await
+}
+
+pub async fn check_custom_profile_value_with_cancellation(
+    root: StateRoot,
+    profile: CustomProfile,
+    mut cancellation: crate::RunCancellation,
+) -> Result<CustomProfileCheck, CustomProfileError> {
     let check_root = root
         .try_clone()
         .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
@@ -61,34 +74,70 @@ pub async fn check_custom_profile_with_cancellation(
         .map_err(|error| CustomProfileError::Journal(Box::new(error)))?;
     let deadline =
         (tokio::time::Instant::now() + PROBE_TOTAL_DEADLINE).min(journal.request_deadline());
-    let mut cancelled = false;
-    let result = tokio::select! {
+    let (result, cancelled) =
+        run_check(&root, &profile, &mut journal, &mut cancellation, deadline).await;
+    finish_check(journal, result, cancelled).await
+}
+
+async fn run_check(
+    root: &StateRoot,
+    profile: &CustomProfile,
+    journal: &mut CheckJournal,
+    cancellation: &mut crate::RunCancellation,
+    deadline: tokio::time::Instant,
+) -> (Result<ProviderEvidenceRecord, CustomProfileError>, bool) {
+    let name = profile.name().to_owned();
+    if !CustomProfile::load_named(root, &name).is_ok_and(|current| current == *profile) {
+        return (Err(CustomProfileError::Changed), false);
+    }
+    tokio::select! {
         biased;
-        () = cancellation.cancelled() => { cancelled = true; Err(CustomProfileError::ConformanceFailed) },
-        result = tokio::time::timeout_at(deadline, async {
-        let destination = profile.resolve_destination().await?;
-        let key = std::env::var(profile.credential_env())
-            .map_err(|_| CustomProfileError::CredentialUnavailable)?;
-        let record = probe(&profile, &destination, key, &mut journal).await?;
-        let current = CustomProfile::load_named(&root, name)?;
-        if fingerprint(&current) != record.digest
-            || current.resolve_destination().await?.addresses() != record.addresses
-        {
-            return Err(CustomProfileError::EvidenceUnavailable);
+        () = cancellation.cancelled() => (Err(CustomProfileError::ConformanceFailed), true),
+        result = tokio::time::timeout_at(deadline, check_destination_and_publish(root, profile, &name, journal)) => {
+            (result.unwrap_or(Err(CustomProfileError::ConformanceFailed)), false)
         }
-        let digest = crate::store::check::provider_digest(&record)
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        journal
-            .evidence_started(digest, record.digest)
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        journal
-            .publish_provider(record.clone())
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        Ok::<_, CustomProfileError>(record)
-    }) => result.map_err(|_| CustomProfileError::ConformanceFailed).and_then(|result| result),
-    };
+    }
+}
+
+async fn check_destination_and_publish(
+    root: &StateRoot,
+    profile: &CustomProfile,
+    name: &str,
+    journal: &mut CheckJournal,
+) -> Result<ProviderEvidenceRecord, CustomProfileError> {
+    let destination = profile.resolve_destination().await?;
+    let key = std::env::var_os(profile.credential_env())
+        .ok_or(CustomProfileError::CredentialNotSet)?
+        .into_string()
+        .map_err(|_| CustomProfileError::CredentialUnavailable)?;
+    if key.is_empty() {
+        return Err(CustomProfileError::CredentialUnavailable);
+    }
+    let record = probe(profile, &destination, key, journal).await?;
+    let current = CustomProfile::load_named(root, name)?;
+    if fingerprint(&current) != record.digest
+        || current.resolve_destination().await?.addresses() != record.addresses
+    {
+        return Err(CustomProfileError::EvidenceUnavailable);
+    }
+    let digest = crate::store::check::provider_digest(&record)
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    journal
+        .evidence_started(digest, record.digest)
+        .await
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    journal
+        .publish_provider(record.clone())
+        .await
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    Ok(record)
+}
+
+async fn finish_check(
+    mut journal: CheckJournal,
+    result: Result<ProviderEvidenceRecord, CustomProfileError>,
+    cancelled: bool,
+) -> Result<CustomProfileCheck, CustomProfileError> {
     if result.is_err() {
         let _ = journal
             .finish(if cancelled {
@@ -99,12 +148,14 @@ pub async fn check_custom_profile_with_cancellation(
             .await;
     }
     let receipt = journal.receipt();
+    let view = journal.view().clone();
     let closed = journal.close().await;
     match (result, closed) {
         (Ok(record), Ok(_)) => Ok(CustomProfileCheck {
             profile_name: record.name,
             expires_at_ms: record.expires_at_ms,
             receipt,
+            view,
         }),
         (Err(source), _) => Err(CustomProfileError::Check {
             source: Box::new(source),

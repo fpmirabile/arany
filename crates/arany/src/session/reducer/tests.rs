@@ -1,5 +1,7 @@
 use super::*;
-use crate::session::WorkspaceIdentity;
+use crate::session::{
+    ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind, WorkspaceIdentity,
+};
 
 mod goal_recovery_tests {
     use super::*;
@@ -134,6 +136,8 @@ mod goal_recovery_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 
@@ -157,6 +161,44 @@ mod goal_recovery_tests {
         // Resume keeps refusing a Tool that stopped the Run, such as a cancelled one.
         let cancelled = pending_plan_view(Some(ToolDisposition::Cancelled));
         assert!(!cancelled.goals[0].can_resume(&cancelled));
+    }
+
+    #[test]
+    fn setup_recovery_preserves_unknown_tool_outcomes() {
+        for disposition in [None, Some(ToolDisposition::Uncertain)] {
+            let mut view = pending_plan_view(disposition);
+            view.runs[0].status = RunStatus::Active;
+            view.goals[0].status = GoalStatus::Running;
+            view.goals[0].active_run = Some(view.runs[0].id);
+            let operation_id = uuid::Uuid::now_v7();
+            view.apply_committed(&EventEnvelope {
+                sequence: view.last_sequence + 1,
+                session_id: view.id,
+                run_id: None,
+                agent_run_id: None,
+                event: Event::ProviderSetupEditStarted {
+                    operation_id,
+                    target: ProviderSetupTarget {
+                        kind: ProviderSetupTargetKind::CustomProfile,
+                        identity: "example-route".into(),
+                    },
+                    expected_digest: None,
+                },
+                created_at_ms: 1,
+            })
+            .unwrap();
+            assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+            assert_eq!(view.goals[0].status, GoalStatus::Interrupted);
+            assert!(!view.goals[0].can_resume(&view));
+            assert_eq!(
+                view.runs[0].tools[0]
+                    .observation
+                    .as_ref()
+                    .map(|value| value.disposition),
+                disposition
+            );
+        }
     }
 
     #[test]
@@ -481,6 +523,114 @@ mod goal_replay_tests {
                 active_ms: 0,
             },
         ]
+    }
+
+    async fn seed_setup_crash_prefix(
+        root: &crate::StateRoot,
+        workspace: &std::path::Path,
+        prefix: usize,
+    ) -> SessionId {
+        let identity =
+            crate::session::input::WorkspaceInputs::admit_identity(workspace, root).unwrap();
+        let session = SessionId::new();
+        let goal = GoalId::new();
+        let mut config = config(CollaborationPolicy::Single, false);
+        config.workspace_device = identity.device;
+        config.workspace_inode = identity.inode;
+        let mut facts = vec![goal_started(goal, GoalBudget::default())];
+        facts.extend(
+            start_run(goal, RunId::new(), AgentRunId::new(), config)
+                .into_iter()
+                .take(prefix),
+        );
+        let mut events = session_with(session, facts);
+        for envelope in &mut events {
+            match &mut envelope.event {
+                Event::SessionStarted {
+                    workspace_identity, ..
+                }
+                | Event::GoalStarted {
+                    workspace_identity, ..
+                } => *workspace_identity = identity,
+                _ => {}
+            }
+        }
+        let store = crate::Store::open(root.try_clone().unwrap()).unwrap();
+        for envelope in &events {
+            store.append(session, envelope.event.clone()).await.unwrap();
+        }
+        store.close().await.unwrap();
+        session
+    }
+
+    #[tokio::test]
+    async fn setup_edit_recovers_crash_prefixes_under_the_session_lock() {
+        for prefix in 0..=4 {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let root = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+            let session = seed_setup_crash_prefix(&root, &workspace, prefix).await;
+            let target = ProviderSetupTarget {
+                kind: ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            };
+            let mut lock = root.lock_session(session).unwrap();
+            lock.keep();
+            assert!(matches!(
+                crate::start_provider_setup_edit(
+                    root.try_clone().unwrap(),
+                    workspace.clone(),
+                    session,
+                    target.clone(),
+                    None
+                )
+                .await,
+                Err(crate::EngineError::SessionBusy)
+            ));
+            drop(lock);
+            let operation_id = crate::start_provider_setup_edit(
+                root.try_clone().unwrap(),
+                workspace,
+                session,
+                target,
+                None,
+            )
+            .await
+            .unwrap();
+            let store = crate::Store::open(root).unwrap();
+            let view = store.load_view(session).await.unwrap().unwrap();
+            assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+            assert_eq!(view.goals[0].status, GoalStatus::Interrupted);
+            assert_eq!(view.goals[0].active_run, None);
+            assert!(
+                view.runs
+                    .iter()
+                    .all(|run| run.status == RunStatus::Interrupted)
+            );
+            assert_eq!(view.defaults, SessionDefaults::default());
+            store
+                .append(
+                    session,
+                    Event::ProviderSetupEditFinished {
+                        operation_id,
+                        resulting_digest: Some([1; 32]),
+                        disposition: ProviderSetupDisposition::Applied,
+                    },
+                )
+                .await
+                .unwrap();
+            let events = store.load_session(session).await.unwrap();
+            let open = SessionView::replay_open(session, &events).unwrap().unwrap();
+            assert_eq!(open.goals[0].status, GoalStatus::Interrupted);
+            assert!(
+                open.runs
+                    .iter()
+                    .all(|run| run.status == RunStatus::Interrupted)
+            );
+            assert_eq!(open.pending_provider_setup_edit, None);
+            store.close().await.unwrap();
+        }
     }
 
     #[test]
@@ -3425,6 +3575,74 @@ mod goal_replay_tests {
         assert!(SessionView::replay_open(session_id, &journal(session_id, resumed)).is_err());
     }
 
+    fn assert_setup_recovery_with_open_lifecycle_hook(
+        session_id: SessionId,
+        goal_id: GoalId,
+        prefix: &[Event],
+    ) {
+        for disposition in [
+            ProviderSetupDisposition::Applied,
+            ProviderSetupDisposition::Failed,
+            ProviderSetupDisposition::Cancelled,
+            ProviderSetupDisposition::Uncertain,
+        ] {
+            let operation_id = uuid::Uuid::now_v7();
+            let mut events = prefix.to_vec();
+            events.push(Event::ProviderSetupEditStarted {
+                operation_id,
+                target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::CustomProfile,
+                    identity: "example-route".into(),
+                },
+                expected_digest: None,
+            });
+            let pending =
+                SessionView::replay_open(session_id, &journal(session_id, events.clone()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(pending.pending_provider_setup_edit, Some(operation_id));
+            events.push(Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: (disposition == ProviderSetupDisposition::Applied)
+                    .then_some([1; 32]),
+                disposition,
+            });
+            let journal = journal(session_id, events);
+            let mut view = SessionView::replay_open(session_id, &journal)
+                .expect("setup outcome after an unfinished lifecycle hook")
+                .unwrap();
+            assert_eq!(view.pending_provider_setup_edit, None);
+            assert_eq!(
+                view.provider_setup_uncertain,
+                disposition == ProviderSetupDisposition::Uncertain
+            );
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+            assert!(view.runs[0].lifecycle_hooks[0].outcome.is_none());
+            assert_eq!(view.goal(goal_id).unwrap().status, GoalStatus::Interrupted);
+            assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+            let recovered = SessionView::replay(session_id, &journal).unwrap().unwrap();
+            assert_eq!(recovered.pending_provider_setup_edit, None);
+            assert_eq!(
+                recovered.provider_setup_uncertain,
+                view.provider_setup_uncertain
+            );
+            let renamed = view.apply_committed(&EventEnvelope {
+                sequence: view.last_sequence + 1,
+                session_id,
+                run_id: None,
+                agent_run_id: None,
+                event: Event::SessionRenamed {
+                    title: "Renamed".into(),
+                },
+                created_at_ms: 1,
+            });
+            assert_eq!(
+                renamed.is_ok(),
+                disposition != ProviderSetupDisposition::Uncertain
+            );
+        }
+    }
+
     #[test]
     fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
         use crate::tools::permissions::{HookEvent, HookInvocation, stop_subject};
@@ -3487,6 +3705,7 @@ mod goal_replay_tests {
         assert_eq!(view.runs[0].status, RunStatus::Interrupted);
         assert!(!view.runs[0].hooks_settled());
         assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+        assert_setup_recovery_with_open_lifecycle_hook(session_id, goal_id, &events);
 
         let next_goal = GoalId::new();
         events.push(goal_started(next_goal, GoalBudget::default()));
@@ -3705,6 +3924,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 
@@ -4961,6 +5182,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         for path in ["unrelated", "src/main.rs"] {
             let mut after_rewind = view.clone();
@@ -5159,6 +5382,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         view.apply_committed(&EventEnvelope {
             sequence: 3,
@@ -9355,4 +9580,80 @@ mod goal_replay_tests {
             assert_eq!(last.status, CheckpointStatus::Captured);
         }
     }
+}
+
+#[test]
+fn setup_edit_replay_requires_matching_finish_and_blocks_uncertainty() {
+    let session_id = SessionId::new();
+    let operation_id = uuid::Uuid::now_v7();
+    let envelope = |sequence, event| EventEnvelope {
+        sequence,
+        session_id,
+        run_id: None,
+        agent_run_id: None,
+        event,
+        created_at_ms: 1,
+    };
+    let started = envelope(
+        1,
+        Event::SessionStarted {
+            title: "Setup".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+        },
+    );
+    let edit_started = envelope(
+        2,
+        Event::ProviderSetupEditStarted {
+            operation_id,
+            target: ProviderSetupTarget {
+                kind: ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            },
+            expected_digest: None,
+        },
+    );
+    let mut view = SessionView::replay_open(session_id, &[started.clone(), edit_started.clone()])
+        .expect("valid open setup edit")
+        .expect("Session view");
+    assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+    assert!(
+        view.apply_committed(&envelope(
+            3,
+            Event::ProviderSetupEditFinished {
+                operation_id: uuid::Uuid::now_v7(),
+                resulting_digest: Some([1; 32]),
+                disposition: ProviderSetupDisposition::Applied,
+            },
+        ))
+        .is_err()
+    );
+    assert!(
+        view.apply_committed(&envelope(
+            3,
+            Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: None,
+                disposition: ProviderSetupDisposition::Uncertain,
+            },
+        ))
+        .is_ok()
+    );
+    assert!(view.provider_setup_uncertain);
+    assert!(
+        view.apply_committed(&envelope(
+            4,
+            Event::SessionDefaultChanged {
+                defaults: SessionDefaults::default(),
+            },
+        ))
+        .is_err()
+    );
+
+    let recovered = SessionView::replay(session_id, &[started, edit_started])
+        .expect("incomplete edit remains replayable")
+        .expect("recovered Session");
+    assert_eq!(recovered.pending_provider_setup_edit, Some(operation_id));
 }

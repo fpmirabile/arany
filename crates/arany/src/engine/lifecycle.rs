@@ -91,6 +91,28 @@ pub async fn set_session_defaults(
     .await
 }
 
+pub async fn start_provider_setup_edit(
+    state: StateRoot,
+    workspace: PathBuf,
+    session_id: SessionId,
+    target: crate::session::ProviderSetupTarget,
+    expected_digest: Option<[u8; 32]>,
+) -> Result<uuid::Uuid, EngineError> {
+    let operation_id = uuid::Uuid::now_v7();
+    append_idle_event(
+        state,
+        workspace,
+        session_id,
+        Event::ProviderSetupEditStarted {
+            operation_id,
+            target,
+            expected_digest,
+        },
+    )
+    .await?;
+    Ok(operation_id)
+}
+
 async fn append_idle_event(
     state: StateRoot,
     workspace: PathBuf,
@@ -104,6 +126,9 @@ async fn append_idle_event(
             .load_view(session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         session_lock.keep();
         if view
             .runs
@@ -137,6 +162,9 @@ pub async fn resume_session(
             .load_view(session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         session_lock.keep();
         let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
         ensure_session_workspace(&view, identity)?;
@@ -258,6 +286,9 @@ pub(super) async fn fork_with_store(
         .load_view(source_session_id)
         .await?
         .ok_or(EngineError::MissingSession)?;
+    if source.provider_setup_blocks_continuation() {
+        return Err(EngineError::ProviderSetupBlocked);
+    }
     source_lock.keep();
     let identity = WorkspaceInputs::admit_identity(workspace, state)?;
     ensure_session_workspace(&source, identity)?;

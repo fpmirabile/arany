@@ -121,7 +121,7 @@ impl Registration {
                         state
                             .record(RecordKind::ChatgptRegistration)
                             .replace(&record.encode()?)
-                            .map_err(|_| AuthorizationError::Unavailable)?;
+                            .map_err(super::publication_error)?;
                     }
                     return Ok(Self(record));
                 }
@@ -140,7 +140,7 @@ impl Registration {
                 state
                     .record(RecordKind::ChatgptRegistration)
                     .replace(&record.encode()?)
-                    .map_err(|_| AuthorizationError::Unavailable)?;
+                    .map_err(super::publication_error)?;
                 Ok(Self(record))
             })
             .map_err(|_| AuthorizationError::Unavailable)?
@@ -196,7 +196,7 @@ pub(super) fn complete_issued_client_at(
     state
         .record(RecordKind::ChatgptRegistration)
         .replace(&record.encode()?)
-        .map_err(|_| AuthorizationError::Unavailable)
+        .map_err(super::publication_error)
 }
 
 pub(super) fn retain_issued_client(
@@ -233,7 +233,7 @@ fn retain_at(
             state
                 .record(RecordKind::ChatgptRegistration)
                 .replace(&record.encode()?)
-                .map_err(|_| AuthorizationError::Unavailable)
+                .map_err(super::publication_error)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
 }
@@ -267,6 +267,25 @@ mod tests {
             attempt.redirect_uri, attempt.state
         );
         attempt.accept_callback(&callback).expect("callback")
+    }
+
+    #[test]
+    fn registration_directory_sync_failure_is_uncertain() {
+        let (_temp, workspace, state) = workspace_and_state();
+        arany::FaultPlan::fail_record_sync(state.path().to_owned(), "chatgpt-registration.json");
+        assert!(matches!(
+            Registration::at(&state, &workspace),
+            Err(AuthorizationError::CredentialStore(
+                crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
+            ))
+        ));
+        assert!(
+            state
+                .record(RecordKind::ChatgptRegistration)
+                .read()
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

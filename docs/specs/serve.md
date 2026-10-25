@@ -54,6 +54,12 @@ journal format. JSON is data; clients must render untrusted content inertly.
 | `-32000` | Engine admission failure | EngineError variant in camelCase; the closed vocabulary is exported as `$defs.Reason` |
 | `-32001` | Provider selection or routing failure | `providerUnavailable`, `providerRejected`, `invalidSelection` |
 
+A pending or Uncertain [Provider setup edit](./execution.md#admission-persistence-and-recovery)
+refuses `turn/start`, `goal/resume` and `thread/resume` with `-32000` and
+`data.reason:"providerSetupBlocked"`, including for an already loaded thread.
+The refusal appends no Events and makes no Provider calls. Inspect the saved
+setup state and start a new Session before submitting more work.
+
 Engine errors use their compiled Display message. A failed accepted turn is
 represented by `turn/completed` with status `failed` and compiled recovery
 guidance in `error.message`, never a JSON-RPC error. Cancellation is
@@ -347,6 +353,7 @@ pre-beta; stored formats follow the [journal migration contract](./execution.md#
 | CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
 | Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs) |
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Provider setup blocks continuation | Pending and Uncertain setup edits refuse ordinary/autonomous turns, Goal resume and thread reload with `providerSetupBlocked`; Events remain unchanged and inference/compaction Provider calls stay at zero | [`setup_edits_block_loaded_thread_prompts_without_events_or_provider_calls`](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; late accept to a live primary request dispatches once; decline denies, invalid result/EOF/unsent delivery are unavailable, cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Session lifecycle | Close frees a slot after 64 loaded threads, retains durable history and cancels an active submission before releasing it; list pages include only admitted Workspace metadata, enforce page/line/cursor bounds, reject foreign and invalid cursors and never execute | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |

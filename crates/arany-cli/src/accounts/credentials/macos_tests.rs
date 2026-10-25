@@ -27,7 +27,7 @@ pub(super) async fn roundtrip() {
         )
         .unwrap();
         let id = account.id;
-        save_at(DEFAULT_ACCOUNT, &account_root, &workspace, account)
+        save_at(DEFAULT_ACCOUNT, &account_root, &workspace, account, None)
             .await
             .unwrap();
         let loaded = load_at(DEFAULT_ACCOUNT).await.unwrap().unwrap();
@@ -81,9 +81,15 @@ pub(super) async fn roundtrip() {
         )
         .unwrap();
         let replacement_id = replacement.id;
-        save_at(DEFAULT_ACCOUNT, &account_root, &workspace, replacement)
-            .await
-            .unwrap();
+        save_at(
+            DEFAULT_ACCOUNT,
+            &account_root,
+            &workspace,
+            replacement,
+            Some(loaded.snapshot_digest().unwrap()),
+        )
+        .await
+        .unwrap();
         let loaded = load_at(DEFAULT_ACCOUNT).await.unwrap().unwrap();
         assert_eq!(loaded.id, replacement_id);
         assert!(
@@ -115,7 +121,14 @@ pub(super) async fn roundtrip() {
         )
         .unwrap();
         assert!(matches!(
-            save_at(DEFAULT_ACCOUNT, &account_root, &workspace, rejected).await,
+            save_at(
+                DEFAULT_ACCOUNT,
+                &account_root,
+                &workspace,
+                rejected,
+                Some(loaded.snapshot_digest().unwrap())
+            )
+            .await,
             Err(CredentialError::Locked)
         ));
         assert_eq!(

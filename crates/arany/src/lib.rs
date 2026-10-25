@@ -42,7 +42,7 @@ pub use engine::{
     RunOutcome, RunPreview, RunRequest, RunResult, RunSteering, SteeringRefused, ToolGrant,
     budget_refusal_summary, continue_session, create_session, fork_session, list_sessions,
     list_sessions_page, rename_session, resume_session, set_session_defaults,
-    validate_workspace_inputs,
+    start_provider_setup_edit, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;
@@ -58,24 +58,27 @@ pub use provider::semantic;
 pub use provider::{
     AdmittedProviders, AdmittedRoster, AgentPhase, Answer, AnthropicProvider, CallLimits,
     ChatGptAdmission, ChatGptProvenance, ChatGptProvider, ChildAssignment, ChildResult,
-    CompactionItem, CompactionRequest, CompactionResponse, CustomProfile, CustomProfileCheck,
-    CustomProfileError, CustomProfileProvenance, CustomProvider, Delegate, Effort,
-    GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin, LimitFailure, LimitSource,
-    LimitUnavailable, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_CATALOG_MODELS,
-    MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP, MAX_MESSAGE_IMAGES,
-    MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES,
-    ModelEntry, NamedProviderRoutes, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
+    CompactionItem, CompactionRequest, CompactionResponse, CustomCheckStatus, CustomProfile,
+    CustomProfileCheck, CustomProfileDraft, CustomProfileError, CustomProfileProvenance,
+    CustomProtocol, CustomProvider, Delegate, Effort, GoalContextFacts, HistoryTurn,
+    ImageAttachment, ImageOrigin, LimitFailure, LimitSource, LimitUnavailable,
+    MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_CATALOG_MODELS, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
+    MAX_CUSTOM_PROFILE_EFFORTS_BYTES, MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
+    MAX_CUSTOM_PROFILE_MODEL_BYTES, MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_ENCODED_IMAGE_BYTES,
+    MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP, MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES,
+    MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES, MessagesAuth, ModelEntry,
+    NamedProviderRoutes, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
     OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText, PromptRole, Provenance,
     Provider, ProviderError, ProviderFailureReason, ProviderFallback, ProviderIdentity,
     ProviderImage, ProviderKind, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderRetry,
     ProviderRole, ProviderRoutes, ProviderTurn, ProviderWireProvenance, Providers, RateLimitSlot,
     RateLimits, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot, RunInput, ToolUseId,
     UnansweredStatus, Usage, UsedPercent, WorkspaceGuidance, admitted_context_window,
-    check_custom_profile, check_custom_profile_with_cancellation, check_native_model,
-    check_native_model_from_env, list_native_models, list_native_models_with_api_key,
-    list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
-    resolve_native_effort_for_run, valid_profile_name, validate_native_api_key,
-    validate_native_model_id,
+    check_custom_profile, check_custom_profile_value_with_cancellation,
+    check_custom_profile_with_cancellation, check_native_model, check_native_model_from_env,
+    list_native_models, list_native_models_with_api_key, list_native_models_with_credentials,
+    probe_chatgpt_model, resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
+    validate_native_api_key, validate_native_model_id,
 };
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, BudgetAction,
@@ -86,16 +89,18 @@ pub use session::{
     GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES,
     MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, MAX_USER_MESSAGE_BYTES, PlanUsage, ProposalRefusal,
-    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig,
-    RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
-    SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount, ToolView,
-    UsageGroup, UsageView, WorkspaceIdentity, escape_status_text,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
+    ProviderSetupTarget, ProviderSetupTargetKind, ReplayError, RunConfig, RunDisposition,
+    RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId,
+    SessionListItem, SessionPage, SessionView, TokenCount, ToolView, UsageGroup, UsageView,
+    WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
 pub use store::{
-    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, RECORD_FORMATS, Record,
-    RecordFormat, RecordKind, RecordStep, StateRoot, Store, StoreError,
+    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, ProviderRecordEdit,
+    ProviderRecordTarget, RECORD_FORMATS, Record, RecordFormat, RecordKind, RecordStep, StateRoot,
+    Store, StoreError,
 };
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{

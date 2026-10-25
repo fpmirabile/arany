@@ -22,6 +22,7 @@ struct Startup {
     archived_history: Option<arany::ArchivedHistory>,
     setup_catalog: Option<Vec<arany::ModelEntry>>,
     setup_notice: Option<String>,
+    setup_session_id: Option<SessionId>,
     composer: Composer,
     terminal: AttachedTerminal,
     admission: Admission,
@@ -172,6 +173,7 @@ impl Startup {
             saved_view,
             composer: Composer::default(),
             setup_notice: None,
+            setup_session_id: None,
             setup_catalog: None,
             archived_history: None,
             access: SavedAccess::Authorized,
@@ -199,7 +201,17 @@ impl Startup {
     }
 
     async fn resolve_setup(&mut self) -> Result<ControlFlow<(), AccessCheck>, String> {
-        match setup::resolve(&mut self.terminal, &self.admission.workspace).await {
+        let mut journal =
+            setup::SetupJournal::new(&self.admission.state_dir, &self.admission.workspace, None);
+        let result = setup::resolve(
+            &mut self.terminal,
+            &self.admission.state_dir,
+            &self.admission.workspace,
+            &mut journal,
+        )
+        .await;
+        self.setup_session_id = journal.session_id();
+        match result {
             Ok(Some(setup::SetupSelection::Native {
                 defaults,
                 notice,
@@ -217,6 +229,11 @@ impl Startup {
                 self.admission.defaults = defaults;
                 self.setup_notice = notice;
                 self.setup_catalog = Some(catalog);
+            }
+            Ok(Some(setup::SetupSelection::Custom { defaults, notice })) => {
+                self.admission.defaults = defaults;
+                self.setup_notice = Some(notice);
+                self.setup_catalog = Some(Vec::new());
             }
             Ok(None) => return Ok(ControlFlow::Break(())),
             Err(setup::SetupError::Recoverable(error)) => {
@@ -513,7 +530,13 @@ impl Startup {
         goal_resume: Option<arany::GoalId>,
         reuse_saved_selection: bool,
     ) -> Result<ControlFlow<(), AttachedSession>, String> {
-        let (session_id, view) = start_session(&self.admission).await?;
+        let (session_id, view) = match self.setup_session_id {
+            Some(id) => {
+                let view = super::load_view(&self.admission.state_dir, id).await?;
+                super::finish_existing_start(&self.admission, view).await?
+            }
+            None => start_session(&self.admission).await?,
+        };
         if let Some(goal_id) = goal_resume
             && view.interrupted_goal_id() != Some(goal_id)
         {

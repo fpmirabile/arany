@@ -956,7 +956,7 @@ pub(super) fn draw_setup_choices_frame(
 
 pub(super) fn setup_warning_height(warning: &str, width: u16) -> u16 {
     u16::try_from(
-        wrap_ascii_setup_warning(warning, usize::from(width.clamp(1, 72)))
+        wrap_setup_warning(warning, usize::from(width.clamp(1, 72)))
             .len()
             .saturating_add(5),
     )
@@ -990,7 +990,7 @@ pub(super) fn draw_setup_warning_frame(
         height,
     );
     let body_height = height - 5;
-    let lines = wrap_ascii_setup_warning(warning, usize::from(width));
+    let lines = wrap_setup_warning(warning, usize::from(width));
     let pages = lines.len().div_ceil(usize::from(body_height));
     let page = page.min(pages - 1);
     let has_more = page + 1 < pages;
@@ -1059,28 +1059,9 @@ pub(super) fn draw_setup_warning_frame(
     has_more
 }
 
-fn wrap_ascii_setup_warning(warning: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in warning.split_ascii_whitespace() {
-        for chunk in word.as_bytes().chunks(width) {
-            let chunk = std::str::from_utf8(chunk).expect("compiled ASCII consent warning");
-            if !current.is_empty() && current.len() + 1 + chunk.len() > width {
-                lines.push(std::mem::take(&mut current));
-            }
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(chunk);
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+fn wrap_setup_warning(warning: &str, width: usize) -> Vec<String> {
+    let normalized = warning.split_whitespace().collect::<Vec<_>>().join(" ");
+    wrap_cells(&normalized, width, 0)
 }
 
 #[cfg(test)]

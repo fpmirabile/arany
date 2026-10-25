@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+pub(super) const MAX_PROFILE_NAME_BYTES: usize = 64;
+
 pub fn valid_profile_name(name: &str) -> bool {
-    (1..=64).contains(&name.len())
+    (1..=MAX_PROFILE_NAME_BYTES).contains(&name.len())
         && name.as_bytes()[0].is_ascii_lowercase()
         && name
             .bytes()

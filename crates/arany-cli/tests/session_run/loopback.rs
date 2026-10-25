@@ -268,6 +268,23 @@ pub(super) struct HeldStream {
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldStream {
+    held_provider(state, answer, HeldResponseKind::Streamed)
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[derive(Clone, Copy)]
+pub(super) enum HeldResponseKind {
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    Buffered,
+    Streamed,
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn held_provider(
+    state: &Path,
+    answer: &'static str,
+    kind: HeldResponseKind,
+) -> HeldStream {
     use std::sync::mpsc::sync_channel;
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback Provider");
     write_profile(
@@ -295,34 +312,12 @@ pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldSt
             send_response(&mut stream, index, text);
         }
         let mut stream = accept("held Run request");
-        let wire: serde_json::Value =
-            serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
-        assert_eq!(wire["stream"], true, "attached Runs stream");
-        let body = responses_stream(serde_json::json!({
-            "id": "resp_4",
-            "status": "completed",
-            "model": "model-1",
-            "output": arany::semantic::responses_output(&serde_json::json!(answer)),
-            "usage": {"input_tokens":20,"output_tokens":10}
-        }));
-        let split = body
-            .find("event: response.output_item.done")
-            .expect("SSE item completion");
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            &body[..split]
-        )
-        .expect("streamed delta");
-        stream.flush().expect("streamed delta flush");
+        let remaining = begin_held_response(&mut stream, answer, kind);
         streaming_sender.send(()).expect("streaming gate");
         released
             .recv_timeout(Duration::from_secs(30))
             .expect("stream release");
-        stream
-            .write_all(&body.as_bytes()[split..])
-            .expect("stream completion");
+        stream.write_all(&remaining).expect("stream completion");
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .expect("close deadline");
@@ -339,4 +334,42 @@ pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldSt
         consumed,
         peer,
     }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn begin_held_response(stream: &mut TcpStream, answer: &str, kind: HeldResponseKind) -> Vec<u8> {
+    let wire: serde_json::Value =
+        serde_json::from_slice(&read_request(stream)).expect("Responses request");
+    match kind {
+        #[cfg(all(target_os = "linux", debug_assertions))]
+        HeldResponseKind::Buffered => assert!(wire.get("stream").is_none()),
+        HeldResponseKind::Streamed => assert_eq!(wire["stream"], true),
+    }
+    let response = serde_json::json!({
+        "id": "resp_4",
+        "status": "completed",
+        "model": "model-1",
+        "output": arany::semantic::responses_output(&serde_json::json!(answer)),
+        "usage": {"input_tokens":20,"output_tokens":10}
+    });
+    let (body, content_type, split) = match kind {
+        #[cfg(all(target_os = "linux", debug_assertions))]
+        HeldResponseKind::Buffered => (response.to_string(), "application/json", 0),
+        HeldResponseKind::Streamed => {
+            let body = responses_stream(response);
+            let split = body
+                .find("event: response.output_item.done")
+                .expect("SSE item completion");
+            (body, "text/event-stream", split)
+        }
+    };
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        &body[..split]
+    )
+    .expect("streamed delta");
+    stream.flush().expect("streamed delta flush");
+    body.as_bytes()[split..].to_vec()
 }

@@ -1477,6 +1477,8 @@ mod tests {
             last_sequence: 1,
             lineage: None,
             goals: Vec::new(),
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
             runs: Vec::new(),
             compactions: Vec::new(),
         };
@@ -2097,6 +2099,8 @@ mod tests {
             last_sequence: 1,
             lineage: None,
             goals: Vec::new(),
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
             runs: Vec::new(),
             compactions: Vec::new(),
         };

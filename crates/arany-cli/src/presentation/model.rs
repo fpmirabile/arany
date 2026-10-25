@@ -370,6 +370,8 @@ mod tests {
             runs: Vec::new(),
             compactions: Vec::new(),
             goals: Vec::new(),
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 

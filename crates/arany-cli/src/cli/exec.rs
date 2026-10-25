@@ -1490,7 +1490,10 @@ mod tests {
         tokio::time::advance(active_time).await;
         tokio::time::resume();
         release.send(()).expect("release accepted answer");
-        run.await.expect("completed Run with an exhausted Goal")
+        tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, run)
+            .await
+            .expect("Goal settlement deadline")
+            .expect("completed Run with an exhausted Goal")
     }
 
     fn exec_budget_fixture(
@@ -1633,6 +1636,52 @@ mod tests {
         assert_eq!(
             goal.budget_refusal.expect("budget refusal").dimension,
             arany::GoalLimit::ActiveTime
+        );
+        let feedback =
+            crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
+        assert_eq!(
+            report.stderr,
+            format!(
+                "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
+            )
+        );
+        assert!(!report.success);
+        assert_jsonl_committed_answer(&report.stdout, "The notes remain unchanged");
+    }
+
+    #[tokio::test]
+    async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run_in_an_existing_session() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
+        let state_dir = temp.path().join("state");
+        let budget = GoalBudget {
+            max_active_ms: Some(ACTIVE_LIMIT_MS),
+            ..GoalBudget::default()
+        };
+        let (mut exec, provider) =
+            exec_budget_fixture(state_dir.clone(), workspace.clone(), budget);
+        let session_id = arany::create_session(
+            StateRoot::open_existing(&state_dir).expect("state"),
+            workspace,
+            None,
+        )
+        .await
+        .expect("existing Session");
+        exec.session_id = Some(session_id.to_string());
+        let admission = exec.admit().expect("valid autonomous command");
+        let report = run_with_budget_spent_after_answer(
+            exec,
+            admission,
+            provider,
+            std::time::Duration::from_millis(budget.max_active_ms.expect("finite active time")),
+        )
+        .await;
+        let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
+        let run = view.runs.last().expect("Finished Run");
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(
+            view.goals.last().expect("Failed Goal").status,
+            GoalStatus::Failed
         );
         let feedback =
             crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");

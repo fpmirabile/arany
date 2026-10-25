@@ -356,7 +356,7 @@ async fn run_selector(
             return Ok(None);
         }
         Selector::Setup => {
-            configure_account(terminal, admission, *session_id, view, composer).await?
+            configure_account(terminal, admission, session_id, view, composer).await?
         }
         Selector::Models => {
             match models::browse(terminal, admission, *session_id, view, composer).await? {
@@ -424,14 +424,38 @@ async fn resume_selector(
     }
 }
 
+#[cfg(test)]
+pub(crate) use setup::tests::{SetupPublication, assert_uncertain_publication};
+
 async fn configure_account(
     terminal: &mut AttachedTerminal,
     admission: &mut Admission,
-    session_id: SessionId,
+    session_id: &mut SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
 ) -> Result<Feedback, String> {
-    let (defaults, notice, catalog) = match setup::resolve(terminal, &admission.workspace).await {
+    let mut journal =
+        setup::SetupJournal::for_conversation(&admission.state_dir, &admission.workspace, view);
+    let result = setup::resolve(
+        terminal,
+        &admission.state_dir,
+        &admission.workspace,
+        &mut journal,
+    )
+    .await;
+    if let Some(id) = journal.session_id() {
+        *session_id = id;
+        if view.created_sequence == 0 || id == view.id {
+            *view = load_view(&admission.state_dir, id).await?;
+        }
+    }
+    if view.provider_setup_blocks_continuation() {
+        return Err(
+            "Provider setup outcome is incomplete or uncertain; inspect saved access and start a new Session"
+                .into(),
+        );
+    }
+    let (defaults, notice, catalog) = match result {
         Ok(Some(setup::SetupSelection::Native {
             defaults,
             notice,
@@ -451,6 +475,9 @@ async fn configure_account(
             });
             (defaults, notice, catalog)
         }
+        Ok(Some(setup::SetupSelection::Custom { defaults, notice })) => {
+            (defaults, notice, Vec::new())
+        }
         Ok(None) => {
             return Ok(Feedback::Transient("Setup closed".into()));
         }
@@ -459,7 +486,7 @@ async fn configure_account(
         }
         Err(error) => return Err(error.into()),
     };
-    update_defaults(admission, session_id, view, defaults.clone()).await?;
+    update_defaults(admission, *session_id, view, defaults.clone()).await?;
     admission.defaults = defaults;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
     if let Err(error) =
@@ -913,6 +940,8 @@ fn new_conversation(defaults: SessionDefaults) -> SessionView {
         runs: Vec::new(),
         compactions: Vec::new(),
         goals: Vec::new(),
+        pending_provider_setup_edit: None,
+        provider_setup_uncertain: false,
     }
 }
 
@@ -924,30 +953,45 @@ async fn materialize_session(
     if view.created_sequence != 0 {
         return Ok(());
     }
-    let root = StateRoot::admit(&admission.state_dir)
+    *view = materialize_conversation(&admission.state_dir, &admission.workspace, view).await?;
+    *session_id = view.id;
+    Ok(())
+}
+
+async fn materialize_conversation(
+    state_dir: &Path,
+    workspace: &Path,
+    draft: &SessionView,
+) -> Result<SessionView, String> {
+    let root = StateRoot::admit(state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-    let title = view.title_is_explicit.then(|| view.title.clone());
-    let id = create_session(root, admission.workspace.clone(), title.clone())
+    let title = draft.title_is_explicit.then(|| draft.title.clone());
+    let id = create_session(root, workspace.to_owned(), title.clone())
         .await
         .map_err(|error| error.to_string())?;
-    let defaults = view.defaults.clone();
-    *view = load_view(&admission.state_dir, id).await?;
+    let mut view = load_view(state_dir, id).await?;
     if let Some(title) = title.filter(|_| !view.title_is_explicit) {
         arany::rename_session(
-            StateRoot::open_existing(&admission.state_dir)
+            StateRoot::open_existing(state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?,
-            admission.workspace.clone(),
+            workspace.to_owned(),
             id,
             title,
         )
         .await
         .map_err(|error| error.to_string())?;
-        *view = load_view(&admission.state_dir, id).await?;
     }
-    *session_id = id;
-    update_defaults(admission, id, view, defaults)
-        .await
-        .map_err(String::from)
+    set_session_defaults(
+        StateRoot::open_existing(state_dir)
+            .map_err(|_| "state directory unavailable or unsafe".to_owned())?,
+        workspace.to_owned(),
+        id,
+        draft.defaults.clone(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    view = load_view(state_dir, id).await?;
+    Ok(view)
 }
 
 async fn update_defaults(
@@ -1035,6 +1079,9 @@ async fn finish_existing_start(
     admission: &Admission,
     mut view: SessionView,
 ) -> Result<(SessionId, SessionView), String> {
+    if view.provider_setup_blocks_continuation() {
+        return Err("Provider setup outcome is incomplete or uncertain; inspect history and start a new Session".into());
+    }
     if admission.defaults.provider.is_none() {
         view = prepare_resume(admission, view, None).await?;
     }
