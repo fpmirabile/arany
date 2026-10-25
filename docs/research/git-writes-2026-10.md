@@ -39,4 +39,4 @@ The [GitHub CLI PR manual](https://cli.github.com/manual/gh_pr_create) says PR c
 
 ## Verification limits
 
-This investigation ran no Linux/macOS native write test, remote push, PR creation, credential access or peer executable experiment. Remaining implementation lives in [NEXT_STEPS.md, Daily use item 10](../../NEXT_STEPS.md#daily-use-first) and its linked native/live checklist. The current contracts above own authentication, supported layouts and recovery; this report is not evidence of their native or live verification.
+This investigation ran no Linux/macOS native write test, remote push, PR creation, credential access or peer executable experiment. Remaining implementation lives in [Git write workflow in NEXT_STEPS.md](../../NEXT_STEPS.md#daily-use-first) and its linked native/live checklist. The current contracts above own authentication, supported layouts and recovery; this report is not evidence of their native or live verification.

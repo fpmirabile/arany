@@ -100,11 +100,20 @@ pub(crate) struct ApprovalWait {
     withdrawal: Option<oneshot::Sender<()>>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ApprovalWaitReply {
+    Replied(ApprovalReply),
+    Closed,
+}
+
 impl ApprovalWait {
-    pub(crate) async fn reply(&mut self) -> ApprovalReply {
+    pub(crate) async fn reply(&mut self) -> ApprovalWaitReply {
         match self.response.take() {
-            Some(response) => response.await.unwrap_or(ApprovalReply::Unavailable),
-            None => ApprovalReply::Unavailable,
+            Some(response) => match response.await {
+                Ok(reply) => ApprovalWaitReply::Replied(reply),
+                Err(_) => ApprovalWaitReply::Closed,
+            },
+            None => ApprovalWaitReply::Closed,
         }
     }
 
@@ -255,6 +264,29 @@ impl ToolApprovals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_reply_is_distinct_from_reply_channel_shutdown() {
+        for (reply, expected) in [
+            (
+                Some(ApprovalReply::Unavailable),
+                ApprovalWaitReply::Replied(ApprovalReply::Unavailable),
+            ),
+            (None, ApprovalWaitReply::Closed),
+        ] {
+            let (sender, response) = oneshot::channel();
+            if let Some(reply) = reply {
+                sender.send(reply).unwrap();
+            } else {
+                drop(sender);
+            }
+            let mut wait = ApprovalWait {
+                response: Some(response),
+                withdrawal: None,
+            };
+            assert_eq!(wait.reply().await, expected);
+        }
+    }
 
     #[test]
     fn modes_only_preapprove_typed_file_edits_in_auto_edits() {
