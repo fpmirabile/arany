@@ -4080,6 +4080,7 @@ mod graphics_lifecycle_tests {
             .block_on(async {
                 let backend = TerminalBackend::failing_graphics_writer(80, 24);
                 let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+                attached.graphics_protocol = Some(GraphicsProtocol::Kitty);
                 attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
                 attached.graphics_placement = Some(GraphicsPlacement {
                     image_index: 0,
@@ -4100,6 +4101,7 @@ mod graphics_lifecycle_tests {
     async fn opening_agent_chat_clears_preview_and_propagates_delete_failure() {
         let backend = TerminalBackend::failing_graphics_writer(80, 24);
         let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+        attached.graphics_protocol = Some(GraphicsProtocol::Kitty);
         attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
         attached.hovered_image = Some(0);
         attached.graphics_placement = Some(GraphicsPlacement {
