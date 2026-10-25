@@ -382,7 +382,7 @@ async fn saved_native_credentials(
         .await
         .map_err(|error| error.to_string())?
         .ok_or("no saved native API account")?;
-    if account.provider != profile {
+    if account.provider.profile() != profile {
         return Err("saved API account belongs to a different Provider".into());
     }
     let id = account.id;
@@ -401,7 +401,7 @@ async fn revalidate_native_credentials(
             .await
             .map_err(|_| NativeCheckError::CredentialUnavailable)?
             .ok_or(NativeCheckError::CredentialUnavailable)?;
-        if account.id != id || account.provider != profile {
+        if account.id != id || account.provider.profile() != profile {
             return Err(NativeCheckError::EvidenceUnavailable);
         }
         account

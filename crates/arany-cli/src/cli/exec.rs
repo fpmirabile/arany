@@ -194,7 +194,8 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
         let selected = super::provider::roster::load(&state_dir, &workspace, name)?;
         selected.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
         let primary = selected.primary();
-        args.provider = Some(ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?);
+        args.provider =
+            Some(ProviderArg::from_str(&primary.provider.profile()).map_err(str::to_owned)?);
         args.model = Some(primary.model.clone());
         args.effort = primary.effort;
         let admission = args.admit().map_err(str::to_owned)?;
