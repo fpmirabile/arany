@@ -101,6 +101,7 @@ pub enum TerminalInput {
     Shutdown(ShutdownSignal),
     Resize,
     CopySelection,
+    PanelSelectionChanged,
     PointerMove { column: u16, row: u16 },
     PointerClick { column: u16, row: u16, clicks: u8 },
     PointerDrag { column: u16, row: u16 },
