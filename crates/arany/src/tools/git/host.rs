@@ -1539,33 +1539,27 @@ fn pr_view_payload(
 
 fn fit_pr_view_result(mut result: Value, result_bytes: usize) -> Option<String> {
     let budget = result_bytes.min(crate::tools::types::MAX_TOOL_RESULT_BYTES);
+    let output = serde_json::to_string(&result).ok()?;
+    let mut bytes = output.len();
+    if bytes <= budget {
+        return Some(output);
+    }
+    for kind in [
+        PrViewConnection::Checks,
+        PrViewConnection::Reviews,
+        PrViewConnection::Comments,
+    ] {
+        trim_pr_view_connection(
+            &mut result["pull_request"][kind.field()],
+            kind,
+            budget,
+            &mut bytes,
+        )?;
+    }
     loop {
         let output = serde_json::to_string(&result).ok()?;
         if output.len() <= budget {
             return Some(output);
-        }
-        if let Some(trimmed) = [
-            PrViewConnection::Checks,
-            PrViewConnection::Reviews,
-            PrViewConnection::Comments,
-        ]
-        .into_iter()
-        .find(|kind| {
-            result["pull_request"][kind.field()]["items"]
-                .as_array()
-                .is_some_and(|rows| !rows.is_empty())
-        }) {
-            let items = result["pull_request"][trimmed.field()]["items"].as_array_mut()?;
-            match trimmed {
-                PrViewConnection::Checks => {
-                    items.pop();
-                }
-                PrViewConnection::Comments | PrViewConnection::Reviews => {
-                    items.remove(0);
-                }
-            }
-            result["pull_request"][trimmed.field()]["truncated"] = Value::Bool(true);
-            continue;
         }
         let body = result["pull_request"]["body"].as_str()?;
         if body.is_empty() {
@@ -1583,6 +1577,45 @@ fn fit_pr_view_result(mut result: Value, result_bytes: usize) -> Option<String> 
             fields.push(Value::String("body".into()));
         }
     }
+}
+
+fn trim_pr_view_connection(
+    connection: &mut Value,
+    kind: PrViewConnection,
+    budget: usize,
+    bytes: &mut usize,
+) -> Option<()> {
+    if *bytes <= budget || connection.is_null() {
+        return Some(());
+    }
+    let truncated = connection.get("truncated")?.as_bool()?;
+    let items = connection.get_mut("items")?.as_array_mut()?;
+    if items.is_empty() {
+        return Some(());
+    }
+    let mut removed = 0;
+    while removed < items.len() && (removed == 0 || *bytes > budget) {
+        let index = match kind {
+            PrViewConnection::Checks => items.len() - removed - 1,
+            PrViewConnection::Comments | PrViewConnection::Reviews => removed,
+        };
+        let row_bytes = serde_json::to_vec(&items[index]).ok()?.len();
+        let comma_bytes = usize::from(removed + 1 < items.len());
+        *bytes = bytes.checked_sub(row_bytes + comma_bytes)?;
+        if removed == 0 {
+            // JSON true is one byte shorter than false.
+            *bytes = bytes.checked_sub(usize::from(!truncated))?;
+        }
+        removed += 1;
+    }
+    match kind {
+        PrViewConnection::Checks => items.truncate(items.len() - removed),
+        PrViewConnection::Comments | PrViewConnection::Reviews => {
+            items.drain(..removed);
+        }
+    }
+    connection["truncated"] = Value::Bool(true);
+    Some(())
 }
 
 fn pr_view_text(
@@ -2510,10 +2543,10 @@ mod tests {
     #[test]
     fn host_gh_pr_view_budget_retains_recent_discussion_and_first_checks() {
         let head = "a".repeat(40);
-        for (connection, field, retained) in [
-            ("comments", "body", 1),
-            ("reviews", "body", 1),
-            ("checks", "name", 0),
+        for (connection, field) in [
+            ("comments", "body"),
+            ("reviews", "body"),
+            ("checks", "name"),
         ] {
             let mut graph = pr_view_graph(&head, "COMPLETED");
             let pull = &mut graph["data"]["repository"]["pullRequest"];
@@ -2523,10 +2556,15 @@ mod tests {
             } else {
                 pull[connection]["nodes"].clone()
             };
-            let mut latest = rows[0].clone();
-            rows[0][field] = json!("Earlier");
-            latest[field] = json!("Current");
-            rows.as_array_mut().unwrap().push(latest);
+            let template = rows[0].clone();
+            rows = json!([template.clone(), template.clone(), template]);
+            for (row, text) in rows.as_array_mut().unwrap().iter_mut().zip([
+                "Earlier \"quoted\"",
+                "Middle\\path",
+                "Current 🧪\n",
+            ]) {
+                row[field] = json!(text);
+            }
             for name in ["comments", "reviews"] {
                 pull[name]["nodes"] = json!([]);
             }
@@ -2544,20 +2582,32 @@ mod tests {
                 crate::tools::types::MAX_TOOL_RESULT_BYTES,
             )
             .unwrap();
-            let mut expected: Value = serde_json::from_str(&output).unwrap();
-            let item = expected["pull_request"][connection]["items"][retained].clone();
-            expected["pull_request"][connection]["items"] = json!([item]);
-            expected["pull_request"][connection]["truncated"] = json!(true);
-            let budget = serde_json::to_string(&expected).unwrap().len();
-            let output =
-                pr_view_result(&scalar, &graph.to_string(), pr_view_identity(), budget).unwrap();
-            assert!(output.len() <= budget);
-            assert!(valid_pr_view_output(&output, pr_view_identity()));
-            assert_eq!(
-                serde_json::from_str::<Value>(&output).unwrap(),
-                expected,
-                "{connection}"
-            );
+            let full: Value = serde_json::from_str(&output).unwrap();
+            let items = full["pull_request"][connection]["items"]
+                .as_array()
+                .unwrap();
+            for keep in 0..=items.len() {
+                let mut expected = full.clone();
+                let retained = if connection == "checks" {
+                    &items[..keep]
+                } else {
+                    &items[items.len() - keep..]
+                };
+                expected["pull_request"][connection]["items"] = json!(retained);
+                if keep < items.len() {
+                    expected["pull_request"][connection]["truncated"] = json!(true);
+                }
+                let expected = serde_json::to_string(&expected).unwrap();
+                let output = pr_view_result(
+                    &scalar,
+                    &graph.to_string(),
+                    pr_view_identity(),
+                    expected.len(),
+                )
+                .unwrap();
+                assert!(valid_pr_view_output(&output, pr_view_identity()));
+                assert_eq!(output, expected, "{connection}: retain {keep}");
+            }
         }
     }
 

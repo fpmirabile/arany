@@ -16,6 +16,17 @@ struct Repo {
     markers: PathBuf,
 }
 
+fn pinned_program(name: &str, executable: &Path) -> Value {
+    json!({
+        "name": name,
+        "executable": executable,
+        "sha256": Sha256::digest(std::fs::read(executable).unwrap()).iter()
+            .map(|byte| format!("{byte:02x}")).collect::<String>(),
+        "interpreter": false,
+        "inputs": []
+    })
+}
+
 impl Repo {
     // A trusted-folder style grant over a repository whose configuration tries to run code.
     fn new() -> Self {
@@ -70,16 +81,7 @@ impl Repo {
             "commands": [],
             "skills": [],
             "mcp": [],
-            "git": {
-                "name": "git",
-                "executable": executable,
-                "sha256": Sha256::digest(std::fs::read(&executable).unwrap())
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-                "interpreter": false,
-                "inputs": []
-            },
+            "git": pinned_program("git", &executable),
             "git_identity": {"name": "Arany Journey", "email": "journey@example.invalid"}
         });
         let tools = state.join("tools.json");
@@ -451,26 +453,7 @@ int main(int argc, char **argv) {
 
 async fn host_pr_list_remember_and_replay_journey() {
     let repo = Repo::new();
-    let executable = native_gh_peer(&repo);
-    let mut tools: Value =
-        serde_json::from_slice(&std::fs::read(repo.state.join("tools.json")).unwrap()).unwrap();
-    tools["write"] = json!(false);
-    tools["commands"] = json!([{
-        "name":"gh",
-        "executable":executable,
-        "sha256":Sha256::digest(std::fs::read(&executable).unwrap())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        "interpreter":false,
-        "inputs":[]
-    }]);
-    std::fs::write(
-        repo.state.join("tools.json"),
-        serde_json::to_vec(&tools).unwrap(),
-    )
-    .unwrap();
-    std::fs::remove_file(repo.state.join("permissions.json")).unwrap();
+    configure_native_gh(&repo);
 
     refuse_without_human_or_settings(&repo).await;
     repo.settings(json!({"permissions":{"defaultMode":"default"}}));
@@ -491,7 +474,7 @@ fn host_pr_view_remember_and_replay_journey() {
         .unwrap()
         .block_on(async {
             let repo = Repo::new();
-            configure_pr_view(&repo);
+            configure_native_gh(&repo);
             refuse_pr_view_without_human(&repo).await;
             remember_pr_view(&repo).await;
             use_remembered_pr_view(&repo).await;
@@ -500,18 +483,12 @@ fn host_pr_view_remember_and_replay_journey() {
         });
 }
 
-fn configure_pr_view(repo: &Repo) {
+fn configure_native_gh(repo: &Repo) {
     let executable = native_gh_peer(repo);
     let mut tools: Value =
         serde_json::from_slice(&std::fs::read(repo.state.join("tools.json")).unwrap()).unwrap();
     tools["write"] = json!(false);
-    tools["commands"] = json!([{
-        "name":"gh",
-        "executable":executable,
-        "sha256":Sha256::digest(std::fs::read(&executable).unwrap()).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
-        "interpreter":false,
-        "inputs":[]
-    }]);
+    tools["commands"] = json!([pinned_program("gh", &executable)]);
     std::fs::write(
         repo.state.join("tools.json"),
         serde_json::to_vec(&tools).unwrap(),
@@ -1266,12 +1243,7 @@ async fn goal_continuations_readmit_saved_typed_rules_but_latch_external_drift()
         let path = repo.state.join("tools.json");
         let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let find = std::fs::canonicalize("/usr/bin/find").unwrap();
-        config["commands"] = json!([{
-            "name":"find", "executable":find,
-            "sha256":Sha256::digest(std::fs::read(&find).unwrap()).iter()
-                .map(|byte| format!("{byte:02x}")).collect::<String>(),
-            "interpreter":false, "inputs":[]
-        }]);
+        config["commands"] = json!([pinned_program("find", &find)]);
         std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
         let engine = engine_support::open(
             StateRoot::open_existing(&repo.state).unwrap(),
@@ -1849,7 +1821,7 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
             let mut tools: Value = serde_json::from_slice(&std::fs::read(&tools_path).unwrap()).unwrap();
             // This synthetic peer succeeds if accidentally dispatched, so missing-human refusal cannot pass on a peer error.
             let executable = std::fs::canonicalize(if scenario == "uncertain" { "/usr/bin/false" } else { "/usr/bin/true" }).unwrap();
-            tools["commands"] = json!([{"name":"gh", "executable":executable, "sha256":Sha256::digest(std::fs::read(&executable).unwrap()).iter().map(|b| format!("{b:02x}")).collect::<String>(), "interpreter":false, "inputs":[]}]);
+            tools["commands"] = json!([pinned_program("gh", &executable)]);
             std::fs::write(tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
             repo.settings(json!({"permissions":{"defaultMode":"auto", "typedPrefixes":[{"prefix":["gh","pr","create"],"decision":"allow","workspace":null}]}}));
             let call = ToolCall::GhPrCreate { repository: "github.com/example/project".into(), base: "base".into(), head: "main".into(), title: "Synthetic PR".into(), body: "Synthetic body".into(), draft: true };
