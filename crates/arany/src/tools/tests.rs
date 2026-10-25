@@ -3919,9 +3919,19 @@ fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
             cwd: String::new(),
         },
     );
-    assert!(runtime.with_hook_stdin("{}").hook_task_fits(&intent));
+    assert!(
+        runtime
+            .clone()
+            .with_hook_stdin("{}")
+            .hook_task_fits(&intent)
+    );
     let padded = "x".repeat(super::guard::TASK_BYTES_CAP);
-    assert!(!runtime.with_hook_stdin(&padded).hook_task_fits(&intent));
+    assert!(
+        !runtime
+            .clone()
+            .with_hook_stdin(&padded)
+            .hook_task_fits(&intent)
+    );
 }
 
 #[test]

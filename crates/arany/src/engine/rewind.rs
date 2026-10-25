@@ -460,6 +460,7 @@ impl Engine {
             finished.outcome = RewindOutcome::Failed;
         } else {
             let observation = runtime
+                .clone()
                 .with_handover(bytes.into())
                 .execute(intent.clone(), cancellation)
                 .await;
