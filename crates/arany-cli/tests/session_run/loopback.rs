@@ -274,7 +274,7 @@ pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldSt
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[derive(Clone, Copy)]
 pub(super) enum HeldResponseKind {
-    #[cfg(debug_assertions)]
+    #[cfg(all(target_os = "linux", debug_assertions))]
     Buffered,
     Streamed,
 }
@@ -341,7 +341,7 @@ fn begin_held_response(stream: &mut TcpStream, answer: &str, kind: HeldResponseK
     let wire: serde_json::Value =
         serde_json::from_slice(&read_request(stream)).expect("Responses request");
     match kind {
-        #[cfg(debug_assertions)]
+        #[cfg(all(target_os = "linux", debug_assertions))]
         HeldResponseKind::Buffered => assert!(wire.get("stream").is_none()),
         HeldResponseKind::Streamed => assert_eq!(wire["stream"], true),
     }
@@ -353,7 +353,7 @@ fn begin_held_response(stream: &mut TcpStream, answer: &str, kind: HeldResponseK
         "usage": {"input_tokens":20,"output_tokens":10}
     });
     let (body, content_type, split) = match kind {
-        #[cfg(debug_assertions)]
+        #[cfg(all(target_os = "linux", debug_assertions))]
         HeldResponseKind::Buffered => (response.to_string(), "application/json", 0),
         HeldResponseKind::Streamed => {
             let body = responses_stream(response);
