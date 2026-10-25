@@ -140,7 +140,8 @@ impl RoutingDraft {
             }
         }
         let bytes = serde_json::to_vec(&RoutingConfig {
-            version: PROVIDER_ROUTING.current as u8,
+            version: u8::try_from(PROVIDER_ROUTING.current)
+                .map_err(|_| RoutingError::InvalidConfiguration)?,
             providers,
         })
         .map_err(|_| RoutingError::InvalidConfiguration)?;
