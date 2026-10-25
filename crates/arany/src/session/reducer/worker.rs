@@ -234,16 +234,13 @@ fn tool(run: &RunView, actor: AgentRunId) -> Option<&ToolView> {
     }
 }
 fn quiescent(run: &RunView) -> bool {
-    if pending_command_capture(run).is_some() {
+    if run.workers.capture.is_some() {
         return false;
     }
     run.tools
         .iter()
         .chain(run.agents.iter().flat_map(|a| &a.tools))
         .all(|t| t.observation.is_some())
-}
-fn pending_command_capture(run: &RunView) -> Option<CommandCapture> {
-    run.workers.capture.clone()
 }
 
 fn sealed_changes<'a>(
@@ -937,16 +934,7 @@ pub(super) fn after_event(
             if o.disposition != ToolDisposition::Succeeded {
                 run.workers.pending = None;
             }
-            if matches!(o.intent.call, ToolCall::Command { .. })
-                && matches!(o.intent.target, EffectTarget::WorkerView { .. })
-                && o.disposition == ToolDisposition::Succeeded
-                && let Ok(WorkerCommandResult {
-                    private_capture: PrivateCapture::Sealed { data },
-                    ..
-                }) = serde_json::from_str(&o.output)
-            {
-                run.workers.capture = Some((o.intent.agent_run_id, o.intent.id, data));
-            }
+            record_command_capture(run, o)?;
             if let Some(Attestation::WorkerMutation { mutation, .. }) = &o.attestation {
                 let changes = sealed_changes(run, &mutation.data)?.to_vec();
                 let w = worker_mut(run, *agent_run_id)?;
@@ -1141,6 +1129,63 @@ pub(crate) fn private_failure(t: &ToolView) -> bool {
             && (o.disposition != ToolDisposition::Denied || t.permission_verdict.is_some()))
 }
 
+fn record_command_capture(
+    run: &mut RunView,
+    observation: &crate::tools::ToolObservation,
+) -> Result<(), ReplayError> {
+    if !matches!(observation.intent.target, EffectTarget::WorkerView { .. })
+        || !matches!(observation.intent.call, ToolCall::Command { .. })
+        || observation.disposition != ToolDisposition::Succeeded
+    {
+        return Ok(());
+    }
+    let Some(WorkerCommandResult {
+        private_capture: PrivateCapture::Sealed { data },
+        ..
+    }) = WorkerCommandResult::parse(&observation.output)
+    else {
+        return Ok(());
+    };
+    let capture = (observation.intent.agent_run_id, observation.intent.id, data);
+    if run
+        .workers
+        .data
+        .iter()
+        .any(|sealed| sealed.reference == capture.2)
+    {
+        apply_command_capture(run, &capture)?;
+    } else {
+        run.workers.capture = Some(capture);
+    }
+    Ok(())
+}
+
+fn apply_command_capture(run: &mut RunView, capture: &CommandCapture) -> Result<(), ReplayError> {
+    let (actor, _, data) = capture;
+    let changes = valid_delta(run, *actor, data, false)?;
+    if changes.is_empty() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let w = worker_mut(run, *actor)?;
+    w.revision = w
+        .revision
+        .checked_add(1)
+        .filter(|r| *r <= 16)
+        .ok_or(ReplayError::InvalidTransition)?;
+    for change in changes {
+        if let Some(old) = w.overlay.iter_mut().find(|f| f.path == change.path) {
+            old.after = change.after;
+        } else {
+            w.overlay.push(change);
+        }
+    }
+    w.overlay.sort_by(|a, b| a.path.cmp(&b.path));
+    if w.overlay.len() > WORKER_FILES {
+        return Err(ReplayError::InvalidTransition);
+    }
+    Ok(())
+}
+
 pub(crate) fn criterion_unmet_in_view(run: &RunView, id: AgentRunId) -> Result<bool, ReplayError> {
     Ok(private_criterion_evidence(run, id)?.is_empty())
 }
@@ -1155,7 +1200,7 @@ pub(crate) fn private_criterion_evidence(
         .iter()
         .find(|a| a.id == id)
         .ok_or(ReplayError::InvalidTransition)?;
-    if pending_command_capture(run).is_some() {
+    if run.workers.capture.is_some() {
         return Ok(Vec::new());
     }
     for t in a.tools.iter().rev() {

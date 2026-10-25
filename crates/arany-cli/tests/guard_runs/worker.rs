@@ -1182,6 +1182,29 @@ async fn runtime_command_case_agrees_with_closed_output(case: &'static str) {
     .await;
     assert_eq!(bundle.events, observation.events, "{case}");
     assert_eq!(bundle.view, observation.view, "{case}");
+    let mut captures = 0;
+    for envelope in &bundle.events {
+        if let Event::ToolFinished { observation, .. } = &envelope.event
+            && let Ok(result) =
+                serde_json::from_str::<arany::worker::WorkerCommandResult>(&observation.output)
+            && let arany::worker::PrivateCapture::Sealed { data } = result.private_capture
+        {
+            captures += 1;
+            assert!(data.seal_sequence < envelope.sequence, "{case}");
+            assert!(
+                bundle
+                    .events
+                    .iter()
+                    .any(|e| e.sequence == data.seal_sequence
+                        && matches!(&e.event, Event::WorkerDataSealed { record, .. }
+                    if record.data == data && record.tool_id == observation.intent.id)),
+                "{case}"
+            );
+        }
+    }
+    if case == "command_success" {
+        assert_eq!(captures, 2);
+    }
 }
 
 #[tokio::test]

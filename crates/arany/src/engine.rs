@@ -1676,7 +1676,7 @@ impl Engine {
                 controls,
                 ledger,
                 publisher,
-            )
+            )?
             .execute(request),
         )
         .await

@@ -3912,13 +3912,24 @@ fn supervised_handover() -> (Fixture, u64, WorkerDataRef, Event) {
     let mut view = SessionView::replay_open(f.session, &envelopes[..1])
         .unwrap()
         .unwrap();
+    let mut decision = crate::supervisor::SupervisorDecision::Continue;
     for envelope in &envelopes[1..] {
         view.apply_committed(envelope).unwrap();
-        evaluator.after(&view, envelope);
+        decision = evaluator.decide_verdict(&view, envelope);
     }
-    let verdict = evaluator
-        .pending_event()
-        .expect("sixteen-file handover notice");
+    let crate::supervisor::SupervisorDecision::Record {
+        run_id,
+        agent_run_id,
+        verdict,
+    } = decision
+    else {
+        panic!("sixteen-file handover notice")
+    };
+    let verdict = Event::SupervisorVerdictRecorded {
+        run_id,
+        agent_run_id,
+        verdict,
+    };
     assert!(
         matches!(&verdict,Event::SupervisorVerdictRecorded {verdict,..} if verdict.site==crate::supervisor::Site::Handover && verdict.subject_sequence==subject)
     );
@@ -4160,7 +4171,7 @@ fn command_fixture() -> Fixture {
 }
 
 impl Fixture {
-    fn command(&mut self, capture: PrivateCapture) -> EffectIntent {
+    fn start_command(&mut self) -> EffectIntent {
         self.call(
             self.child,
             AgentPhase::ChildWork,
@@ -4186,6 +4197,14 @@ impl Fixture {
             self.target(revision),
         );
         self.started(&intent);
+        intent
+    }
+    fn command(&mut self, capture: PrivateCapture) -> EffectIntent {
+        let intent = self.start_command();
+        self.finish_command(&intent, capture);
+        intent
+    }
+    fn finish_command(&mut self, intent: &EffectIntent, capture: PrivateCapture) {
         self.push(Event::ToolFinished {
             checkpoint: None,
             run_id: self.run,
@@ -4196,7 +4215,7 @@ impl Fixture {
                 enforcement_cause: None,
                 limit_cause: None,
                 attestation: Some(Attestation::WorkerCommand {
-                    receipt: receipt(&intent),
+                    receipt: receipt(intent),
                 }),
                 approval_cause: None,
                 cache_update: CacheUpdate::Discarded,
@@ -4211,7 +4230,6 @@ impl Fixture {
                 .unwrap(),
             },
         });
-        intent
     }
     fn command_capture(&mut self) -> EffectIntent {
         let bytes = serde_json::to_vec(&self.changes).unwrap();
@@ -4232,11 +4250,22 @@ impl Fixture {
         );
         intent
     }
+    fn sealed_command_capture(&mut self) -> EffectIntent {
+        let intent = self.start_command();
+        let bytes = serde_json::to_vec(&self.changes).unwrap();
+        let data = self.data(&intent, WorkerDataPurpose::Mutation, &bytes);
+        self.finish_command(&intent, PrivateCapture::Sealed { data });
+        intent
+    }
 }
 
 pub(crate) fn completed_command_fixture() -> Fixture {
     let mut f = command_fixture();
     f.command_capture();
+    complete_command_fixture(f)
+}
+
+fn complete_command_fixture(mut f: Fixture) -> Fixture {
     let data = f.finish_worker();
     let h = f.handover(data.clone());
     let i = f.integrate(h, data, ToolDisposition::Succeeded);
@@ -4248,34 +4277,68 @@ pub(crate) fn completed_command_fixture() -> Fixture {
 
 #[test]
 fn worker_protocol_commands_decode_and_cold_replay_without_execution() {
-    let f = completed_command_fixture();
-    let decoded: Vec<_> = f
-        .envelopes()
-        .into_iter()
-        .map(|e| EventEnvelope {
-            event: Event::decode(
-                e.event.kind(),
-                e.event.version(),
-                &e.event.payload().unwrap(),
-                e.run_id,
-                e.agent_run_id,
-            )
-            .unwrap(),
-            ..e
-        })
-        .collect();
-    for end in 1..=decoded.len() {
+    let mut sealed = command_fixture();
+    sealed.sealed_command_capture();
+    for (seal_first, f) in [
+        (false, completed_command_fixture()),
+        (true, complete_command_fixture(sealed)),
+    ] {
+        let decoded: Vec<_> = f
+            .envelopes()
+            .into_iter()
+            .map(|e| EventEnvelope {
+                event: Event::decode(
+                    e.event.kind(),
+                    e.event.version(),
+                    &e.event.payload().unwrap(),
+                    e.run_id,
+                    e.agent_run_id,
+                )
+                .unwrap(),
+                ..e
+            })
+            .collect();
+        let (observed, intent, data) = decoded
+            .iter()
+            .find_map(|e| {
+                let Event::ToolFinished { observation, .. } = &e.event else {
+                    return None;
+                };
+                let result = WorkerCommandResult::parse(&observation.output)?;
+                let PrivateCapture::Sealed { data } = result.private_capture else {
+                    return None;
+                };
+                Some((e.sequence, observation.intent.id, data))
+            })
+            .unwrap();
+        assert_eq!(data.seal_sequence < observed, seal_first);
+        assert!(matches!(&decoded[data.seal_sequence as usize - 1].event,
+        Event::WorkerDataSealed { record, .. } if record.data == data && record.tool_id == intent));
+        for end in 1..=decoded.len() {
+            let view = SessionView::replay(f.session, &decoded[..end])
+                .unwrap()
+                .unwrap();
+            if let Some(worker) = view
+                .runs
+                .last()
+                .and_then(|run| run.agents.iter().find_map(|a| a.assignment.as_ref()))
+            {
+                assert_eq!(
+                    worker.revision,
+                    u32::from(end as u64 >= observed.max(data.seal_sequence))
+                );
+            }
+            assert_eq!(
+                Some(view),
+                SessionView::replay(f.session, &f.envelopes()[..end]).unwrap(),
+                "decoded cold prefix {end}"
+            );
+        }
         assert_eq!(
-            SessionView::replay(f.session, &decoded[..end]).unwrap(),
-            SessionView::replay(f.session, &f.envelopes()[..end]).unwrap(),
-            "decoded cold prefix {end}"
+            crate::session::prefix_digest(&decoded, decoded.len() as u64).unwrap(),
+            crate::session::prefix_digest(&f.envelopes(), decoded.len() as u64).unwrap()
         );
     }
-    let view = f.view();
-    assert_eq!(
-        view.runs[0].agents[1].assignment.as_ref().unwrap().revision,
-        1
-    );
 }
 
 #[test]
