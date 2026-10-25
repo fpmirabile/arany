@@ -287,7 +287,7 @@ impl Engine {
             },
             &ledger,
             None,
-        );
+        )?;
         Ok(runner
             .lifecycle_hooks(super::run_loop::LifecycleHook {
                 agent: primary_id,

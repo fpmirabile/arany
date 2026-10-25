@@ -142,6 +142,7 @@ pub(super) struct RunLoop<'a> {
     primary_id: AgentRunId,
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
+    supervisor: std::sync::Mutex<crate::supervisor::SupervisorState>,
     hints: Option<&'a HintPublisher>,
     worker_data_bytes: std::sync::Mutex<std::collections::HashMap<AgentRunId, u32>>,
     worker_requests:
@@ -206,8 +207,9 @@ impl<'a> RunLoop<'a> {
         controls: LoopControls<'a>,
         ledger: &'a GoalLedger,
         hints: Option<&'a HintPublisher>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, EngineError> {
+        let supervisor = ledger.view(crate::supervisor::SupervisorState::from_committed)?;
+        Ok(Self {
             routing: super::routing::CallRouter {
                 providers,
                 journal,
@@ -215,6 +217,7 @@ impl<'a> RunLoop<'a> {
                 publisher: hints,
                 steering: controls.steering.clone(),
             },
+            supervisor: std::sync::Mutex::new(supervisor),
             worker_data_bytes: Default::default(),
             worker_requests: Default::default(),
             worker: Default::default(),
@@ -231,7 +234,7 @@ impl<'a> RunLoop<'a> {
             controls,
             ledger,
             hints,
-        }
+        })
     }
 
     // Only a fork boundary hook runs without a Goal.
@@ -282,9 +285,11 @@ impl<'a> RunLoop<'a> {
             Event::AgentSpawned { .. } | Event::AgentFinished { .. } | Event::RunFinished { .. }
         )
         .then(|| event.clone());
-        self.ledger
-            .append(self.journal, self.session_id, event)
+        let committed = self
+            .ledger
+            .append_committed(self.journal, self.session_id, event)
             .await?;
+        self.record_supervisor_verdict(&committed).await?;
         if let (Some(steering), Some(fact)) = (&self.controls.steering, fact) {
             match fact {
                 Event::AgentSpawned {
@@ -312,6 +317,39 @@ impl<'a> RunLoop<'a> {
                 }
                 Event::RunFinished { run_id, .. } => steering.end_run(self.session_id, run_id),
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_supervisor_verdict(
+        &self,
+        committed: &crate::session::EventEnvelope,
+    ) -> Result<(), EngineError> {
+        let decision = self.ledger.view(|view| {
+            self.supervisor
+                .lock()
+                .map_err(|_| EngineError::CoordinatorFailed)
+                .map(|mut state| state.decide_verdict(view, committed))
+        })??;
+        match decision {
+            crate::supervisor::SupervisorDecision::Continue => {}
+            crate::supervisor::SupervisorDecision::Record {
+                run_id,
+                agent_run_id,
+                verdict,
+            } => {
+                self.ledger
+                    .append(
+                        self.journal,
+                        self.session_id,
+                        Event::SupervisorVerdictRecorded {
+                            run_id,
+                            agent_run_id,
+                            verdict,
+                        },
+                    )
+                    .await?;
             }
         }
         Ok(())
