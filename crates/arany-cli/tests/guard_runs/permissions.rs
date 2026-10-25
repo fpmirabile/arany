@@ -1584,27 +1584,131 @@ fn shell_hook(script: &str) -> Value {
     json!({"type": "command", "command": script})
 }
 
-const HOOK_DISPATCH_TIMEOUT: Duration = Duration::from_secs(180);
+const HOOK_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(180);
 
-fn cancellable_hook() -> (Value, tokio::sync::oneshot::Receiver<()>) {
+enum HookCancellation {
+    Acknowledged,
+    Dispatched(tokio::sync::oneshot::Receiver<()>),
+}
+
+fn cancellable_hook() -> (Value, HookCancellation) {
     let script = format!("while :; do :; done # {}", Uuid::now_v7());
     let dispatched = arany::FaultPlan::observe_guard_dispatch(arany::ToolCall::Command {
         program: "sh".into(),
         args: vec!["-c".into(), script.clone()],
         cwd: String::new(),
     });
-    (shell_hook(&script), dispatched)
+    (
+        shell_hook(&script),
+        HookCancellation::Dispatched(dispatched),
+    )
 }
 
-async fn cancel_when_hook_dispatched(
-    dispatched: tokio::sync::oneshot::Receiver<()>,
-    cancellation: RunCancellation,
-) -> bool {
-    let observed = tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, dispatched)
+async fn assert_hook_cancellation(
+    fixture: Fixture,
+    provider: &Arc<ScriptedProvider>,
+    mut input: arany::RunRequest,
+    gate: HookCancellation,
+) -> Vec<arany::EventEnvelope> {
+    use arany::ToolDisposition;
+    let session = fixture
+        .engine
+        .create_session(fixture.workspace.clone(), None)
         .await
-        .is_ok_and(|result| result.is_ok());
-    cancellation.cancel();
-    observed
+        .unwrap();
+    input.session_id = Some(session);
+    input.title = None;
+    let (entered, release, expected_run, expected_hook) = match gate {
+        HookCancellation::Acknowledged => {
+            let (entered, release) =
+                arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                    matches!(event, Event::HookFinished { .. })
+                });
+            (
+                entered,
+                Some(release),
+                RunStatus::Cancelled,
+                ToolDisposition::Succeeded,
+            )
+        }
+        HookCancellation::Dispatched(entered) => (
+            entered,
+            None,
+            RunStatus::Interrupted,
+            ToolDisposition::Uncertain,
+        ),
+    };
+    let cancellation = RunCancellation::new();
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        cancellation: cancellation.clone(),
+        ..Default::default()
+    };
+    let watcher = async move {
+        let observed = tokio::time::timeout(HOOK_CANCELLATION_TIMEOUT, entered)
+            .await
+            .is_ok_and(|result| result.is_ok());
+        cancellation.cancel();
+        if let Some(release) = release {
+            let _ = release.send(());
+        }
+        observed
+    };
+    let (outcome, gate_reached) = tokio::join!(
+        run_with(&fixture.engine, provider, input, controls),
+        watcher
+    );
+    assert!(gate_reached, "hook cancellation boundary reached");
+    match outcome {
+        Ok(outcome) if expected_run == RunStatus::Cancelled => {
+            assert_eq!(outcome.run.status, expected_run);
+        }
+        Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            if expected_run == RunStatus::Interrupted => {}
+        other => panic!("unexpected hook cancellation outcome: {other:?}"),
+    }
+    let (events, view) = fixture.reopen(session).await;
+    assert_hook_cancellation_history(&events, &view, expected_run, expected_hook);
+    events
+}
+
+fn assert_hook_cancellation_history(
+    events: &[arany::EventEnvelope],
+    view: &SessionView,
+    expected_run: RunStatus,
+    expected_hook: arany::ToolDisposition,
+) {
+    assert_eq!(view.runs[0].status, expected_run);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Interrupted);
+    if expected_run == RunStatus::Cancelled {
+        assert!(
+            view.runs[0]
+                .agents
+                .iter()
+                .all(|agent| agent.status == arany::AgentStatus::Cancelled)
+        );
+    }
+    let hooks = &view.runs[0].lifecycle_hooks;
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(
+        hooks[0].outcome.as_ref().unwrap().observation.disposition,
+        expected_hook
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        Event::GoalFinished { .. } | Event::MessageCommitted { .. }
+    )));
+    if expected_run == RunStatus::Interrupted {
+        assert_eq!(
+            view.run_stop(&view.runs[0]),
+            Some(arany::RunStop::Uncertain)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::RunFinished { .. }))
+        );
+    }
 }
 
 fn hook_json(decision: &str) -> String {
@@ -4408,90 +4512,59 @@ mod lifecycle_hooks {
 
     #[tokio::test]
     async fn cancellation_during_auto_pre_compact_stops_before_reservation() {
-        let (hook, dispatched) = cancellable_hook();
-        let settings = json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[hook]}]}});
-        let fixture = Fixture::new(Some(&settings), false);
-        let page = 60 * 1024;
-        let reads = 5;
-        let call_budget = u32::try_from(2 * reads + 1).unwrap();
-        std::fs::write(
-            fixture.workspace.join("notes/data.txt"),
-            format!("{}\n", "x".repeat(1023)).repeat(usize::try_from(page / 1024).unwrap()),
-        )
-        .unwrap();
-        let mut outcomes: Vec<_> = (0..reads)
-            .map(|_| {
-                tool_outcome(arany::ToolCall::Read {
-                    path: "notes/data.txt".into(),
-                    offset: None,
-                    limit: None,
-                })
-            })
-            .collect();
-        outcomes.push(finish("done"));
-        let provider = Arc::new(
-            ScriptedProvider::new(outcomes).with_compactions(
-                (0..reads)
-                    .map(|_| {
-                        Ok(CompactionResponse {
-                            summary: "Earlier reads remain recorded in the journal.".into(),
-                            response_id: None,
-                            usage: arany::Usage::default(),
-                            wire_provenance: None,
-                        })
+        for (hook, gate) in [
+            (shell_hook("exit 0"), HookCancellation::Acknowledged),
+            cancellable_hook(),
+        ] {
+            let settings = json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[hook]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let page = 60 * 1024;
+            let reads = 5;
+            let call_budget = u32::try_from(2 * reads + 1).unwrap();
+            std::fs::write(
+                fixture.workspace.join("notes/data.txt"),
+                format!("{}\n", "x".repeat(1023)).repeat(usize::try_from(page / 1024).unwrap()),
+            )
+            .unwrap();
+            let mut outcomes: Vec<_> = (0..reads)
+                .map(|_| {
+                    tool_outcome(arany::ToolCall::Read {
+                        path: "notes/data.txt".into(),
+                        offset: None,
+                        limit: None,
                     })
-                    .collect(),
-            ),
-        );
-        let cancellation = RunCancellation::new();
-        let mut input = request(&fixture.workspace, "Inspect and complete the task");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Single;
-        input.goal.budget = Some(arany::GoalBudget {
-            max_provider_calls: Some(call_budget),
-            ..budget()
-        });
-        let outcome = {
-            let running = run_with(
-                &fixture.engine,
-                &provider,
-                input,
-                RunControls {
-                    tools: ToolGrant::Configured,
-                    cancellation: cancellation.clone(),
-                    ..Default::default()
-                },
+                })
+                .collect();
+            outcomes.push(finish("done"));
+            let provider = Arc::new(
+                ScriptedProvider::new(outcomes).with_compactions(
+                    (0..reads)
+                        .map(|_| {
+                            Ok(CompactionResponse {
+                                summary: "Earlier reads remain recorded in the journal.".into(),
+                                response_id: None,
+                                usage: arany::Usage::default(),
+                                wire_provenance: None,
+                            })
+                        })
+                        .collect(),
+                ),
             );
-            tokio::pin!(running);
-            let watcher = tokio::spawn(cancel_when_hook_dispatched(dispatched, cancellation));
-            let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
+            let mut input = request(&fixture.workspace, "Inspect and complete the task");
+            input.include_paths.clear();
+            input.policy = CollaborationPolicy::Single;
+            input.goal.budget = Some(arany::GoalBudget {
+                max_provider_calls: Some(call_budget),
+                ..budget()
+            });
+            let events = assert_hook_cancellation(fixture, &provider, input, gate).await;
+            assert!(provider.compact_requests.lock().unwrap().is_empty());
             assert!(
-                gate_reached.unwrap(),
-                "the Guard dispatched the PreCompact hook"
+                !events
+                    .iter()
+                    .any(|event| matches!(event.event, Event::GoalCompactionCallReserved { .. }))
             );
-            outcome.expect("cancelled Run")
-        };
-        assert_eq!(outcome.run.status, RunStatus::Cancelled);
-        assert!(provider.compact_requests.lock().unwrap().is_empty());
-
-        let (events, view) = fixture.reopen(outcome.session_id).await;
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::HookFinished { outcome, .. }
-                if outcome.observation.disposition == arany::ToolDisposition::Cancelled
-        )));
-        assert!(!events.iter().any(|event| matches!(
-            &event.event,
-            Event::GoalCompactionCallReserved { .. }
-                | Event::GoalFinished {
-                    exhausted: true,
-                    ..
-                }
-        )));
-        assert_eq!(
-            view.goal(outcome.goal_id).unwrap().status,
-            arany::GoalStatus::Interrupted
-        );
+        }
     }
 
     #[tokio::test]
@@ -4568,106 +4641,43 @@ mod lifecycle_hooks {
     }
 
     #[tokio::test]
-    async fn cancellation_during_subagent_stop_cancels_the_run_without_exhausting_the_goal() {
-        let (hook, dispatched) = cancellable_hook();
-        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[hook]}]}});
-        let fixture = Fixture::new(Some(&settings), false);
-        let cancellation = RunCancellation::new();
-        let provider = Arc::new(ScriptedProvider::new(vec![
-            delegate(1),
-            finish("child candidate"),
-            finish("synthesis"),
-        ]));
-        let mut input = request(&fixture.workspace, "Inspect and complete the task");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
-        let outcome = {
-            let running = run_with(
-                &fixture.engine,
-                &provider,
-                input,
-                RunControls {
-                    tools: ToolGrant::Configured,
-                    cancellation: cancellation.clone(),
-                    ..Default::default()
-                },
-            );
-            tokio::pin!(running);
-            let watcher = tokio::spawn(cancel_when_hook_dispatched(dispatched, cancellation));
-            let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
-            assert!(
-                gate_reached.unwrap(),
-                "the Guard dispatched the SubagentStop hook"
-            );
-            outcome.expect("cancelled Run")
-        };
-        assert_eq!(outcome.run.status, RunStatus::Cancelled);
-        let (events, view) = fixture.reopen(outcome.session_id).await;
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::HookFinished { outcome, .. }
-                if outcome.observation.disposition == arany::ToolDisposition::Cancelled
-        )));
-        assert!(!events.iter().any(|event| matches!(
-            &event.event,
-            Event::GoalFinished {
-                exhausted: true,
-                ..
-            }
-        )));
-        assert_eq!(
-            view.goal(outcome.goal_id).unwrap().status,
-            arany::GoalStatus::Interrupted
-        );
+    async fn subagent_stop_cancellation_preserves_known_and_unknown_outcomes() {
+        for (hook, gate) in [
+            (shell_hook("exit 0"), HookCancellation::Acknowledged),
+            cancellable_hook(),
+        ] {
+            let settings = json!({"hooks":{"SubagentStop":[{"hooks":[hook]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let provider = Arc::new(ScriptedProvider::new(vec![
+                delegate(1),
+                finish("child candidate"),
+                finish("synthesis"),
+            ]));
+            let mut input = request(&fixture.workspace, "Inspect and complete the task");
+            input.include_paths.clear();
+            input.policy = CollaborationPolicy::Auto {
+                max_active_children: 1,
+            };
+            assert_hook_cancellation(fixture, &provider, input, gate).await;
+            assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        }
     }
 
     #[tokio::test]
-    async fn cancellation_during_stop_cancels_the_run_without_exhausting_the_goal() {
-        let (hook, dispatched) = cancellable_hook();
-        let settings = json!({"hooks":{"Stop":[{"hooks":[hook]}]}});
-        let fixture = Fixture::new(Some(&settings), false);
-        let cancellation = RunCancellation::new();
-        let provider = Arc::new(ScriptedProvider::new(vec![finish("candidate")]));
-        let mut input = request(&fixture.workspace, "Inspect and complete the task");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Single;
-        let outcome = {
-            let mut running = Box::pin(run_with(
-                &fixture.engine,
-                &provider,
-                input,
-                RunControls {
-                    tools: ToolGrant::Configured,
-                    cancellation: cancellation.clone(),
-                    ..Default::default()
-                },
-            ));
-            let watcher = tokio::spawn(cancel_when_hook_dispatched(dispatched, cancellation));
-            let (outcome, gate_reached) = tokio::join!(&mut running, watcher);
-            assert!(gate_reached.unwrap(), "the Guard dispatched the Stop hook");
-            outcome.expect("cancelled Run")
-        };
-        assert_eq!(outcome.run.status, RunStatus::Cancelled);
-
-        let (events, view) = fixture.reopen(outcome.session_id).await;
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::HookFinished { outcome, .. }
-                if outcome.observation.disposition == arany::ToolDisposition::Cancelled
-        )));
-        assert!(!events.iter().any(|event| matches!(
-            &event.event,
-            Event::GoalFinished {
-                exhausted: true,
-                ..
-            }
-        )));
-        assert_eq!(
-            view.goal(outcome.goal_id).unwrap().status,
-            arany::GoalStatus::Interrupted
-        );
+    async fn stop_cancellation_preserves_known_and_unknown_outcomes() {
+        for (hook, gate) in [
+            (shell_hook("exit 0"), HookCancellation::Acknowledged),
+            cancellable_hook(),
+        ] {
+            let settings = json!({"hooks":{"Stop":[{"hooks":[hook]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let provider = Arc::new(ScriptedProvider::new(vec![finish("candidate")]));
+            let mut input = request(&fixture.workspace, "Inspect and complete the task");
+            input.include_paths.clear();
+            input.policy = CollaborationPolicy::Single;
+            assert_hook_cancellation(fixture, &provider, input, gate).await;
+            assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]
