@@ -14,16 +14,18 @@ pub enum TypedGitPrefix {
     Push,
     PrCreate,
     PrList,
+    PrView,
 }
 
 impl TypedGitPrefix {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Commit,
         Self::Branch,
         Self::Switch,
         Self::Push,
         Self::PrCreate,
         Self::PrList,
+        Self::PrView,
     ];
 
     pub fn tokens(self) -> &'static [&'static str] {
@@ -34,6 +36,7 @@ impl TypedGitPrefix {
             Self::Push => &["git", "push"],
             Self::PrCreate => &["gh", "pr", "create"],
             Self::PrList => &["gh", "pr", "list"],
+            Self::PrView => &["gh", "pr", "view"],
         }
     }
 
@@ -45,6 +48,7 @@ impl TypedGitPrefix {
             Self::Push => "git push",
             Self::PrCreate => "gh pr create",
             Self::PrList => "gh pr list",
+            Self::PrView => "gh pr view",
         }
     }
 
@@ -63,6 +67,7 @@ impl TypedGitPrefix {
             ToolCall::GitPush { .. } => Some(Self::Push),
             ToolCall::GhPrCreate { .. } => Some(Self::PrCreate),
             ToolCall::GhPrList { .. } => Some(Self::PrList),
+            ToolCall::GhPrView { .. } => Some(Self::PrView),
             _ => None,
         }
     }
