@@ -3,8 +3,173 @@ use super::{Grant, RunLoop};
 use crate::engine::EngineError;
 use crate::provider::ProviderRequest;
 use crate::session::RunFailure;
+use crate::tools::definitions::MAX_AGENT_CATALOG_BYTES;
 use crate::tools::types::MAX_TOOL_RESULT_BYTES;
 use crate::tools::{ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
+
+const MAX_NORMALIZED_DEFINITION_BYTES: usize = 1024 * 1024;
+
+#[must_use]
+pub(in crate::engine::run_loop) enum DefinitionInitialization {
+    Ready,
+    Stopped,
+}
+
+#[must_use]
+enum DefinitionRead {
+    Output(String),
+    Stopped,
+}
+
+impl RunLoop<'_> {
+    pub(in crate::engine::run_loop) async fn initialize_definitions(
+        &self,
+        request: &mut ProviderRequest,
+    ) -> Result<RunProgress<DefinitionInitialization>, EngineError> {
+        let Some(runtime) = self.controls.tools else {
+            return Ok(RunProgress::Ready(DefinitionInitialization::Ready));
+        };
+        let Some(pin) = runtime.definitions.pin() else {
+            return Ok(RunProgress::Ready(DefinitionInitialization::Ready));
+        };
+        let mut outputs = Vec::with_capacity(pin.files.len());
+        let mut normalized_bytes = 0;
+        for (index, file) in pin.files.iter().enumerate() {
+            if self.pause_at_boundary() || self.controls.cancellation.is_cancelled() {
+                return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
+            }
+            let call = ToolCall::ParseAgentDefinition {
+                index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
+                raw_digest: file.digest,
+            };
+            let output = match self.read_definition(request, runtime, call).await? {
+                RunProgress::Ready(DefinitionRead::Output(output)) => output,
+                RunProgress::Ready(DefinitionRead::Stopped) => {
+                    return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
+                }
+                RunProgress::Stopped(cause) => return Ok(RunProgress::Stopped(cause)),
+            };
+            normalized_bytes += output.len();
+            if normalized_bytes > MAX_NORMALIZED_DEFINITION_BYTES {
+                return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
+            }
+            outputs.push(output);
+        }
+        let child_model = &self.routing.providers.child[0].identity().model;
+        let Ok(registry) = crate::tools::definitions::registry(
+            &pin,
+            outputs.iter().map(String::as_str),
+            child_model,
+        ) else {
+            return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
+        };
+        self.install_definitions(request, runtime, registry)
+            .map(RunProgress::Ready)
+    }
+
+    fn install_definitions(
+        &self,
+        request: &mut ProviderRequest,
+        runtime: &ToolRuntime,
+        registry: crate::tools::definitions::Registry,
+    ) -> Result<DefinitionInitialization, EngineError> {
+        let registry = registry.definitions;
+        let tools = request
+            .input
+            .tools
+            .as_mut()
+            .ok_or(EngineError::InvalidRequest)?;
+        let mut catalog: serde_json::Value =
+            serde_json::from_str(tools.catalog()).map_err(|_| EngineError::InvalidRequest)?;
+        catalog["agents"] = serde_json::json!(
+            registry
+                .values()
+                .map(|definition| {
+                    let mut entry = definition.catalog_entry();
+                    if definition.editor() {
+                        let supported = runtime.worker_policy().is_some()
+                            && self.controls.goal_phase
+                                == crate::session::GoalPhase::Implementation;
+                        entry["supported"] = serde_json::json!(supported);
+                        entry["unsupported_reason"] = serde_json::json!(if !supported {
+                            Some("editor_parent_grant_unavailable")
+                        } else {
+                            None
+                        });
+                        entry["editor"] = serde_json::json!(true);
+                        entry["background"] = serde_json::json!(definition.background);
+                        entry["digest"] = serde_json::json!(crate::validate::digest(
+                            &serde_json::to_vec(definition).expect("normalized definition")
+                        ));
+                        entry["max_turns"] = serde_json::json!(definition.max_turns);
+                    }
+                    entry
+                })
+                .collect::<Vec<_>>()
+        );
+        tools.set_catalog(&catalog);
+        if serde_json::to_vec(&catalog["agents"])
+            .map_err(|_| EngineError::InvalidRequest)?
+            .len()
+            > MAX_AGENT_CATALOG_BYTES
+            || tools.catalog().len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
+            || tools.rendered_len() > runtime.context_limit_bytes()
+        {
+            return Ok(DefinitionInitialization::Stopped);
+        }
+        self.definitions
+            .set(registry)
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        Ok(DefinitionInitialization::Ready)
+    }
+
+    async fn read_definition(
+        &self,
+        request: &mut ProviderRequest,
+        runtime: &ToolRuntime,
+        call: ToolCall,
+    ) -> Result<RunProgress<DefinitionRead>, EngineError> {
+        let Some(mut intent) = self.primary_intent(runtime, call).await? else {
+            self.active_time_floor
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(RunProgress::Ready(DefinitionRead::Stopped));
+        };
+        intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
+        let grant = Grant::Primary {
+            request,
+            review_allowed: false,
+        };
+        let post_call = intent.call.clone();
+        let observation = match self
+            .run_intent(&grant, runtime, intent, &post_call, false)
+            .await?
+        {
+            Ok((observation, _)) => observation,
+            Err(StopCause::ActiveTime) => return Ok(RunProgress::Stopped(RunRefusal::Budget)),
+            Err(StopCause::Capacity) => return Ok(RunProgress::Stopped(RunRefusal::Capacity)),
+            Err(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::Budget
+                | StopCause::ContextFull
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            ) => return Ok(RunProgress::Ready(DefinitionRead::Stopped)),
+        };
+        if observation.disposition != ToolDisposition::Succeeded
+            || observation.attestation.is_none()
+        {
+            return Ok(RunProgress::Ready(DefinitionRead::Stopped));
+        }
+        Ok(RunProgress::Ready(DefinitionRead::Output(
+            observation.output,
+        )))
+    }
+}
 
 const INVOKED_SKILL_ENVELOPE_BYTES: usize = 1024;
 
