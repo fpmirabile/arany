@@ -51,7 +51,7 @@ queueing another task. Ctrl+C cancels active work. Once idle, review the retaine
 draft and press Enter explicitly. Errors do not automatically retry a task or
 restore an already consumed submission.
 
-Use Ctrl+O for a newline, `/paste` for an explicit clipboard read and `/help` for
+Use Ctrl+J for a newline, `/paste` for an explicit clipboard read and `/help` for
 available commands. The draft is limited to 8 KiB of UTF-8; invalid or oversized
 insertions reject without submitting a truncated task. Clipboard PNGs are
 limited to four images totaling 192 KiB. Original images remain in private
@@ -61,7 +61,7 @@ model limitations.
 
 Fullscreen, the default chat view, provides managed history with a visible
 composer. Classic inserts confirmed turns into native scrollback; choose it with
-`--classic` for one process or save it as the chat view in `/settings`. Ctrl+T
+`--classic` for one process or save it as the chat view in `/settings`. Ctrl+O
 or `/transcript` shows Tool details and public commentary. Visual streaming is
 provisional: interrupted saved prefixes remain incomplete and
 outside later model context. `--screen-reader` uses linear confirmed output.
