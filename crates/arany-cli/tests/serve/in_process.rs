@@ -1646,6 +1646,12 @@ fn private_json(path: &std::path::Path, value: Value) {
         .unwrap();
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Executor {
+    Tool,
+    Host,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ApprovalCase {
     Accept,
@@ -1661,6 +1667,7 @@ enum ApprovalCase {
     BackpressureInterrupt,
     Undelivered,
     Session,
+    SessionBusyResume,
     Remember,
 }
 
@@ -1668,7 +1675,7 @@ enum ApprovalCase {
 #[tokio::test]
 async fn approval_accept_dispatches_the_exact_journaled_intent_once() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Accept, false, false).await;
+    approval_scenario(ApprovalCase::Accept, Executor::Tool).await;
 }
 
 #[cfg(unix)]
@@ -1680,7 +1687,7 @@ async fn approval_decline_invalid_and_client_error_deny() {
         ApprovalCase::Invalid,
         ApprovalCase::ClientError,
     ] {
-        approval_scenario(case, false, false).await;
+        approval_scenario(case, Executor::Tool).await;
     }
 }
 
@@ -1693,7 +1700,7 @@ async fn approval_cancel_interrupt_and_eof_deny() {
         ApprovalCase::Interrupt,
         ApprovalCase::Eof,
     ] {
-        approval_scenario(case, false, false).await;
+        approval_scenario(case, Executor::Tool).await;
     }
 }
 
@@ -1701,14 +1708,14 @@ async fn approval_cancel_interrupt_and_eof_deny() {
 #[tokio::test]
 async fn approval_remains_answerable_after_the_former_deadline() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::LateAccept, false, false).await;
+    approval_scenario(ApprovalCase::LateAccept, Executor::Tool).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn approval_duplicate_and_unknown_responses_cannot_resolve_another_intent() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Duplicate, false, false).await;
+    approval_scenario(ApprovalCase::Duplicate, Executor::Tool).await;
 }
 
 #[cfg(unix)]
@@ -1719,7 +1726,7 @@ async fn approval_cancel_journals_while_outbound_is_full() {
         ApprovalCase::Backpressure,
         ApprovalCase::BackpressureInterrupt,
     ] {
-        approval_scenario(case, false, false).await;
+        approval_scenario(case, Executor::Tool).await;
     }
 }
 
@@ -1727,7 +1734,7 @@ async fn approval_cancel_journals_while_outbound_is_full() {
 #[tokio::test]
 async fn approval_never_delivered_is_unavailable_and_rejects_late_acceptance() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Undelivered, false, false).await;
+    approval_scenario(ApprovalCase::Undelivered, Executor::Tool).await;
 }
 
 #[test]
@@ -1758,13 +1765,11 @@ fn host_approval_once_refusal_and_transport_failures_replay() {
                 ApprovalCase::BackpressureInterrupt,
                 ApprovalCase::Undelivered,
                 ApprovalCase::Session,
+                ApprovalCase::SessionBusyResume,
                 ApprovalCase::Remember,
             ] {
                 let _deadline = deadline();
-                approval_scenario(case, true, false).await;
-                if case == ApprovalCase::Session {
-                    approval_scenario(case, true, true).await;
-                }
+                approval_scenario(case, Executor::Host).await;
             }
         });
 }
@@ -1916,7 +1921,7 @@ async fn session_host_turn(
 }
 
 #[cfg(unix)]
-async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
+async fn approval_scenario(case: ApprovalCase, executor: Executor) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1934,7 +1939,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
     let engine = arany::test_support::engine::open(
         state_root,
         EngineConfig {
-            guard_executable: Some(if host {
+            guard_executable: Some(if executor == Executor::Host {
                 std::env::current_exe()
                     .unwrap()
                     .parent()
@@ -1954,7 +1959,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
     let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
     let stalled = outbound.clone();
     let fill_output = outbound.clone();
-    let read = arany::test_support::scenario::tool_outcome(if host {
+    let read = arany::test_support::scenario::tool_outcome(if executor == Executor::Host {
         arany::ToolCall::CommandUnguarded {
             program: "printf".into(),
             args: vec!["host value".into()],
@@ -1972,7 +1977,10 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
     let finish = arany::ProviderOutcome::Answer(arany::Answer {
         text: "Finished".into(),
     });
-    let outcomes = if case == ApprovalCase::Session {
+    let outcomes = if matches!(
+        case,
+        ApprovalCase::Session | ApprovalCase::SessionBusyResume
+    ) {
         vec![
             read.clone(),
             read.clone(),
@@ -2004,7 +2012,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
     let (busy_started, mut busy_start) = mpsc::unbounded_channel();
     let busy_requests = Arc::new(Mutex::new(Vec::new()));
     let busy_dropped = Arc::new(AtomicUsize::new(0));
-    let selected: Arc<dyn Provider> = if busy_resume {
+    let selected: Arc<dyn Provider> = if case == ApprovalCase::SessionBusyResume {
         Arc::new(ResumeProvider {
             scripted: provider.clone(),
             waiting: WaitingProvider {
@@ -2021,13 +2029,13 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
         provider: Some(selected),
         ..Default::default()
     };
-    let approval_method = if host {
+    let approval_method = if executor == Executor::Host {
         "item/commandExecution/requestApproval"
     } else {
         "item/tool/requestApproval"
     };
     let client = async {
-        input.send(if matches!(case, ApprovalCase::Session | ApprovalCase::Remember) {
+        input.send(if matches!(case, ApprovalCase::Session | ApprovalCase::SessionBusyResume | ApprovalCase::Remember) {
             request(1, "initialize", json!({"clientInfo":{"name":"test","version":"1"},"capabilities":{"hostCommandSessionApproval":true}}))
         } else { initialize() }).await.unwrap();
         assert!(
@@ -2036,7 +2044,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
                 .unwrap()
                 .contains(&json!("approvals_v2"))
         );
-        let start = json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":if matches!(case, ApprovalCase::Session | ApprovalCase::Remember) {"default"} else {"auto"},"collaboration":"single"});
+        let start = json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":if matches!(case, ApprovalCase::Session | ApprovalCase::SessionBusyResume | ApprovalCase::Remember) {"default"} else {"auto"},"collaboration":"single"});
         input.send(request(2, "thread/start", start)).await.unwrap();
         let thread = next(&mut output).await["result"]["thread"]["id"].clone();
         next(&mut output).await;
@@ -2105,7 +2113,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
             assert!(params["intent"].get("expires_at_ms").is_none());
             let intent: arany::EffectIntent =
                 serde_json::from_value(params["intent"].clone()).unwrap();
-            if host {
+            if executor == Executor::Host {
                 assert!(
                     params["lines"]
                         .as_array()
@@ -2115,7 +2123,12 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
                 );
                 assert_eq!(
                     params.get("availableDecisions").is_some(),
-                    matches!(case, ApprovalCase::Session | ApprovalCase::Remember)
+                    matches!(
+                        case,
+                        ApprovalCase::Session
+                            | ApprovalCase::SessionBusyResume
+                            | ApprovalCase::Remember
+                    )
                 );
             } else {
                 assert_eq!(
@@ -2125,12 +2138,17 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
             }
             wire_approval = Some(approval.clone());
             match case {
-                ApprovalCase::Session | ApprovalCase::Remember => {
+                ApprovalCase::Session
+                | ApprovalCase::SessionBusyResume
+                | ApprovalCase::Remember => {
                     input
                         .send(decision(json!(999), json!({"decision":"acceptForSession"})))
                         .await
                         .unwrap();
-                    let reply = if case == ApprovalCase::Session {
+                    let reply = if matches!(
+                        case,
+                        ApprovalCase::Session | ApprovalCase::SessionBusyResume
+                    ) {
                         "acceptForSession"
                     } else {
                         "allowPrefixInFolder"
@@ -2333,9 +2351,12 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
                 .unwrap();
         }
         let mut receipt = None;
-        if case == ApprovalCase::Session {
+        if matches!(
+            case,
+            ApprovalCase::Session | ApprovalCase::SessionBusyResume
+        ) {
             session_host_turn(&input, &mut output, &thread, 0).await;
-            if busy_resume {
+            if case == ApprovalCase::SessionBusyResume {
                 resume_during_tools_disabled_turn(
                     &input,
                     &mut output,
@@ -2395,7 +2416,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
             "{case:?}: {message:?}"
         );
     }
-    if busy_resume {
+    if case == ApprovalCase::SessionBusyResume {
         assert_eq!(busy_dropped.load(Ordering::SeqCst), 1);
         let busy_session = {
             let busy = busy_requests.lock().unwrap();
@@ -2410,7 +2431,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
         }
     }
     let (events, view) = closed_view(&state, id).await;
-    if host {
+    if executor == Executor::Host {
         assert_eq!(
             std::fs::read(state.join("permissions.json")).unwrap(),
             serde_json::to_vec(&json!({"permissions":{"ask":["Read"]}})).unwrap()
@@ -2435,7 +2456,10 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
         );
         assert!(receipt["report"].to_string().contains("unguarded host run"));
     }
-    if case == ApprovalCase::Session {
+    if matches!(
+        case,
+        ApprovalCase::Session | ApprovalCase::SessionBusyResume
+    ) {
         assert_eq!(view.runs.len(), 3);
         let second = &view.runs[1].tools[0];
         let third = &view.runs[2].tools[0];
@@ -2481,6 +2505,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
             | ApprovalCase::Duplicate
             | ApprovalCase::LateAccept
             | ApprovalCase::Session
+            | ApprovalCase::SessionBusyResume
     );
     let continued = accepted
         || matches!(
@@ -2493,7 +2518,10 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
         );
     assert_eq!(
         tools.len(),
-        if matches!(case, ApprovalCase::Duplicate | ApprovalCase::Session) {
+        if matches!(
+            case,
+            ApprovalCase::Duplicate | ApprovalCase::Session | ApprovalCase::SessionBusyResume
+        ) {
             2
         } else {
             1
@@ -2505,7 +2533,10 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
             .filter(|tool| tool.observation.as_ref().unwrap().disposition
                 == arany::ToolDisposition::Succeeded)
             .count(),
-        if matches!(case, ApprovalCase::Duplicate | ApprovalCase::Session) {
+        if matches!(
+            case,
+            ApprovalCase::Duplicate | ApprovalCase::Session | ApprovalCase::SessionBusyResume
+        ) {
             2
         } else {
             usize::from(accepted)
@@ -2528,13 +2559,18 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
                 ApprovalCase::Accept
                 | ApprovalCase::LateAccept
                 | ApprovalCase::Duplicate
-                | ApprovalCase::Session => None,
+                | ApprovalCase::Session
+                | ApprovalCase::SessionBusyResume => None,
             }
         );
         let verdict = tool.permission_verdict.as_ref().unwrap();
         assert_eq!(
             verdict.source,
-            if case == ApprovalCase::Session && index == 1 {
+            if matches!(
+                case,
+                ApprovalCase::Session | ApprovalCase::SessionBusyResume
+            ) && index == 1
+            {
                 arany::permissions::PermissionSource::SessionApproval
             } else if matches!(
                 case,
@@ -2543,6 +2579,7 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
                     | ApprovalCase::Decline
                     | ApprovalCase::Duplicate
                     | ApprovalCase::Session
+                    | ApprovalCase::SessionBusyResume
             ) {
                 arany::permissions::PermissionSource::Human
             } else {
@@ -2570,7 +2607,15 @@ async fn approval_scenario(case: ApprovalCase, host: bool, busy_resume: bool) {
             .iter()
             .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
             .count(),
-        tools.len() + if case == ApprovalCase::Session { 2 } else { 0 }
+        tools.len()
+            + if matches!(
+                case,
+                ApprovalCase::Session | ApprovalCase::SessionBusyResume
+            ) {
+                2
+            } else {
+                0
+            }
     );
     assert!(
         requests
