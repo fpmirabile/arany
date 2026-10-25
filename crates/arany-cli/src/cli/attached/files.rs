@@ -334,6 +334,10 @@ mod tests {
             explicit_state_dir: false,
             roster: None,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,

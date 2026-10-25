@@ -1672,23 +1672,43 @@ fn draw_composer(
     } else {
         String::new()
     };
+    let mut compact_image_chip = !composer.images().is_empty() && composer_area.width < 28;
     if !composer.images().is_empty() {
-        position = if composer_area.width >= 40 {
-            format!(
-                " · {} image{}{}",
-                composer.images().len(),
-                if composer.images().len() == 1 {
-                    ""
+        let labels = (0..composer.images().len())
+            .map(|index| {
+                format!(
+                    "{}[Image #{}]",
+                    if composer.selected_image() == Some(index) {
+                        ">"
+                    } else {
+                        ""
+                    },
+                    index + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let all_chips = format!(" · {labels}{position}");
+        compact_image_chip |= UnicodeWidthStr::width(all_chips.as_str())
+            > usize::from(composer_area.width).saturating_sub(12);
+        if compact_image_chip {
+            let index = composer.selected_image().unwrap_or(0);
+            position = format!(
+                " {}[Image #{}]",
+                if composer.selected_image().is_some() {
+                    ">"
                 } else {
-                    "s"
+                    ""
                 },
-                position
-            )
+                index + 1
+            );
         } else {
-            format!(" {}img{}", composer.images().len(), position)
-        };
+            position = all_chips;
+        }
     }
-    let title = if 2 + "Ask Arany".len() + position.len() <= usize::from(composer_area.width) {
+    let title = if compact_image_chip {
+        ""
+    } else if 2 + "Ask Arany".len() + position.len() <= usize::from(composer_area.width) {
         "Ask Arany"
     } else {
         "Draft"
@@ -1737,7 +1757,13 @@ fn draw_composer(
         );
         let command = model.draft_action != DraftAction::Retain
             && matches!(composer.submission(), Ok(Submission::Command { .. }));
-        let hint = if composer.selected_paste().is_some() {
+        let hint = if composer.selected_image().is_some() {
+            if composer_area.width >= 28 {
+                " ←/→ select · Del/Backspace remove "
+            } else {
+                " Del remove "
+            }
+        } else if composer.selected_paste().is_some() {
             if composer_area.width >= 28 {
                 " Tab: inspect · Del: remove "
             } else {

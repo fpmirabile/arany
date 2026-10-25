@@ -22,6 +22,7 @@ pub struct ConversationRewind {
     pub session_id: Option<SessionId>,
     pub defaults: SessionDefaults,
     pub prompt: Option<String>,
+    pub images: Vec<crate::ImageAttachment>,
     pub images_omitted: bool,
 }
 
@@ -224,6 +225,7 @@ impl Engine {
                 session_id: None,
                 defaults: view.defaults.clone(),
                 prompt: Some(selected.objective.clone()),
+                images: selected.images.clone(),
                 images_omitted: !selected.images.is_empty(),
             },
         })

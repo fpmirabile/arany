@@ -2244,7 +2244,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         empty_chat: true,
         agent_switch: false,
     };
-    for width in [16, 40, 80] {
+    for width in [16, 28, 32, 40, 80] {
         for color in [true, false] {
             for action in [DraftAction::Submit, DraftAction::Retain] {
                 let mut model = model.clone();
@@ -2259,9 +2259,11 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                     .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
                     .unwrap();
                 let cursor_before = terminal.backend_mut().get_cursor_position().unwrap();
-                composer
-                    .attach_image(arany::test_support::test_image())
-                    .unwrap();
+                for _ in 0..4 {
+                    composer
+                        .attach_image(arany::test_support::test_image())
+                        .unwrap();
+                }
                 terminal
                     .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
                     .unwrap();
@@ -2272,17 +2274,25 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                 );
                 assert_eq!(composer.text(), text);
                 assert_eq!(composer.cursor_byte_offset(), caret);
-                let buffer = terminal.backend().buffer();
-                let rows = (0..8).map(|y| buffer_row(buffer, y)).collect::<Vec<_>>();
-                assert!(
-                    rows[3].contains(if width < 40 { "1img" } else { "1 image" }),
-                    "{width}: {rows:?}"
-                );
+                let rows = (0..8)
+                    .map(|y| buffer_row(terminal.backend().buffer(), y))
+                    .collect::<Vec<_>>();
+                assert!(rows[3].contains(">[Image #4]"), "{width}: {rows:?}");
                 assert!(rows[4].contains("alpha") && rows[5].contains('中'));
                 assert!(!rows.iter().any(|row| row.contains("iVBOR")));
+                assert_eq!(composer.apply(TerminalInput::Left), ComposerEdit::Changed);
+                terminal
+                    .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                    .unwrap();
+                let rows = (0..8)
+                    .map(|y| buffer_row(terminal.backend().buffer(), y))
+                    .collect::<Vec<_>>();
+                assert!(rows[3].contains(">[Image #3]"), "{width}: {rows:?}");
                 if !color {
                     assert!(
-                        buffer
+                        terminal
+                            .backend()
+                            .buffer()
                             .content()
                             .iter()
                             .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)

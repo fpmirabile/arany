@@ -39,6 +39,7 @@ pub struct ComposerDraft {
     text: String,
     pastes: Vec<TextPaste>,
     images: Vec<ImageAttachment>,
+    selected_image: Option<usize>,
     cursor: usize,
     text_only: bool,
 }
@@ -93,6 +94,7 @@ impl ComposerDraft {
             text: note,
             pastes,
             images: Vec::new(),
+            selected_image: None,
             text_only: false,
         }
     }
@@ -205,6 +207,7 @@ pub struct Composer {
     shortcut_received: bool,
     text_only: bool,
     images: Vec<ImageAttachment>,
+    selected_image: Option<usize>,
     cursor: usize,
     vertical_grapheme_column: Option<usize>,
     choices: CommandChoices,
@@ -318,6 +321,7 @@ impl Composer {
             text: std::mem::take(&mut self.text),
             pastes: std::mem::take(&mut self.pastes),
             images: std::mem::take(&mut self.images),
+            selected_image: self.selected_image,
             cursor: self.cursor,
             text_only: self.text_only,
         };
@@ -389,7 +393,15 @@ impl Composer {
             pastes.push(paste);
         }
         let mut images = draft.images;
+        let draft_image_count = images.len();
+        let use_draft_selection = self.text.is_empty() && self.images.is_empty();
+        let current_selection = self.selected_image;
         images.append(&mut self.images);
+        let selected_image = if use_draft_selection {
+            draft.selected_image
+        } else {
+            current_selection.map(|index| draft_image_count + index)
+        };
         self.cursor = if self.text.is_empty() {
             draft.cursor
         } else {
@@ -398,6 +410,7 @@ impl Composer {
         self.text = text;
         self.pastes = pastes;
         self.images = images;
+        self.selected_image = selected_image;
         true
     }
 
@@ -669,10 +682,30 @@ impl Composer {
             return Err("draft images are too large; remove one or use smaller PNGs");
         }
         self.images.push(image);
+        self.selected_image = Some(self.images.len() - 1);
         Ok(())
     }
 
+    pub fn selected_image(&self) -> Option<usize> {
+        self.selected_image
+            .filter(|index| *index < self.images.len())
+    }
+
+    pub fn remove_selected_image(&mut self) -> bool {
+        let Some(index) = self.selected_image() else {
+            return false;
+        };
+        self.images.remove(index);
+        self.selected_image = if self.images.is_empty() {
+            None
+        } else {
+            Some(index.min(self.images.len() - 1))
+        };
+        true
+    }
+
     pub fn take_images(&mut self) -> Vec<ImageAttachment> {
+        self.selected_image = None;
         std::mem::take(&mut self.images)
     }
 
@@ -829,6 +862,7 @@ impl Composer {
         self.vertical_grapheme_column = None;
         self.completion_index = 0;
         self.completion_hidden = false;
+        self.selected_image = None;
         Ok(ComposerEdit::Changed)
     }
 
@@ -843,6 +877,7 @@ impl Composer {
         self.pastes.clear();
         self.detail_scroll = None;
         self.images.clear();
+        self.selected_image = None;
         self.cursor = 0;
         self.vertical_grapheme_column = None;
         self.completion_index = 0;
@@ -1053,6 +1088,7 @@ impl Composer {
                     }
                     self.text.replace_range(start..self.cursor, &replacement);
                     self.cursor = start + replacement.len();
+                    self.selected_image = None;
                     self.vertical_grapheme_column = None;
                     self.completion_index = 0;
                     return ComposerEdit::Changed;
@@ -1102,6 +1138,7 @@ impl Composer {
                     }
                     self.text = completed;
                     self.cursor = self.text.len();
+                    self.selected_image = None;
                     self.vertical_grapheme_column = None;
                     self.completion_index = 0;
                     self.completion_hidden = input == TerminalInput::Submit;
@@ -1154,6 +1191,39 @@ impl Composer {
     fn apply_edit(&mut self, input: TerminalInput) -> ComposerEdit {
         if !matches!(input, TerminalInput::Up | TerminalInput::Down) {
             self.vertical_grapheme_column = None;
+        }
+        if let Some(selected) = self.selected_image() {
+            match input {
+                TerminalInput::Backspace | TerminalInput::Delete => {
+                    self.remove_selected_image();
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Left if selected > 0 => {
+                    self.selected_image = Some(selected - 1);
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Right if selected + 1 < self.images.len() => {
+                    self.selected_image = Some(selected + 1);
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Left | TerminalInput::Right => {
+                    self.selected_image = None;
+                    return ComposerEdit::Changed;
+                }
+                _ => self.selected_image = None,
+            }
+        } else if !self.images.is_empty() {
+            match input {
+                TerminalInput::Left if self.cursor == 0 => {
+                    self.selected_image = Some(self.images.len() - 1);
+                    return ComposerEdit::Changed;
+                }
+                TerminalInput::Right if self.cursor == self.text.len() => {
+                    self.selected_image = Some(0);
+                    return ComposerEdit::Changed;
+                }
+                _ => {}
+            }
         }
         match input {
             TerminalInput::Tab
@@ -1325,6 +1395,89 @@ fn next_word_boundary(text: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_text_deselects_an_image_before_backspace() {
+        let mut composer = Composer::default();
+        composer
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+        assert_eq!(composer.insert_paste("abc"), Ok(ComposerEdit::Changed));
+        assert_eq!(composer.selected_image(), None);
+        assert_eq!(
+            composer.apply(TerminalInput::Backspace),
+            ComposerEdit::Changed
+        );
+        assert_eq!(composer.text(), "ab");
+        assert_eq!(composer.images().len(), 1);
+    }
+
+    #[test]
+    fn recalled_and_merged_text_drafts_keep_image_focus_deselected() {
+        let mut composer = Composer::default();
+        composer
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+        composer.insert_paste("abc").unwrap();
+        assert_eq!(composer.selected_image(), None);
+        assert!(composer.remember_and_clear());
+        assert_eq!(composer.apply(TerminalInput::Up), ComposerEdit::Changed);
+        assert_eq!(composer.selected_image(), None);
+        assert_eq!(
+            composer.apply(TerminalInput::Backspace),
+            ComposerEdit::Changed
+        );
+        assert_eq!(composer.text(), "ab");
+        assert_eq!(composer.images().len(), 1);
+
+        let held = composer.take_draft();
+        composer.insert_literal("newer text").unwrap();
+        composer
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+        composer.insert_literal("!").unwrap();
+        assert_eq!(composer.selected_image(), None);
+        assert!(composer.restore_draft(held));
+        assert_eq!(composer.text(), "ab\nnewer text!");
+        assert_eq!(composer.images().len(), 2);
+        assert_eq!(composer.selected_image(), None);
+        assert_eq!(
+            composer.apply(TerminalInput::Backspace),
+            ComposerEdit::Changed
+        );
+        assert_eq!(composer.text(), "ab\nnewer text");
+        assert_eq!(composer.images().len(), 2);
+    }
+
+    #[test]
+    fn command_and_file_completion_deselect_images_before_backspace() {
+        let mut command = Composer::default();
+        command.insert_literal("/he").unwrap();
+        command
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+        assert_eq!(command.apply(TerminalInput::Tab), ComposerEdit::Changed);
+        assert_eq!(command.text(), "/help");
+        assert_eq!(command.selected_image(), None);
+        assert_eq!(
+            command.apply(TerminalInput::Backspace),
+            ComposerEdit::Changed
+        );
+        assert_eq!(command.text(), "/hel");
+        assert_eq!(command.images().len(), 1);
+
+        let mut file = Composer::default();
+        file.insert_literal("@sr").unwrap();
+        file.set_file_candidates(Some("sr".into()), vec!["src/".into()]);
+        file.attach_image(arany::test_support::test_image())
+            .unwrap();
+        assert_eq!(file.apply(TerminalInput::Tab), ComposerEdit::Changed);
+        assert_eq!(file.text(), "@src/");
+        assert_eq!(file.selected_image(), None);
+        assert_eq!(file.apply(TerminalInput::Backspace), ComposerEdit::Changed);
+        assert_eq!(file.text(), "@src");
+        assert_eq!(file.images().len(), 1);
+    }
 
     #[test]
     fn newline_gestures_preserve_provenance_caret_capacity_and_aliases() {
@@ -1813,6 +1966,19 @@ mod tests {
             composer.is_empty(),
             "explicit clear discards text and images"
         );
+        let image = arany::test_support::test_image();
+        for _ in 0..3 {
+            composer.attach_image(image.clone()).unwrap();
+        }
+        assert_eq!(composer.selected_image(), Some(2));
+        assert_eq!(composer.apply(TerminalInput::Left), ComposerEdit::Changed);
+        assert_eq!(composer.selected_image(), Some(1));
+        assert_eq!(composer.apply(TerminalInput::Delete), ComposerEdit::Changed);
+        assert_eq!(composer.images().len(), 2);
+        assert_eq!(composer.selected_image(), Some(1));
+        let draft = composer.take_draft();
+        assert!(composer.restore_draft(draft));
+        assert_eq!(composer.selected_image(), Some(1));
     }
 
     #[test]

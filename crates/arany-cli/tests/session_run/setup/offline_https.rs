@@ -1,5 +1,6 @@
 use super::*;
 use crate::process::BoundedOutput;
+use base64::engine::general_purpose::STANDARD;
 use std::{net::TcpStream, os::unix::fs::PermissionsExt, process::Child};
 
 const STAGE: &str = "ARANY_TEST_OFFLINE_HTTPS_SETUP_STAGE";
@@ -420,7 +421,8 @@ fn run_pty_with_gate(
         );
         let catalog_busy = needle == b"Notice: Loading model catalog; Ctrl+C cancels"
             || needle.ends_with(b"catalog loading; Ctrl+C cancels")
-            || needle.ends_with(b"draft unchanged; catalog loading");
+            || needle.ends_with(b"draft unchanged; catalog loading")
+            || needle.starts_with(b"Image 1: PNG");
         if needle != b"Choose number, n next, p previous, or q close:"
             && needle != b"Choose number, exact ID, n next, p previous, or q close:"
             && !catalog_busy
@@ -817,6 +819,10 @@ fn isolated_stage() {
             ),
             (
                 b"Notice: Draft: 13 characters; catalog loading; Ctrl+C cancels",
+                b"\x1b[200~photo.png\x1b[201~",
+            ),
+            (
+                b"Image 1: PNG 1x1, 69 B",
                 b"\x01\x04",
             ),
             (
@@ -900,6 +906,12 @@ fn release_private_file_setup_reuses_saved_account() {
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
         .expect("owner-only home");
     std::fs::create_dir(home.join("workspace")).expect("Workspace");
+    let image = arany::test_support::test_image();
+    std::fs::write(
+        home.join("workspace/photo.png"),
+        base64::Engine::decode(&STANDARD, image.base64()).expect("test PNG bytes"),
+    )
+    .expect("Workspace PNG");
     fixture(&fixture_dir);
     let hosts = temp.path().join("hosts");
     std::fs::write(&hosts, b"127.0.0.1 api.openai.com api.anthropic.com\n")

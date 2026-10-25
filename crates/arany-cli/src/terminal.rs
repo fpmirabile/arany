@@ -39,6 +39,184 @@ pub use agent_chat::{AgentChatFollow, AgentChatInput};
 use agents::{AgentPanel, PanelUpdate, window_start};
 use backend::TerminalBackend;
 use clipboard::{ClipboardContent, ClipboardRead};
+
+fn read_pasted_workspace_image(
+    input: &str,
+    workspace: &std::path::Path,
+    identity: arany::WorkspaceIdentity,
+) -> Result<Option<arany::ImageAttachment>, &'static str> {
+    use std::io::Read;
+    let Some(path) = pasted_png_path(input, workspace)? else {
+        return Ok(None);
+    };
+    let file = open_pinned_workspace_png(workspace, &path, identity)?;
+    let initial_capacity = file
+        .metadata()
+        .map_err(|_| "PNG file is unavailable")?
+        .len()
+        .min(arany::MAX_IMAGE_BYTES as u64) as usize;
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    file.take(arany::MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "PNG file could not be read")?;
+    if bytes.len() > arany::MAX_IMAGE_BYTES {
+        return Err("image is too large; choose a smaller PNG");
+    }
+    arany::ImageAttachment::from_png(&bytes)
+        .map(Some)
+        .map_err(|_| "invalid or unsupported PNG image")
+}
+
+const MAX_PASTED_PNG_PATH_BYTES: usize = 512;
+
+fn pasted_png_path(
+    input: &str,
+    workspace: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, &'static str> {
+    let path = input.trim().trim_matches(['"', '\'']);
+    if path.len() > MAX_PASTED_PNG_PATH_BYTES || !path.to_ascii_lowercase().ends_with(".png") {
+        return Ok(None);
+    }
+    let pasted_path = std::path::Path::new(path);
+    let relative = if pasted_path.is_absolute() {
+        let admitted_root = workspace
+            .canonicalize()
+            .map_err(|_| "Workspace is unavailable")?;
+        pasted_path
+            .strip_prefix(admitted_root)
+            .map_err(|_| "PNG path must be inside the admitted Workspace")?
+            .to_str()
+            .ok_or("PNG path must be valid UTF-8")?
+    } else {
+        path.strip_prefix("./").unwrap_or(path)
+    };
+    let mention = serde_json::to_string(relative).map_err(|_| "invalid PNG path")?;
+    let paths = arany::mention_paths(&format!("@{mention}"))
+        .map_err(|_| "PNG path must name a file inside the admitted Workspace")?;
+    let [relative_path] = paths.as_slice() else {
+        return Err("PNG path must name a file inside the admitted Workspace");
+    };
+    Ok(Some(relative_path.clone()))
+}
+
+fn open_pinned_workspace_png(
+    workspace: &std::path::Path,
+    relative: &std::path::Path,
+    identity: arany::WorkspaceIdentity,
+) -> Result<std::fs::File, &'static str> {
+    use rustix::fs::{Mode, OFlags, fstat, open, openat};
+    use std::os::unix::fs::MetadataExt;
+
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| "Workspace is unavailable")?;
+    let root = open(
+        workspace,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|_| "Workspace is unavailable")?;
+    let root_stat = fstat(&root).map_err(|_| "Workspace is unavailable")?;
+    if identity.device != root_stat.st_dev as u64 || identity.inode != root_stat.st_ino as u64 {
+        return Err("Workspace identity changed; PNG was not read");
+    }
+    let relative = relative.to_str().ok_or("PNG path must be valid UTF-8")?;
+    let components = relative.split('/').collect::<Vec<_>>();
+    let mut directory = std::fs::File::from(root);
+    for component in &components[..components.len() - 1] {
+        directory = std::fs::File::from(
+            openat(
+                &directory,
+                *component,
+                OFlags::RDONLY
+                    | OFlags::DIRECTORY
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK
+                    | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(|_| "PNG path is unavailable or unsafe")?,
+        );
+        if fstat(&directory)
+            .map_err(|_| "PNG path is unavailable")?
+            .st_dev
+            != root_stat.st_dev
+        {
+            return Err("PNG path crosses a filesystem boundary");
+        }
+    }
+    let file = std::fs::File::from(
+        openat(
+            &directory,
+            components[components.len() - 1],
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
+            Mode::empty(),
+        )
+        .map_err(|_| "PNG path is unavailable or unsafe")?,
+    );
+    let metadata = file.metadata().map_err(|_| "PNG file is unavailable")?;
+    if !metadata.is_file() || metadata.dev() != root_stat.st_dev as u64 || metadata.nlink() != 1 {
+        return Err("PNG path must be a regular Workspace file without hard links");
+    }
+    if metadata.len() > arany::MAX_IMAGE_BYTES as u64 {
+        return Err("image is too large; choose a smaller PNG");
+    }
+    Ok(file)
+}
+
+#[cfg(test)]
+mod workspace_image_tests {
+    use super::read_pasted_workspace_image;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn pasted_png_reads_only_a_pinned_regular_workspace_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let bytes = STANDARD
+            .decode(arany::test_support::test_image().base64())
+            .unwrap();
+        std::fs::write(workspace.join("photo.png"), &bytes).unwrap();
+        let metadata = std::fs::metadata(&workspace).unwrap();
+        let identity = arany::WorkspaceIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let image = read_pasted_workspace_image("photo.png", &workspace, identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.byte_len(), bytes.len());
+        let absolute = workspace.join("photo.png");
+        assert!(
+            read_pasted_workspace_image(absolute.to_str().unwrap(), &workspace, identity)
+                .unwrap()
+                .is_some()
+        );
+        assert!(read_pasted_workspace_image("../photo.png", &workspace, identity).is_err());
+        assert!(read_pasted_workspace_image("/tmp/photo.png", &workspace, identity).is_err());
+        assert!(read_pasted_workspace_image("missing.png", &workspace, identity).is_err());
+        assert!(
+            read_pasted_workspace_image(
+                "photo.png",
+                &workspace,
+                arany::WorkspaceIdentity {
+                    inode: identity.inode + 1,
+                    ..identity
+                }
+            )
+            .is_err()
+        );
+        std::os::unix::fs::symlink("photo.png", workspace.join("linked.png")).unwrap();
+        assert!(read_pasted_workspace_image("linked.png", &workspace, identity).is_err());
+        let replaced = temp.path().join("replaced-workspace");
+        std::fs::rename(&workspace, replaced).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("photo.png"), &bytes).unwrap();
+        assert!(read_pasted_workspace_image("photo.png", &workspace, identity).is_err());
+    }
+}
 use commands::help_len;
 pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
@@ -1477,6 +1655,23 @@ impl AttachedTerminal {
     }
 
     pub fn paste_into(&mut self, composer: &mut Composer) -> Result<ComposerEdit, &'static str> {
+        self.paste_into_workspace(composer, None)
+    }
+
+    pub fn paste_into_admitted_workspace(
+        &mut self,
+        composer: &mut Composer,
+        workspace: &std::path::Path,
+        identity: arany::WorkspaceIdentity,
+    ) -> Result<ComposerEdit, &'static str> {
+        self.paste_into_workspace(composer, Some((workspace, identity)))
+    }
+
+    fn paste_into_workspace(
+        &mut self,
+        composer: &mut Composer,
+        workspace: Option<(&std::path::Path, arany::WorkspaceIdentity)>,
+    ) -> Result<ComposerEdit, &'static str> {
         if let Some(paste) = self.clipboard_paste.take() {
             match paste? {
                 ClipboardContent::Image(image) => {
@@ -1490,6 +1685,13 @@ impl AttachedTerminal {
             }
         }
         let text = self.take_paste()?;
+        if let Some((workspace, identity)) = workspace
+            && let Some(image) = read_pasted_workspace_image(&text, workspace, identity)?
+        {
+            composer.attach_image(image)?;
+            self.clipboard_preview = self.is_linear();
+            return Ok(ComposerEdit::Changed);
+        }
         match composer.insert_paste(&text)? {
             ComposerEdit::AtCapacity => Err("paste is too large; paste a smaller section"),
             edit => {
