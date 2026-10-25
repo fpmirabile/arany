@@ -90,12 +90,14 @@ pub(super) enum StepEnd {
 pub(super) enum SizingRefusal {
     DelegationDeadline,
     ActiveTime,
+    Cancelled,
     ContextFull,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::engine) enum HookRefusal {
     ActiveTime,
+    Cancelled,
     ContextFull,
 }
 
@@ -103,6 +105,7 @@ impl From<HookRefusal> for SizingRefusal {
     fn from(refusal: HookRefusal) -> Self {
         match refusal {
             HookRefusal::ActiveTime => Self::ActiveTime,
+            HookRefusal::Cancelled => Self::Cancelled,
             HookRefusal::ContextFull => Self::ContextFull,
         }
     }
@@ -112,6 +115,7 @@ impl HookRefusal {
     pub(in crate::engine) fn into_engine_error(self) -> EngineError {
         match self {
             Self::ActiveTime => EngineError::GoalBudgetExhausted,
+            Self::Cancelled => EngineError::CancelledBeforeStart,
             Self::ContextFull => EngineError::ContextTooLarge,
         }
     }
@@ -122,6 +126,7 @@ impl From<SizingRefusal> for StopCause {
         match refusal {
             SizingRefusal::DelegationDeadline => Self::DelegationDeadline,
             SizingRefusal::ActiveTime => Self::ActiveTime,
+            SizingRefusal::Cancelled => Self::Cancelled,
             SizingRefusal::ContextFull => Self::ContextFull,
         }
     }
@@ -432,12 +437,14 @@ mod tests {
     fn sizing_and_stop_precedence() {
         for (refusal, expected) in [
             (HookRefusal::ActiveTime, StopCause::ActiveTime),
+            (HookRefusal::Cancelled, StopCause::Cancelled),
             (HookRefusal::ContextFull, StopCause::ContextFull),
         ] {
             assert_eq!(StopCause::from(SizingRefusal::from(refusal)), expected);
         }
         for (refusal, expected) in [
             (HookRefusal::ActiveTime, EngineError::GoalBudgetExhausted),
+            (HookRefusal::Cancelled, EngineError::CancelledBeforeStart),
             (HookRefusal::ContextFull, EngineError::ContextTooLarge),
         ] {
             assert_eq!(
@@ -448,6 +455,7 @@ mod tests {
 
         for (refusal, expected) in [
             (SizingRefusal::ActiveTime, StopCause::ActiveTime),
+            (SizingRefusal::Cancelled, StopCause::Cancelled),
             (SizingRefusal::ContextFull, StopCause::ContextFull),
             (
                 SizingRefusal::DelegationDeadline,

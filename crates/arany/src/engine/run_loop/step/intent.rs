@@ -286,6 +286,7 @@ impl RunLoop<'_> {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(Err(refusal.into()))
             }
+            Err(refusal @ SizingRefusal::Cancelled) => Ok(Err(refusal.into())),
             Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
         }
     }

@@ -1103,6 +1103,7 @@ pub(super) async fn execute_inner(
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
+        crate::fault::guard_dispatched(intent);
         let report_deadline = if primary_command(intent) {
             capture_phase(&mut unit, intent, &mut stdin, &mut stdout, deadline).await?
         } else {
