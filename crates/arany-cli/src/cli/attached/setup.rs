@@ -1,3 +1,4 @@
+mod native;
 mod roster;
 mod routing;
 
@@ -7,6 +8,7 @@ use crate::accounts::chatgpt::{
 use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
 use crate::presentation::{escape_terminal, format_duration};
 use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalError, TerminalInput};
+#[cfg(all(test, unix, debug_assertions))]
 use arany::RecordKind;
 use arany::{
     CollaborationPolicy, CustomCheckStatus, CustomProfile, CustomProfileDraft, CustomProfileError,
@@ -402,7 +404,7 @@ pub(super) async fn saved_defaults(
         }
     }
     let path = StateRoot::account_path().map_err(|error| error.to_string())?;
-    let (native, chatgpt) = saved_account_presence(&path)?;
+    let (native, chatgpt) = native::saved_account_presence(&path)?;
     match (native, chatgpt) {
         (true, true) => match choose(
             terminal,
@@ -413,12 +415,12 @@ pub(super) async fn saved_defaults(
         )
         .await?
         {
-            Some(b'1') => saved_native_defaults(terminal).await,
+            Some(b'1') => native::saved_native_defaults(terminal).await,
             Some(b'2') => selected_chatgpt_defaults().map_err(Into::into),
             Some(b'0') | None => Ok(SavedDefaults::Cancelled),
             _ => Err("invalid saved access choice".into()),
         },
-        (true, false) => saved_native_defaults(terminal).await,
+        (true, false) => native::saved_native_defaults(terminal).await,
         (false, true) => selected_chatgpt_defaults().map_err(Into::into),
         (false, false) => Ok(SavedDefaults::Unconfigured),
     }
@@ -477,43 +479,6 @@ async fn selected_keyring_slot(defaults: &SessionDefaults) -> Result<Option<Stri
         }
         Some(ProviderKind::Custom) | None => Ok(None),
     }
-}
-
-fn saved_account_presence(path: &Path) -> Result<(bool, bool), String> {
-    let Some(state) = crate::files::open_optional_state(path).map_err(|error| error.to_string())?
-    else {
-        return Ok((false, false));
-    };
-    Ok((
-        state
-            .record(RecordKind::SavedAccount)
-            .present()
-            .map_err(|error| error.to_string())?,
-        state
-            .record(RecordKind::ChatgptAccounts)
-            .present()
-            .map_err(|error| error.to_string())?,
-    ))
-}
-
-async fn saved_native_defaults(
-    terminal: &mut AttachedTerminal,
-) -> Result<SavedDefaults, SetupError> {
-    let Some(inspected) = await_operation(
-        terminal,
-        AUTHORIZE_TITLE,
-        AUTHORIZE_PROMPT,
-        credentials::inspect_interactive(),
-    )
-    .await?
-    else {
-        return Ok(SavedDefaults::Cancelled);
-    };
-    let account = inspected
-        .map_err(|error| error.to_string())?
-        .account
-        .ok_or("saved API account unavailable; use /setup to repair it")?;
-    Ok(SavedDefaults::AccessChecked(defaults(&account)))
 }
 
 fn selected_chatgpt_defaults() -> Result<SavedDefaults, String> {
@@ -640,80 +605,14 @@ async fn accounts_setup(
         };
         match action {
             b'1' => return native_setup(terminal, workspace, journal).await,
-            b'2' => return select_native_account(terminal).await,
+            b'2' => return native::select_native_account(terminal).await,
             b'3' => return chatgpt_setup(terminal, workspace, journal).await,
-            b'4' => inspect_native_account(terminal).await?,
+            b'4' => native::inspect_native_account(terminal).await?,
             b'5' => remove_saved_access(terminal, workspace, journal).await?,
             b'6' => return Ok(None),
             _ => return Err("invalid account action".into()),
         }
     }
-}
-
-async fn inspect_native_account(terminal: &mut AttachedTerminal) -> Result<(), SetupError> {
-    let inspected = credentials::inspect()
-        .await
-        .map_err(|error| SetupError::from(error.to_string()))?;
-    let Some(account) = inspected.account else {
-        await_setup_ack(terminal, "Native API account", "No saved account").await?;
-        return Ok(());
-    };
-    let details = format!(
-        "Provider: {}\nModel: {}\nEffort: {}\nStorage: {}\nCredential: stored; hidden",
-        escape_terminal(&account.provider.profile()),
-        escape_terminal(&account.model),
-        account
-            .effort
-            .map_or("default".to_owned(), |effort| effort.to_string()),
-        match inspected.storage {
-            AccountStorage::Keyring => "OS password store",
-            AccountStorage::PrivateFile => "private file",
-        },
-    );
-    await_setup_ack(terminal, "Native API account", &details).await?;
-    Ok(())
-}
-
-async fn select_native_account(
-    terminal: &mut AttachedTerminal,
-) -> Result<Option<SetupSelection>, SetupError> {
-    let inspected = credentials::inspect()
-        .await
-        .map_err(|error| SetupError::from(error.to_string()))?;
-    let Some(account) = inspected.account else {
-        await_setup_ack(terminal, "Native API account", "No saved account to select").await?;
-        return Ok(None);
-    };
-    if inspected.storage == AccountStorage::PrivateFile
-        && choose(
-            terminal,
-            1,
-            "Use private file?",
-            "NOT encrypted; same-user apps read key",
-            &[(b'2', "Cancel"), (b'1', "Use private file")],
-        )
-        .await?
-            != Some(b'1')
-    {
-        return Ok(None);
-    }
-    let credentials = credentials::load_selected(account.id, &account.provider.profile())
-        .await
-        .map_err(|error| SetupError::from(error.to_string()))?;
-    let Some(catalog) = load_catalog(terminal, &account.provider.profile(), &credentials).await?
-    else {
-        return Ok(None);
-    };
-    let notice = format!(
-        "{} ready: {} · use /model to change.",
-        account.provider.profile(),
-        account.model
-    );
-    Ok(Some(SetupSelection::Native {
-        defaults: defaults(&account),
-        notice,
-        catalog,
-    }))
 }
 
 async fn remove_saved_access(
@@ -2126,7 +2025,7 @@ async fn native_setup(
     )
     .and_then(|account| account.with_anthropic_workspace(workspace_id))
     .map_err(|error| error.to_string())?;
-    let defaults = defaults(&account);
+    let defaults = native::defaults(&account);
     terminal.draw_setup(
         0,
         "Saving account",
@@ -2986,16 +2885,6 @@ fn native_catalog_default<'a>(provider: &str, items: &'a [ModelEntry]) -> Option
         .or_else(|| items.first().map(|item| (item.id.as_str(), false)))
 }
 
-fn defaults(account: &SavedAccount) -> SessionDefaults {
-    SessionDefaults {
-        provider: Some(account.provider.profile()),
-        model: Some(account.model.clone()),
-        effort: account.effort,
-        account_id: Some(account.id),
-        policy: CollaborationPolicy::default(),
-    }
-}
-
 async fn choose(
     terminal: &mut AttachedTerminal,
     step: u8,
@@ -3572,35 +3461,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn saved_account_defaults_pin_only_the_selected_account() {
-        let account = SavedAccount::new(
-            "openai".into(),
-            "gpt-5.4".into(),
-            Some(Effort::High),
-            "synthetic-key".into(),
-        )
-        .expect("account");
-        let defaults = defaults(&account);
-        assert_eq!(defaults.provider.as_deref(), Some("openai"));
-        assert_eq!(defaults.model.as_deref(), Some("gpt-5.4"));
-        assert_eq!(defaults.effort, Some(Effort::High));
-        assert_eq!(defaults.account_id, Some(account.id));
-
-        let temp = tempfile::tempdir().unwrap();
-        let current = temp.path().join("current");
-        assert_eq!(saved_account_presence(&current).unwrap(), (false, false));
-        let root = StateRoot::admit(&current).unwrap();
-        root.record(RecordKind::ChatgptAccounts)
-            .replace(b"not a parsed account index")
-            .unwrap();
-        assert_eq!(saved_account_presence(&current).unwrap(), (false, true));
-        root.record(RecordKind::SavedAccount)
-            .replace(b"not a parsed native account")
-            .unwrap();
-        assert_eq!(saved_account_presence(&current).unwrap(), (true, true));
-    }
-
-    #[test]
     fn setup_account_requires_explicit_effort_for_unreviewed_model() {
         assert!(
             SavedAccount::new("openai".into(), "future-model".into(), None, "key".into()).is_err()
@@ -3637,7 +3497,7 @@ pub(super) mod tests {
                 "synthetic-key".into(),
             )
             .unwrap();
-            assert_eq!(defaults(&account).effort, Some(Effort::Low));
+            assert_eq!(native::defaults(&account).effort, Some(Effort::Low));
             assert!(native_catalog_default(provider, &[]).is_none());
         }
         assert!(native_catalog_default("custom:local", &[]).is_none());
