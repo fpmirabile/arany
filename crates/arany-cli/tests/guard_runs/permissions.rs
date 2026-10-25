@@ -679,7 +679,7 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                         PermissionSource::AiReview
                     } else if human {
                         PermissionSource::Human
-                    } else if mode == "plan" || mode == "dontAsk" && rule == "ask" {
+                    } else if mode == "plan" {
                         PermissionSource::Mode
                     } else {
                         PermissionSource::Rule

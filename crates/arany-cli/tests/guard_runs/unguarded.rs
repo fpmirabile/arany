@@ -167,10 +167,10 @@ impl Host {
         let mut prompts = Vec::new();
         let mut intents = Vec::new();
         replies.reverse();
-        let outcome = loop {
+        let result = loop {
             tokio::select! {
                 biased;
-                result = &mut running => break result.unwrap(),
+                result = &mut running => break result,
                 approval = inbox.next(), if terminal.is_some() => {
                     let approval = approval.unwrap();
                     match approval.unguarded.clone() {
@@ -187,6 +187,7 @@ impl Host {
                 }
             }
         };
+        let outcome = self.observed_outcome(workspace, result).await;
         let requests = provider.requests.lock().unwrap().len();
         let unconsumed = provider.responses.lock().unwrap().len();
         let seen = Seen {
@@ -219,6 +220,36 @@ impl Host {
             )
         );
         seen
+    }
+
+    async fn observed_outcome(
+        &self,
+        workspace: &Path,
+        result: Result<arany::RunOutcome, EngineError>,
+    ) -> arany::RunOutcome {
+        if !self.uncertain_save {
+            return result.unwrap();
+        }
+        assert!(
+            matches!(result, Err(EngineError::Tool(arany::ToolError::Uncertain))),
+            "an unconfirmed save stops continuation: {result:?}"
+        );
+        let sessions = list_sessions(
+            StateRoot::open_existing(&self.state).unwrap(),
+            workspace.to_owned(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session_id = sessions[0].id;
+        let (_, view) = arany::test_support::goals::replayed(&self.state, session_id).await;
+        let run = view.runs.last().unwrap().clone();
+        assert_eq!(run.status, RunStatus::Interrupted);
+        arany::RunOutcome {
+            session_id,
+            goal_id: view.goals.last().unwrap().id,
+            run,
+        }
     }
 
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {
@@ -1673,7 +1704,16 @@ async fn host_prefix_overflow_and_unconfirmed_save_never_spawn() {
             }
         );
         assert_eq!(seen.requests, if uncertain { 1 } else { 2 });
-        let (_, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(seen.unconsumed, usize::from(uncertain));
+        let (events, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
+                .count(),
+            1,
+            "the Tool is never retried"
+        );
         assert_eq!(
             view.runs[0]
                 .tools
