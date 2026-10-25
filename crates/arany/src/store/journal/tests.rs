@@ -192,7 +192,7 @@ async fn store_reopens_maximum_worst_case_escaped_compaction_summary() {
             .expect("completed Run digest");
     let event = Event::ContextCompacted {
         record,
-        active_ms: None,
+        active_ms: Some(0),
     };
     let payload = event.payload().expect("valid Session compaction Event");
     assert!(payload.len() > super::super::MAX_EVENT_BYTES);
@@ -200,12 +200,23 @@ async fn store_reopens_maximum_worst_case_escaped_compaction_summary() {
     store
         .admit(
             fixture.session,
-            1,
+            2,
             0,
             crate::store::AdmissionKind::Compaction,
         )
         .await
         .expect("Session compaction admission headroom");
+    store
+        .append(
+            fixture.session,
+            Event::GoalCompactionCallReserved {
+                goal_id,
+                run_id,
+                active_ceiling_ms: 0,
+            },
+        )
+        .await
+        .expect("Session compaction call reservation");
     store
         .append(fixture.session, event)
         .await
@@ -226,6 +237,12 @@ async fn store_reopens_maximum_worst_case_escaped_compaction_summary() {
         &view.compactions[0].record.status,
         CompactionStatus::Succeeded { summary: stored, .. } if stored == &summary
     ));
+    assert_eq!(
+        view.goal(goal_id)
+            .expect("replayed Goal")
+            .compaction_call_reserved,
+        None
+    );
     reopened.close().await.expect("close reopened Store");
 }
 
