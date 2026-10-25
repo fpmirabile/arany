@@ -137,6 +137,24 @@ struct ReviewResolution {
     active_time_exhausted: bool,
 }
 
+struct BeforeDispatch {
+    site: DispatchSite,
+    intent: EffectIntent,
+    permission: Permission,
+    hooks: HookFold,
+    host_permission: permission::HostPermission,
+    timeout_limit: Option<(u32, u32)>,
+    goal_allows: bool,
+    allow_auto_edits: bool,
+}
+
+struct DispatchResolution {
+    verdict: Verdict,
+    save: Option<RuleSave>,
+    decision: Decision,
+    source: PermissionSource,
+}
+
 fn decide_review(facts: ReviewFacts) -> ReviewResolution {
     let (progress, approved, source, active_time_exhausted) = match facts.outcome {
         ReviewOutcome::Stopped(cause) => (
@@ -359,10 +377,6 @@ impl RunLoop<'_> {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep hook narrowing, human approval and journal-before-dispatch ordering together"
-    )]
     async fn before_dispatch(
         &self,
         grant: &Grant<'_>,
@@ -371,6 +385,33 @@ impl RunLoop<'_> {
         permission: Permission,
         narrowable: bool,
     ) -> Result<Admission<Verdict>, EngineError> {
+        let phase = self
+            .hook_gate(grant, runtime, intent, permission, narrowable)
+            .await?;
+        let facts = self.dispatch_facts(grant, runtime, &phase).await?;
+        let (approval, save) = match self
+            .dispatch_approval(grant, runtime, &phase, &facts)
+            .await?
+        {
+            Admission::Reserved(approval) => approval,
+            Admission::Exhausted => return Ok(Admission::Exhausted),
+        };
+        let decided = self.dispatch_decision(grant, &facts, approval);
+        let resolution = self.dispatch_verdict(&phase, decided, save)?;
+        self.record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
+            .await?;
+        self.save_remembered_rule(runtime, phase.site, resolution.verdict, resolution.save)
+            .map(Admission::Reserved)
+    }
+
+    async fn hook_gate(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+        permission: Permission,
+        narrowable: bool,
+    ) -> Result<BeforeDispatch, EngineError> {
         let config = runtime.permissions();
         let site = grant.site();
         let allow_auto_edits = permission.decision == Decision::Allow
@@ -395,7 +436,7 @@ impl RunLoop<'_> {
                     && timeout_limit.is_none()
                     && goal_allows =>
             {
-                // Boxed like the other Tool futures so the hook loop does not inflate every agent step.
+                // Boxed like other Tool futures to avoid inflating each agent step.
                 Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent, narrowable))
                     .await?
             }
@@ -404,51 +445,82 @@ impl RunLoop<'_> {
         let permission =
             permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
         let host_permission = self.host_permission(runtime, &intent, permission, &hooks)?;
-        let permission = host_permission.permission;
-        let facts = DispatchFacts {
+        Ok(BeforeDispatch {
             site,
-            permission,
-            hooks: &hooks,
+            intent,
+            permission: host_permission.permission,
+            hooks,
+            host_permission,
             timeout_limit,
+            goal_allows,
+            allow_auto_edits,
+        })
+    }
+
+    async fn dispatch_facts<'a>(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        phase: &'a BeforeDispatch,
+    ) -> Result<DispatchFacts<'a>, EngineError> {
+        let intent = &phase.intent;
+        Ok(DispatchFacts {
+            site: phase.site,
+            permission: phase.permission,
+            hooks: &phase.hooks,
+            timeout_limit: phase.timeout_limit,
             host: intent.call.is_host(),
             host_unpinned: intent.call.is_host() && intent.host.is_none(),
             human_only_unavailable: (intent.call.is_host() && self.controls.approvals.is_none())
                 || self.controls.approvals.is_some_and(|approvals| {
-                    !approvals
-                        .admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
+                    !approvals.admits_human_only(
+                        &intent.call,
+                        phase.hooks.restriction == Some(Decision::Ask),
+                    )
                 }),
             unguarded: match grant {
                 Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
-                    gate: unguarded_gate(runtime, &intent).await.map(|mut prompt| {
-                        prompt.remember = host_permission.remember;
+                    gate: unguarded_gate(runtime, intent).await.map(|mut prompt| {
+                        prompt.remember = phase.host_permission.remember;
                         prompt.prefix =
-                            host_permission.prefix && runtime.host_prefix_candidate(&intent);
+                            phase.host_permission.prefix && runtime.host_prefix_candidate(intent);
                         prompt
                     }),
                 }),
                 Grant::Primary { .. } | Grant::Researcher { .. } => None,
             },
-            goal_allows,
+            goal_allows: phase.goal_allows,
             runtime_allows: runtime.allows(&intent.call),
             can_start_provider_call: self.ledger().can_start_provider_call(),
             guard_site: intent.call.facts().site == crate::tools::catalog::Site::Guard,
             interactive: self.controls.approvals.is_some(),
-        };
+        })
+    }
+
+    async fn dispatch_approval(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        phase: &BeforeDispatch,
+        facts: &DispatchFacts<'_>,
+    ) -> Result<Admission<(Option<Resolution>, Option<RuleSave>)>, EngineError> {
+        let config = runtime.permissions();
         let remember_prefix = remember_candidate(
             grant,
             config.map(|config| config.mode()),
-            permission,
-            &hooks,
-            &intent.call,
+            phase.permission,
+            &phase.hooks,
+            &phase.intent.call,
         );
         let approval = match facts.ask() {
             Some(mode) => Box::pin(self.ask(
                 grant,
-                &intent,
+                &phase.intent,
                 mode,
                 AskOptions {
                     unguarded_prompt: facts.unguarded_prompt(),
-                    allow_auto_edits: allow_auto_edits && hooks.restriction != Some(Decision::Ask),
+                    allow_auto_edits: phase.allow_auto_edits
+                        && phase.hooks.restriction != Some(Decision::Ask),
                     remember_prefix,
                 },
             ))
@@ -463,11 +535,20 @@ impl RunLoop<'_> {
             .as_mut()
             .and_then(|resolution| resolution.withdrawal.take())
         {
-            self.defer_approval_withdrawal(intent.id, withdrawal)?;
+            self.defer_approval_withdrawal(phase.intent.id, withdrawal)?;
         }
         let save = approval.as_ref().and_then(|resolution| resolution.save);
-        let decided = decide_dispatch(
-            &facts,
+        Ok(Admission::Reserved((approval, save)))
+    }
+
+    fn dispatch_decision<'a>(
+        &self,
+        grant: &Grant<'_>,
+        facts: &DispatchFacts<'a>,
+        approval: Option<Resolution>,
+    ) -> dispatch::DispatchDecision<'a> {
+        decide_dispatch(
+            facts,
             &AfterAsk {
                 approval,
                 paused: self.pause_requested(),
@@ -486,7 +567,17 @@ impl RunLoop<'_> {
                     } => (Instant::now() >= *deadline).then_some(ActiveDeadlineCause::Delegation),
                 },
             },
-        );
+        )
+    }
+
+    fn dispatch_verdict(
+        &self,
+        phase: &BeforeDispatch,
+        decided: dispatch::DispatchDecision<'_>,
+        save: Option<RuleSave>,
+    ) -> Result<DispatchResolution, EngineError> {
+        let decision = decided.decision;
+        let source = decided.source;
         // An in-process read waits for no Guard capacity, so it reserves its action directly.
         let (outcome, queue_pause) = match decided.outcome {
             Ok(Dispatch::QueuePause) => match self.reserve_active_pause()?.map(|pause| {
@@ -501,54 +592,71 @@ impl RunLoop<'_> {
             Ok(Dispatch::Direct) => (Ok(()), None),
             Err(refusal) => (Err(refusal), None),
         };
-        let (agent_run_id, digest) = (intent.agent_run_id, intent.digest());
-        let unguarded = intent.call.is_unguarded();
-        let git_write = intent.call.is_git() && intent.call.facts().mutates;
+        let BeforeDispatch { site, intent, .. } = phase;
         let verdict = match outcome {
             Ok(()) => Verdict::Dispatch {
-                intent,
+                intent: intent.clone(),
                 queue_pause,
             },
             Err(refusal) => {
                 if matches!(refusal.reason, NotDispatched::Paused) {
-                    // A pause requested during review or the approval wait stops the Run before dispatch.
+                    // A pause during review or approval must stop the Run before dispatch.
                     self.controls.cancellation.cancel();
                 }
                 if let Some(pause) = queue_pause {
                     self.settle_active_pause(pause, None)?;
                 }
-                self.refused(site, intent, refusal)
+                self.refused(*site, intent.clone(), refusal)
             }
         };
-        let mode = effective_permission_mode(config, grant);
-        if mode.is_some() || unguarded || matches!(grant, Grant::Primary { .. }) && git_write {
-            let approved = matches!(&verdict, Verdict::Dispatch { .. });
-            // An approving review that did not lead to dispatch is not an AI approval.
-            let source = if !approved && decided.source == PermissionSource::AiReview {
-                PermissionSource::UnavailableApproval
-            } else {
-                decided.source
-            };
-            self.append(Event::ToolPermissionDecided {
-                run_id: self.run_id,
-                agent_run_id,
-                verdict: PermissionVerdict {
-                    host: host_permission.verdict(approved, unguarded, save),
-                    intent_digest: digest,
-                    decision: decided.decision,
-                    mode,
-                    basis: permission.basis,
-                    source,
-                    approved,
-                    hook_restriction: hooks.restriction,
-                    hooks: hooks.count,
-                    narrowed: matches!(verdict, Verdict::Narrow(..)),
-                },
-            })
-            .await?;
+        Ok(DispatchResolution {
+            verdict,
+            save,
+            decision,
+            source,
+        })
+    }
+
+    async fn record_permission_verdict(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        phase: &BeforeDispatch,
+        facts: &DispatchFacts<'_>,
+        resolution: &DispatchResolution,
+    ) -> Result<(), EngineError> {
+        let unguarded = phase.intent.call.is_unguarded();
+        let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
+        let mode = effective_permission_mode(runtime.permissions(), grant);
+        if mode.is_none() && !unguarded && !(matches!(grant, Grant::Primary { .. }) && git_write) {
+            return Ok(());
         }
-        self.save_remembered_rule(runtime, site, verdict, save)
-            .map(Admission::Reserved)
+        let approved = matches!(resolution.verdict, Verdict::Dispatch { .. });
+        // An approving review that did not lead to dispatch is not an AI approval.
+        let source = if !approved && resolution.source == PermissionSource::AiReview {
+            PermissionSource::UnavailableApproval
+        } else {
+            resolution.source
+        };
+        self.append(Event::ToolPermissionDecided {
+            run_id: self.run_id,
+            agent_run_id: phase.intent.agent_run_id,
+            verdict: PermissionVerdict {
+                host: phase
+                    .host_permission
+                    .verdict(approved, unguarded, resolution.save),
+                intent_digest: phase.intent.digest(),
+                decision: resolution.decision,
+                mode,
+                basis: facts.permission.basis,
+                source,
+                approved,
+                hook_restriction: phase.hooks.restriction,
+                hooks: phase.hooks.count,
+                narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
+            },
+        })
+        .await
     }
 
     async fn dispatch_primary(
