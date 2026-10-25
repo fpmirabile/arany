@@ -166,6 +166,8 @@ A `serve --stdio` process opens one Engine shared by all its loaded threads; the
 
 Persist only SQLite schema 7, compaction compiler version 3 and one current payload version per Event kind. Decision O5 (persistence): roster metadata and the agent-definition pin are required nullable `RunStarted` fields; keep role provenance and cross-validate it with the bounded snapshot. `AgentSpawned` requires the nullable selected definition, resolved profile reference and assignment pins; [worker journal records](#worker-journal-protocol) use one current typed format. No dual reader or replay-time configuration lookup; older history reaches runtime decoders only through the [journal migration](#journal-migration).
 
+Event decoding retains owned payload records and strict current-field validation. Serialization borrows Event fields through private payload views, preserving the exact field order, flattening, nullable values, serde behavior and stored bytes; this changes neither payload versions nor migration rules.
+
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 24; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
