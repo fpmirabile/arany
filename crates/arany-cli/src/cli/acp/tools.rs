@@ -166,7 +166,8 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                 | ToolCall::McpList { .. }
                 | ToolCall::McpCall { .. }
                 | ToolCall::GitPush { .. }
-                | ToolCall::GhPrCreate { .. } => ("other", "Tool"),
+                | ToolCall::GhPrCreate { .. }
+                | ToolCall::GhPrView { .. } => ("other", "Tool"),
             };
             let path = call["path"].as_str();
             ToolItem {
