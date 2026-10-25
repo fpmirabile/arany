@@ -844,10 +844,8 @@ fn assert_background_primary_context(
                     ..
                 } if *event_run == run_id
                     && *agent_run_id == primary
-                    && !matches!(
-                        &intent.call,
-                        ToolCall::PrepareWorker { .. } | ToolCall::ApplyChangeset { .. }
-                    ) =>
+                    && !intent.call.is_internal()
+                    && !matches!(&intent.call, ToolCall::ApplyChangeset { .. }) =>
                 {
                     Some(&intent.call)
                 }
