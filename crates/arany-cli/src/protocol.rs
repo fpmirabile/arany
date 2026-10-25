@@ -54,6 +54,8 @@ event_kinds!(
     SessionForked,
     ContextCompacted,
     SessionRenamed,
+    ProviderSetupEditStarted,
+    ProviderSetupEditFinished,
     GoalStarted,
     GoalRunLinked,
     GoalResumed,

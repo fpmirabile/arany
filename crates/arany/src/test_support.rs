@@ -18,6 +18,53 @@ pub const fn max_changeset_bytes() -> usize {
     crate::tools::types::MAX_CHANGESET_BYTES
 }
 
+pub async fn record_setup_edit_state(
+    store: &crate::Store,
+    session_id: crate::SessionId,
+    uncertain: bool,
+) -> uuid::Uuid {
+    let operation_id = if uncertain {
+        store
+            .load_view(session_id)
+            .await
+            .expect("setup Session")
+            .expect("existing Session")
+            .pending_provider_setup_edit
+            .expect("pending setup edit")
+    } else {
+        let operation_id = uuid::Uuid::now_v7();
+        store
+            .append(
+                session_id,
+                crate::Event::ProviderSetupEditStarted {
+                    operation_id,
+                    target: crate::ProviderSetupTarget {
+                        kind: crate::ProviderSetupTargetKind::ChatGptAccount,
+                        identity: uuid::Uuid::now_v7().to_string(),
+                    },
+                    expected_digest: None,
+                },
+            )
+            .await
+            .expect("start setup edit");
+        operation_id
+    };
+    if uncertain {
+        store
+            .append(
+                session_id,
+                crate::Event::ProviderSetupEditFinished {
+                    operation_id,
+                    resulting_digest: None,
+                    disposition: crate::ProviderSetupDisposition::Uncertain,
+                },
+            )
+            .await
+            .expect("record uncertain setup edit");
+    }
+    operation_id
+}
+
 pub fn payload_version(kind: &str) -> i64 {
     crate::session::payload_version(kind).expect("known Event kind")
 }

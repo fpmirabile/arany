@@ -89,8 +89,9 @@ impl HookStart {
             Self::Ran(run) => match event {
                 HookEvent::PreToolUse | HookEvent::PostToolUse => Admission::Reserved(run),
                 HookEvent::Stop | HookEvent::SubagentStop | HookEvent::PreCompact => {
-                    // Hook cancellation intentionally reports active-time exhaustion until the recorded defect is fixed.
-                    if parent.is_cancelled() || (run.stops && run.cancelled) {
+                    if parent.is_cancelled() {
+                        Admission::Reserved(run)
+                    } else if run.cancelled && run.exhausted {
                         Admission::Exhausted
                     } else {
                         Admission::Reserved(run)
@@ -671,8 +672,14 @@ impl RunLoop<'_> {
                 Admission::Reserved(run) => run,
                 Admission::Exhausted => return Ok(Err(HookRefusal::ActiveTime)),
             };
+            if run.cancelled {
+                return Ok(Err(HookRefusal::Cancelled));
+            }
             if run.stops {
                 return Err(crate::tools::ToolError::Uncertain.into());
+            }
+            if self.controls.cancellation.is_cancelled() {
+                return Ok(Err(HookRefusal::Cancelled));
             }
             if matches!(run.result, HookResult::Stopped { .. }) {
                 return self.idle_compact_stop(hook.event, digest).map(Ok);

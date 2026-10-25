@@ -46,7 +46,7 @@ pub use ledger::Action;
 use ledger::GoalLedger;
 pub use lifecycle::{
     continue_session, create_session, fork_session, list_sessions, list_sessions_page,
-    rename_session, resume_session, set_session_defaults,
+    rename_session, resume_session, set_session_defaults, start_provider_setup_edit,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 use report::goal_report;
@@ -131,6 +131,10 @@ pub enum EngineError {
     GuardUnavailable,
     #[error("Session is not idle")]
     SessionNotIdle,
+    #[error(
+        "Provider setup outcome is incomplete or uncertain; inspect history and start a new Session"
+    )]
+    ProviderSetupBlocked,
     #[error("Session has no committed Run boundary to fork")]
     ForkNotAtRunBoundary,
     #[error("conversation rewind exceeds the eight-link or Event limit; start a new Session")]
@@ -417,7 +421,6 @@ impl Drop for OperationSlot<'_> {
 struct AdmittedTurn {
     session_id: SessionId,
     workspace_identity: WorkspaceIdentity,
-    session_lock: SessionRunLock,
     _lineage_locks: Vec<SessionRunLock>,
     history: Option<crate::session::SessionView>,
     goal: GoalAdmission,
@@ -963,6 +966,12 @@ pub struct Engine {
 
 type WorkspaceLeases = HashMap<WorkspaceIdentity, GoalWorkspaceLock>;
 
+#[derive(Default)]
+struct SubmissionLeases {
+    session: Option<(SessionId, SessionRunLock)>,
+    workspaces: WorkspaceLeases,
+}
+
 struct GoalWorkspaceLock {
     goal_id: GoalId,
     _lock: WorkspaceRunLock,
@@ -1274,6 +1283,9 @@ impl Engine {
             .load_view(source_session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         lock.keep();
         let _ancestors = self.lock_lineage(&view).await?;
         let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
@@ -1385,7 +1397,7 @@ impl Engine {
         let launch_directory = request.launch_directory.clone();
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
-        let mut leases = WorkspaceLeases::new();
+        let mut leases = SubmissionLeases::default();
         let entry = if request.goal.id.is_some() {
             GoalEntry::Resume
         } else {
@@ -1403,6 +1415,7 @@ impl Engine {
         .await?;
         let mut continuation_error = None;
         while turn.continues() && !cancellation.is_cancelled() {
+            crate::fault::autonomous_continuation(turn.outcome.session_id).await;
             let next = RunRequest {
                 skill: None,
                 session_id: Some(turn.outcome.session_id),
@@ -1490,7 +1503,7 @@ impl Engine {
         cancellation: RunCancellation,
         hints: Option<RunHints>,
         entry: GoalEntry,
-        leases: &mut WorkspaceLeases,
+        leases: &mut SubmissionLeases,
     ) -> Result<RunTurn, EngineError> {
         submission.cancel_if_paused(&cancellation);
         if cancellation.is_cancelled() {
@@ -1519,7 +1532,6 @@ impl Engine {
         let AdmittedTurn {
             session_id,
             workspace_identity,
-            mut session_lock,
             _lineage_locks,
             history: _,
             goal,
@@ -1546,7 +1558,7 @@ impl Engine {
 
         if request.session_id.is_none() {
             self.start_session(
-                &mut session_lock,
+                &mut leases.session.as_mut().expect("admitted Session lease").1,
                 session_id,
                 request.title,
                 workspace_identity,
@@ -1585,7 +1597,7 @@ impl Engine {
         let segment = end_turn(
             async {
                 Self::retain_goal_workspace(
-                    leases,
+                    &mut leases.workspaces,
                     goal.id,
                     workspace_identity,
                     provisional_workspace_lock,
@@ -1652,7 +1664,8 @@ impl Engine {
                     publisher.as_ref(),
                 )
                 .await?;
-                self.settle_turn(started, &ledger, leases).await
+                self.settle_turn(started, &ledger, &mut leases.workspaces)
+                    .await
             },
             end,
         );
@@ -1828,7 +1841,7 @@ impl Engine {
         identity: &crate::provider::ProviderIdentity,
         entry: GoalEntry,
         previews: bool,
-        leases: &WorkspaceLeases,
+        leases: &mut SubmissionLeases,
     ) -> Result<AdmittedTurn, EngineError> {
         self.validate_request(request)?;
         if submission.tools.is_some() && identity.custom_provenance().is_some() {
@@ -1839,7 +1852,14 @@ impl Engine {
         }
         let workspace_identity = crate::tools::workspace_identity(&request.workspace)?;
         let session_id = request.session_id.unwrap_or_default();
-        let mut session_lock = self.lock_session(session_id)?;
+        if leases.session.is_none() {
+            leases.session = Some((session_id, self.lock_session(session_id)?));
+        }
+        let (locked_session, session_lock) =
+            leases.session.as_mut().expect("admitted Session lease");
+        if *locked_session != session_id {
+            return Err(EngineError::InvalidRequest);
+        }
         let history = if request.session_id.is_some() {
             Some(
                 self.journal
@@ -1859,6 +1879,9 @@ impl Engine {
             None => Vec::new(),
         };
         if let Some(view) = &history {
+            if view.provider_setup_blocks_continuation() {
+                return Err(EngineError::ProviderSetupBlocked);
+            }
             ensure_session_workspace(view, workspace_identity)?;
         }
         if entry == GoalEntry::Resume
@@ -1953,14 +1976,13 @@ impl Engine {
         };
         let provisional_workspace_lock =
             if goal.phase == crate::session::GoalPhase::Implementation && writes {
-                self.acquire_goal_workspace(leases, goal.id, workspace_identity)?
+                self.acquire_goal_workspace(&leases.workspaces, goal.id, workspace_identity)?
             } else {
                 None
             };
         Ok(AdmittedTurn {
             session_id,
             workspace_identity,
-            session_lock,
             _lineage_locks,
             history,
             goal,

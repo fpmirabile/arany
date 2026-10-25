@@ -1091,6 +1091,9 @@ impl From<&Event> for TraceEventKind {
             | Event::WorkspaceRewindStarted { .. }
             | Event::WorkspaceRewindFinished { .. }
             | Event::SessionRenamed { .. } => Self::Unmarked,
+            Event::ProviderSetupEditStarted { .. } | Event::ProviderSetupEditFinished { .. } => {
+                Self::Unmarked
+            }
         }
     }
 }

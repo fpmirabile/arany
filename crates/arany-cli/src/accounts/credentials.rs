@@ -6,6 +6,7 @@ use arany::{RecordFormat, RecordKind};
 #[cfg(all(test, not(target_os = "macos")))]
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::path::Path;
 use uuid::{Uuid, Version};
 
@@ -131,10 +132,12 @@ pub(crate) enum CredentialError {
     #[error("OS credential store did not respond before its deadline")]
     TimedOut,
     #[error(
-        "OS credential store write timed out; the saved account may have changed. Check it before retrying"
+        "saved credential write could not be confirmed; the saved account may have changed. Inspect it before retrying"
     )]
     WriteOutcomeUnknown,
-    #[error("OS credential store deletion timed out; the ChatGPT token may remain stored")]
+    #[error(
+        "saved credential deletion could not be confirmed; the credential may remain stored. Inspect it before retrying"
+    )]
     DeleteOutcomeUnknown,
     #[error("OS credential store is locked; unlock it before using this account")]
     Locked,
@@ -162,6 +165,13 @@ pub(crate) struct SetupReset {
     state: StateRoot,
     data: SetupData,
     records: [Option<Vec<u8>>; 3],
+}
+
+pub(crate) struct NativeRemoval {
+    state: StateRoot,
+    record: Vec<u8>,
+    models: Option<Vec<u8>>,
+    keyring_identity: Option<[u8; 32]>,
 }
 
 impl SetupReset {
@@ -210,24 +220,154 @@ impl SetupReset {
                 if Self::read(&self.state, self.data)? != self.records {
                     return Err(CredentialError::SetupChanged);
                 }
-                let result = (|| {
-                    match self.data {
-                        SetupData::Native => {
-                            self.state.record(RecordKind::SavedAccount).remove()?
+                let records: &[(RecordKind, usize)] = match self.data {
+                    SetupData::Native => &[
+                        (RecordKind::SavedAccount, 0),
+                        (RecordKind::ModelPreferences, 2),
+                    ],
+                    SetupData::ChatGpt => &[
+                        (RecordKind::ChatgptAccounts, 0),
+                        (RecordKind::ChatgptRegistration, 1),
+                        (RecordKind::ModelPreferences, 2),
+                    ],
+                    SetupData::Models => &[(RecordKind::ModelPreferences, 2)],
+                };
+                let mut changed = false;
+                for &(kind, index) in records {
+                    self.state.record(kind).remove().map_err(|error| {
+                        if changed {
+                            CredentialError::WriteOutcomeUnknown
+                        } else {
+                            account_record_error(error)
                         }
-                        SetupData::ChatGpt => {
-                            self.state.record(RecordKind::ChatgptAccounts).remove()?;
-                            self.state
-                                .record(RecordKind::ChatgptRegistration)
-                                .remove()?;
-                        }
-                        SetupData::Models => {}
-                    }
-                    self.state.record(RecordKind::ModelPreferences).remove()
-                })();
-                result.map_err(|_| CredentialError::StateUnavailable)
+                    })?;
+                    changed |= self.records[index].is_some();
+                }
+                Ok(())
             })
             .map_err(|_| CredentialError::StateUnavailable)?
+    }
+}
+
+impl NativeRemoval {
+    pub(crate) fn prepare(workspace: &Path) -> Result<Option<Self>, CredentialError> {
+        let path = StateRoot::account_path().map_err(|_| CredentialError::StateUnavailable)?;
+        let state = StateRoot::admit(&path).map_err(|_| CredentialError::StateUnavailable)?;
+        Self::prepare_at(state, workspace, || keyring_helper::read(DEFAULT_ACCOUNT))
+    }
+
+    fn prepare_at(
+        state: StateRoot,
+        workspace: &Path,
+        read_keyring: impl FnOnce() -> Result<Option<Vec<u8>>, CredentialError>,
+    ) -> Result<Option<Self>, CredentialError> {
+        let records = state
+            .with_account_replacement_lock(workspace, || {
+                let record = state
+                    .record(RecordKind::SavedAccount)
+                    .read()
+                    .map_err(|_| CredentialError::StateUnavailable)?;
+                let models = state
+                    .record(RecordKind::ModelPreferences)
+                    .read()
+                    .map_err(|_| CredentialError::StateUnavailable)?;
+                let keyring_identity = if record
+                    .as_deref()
+                    .map(StoredAccountFile::parse)
+                    .transpose()?
+                    .is_some_and(|stored| stored.storage == AccountStorage::Keyring)
+                {
+                    Some(keyring_identity(
+                        &read_keyring()?.ok_or(CredentialError::InvalidAccount)?,
+                    ))
+                } else {
+                    None
+                };
+                Ok::<_, CredentialError>((record, models, keyring_identity))
+            })
+            .map_err(|_| CredentialError::StateUnavailable)??;
+        let Some(record) = records.0 else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            state,
+            record,
+            models: records.1,
+            keyring_identity: records.2,
+        }))
+    }
+
+    pub(crate) fn apply(self, workspace: &Path) -> Result<(), CredentialError> {
+        self.apply_with(
+            workspace,
+            || keyring_helper::read(DEFAULT_ACCOUNT),
+            keyring_helper::delete,
+        )
+    }
+
+    fn apply_with(
+        self,
+        workspace: &Path,
+        read_keyring: impl FnOnce() -> Result<Option<Vec<u8>>, CredentialError>,
+        delete_keyring: impl FnOnce(&str) -> Result<(), CredentialError>,
+    ) -> Result<(), CredentialError> {
+        self.state
+            .with_account_replacement_lock(workspace, || {
+                let record = self
+                    .state
+                    .record(RecordKind::SavedAccount)
+                    .read()
+                    .map_err(|_| CredentialError::StateUnavailable)?;
+                let models = self
+                    .state
+                    .record(RecordKind::ModelPreferences)
+                    .read()
+                    .map_err(|_| CredentialError::StateUnavailable)?;
+                if record.as_deref() != Some(&self.record) || models != self.models {
+                    return Err(CredentialError::SetupChanged);
+                }
+                let stored = StoredAccountFile::parse(&self.record)?;
+                let keyring_slot = if stored.storage == AccountStorage::Keyring {
+                    let credential = read_keyring()
+                        .map_err(|_| CredentialError::SetupChanged)?
+                        .ok_or(CredentialError::SetupChanged)?;
+                    if !keyring_identity_matches(self.keyring_identity, &credential) {
+                        return Err(CredentialError::SetupChanged);
+                    }
+                    Some(DEFAULT_ACCOUNT)
+                } else {
+                    None
+                };
+                self.state
+                    .record(RecordKind::SavedAccount)
+                    .remove()
+                    .map_err(account_record_error)?;
+                self.state
+                    .record(RecordKind::ModelPreferences)
+                    .remove()
+                    .map_err(|_| CredentialError::WriteOutcomeUnknown)?;
+                if let Some(slot) = keyring_slot {
+                    delete_keyring(slot).map_err(|_| CredentialError::DeleteOutcomeUnknown)?;
+                }
+                Ok(())
+            })
+            .map_err(|_| CredentialError::StateUnavailable)?
+    }
+}
+
+fn keyring_identity(credential: &[u8]) -> [u8; 32] {
+    sha2::Sha256::digest(credential).into()
+}
+
+fn keyring_identity_matches(expected: Option<[u8; 32]>, credential: &[u8]) -> bool {
+    expected == Some(keyring_identity(credential))
+}
+
+pub(super) fn account_record_error(error: StoreError) -> CredentialError {
+    if matches!(error, StoreError::ReplaceUnconfirmed) {
+        CredentialError::WriteOutcomeUnknown
+    } else {
+        CredentialError::StateUnavailable
     }
 }
 
@@ -352,6 +492,11 @@ impl SavedAccount {
             .map_err(|_| CredentialError::InvalidAccount)
     }
 
+    pub(crate) fn snapshot_digest(&self) -> Result<[u8; 32], CredentialError> {
+        let bytes = serde_json::to_vec(self).map_err(|_| CredentialError::InvalidAccount)?;
+        Ok(sha2::Sha256::digest(bytes).into())
+    }
+
     fn validate(&self) -> Result<(), CredentialError> {
         if self.schema != SAVED_ACCOUNT_SCHEMA
             || self.id.get_version() != Some(Version::SortRand)
@@ -370,13 +515,16 @@ pub(crate) async fn save(
     workspace: &Path,
     account: SavedAccount,
     storage: AccountStorage,
+    expected: Option<[u8; 32]>,
 ) -> Result<(), CredentialError> {
     let account_root = StateRoot::account_path().map_err(|_| CredentialError::StateUnavailable)?;
     match storage {
         AccountStorage::Keyring => {
-            save_at(DEFAULT_ACCOUNT, &account_root, workspace, account).await
+            save_at(DEFAULT_ACCOUNT, &account_root, workspace, account, expected).await
         }
-        AccountStorage::PrivateFile => save_file_at(&account_root, workspace, account).await,
+        AccountStorage::PrivateFile => {
+            save_file_at(&account_root, workspace, account, expected).await
+        }
     }
 }
 
@@ -385,6 +533,7 @@ async fn save_at(
     state_dir: &Path,
     workspace: &Path,
     account: SavedAccount,
+    expected: Option<[u8; 32]>,
 ) -> Result<(), CredentialError> {
     account.validate()?;
     admit_transport()?;
@@ -410,17 +559,13 @@ async fn save_at(
                 {
                     return Err(CredentialError::InvalidAccount);
                 }
-                let marker = StoredAccountFile {
-                    schema: 1,
-                    storage: AccountStorage::Keyring,
-                    account: None,
-                }
-                .encoded()?;
-                state
-                    .record(RecordKind::SavedAccount)
-                    .replace(&marker)
-                    .map_err(|_| CredentialError::StateUnavailable)?;
-                keyring_helper::write(&slot, &record)
+                let current = if existing.is_some() {
+                    parse_account(keyring_helper::read(&slot)?)?
+                } else {
+                    None
+                };
+                require_account_snapshot(current.as_ref(), expected)?;
+                write_marked_keyring_account(&state, &slot, &record, keyring_helper::write)
             })
             .map_err(|error| match error {
                 StoreError::AccountBusy => CredentialError::AccountBusy,
@@ -428,13 +573,33 @@ async fn save_at(
             })?
     })
     .await
-    .map_err(|_| CredentialError::Unavailable)?
+    .map_err(|_| CredentialError::WriteOutcomeUnknown)?
+}
+
+fn write_marked_keyring_account(
+    state: &StateRoot,
+    slot: &str,
+    record: &str,
+    write: impl FnOnce(&str, &str) -> Result<(), CredentialError>,
+) -> Result<(), CredentialError> {
+    let marker = StoredAccountFile {
+        schema: 1,
+        storage: AccountStorage::Keyring,
+        account: None,
+    }
+    .encoded()?;
+    state
+        .record(RecordKind::SavedAccount)
+        .replace(&marker)
+        .map_err(account_record_error)?;
+    write(slot, record).map_err(|_| CredentialError::WriteOutcomeUnknown)
 }
 
 async fn save_file_at(
     account_root: &Path,
     workspace: &Path,
     account: SavedAccount,
+    expected: Option<[u8; 32]>,
 ) -> Result<(), CredentialError> {
     account.validate()?;
     let record = StoredAccountFile {
@@ -461,10 +626,16 @@ async fn save_file_at(
                 {
                     return Err(CredentialError::InvalidAccount);
                 }
+                let current = existing
+                    .as_deref()
+                    .map(StoredAccountFile::parse)
+                    .transpose()?
+                    .and_then(|stored| stored.account);
+                require_account_snapshot(current.as_ref(), expected)?;
                 state
                     .record(RecordKind::SavedAccount)
                     .replace(&record)
-                    .map_err(|_| CredentialError::StateUnavailable)
+                    .map_err(account_record_error)
             })
             .map_err(|error| match error {
                 StoreError::AccountBusy => CredentialError::AccountBusy,
@@ -472,7 +643,17 @@ async fn save_file_at(
             })?
     })
     .await
-    .map_err(|_| CredentialError::StateUnavailable)?
+    .map_err(|_| CredentialError::WriteOutcomeUnknown)?
+}
+
+fn require_account_snapshot(
+    current: Option<&SavedAccount>,
+    expected: Option<[u8; 32]>,
+) -> Result<(), CredentialError> {
+    if current.map(SavedAccount::snapshot_digest).transpose()? != expected {
+        return Err(CredentialError::SetupChanged);
+    }
+    Ok(())
 }
 
 pub(crate) async fn inspect() -> Result<InspectedAccount, CredentialError> {
@@ -602,6 +783,270 @@ fn selected_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_directory_sync_failure_preserves_uncertainty() {
+        for (data, kind, name) in [
+            (
+                SetupData::Native,
+                RecordKind::SavedAccount,
+                "account-credentials.json",
+            ),
+            (
+                SetupData::ChatGpt,
+                RecordKind::ChatgptAccounts,
+                "chatgpt-accounts.json",
+            ),
+            (
+                SetupData::Models,
+                RecordKind::ModelPreferences,
+                "model-preferences.json",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+            state
+                .record(kind)
+                .replace(b"damaged configuration")
+                .unwrap();
+            let reset = SetupReset::at(
+                StateRoot::open_existing(state.path()).unwrap(),
+                &workspace,
+                data,
+            )
+            .unwrap();
+            arany::FaultPlan::fail_record_sync(state.path().to_owned(), name);
+            assert_eq!(
+                reset.apply(&workspace),
+                Err(CredentialError::WriteOutcomeUnknown)
+            );
+            assert!(state.record(kind).read().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_file_publication_fault_is_uncertain_and_stale_replacement_refuses() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let first = SavedAccount::new(
+            "openai".into(),
+            "gpt-5.4".into(),
+            Some(Effort::Low),
+            "synthetic-first-key".into(),
+        )
+        .unwrap();
+        let expected = Some(first.snapshot_digest().unwrap());
+        arany::FaultPlan::fail_record_sync(root.clone(), "account-credentials.json");
+        assert_eq!(
+            save_file_at(&root, &workspace, first, None).await,
+            Err(CredentialError::WriteOutcomeUnknown)
+        );
+        let second = SavedAccount::new(
+            "openai".into(),
+            "gpt-5.4".into(),
+            Some(Effort::Low),
+            "synthetic-second-key".into(),
+        )
+        .unwrap();
+        let current = Some(second.snapshot_digest().unwrap());
+        save_file_at(&root, &workspace, second, expected)
+            .await
+            .unwrap();
+        let rejected = SavedAccount::new(
+            "openai".into(),
+            "gpt-5.4".into(),
+            Some(Effort::Low),
+            "synthetic-rejected-key".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            save_file_at(&root, &workspace, rejected, expected).await,
+            Err(CredentialError::SetupChanged)
+        );
+        let reopened = load_file_at(&root).unwrap().unwrap().account.unwrap();
+        assert_eq!(Some(reopened.snapshot_digest().unwrap()), current);
+    }
+
+    #[test]
+    fn native_snapshot_detects_keyring_credential_change_with_the_same_account_id() {
+        let mut account = SavedAccount::new(
+            "openai".into(),
+            "gpt-5.4".into(),
+            Some(Effort::Low),
+            "synthetic-original-key".into(),
+        )
+        .unwrap();
+        let expected = Some(account.snapshot_digest().unwrap());
+        require_account_snapshot(Some(&account), expected).unwrap();
+        account.api_key = "synthetic-changed-key".into();
+        assert_eq!(
+            require_account_snapshot(Some(&account), expected),
+            Err(CredentialError::SetupChanged)
+        );
+    }
+
+    #[test]
+    fn keyring_identity_changes_when_selected_credential_changes() {
+        assert_ne!(
+            keyring_identity(b"first credential"),
+            keyring_identity(b"replacement credential")
+        );
+        let snapshot = Some(keyring_identity(b"first credential"));
+        assert!(keyring_identity_matches(snapshot, b"first credential"));
+        assert!(!keyring_identity_matches(
+            snapshot,
+            b"replacement credential"
+        ));
+    }
+
+    #[test]
+    fn native_removal_reads_keyring_identity_inside_account_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        state
+            .record(RecordKind::SavedAccount)
+            .replace(br#"{"schema":1,"storage":"keyring","account":null}"#)
+            .unwrap();
+        let probe_state = StateRoot::admit(state.path()).unwrap();
+        let probe_workspace = workspace.clone();
+
+        let removal = NativeRemoval::prepare_at(state, &workspace, || {
+            assert!(matches!(
+                probe_state.with_account_replacement_lock(&probe_workspace, || ()),
+                Err(StoreError::AccountBusy)
+            ));
+            Ok(Some(b"selected credential".to_vec()))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            removal.keyring_identity,
+            Some(keyring_identity(b"selected credential"))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_save_keyring_failures_after_marker_block_continuation() {
+        for failure in [CredentialError::Locked, CredentialError::Unavailable] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            crate::cli::attached::assert_uncertain_publication(
+                crate::cli::attached::SetupPublication::NativeSave,
+                || {
+                    let result = state
+                        .with_account_replacement_lock(&workspace, || {
+                            write_marked_keyring_account(
+                                &state,
+                                DEFAULT_ACCOUNT,
+                                "synthetic credential",
+                                |_, _| Err(failure),
+                            )
+                        })
+                        .unwrap();
+                    assert_eq!(result, Err(CredentialError::WriteOutcomeUnknown));
+                    let reopened = StateRoot::open_existing(state.path()).unwrap();
+                    let bytes = reopened
+                        .record(RecordKind::SavedAccount)
+                        .read()
+                        .unwrap()
+                        .unwrap();
+                    let marker = StoredAccountFile::parse(&bytes).unwrap();
+                    assert_eq!(marker.storage, AccountStorage::Keyring);
+                    assert!(marker.account.is_none());
+                    crate::accounts::chatgpt::AuthorizationError::CredentialStore(
+                        result.unwrap_err(),
+                    )
+                },
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_native_removal_is_uncertain_after_each_publication() {
+        for failure in [
+            CredentialError::Unavailable,
+            CredentialError::DeleteOutcomeUnknown,
+            CredentialError::StateUnavailable,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let record = br#"{"schema":1,"storage":"keyring","account":null}"#.to_vec();
+            state
+                .record(RecordKind::SavedAccount)
+                .replace(&record)
+                .unwrap();
+            state
+                .record(RecordKind::ModelPreferences)
+                .replace(b"saved model preferences")
+                .unwrap();
+            let removal = NativeRemoval::prepare_at(
+                StateRoot::open_existing(state.path()).unwrap(),
+                &workspace,
+                || Ok(Some(b"selected credential".to_vec())),
+            )
+            .unwrap()
+            .unwrap();
+            let preference_failure = failure == CredentialError::StateUnavailable;
+            if preference_failure {
+                arany::FaultPlan::fail_record_publication(
+                    state.path().to_owned(),
+                    "model-preferences.json",
+                );
+            }
+            crate::cli::attached::assert_uncertain_publication(
+                crate::cli::attached::SetupPublication::NativeRemoval,
+                || {
+                    let result = removal.apply_with(
+                        &workspace,
+                        || Ok(Some(b"selected credential".to_vec())),
+                        |_| {
+                            assert_ne!(
+                                failure,
+                                CredentialError::StateUnavailable,
+                                "preference failure must prevent keyring dispatch"
+                            );
+                            Err(failure)
+                        },
+                    );
+                    let expected = if preference_failure {
+                        CredentialError::WriteOutcomeUnknown
+                    } else {
+                        CredentialError::DeleteOutcomeUnknown
+                    };
+                    let error = result.unwrap_err();
+                    assert_eq!(error, expected);
+                    assert!(
+                        state
+                            .record(RecordKind::SavedAccount)
+                            .read()
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert_eq!(
+                        state
+                            .record(RecordKind::ModelPreferences)
+                            .read()
+                            .unwrap()
+                            .is_some(),
+                        preference_failure
+                    );
+                    crate::accounts::chatgpt::AuthorizationError::CredentialStore(error)
+                },
+            )
+            .await;
+        }
+    }
     #[cfg(target_os = "linux")]
     use std::process::Command;
 
@@ -659,7 +1104,14 @@ mod tests {
                 "synthetic-replacement-key".into(),
             )
             .expect("synthetic replacement");
-            let result = save_at(&slot, &account_root, &workspace, replacement).await;
+            let expected = load_at(&slot)
+                .await
+                .unwrap()
+                .as_ref()
+                .map(SavedAccount::snapshot_digest)
+                .transpose()
+                .unwrap();
+            let result = save_at(&slot, &account_root, &workspace, replacement, expected).await;
             match stage.to_str() {
                 Some("busy") => assert_eq!(result, Err(CredentialError::AccountBusy)),
                 Some("replace") => result.expect("replace after lock release"),
@@ -682,7 +1134,7 @@ mod tests {
         )
         .expect("synthetic account");
         let id = account.id;
-        save_at(&slot, &state_dir, &workspace, account)
+        save_at(&slot, &state_dir, &workspace, account, None)
             .await
             .expect("save isolated account");
         let loaded = load_at(&slot)
@@ -838,7 +1290,7 @@ mod tests {
         )
         .expect("synthetic account");
         let expected = serde_json::to_vec(&account).expect("synthetic record");
-        save_at(&slot, &temp.path().join("state"), &workspace, account)
+        save_at(&slot, &temp.path().join("state"), &workspace, account, None)
             .await
             .expect("save isolated account");
 
@@ -1071,7 +1523,7 @@ mod tests {
         )
         .expect("synthetic account");
         let id = account.id;
-        save_file_at(&account_root, &workspace, account)
+        save_file_at(&account_root, &workspace, account, None)
             .await
             .expect("save private account");
         let loaded = load_file_at(&account_root)
@@ -1088,8 +1540,16 @@ mod tests {
             selected_key(&loaded, Uuid::now_v7(), "openai"),
             Err(CredentialError::InvalidAccount)
         );
+        let expected = Some(loaded.snapshot_digest().unwrap());
         assert_eq!(
-            save_at("isolated-never-used", &account_root, &workspace, loaded).await,
+            save_at(
+                "isolated-never-used",
+                &account_root,
+                &workspace,
+                loaded,
+                expected
+            )
+            .await,
             Err(CredentialError::InvalidAccount)
         );
 
@@ -1102,7 +1562,7 @@ mod tests {
         .and_then(|account| account.with_anthropic_workspace(Some("wrkspc_Test123".into())))
         .expect("scoped account");
         let scoped_id = scoped.id;
-        save_file_at(&account_root, &workspace, scoped)
+        save_file_at(&account_root, &workspace, scoped, expected)
             .await
             .expect("save scoped replacement");
         let reopened = load_file_at(&account_root)
@@ -1139,7 +1599,7 @@ mod tests {
         )
         .expect("replacement account");
         assert_eq!(
-            save_file_at(&account_root, &workspace, replacement).await,
+            save_file_at(&account_root, &workspace, replacement, None).await,
             Err(CredentialError::InvalidAccount)
         );
         let stored = load_file_at(&account_root)
@@ -1244,7 +1704,7 @@ mod tests {
                 )
                 .unwrap();
                 let id = account.id;
-                save_file_at(&account_root, &workspace, account)
+                save_file_at(&account_root, &workspace, account, None)
                     .await
                     .unwrap();
                 assert_eq!(
