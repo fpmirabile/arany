@@ -2,16 +2,16 @@ use super::children::ChildWork;
 use super::stop::{RunProgress, RunRefusal, StepEnd, StopCause};
 use super::{ActivePause, ActiveSegment, RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::hints::HintPublisher;
-use crate::engine::ledger::{ActiveDeadlineCause, Admission, duration_ms};
+use crate::engine::ledger::{ActiveDeadlineCause, Admission};
 use crate::engine::{EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{ProviderRequest, ProviderTurn};
 use crate::session::Event;
 use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
 use crate::tools::types::{CommandResult, MAX_TOOL_RESULT_BYTES};
 use crate::tools::{
-    ActiveActionRequest, ActiveToolWindow, ApprovalMode, ApprovalReply, ApprovalWithdrawal,
-    CacheUpdate, EffectIntent, ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation,
-    ToolRequest, ToolRuntime, ToolStep,
+    ActiveActionRequest, ApprovalMode, ApprovalReply, ApprovalWithdrawal, CacheUpdate,
+    EffectIntent, ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation, ToolRequest,
+    ToolRuntime, ToolStep,
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -30,6 +30,9 @@ use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
     Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+};
+use intent::{
+    active_window, execute_cancellable, settle_cancelled, tool_action_bound, tool_action_ms,
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
@@ -353,170 +356,6 @@ impl RunLoop<'_> {
         } else {
             cause
         }
-    }
-
-    pub(super) fn run_intent<'a>(
-        &'a self,
-        grant: &'a Grant<'_>,
-        runtime: &'a ToolRuntime,
-        intent: EffectIntent,
-        post_call: &'a ToolCall,
-        narrowable: bool,
-    ) -> BoxedStep<'a, IntentResult> {
-        Box::pin(self.run_intent_inner(grant, runtime, intent, post_call, narrowable))
-    }
-
-    async fn run_intent_inner(
-        &self,
-        grant: &Grant<'_>,
-        runtime: &ToolRuntime,
-        intent: EffectIntent,
-        post_call: &ToolCall,
-        narrowable: bool,
-    ) -> Result<IntentResult, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
-        if let Err(refusal) = self
-            .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
-            .await?
-        {
-            return Ok(Err(refusal.into()));
-        }
-        let agent_run_id = intent.agent_run_id;
-        let intent_id = intent.id;
-        // A researcher's Tool runs inside its delegation's reservation.
-        let action_ms = match grant {
-            Grant::Primary { .. } => tool_action_ms(runtime, &intent)
-                .saturating_add(pre_ms)
-                .saturating_add(post_ms),
-            Grant::Researcher { .. } => 0,
-        };
-        self.append(Event::ToolStarted {
-            run_id: self.run_id,
-            agent_run_id,
-            intent: intent.clone(),
-            active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
-        })
-        .await?;
-        if matches!(grant, Grant::Researcher { child, .. } if child.editor) {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
-        }
-        let mut narrowed = None;
-        let mut candidate = None;
-        let Admission::Reserved(verdict) = self
-            .before_dispatch(grant, runtime, intent, permission, narrowable)
-            .await?
-        else {
-            return Ok(Err(StopCause::ActiveTime));
-        };
-        let answer = match verdict {
-            Verdict::Deny(answer) => answer,
-            Verdict::Narrow(answer, call) => {
-                narrowed = Some(call);
-                answer
-            }
-            Verdict::Dispatch {
-                intent,
-                queue_pause,
-            } => match grant {
-                Grant::Primary { .. } => {
-                    self.dispatch_primary(runtime, intent, queue_pause).await?
-                }
-                Grant::Researcher {
-                    child, deadline, ..
-                } => {
-                    let deadline = grant.deadline().unwrap_or(*deadline);
-                    let active_deadline = match grant {
-                        Grant::Researcher {
-                            active_deadline, ..
-                        } => active_deadline.as_ref(),
-                        Grant::Primary { .. } => None,
-                    };
-                    let cancellation = RunCancellation::new();
-                    let mut parent = self.controls.cancellation.clone();
-                    let mut timed_out = false;
-                    let execution = async {
-                        let _active_work = self.ledger().active_work();
-                        if child.editor {
-                            let (observation, pending) = self
-                                .dispatch_worker(runtime, intent, cancellation.clone())
-                                .await?;
-                            candidate = pending;
-                            Ok::<_, EngineError>(observation)
-                        } else {
-                            Ok(runtime.execute(intent, cancellation.clone()).await)
-                        }
-                    };
-                    tokio::pin!(execution);
-                    let mut observation = tokio::select! {
-                        result = &mut execution => result?,
-                        () = async {
-                            match active_deadline {
-                                Some(deadline) => deadline.elapsed().await,
-                                None => tokio::time::sleep_until(deadline).await,
-                            }
-                        } => { timed_out = true; cancellation.cancel(); execution.await? },
-                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
-                    };
-                    if timed_out && observation.disposition == ToolDisposition::Cancelled {
-                        observation.disposition = ToolDisposition::Limit;
-                        observation.limit_cause =
-                            timeout_limit_cause(active_deadline.map(|d| d.cause));
-                    }
-                    Answer {
-                        checkpoint: None,
-                        observation,
-                        stop: timed_out.then(|| match active_deadline.map(|d| d.cause) {
-                            Some(crate::engine::ledger::ActiveDeadlineCause::Goal) => {
-                                StopCause::ActiveTime
-                            }
-                            Some(crate::engine::ledger::ActiveDeadlineCause::Delegation) => {
-                                StopCause::DelegationDeadline
-                            }
-                            None => StopCause::ToolStopped,
-                        }),
-                        active_time: None,
-                    }
-                }
-            },
-        };
-        self.append(Event::ToolFinished {
-            checkpoint: answer.checkpoint.clone(),
-            run_id: self.run_id,
-            agent_run_id,
-            observation: answer.observation.clone(),
-        })
-        .await?;
-        self.commit_approval_withdrawal(intent_id)?;
-        if let Some((candidate, data)) = candidate {
-            if matches!(answer.observation.intent.call, ToolCall::Command { .. }) {
-                self.seal_worker_command(&answer.observation.intent, &candidate, &data)
-                    .await?;
-            }
-            self.worker
-                .lock()
-                .await
-                .get_mut(&agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .acknowledge(candidate, data)?;
-        }
-        if let Some(active_time) = answer.active_time {
-            if let Some(segment) = active_time.segment {
-                self.settle_active_segment(segment)?;
-            }
-            if active_time.exhausted || self.ledger().active_time_exhausted() {
-                return Ok(Err(StopCause::ActiveTime));
-            }
-        }
-        Ok(match answer.stop {
-            Some(cause) => Err(cause),
-            None => Ok((answer.observation, narrowed)),
-        })
     }
 
     #[expect(
@@ -1070,96 +909,6 @@ impl RunLoop<'_> {
             .exclude_idle_approval(wall_started.elapsed().saturating_sub(active_during))?;
         let withdrawal = interrupted.then(|| pending.reject_late_replies()).flatten();
         Ok((reply, withdrawal))
-    }
-}
-
-fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
-    runtime
-        .intent_reservation_overhead(intent)
-        .saturating_add(
-            Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
-                .saturating_add(crate::tools::worker::transfer_time(intent))
-                .saturating_mul(2),
-        )
-        .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
-        .saturating_add(TOOL_CLEANUP_OVERHEAD)
-}
-
-fn tool_action_ms(runtime: &ToolRuntime, intent: &EffectIntent) -> u64 {
-    duration_ms(tool_action_bound(runtime, intent).saturating_add(STORE_ACTION_OVERHEAD))
-}
-
-fn active_window(
-    segment: &ActiveSegment,
-    cache_transfer: Duration,
-    runtime_ms: u32,
-) -> Result<ActiveToolWindow, ToolError> {
-    let completion_deadline = segment.deadline().checked_sub(STORE_ACTION_OVERHEAD);
-    let payload_deadline = completion_deadline.and_then(|deadline| {
-        deadline.checked_sub(TOOL_CLEANUP_OVERHEAD.saturating_add(cache_transfer))
-    });
-    let go_deadline = payload_deadline
-        .and_then(|deadline| deadline.checked_sub(Duration::from_millis(u64::from(runtime_ms))));
-    let preparation_deadline =
-        go_deadline.and_then(|deadline| deadline.checked_sub(cache_transfer));
-    preparation_deadline
-        .zip(go_deadline)
-        .zip(payload_deadline)
-        .zip(completion_deadline)
-        .filter(
-            |(((preparation_deadline, go_deadline), payload_deadline), completion_deadline)| {
-                let now = Instant::now();
-                *preparation_deadline > now
-                    && *go_deadline > now
-                    && *payload_deadline > now
-                    && *completion_deadline > now
-            },
-        )
-        .map(
-            |(((preparation_deadline, go_deadline), payload_deadline), completion_deadline)| {
-                ActiveToolWindow {
-                    preparation_deadline,
-                    go_deadline,
-                    payload_deadline,
-                    completion_deadline,
-                }
-            },
-        )
-        .ok_or(ToolError::Limit)
-}
-
-// Dropping a request's reply makes the Guard read an unstarted action. A send that reserved its
-// slot before the close can still arrive, so keep draining while the worker finishes.
-async fn settle_cancelled<T>(
-    mut execution: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
-    receiver: &mut tokio::sync::mpsc::Receiver<ActiveActionRequest>,
-) -> T {
-    receiver.close();
-    loop {
-        tokio::select! {
-            biased;
-            output = &mut execution => return output,
-            Some(_) = receiver.recv() => {}
-        }
-    }
-}
-
-async fn execute_cancellable(
-    runtime: &ToolRuntime,
-    intent: EffectIntent,
-    cancellation: &RunCancellation,
-) -> ToolObservation {
-    let worker_cancellation = RunCancellation::new();
-    let mut run_cancellation = cancellation.clone();
-    let execution = runtime.execute(intent, worker_cancellation.clone());
-    tokio::pin!(execution);
-    tokio::select! {
-        biased;
-        () = run_cancellation.cancelled() => {
-            worker_cancellation.cancel();
-            execution.await
-        }
-        observation = &mut execution => observation,
     }
 }
 
