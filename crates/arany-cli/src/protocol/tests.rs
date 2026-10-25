@@ -476,6 +476,18 @@ fn every_conformance_message_validates_against_the_schema() {
             "events/committed",
             json!({"threadId": thread_id, "event": {"sequence": 1, "session_id": thread_id, "run_id": null, "agent_run_id": null, "kind": "SessionStarted", "event_version": 2, "payload": {"title": "Example"}, "created_at_ms": 1}}),
         ),
+        (
+            "turn/display",
+            json!({"threadId": thread_id, "turnId": run_id, "update":{"type":"waiting","intentId":null}}),
+        ),
+        (
+            "turn/display",
+            json!({"threadId": thread_id, "turnId": run_id, "update":{"type":"waiting","intentId":run_id}}),
+        ),
+        (
+            "turn/display",
+            json!({"threadId": thread_id, "turnId": run_id, "update":{"type":"preview","preview":null}}),
+        ),
         ("initialized", json!({})),
         ("thread/started", json!({"thread": thread})),
         ("turn/started", json!({"threadId": thread_id, "turn": turn})),
@@ -513,7 +525,14 @@ fn every_conformance_message_validates_against_the_schema() {
     ] {
         let params = json!({"threadId": thread_id, "turnId": run_id, "itemId": "tool", "startedAtMs": 1, "intent": {}, "lines": ["Allow read?"]});
         validate(&schema, &schema["serverRequests"][name]["params"], &params);
-        for decision in ["accept", "decline", "cancel"] {
+        for decision in [
+            "accept",
+            "acceptForSession",
+            "allowPrefixInFolder",
+            "unavailable",
+            "decline",
+            "cancel",
+        ] {
             validate(
                 &schema,
                 &schema["serverRequests"][name]["result"],
@@ -594,17 +613,25 @@ fn protocol_params_reject_unknown_fields_unsupported_modes_and_input_overflow() 
         {"type": "image", "mediaType": "image/png", "data": STANDARD.encode(vec![0; arany::MAX_IMAGE_BYTES - arany::MAX_IMAGE_BYTES / 2])}
     ]);
     assert!(serde_json::from_value::<TurnStartParams>(params).is_ok());
-    for decision in ["accept", "acceptForSession", "decline", "cancel"] {
+    for decision in [
+        "accept",
+        "acceptForSession",
+        "allowPrefixInFolder",
+        "unavailable",
+        "decline",
+        "cancel",
+    ] {
         assert!(serde_json::from_value::<ApprovalResult>(json!({"decision":decision})).is_ok());
     }
-    for decision in ["allowPrefixInFolder", "remember", "allow_always"] {
+    for decision in ["remember", "allow_always"] {
         assert!(serde_json::from_value::<ApprovalResult>(json!({"decision":decision})).is_err());
     }
     let capabilities: ClientCapabilities = serde_json::from_value(json!({
-        "hostCommandSessionApproval":true,"unknown":true
+        "hostCommandSessionApproval":true,"provisionalDisplay":true,"unknown":true
     }))
     .unwrap();
     assert!(capabilities.host_command_session_approval);
+    assert!(capabilities.provisional_display);
     assert!(
         serde_json::from_value::<ClientCapabilities>(json!({"hostCommandSessionApproval":"true"}))
             .is_err()
