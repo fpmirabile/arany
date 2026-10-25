@@ -53,5 +53,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Provider setup UI](./provider-setup-ui/README.md) | `In progress`: S1 account/custom-route management, then per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Primary host commands](./primary-host-commands/README.md) | `Ready`: guarantee wording and H1 approved; S1 primary escalation, session approval and privilege-tool refusal, S2 user-owned host prefixes, S3 serve/ACP/exec |
+| [Image chip hover preview](./image-hover-preview/README.md) | `Ready`; after image attachment chips (#425); S1 Kitty-protocol balloon with any-motion capture, S2 iTerm2 inline images, S3 Sixel gated on `png` dependency approval |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
