@@ -681,23 +681,6 @@ fn transition_hover(current: &mut Option<usize>, next: Option<usize>) -> bool {
     true
 }
 
-fn clear_graphics_placement(
-    placed: &mut bool,
-    image_index: &mut Option<usize>,
-    digest: &mut Option<[u8; 32]>,
-    inner: &mut Option<Rect>,
-    write_delete: impl FnOnce() -> io::Result<()>,
-) -> io::Result<()> {
-    if !*placed {
-        return Ok(());
-    }
-    *placed = false;
-    *image_index = None;
-    *digest = None;
-    *inner = None;
-    write_delete()
-}
-
 impl TerminalMode {
     pub const fn label(self) -> &'static str {
         match self {
@@ -1026,10 +1009,7 @@ pub struct AttachedTerminal {
     hovered_image: Option<usize>,
     pointer_position: Option<ratatui::layout::Position>,
     graphics_hover_changed: bool,
-    graphics_placement: bool,
-    graphics_image_index: Option<usize>,
-    graphics_digest: Option<[u8; 32]>,
-    graphics_inner: Option<Rect>,
+    graphics_placement: Option<GraphicsPlacement>,
     hovered_image_digest: Option<[u8; 32]>,
     frame_area: Option<Rect>,
     history_area: Option<Rect>,
@@ -1072,6 +1052,13 @@ pub struct AttachedTerminal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GraphicsProtocol {
     Kitty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GraphicsPlacement {
+    image_index: usize,
+    digest: [u8; 32],
+    inner: Rect,
 }
 
 pub struct ProfileSelection<'a> {
@@ -1388,10 +1375,7 @@ impl AttachedTerminal {
             hovered_image: None,
             pointer_position: None,
             graphics_hover_changed: false,
-            graphics_placement: false,
-            graphics_image_index: None,
-            graphics_digest: None,
-            graphics_inner: None,
+            graphics_placement: None,
             hovered_image_digest: None,
             frame_area: None,
             history_area: None,
@@ -2502,27 +2486,14 @@ impl AttachedTerminal {
     }
 
     fn delete_graphics_placement(&mut self) -> io::Result<()> {
-        let Self {
-            graphics_placement,
-            graphics_image_index,
-            graphics_digest,
-            graphics_inner,
-            terminal,
-            ..
-        } = self;
-        clear_graphics_placement(
-            graphics_placement,
-            graphics_image_index,
-            graphics_digest,
-            graphics_inner,
-            || {
-                terminal.as_mut().map_or(Ok(()), |terminal| {
-                    terminal
-                        .backend_mut()
-                        .write_graphics(graphics::kitty_delete())
-                })
-            },
-        )
+        if self.graphics_placement.take().is_none() {
+            return Ok(());
+        }
+        self.terminal.as_mut().map_or(Ok(()), |terminal| {
+            terminal
+                .backend_mut()
+                .write_graphics(graphics::kitty_delete())
+        })
     }
 
     // Returns true when this call armed the selector, so the caller redraws before reading input.
@@ -2836,31 +2807,24 @@ impl AttachedTerminal {
             .hovered_image
             .and_then(|index| composer.images().get(index).map(|image| (index, image)));
         let preview = image.and_then(|(index, image)| inner.map(|inner| (index, image, inner)));
-        let unchanged = preview.is_some_and(|(index, image, inner)| {
-            self.graphics_placement
-                && self.graphics_image_index == Some(index)
-                && self.graphics_digest == Some(image.digest())
-                && self.graphics_inner == Some(inner)
+        let placement = preview.map(|(index, image, inner)| GraphicsPlacement {
+            image_index: index,
+            digest: image.digest(),
+            inner,
         });
+        let unchanged = placement.is_some() && self.graphics_placement == placement;
         if unchanged {
             return Ok(());
         }
         let mut bytes = Vec::new();
-        if self.graphics_placement {
+        if self.graphics_placement.take().is_some() {
             bytes.extend_from_slice(graphics::kitty_delete());
-            self.graphics_placement = false;
-            self.graphics_image_index = None;
-            self.graphics_digest = None;
-            self.graphics_inner = None;
         }
-        if let (Some(GraphicsProtocol::Kitty), Some((index, image, inner))) =
+        if let (Some(GraphicsProtocol::Kitty), Some((_, image, inner))) =
             (self.graphics_protocol, preview)
         {
             bytes.extend_from_slice(&graphics::kitty_image(image, inner));
-            self.graphics_placement = true;
-            self.graphics_image_index = Some(index);
-            self.graphics_digest = Some(image.digest());
-            self.graphics_inner = Some(inner);
+            self.graphics_placement = placement;
         }
         if !bytes.is_empty() {
             self.owned().backend_mut().write_graphics(&bytes)?;
@@ -3997,9 +3961,8 @@ impl Drop for AttachedTerminal {
 
 #[cfg(test)]
 mod graphics_lifecycle_tests {
-    use super::{TerminalBackend, clear_graphics_placement, hovered_image_at, transition_hover};
+    use super::{GraphicsPlacement, TerminalBackend, hovered_image_at, transition_hover};
     use ratatui::{Terminal, layout::Rect};
-    use std::io;
 
     #[test]
     fn hover_enter_leave_request_one_frame_and_motion_inside_is_suppressed() {
@@ -4030,36 +3993,6 @@ mod graphics_lifecycle_tests {
         assert_eq!(hovered_image_at(&new_chip, position.0, position.1), None);
     }
 
-    #[test]
-    fn failed_delete_clears_placement_before_a_later_drop_cleanup() {
-        let mut placed = true;
-        let mut image_index = Some(0);
-        let mut digest = Some([1; 32]);
-        let mut inner = Some(Rect::new(1, 2, 3, 4));
-        assert!(
-            clear_graphics_placement(
-                &mut placed,
-                &mut image_index,
-                &mut digest,
-                &mut inner,
-                || Err(io::Error::other("closed writer")),
-            )
-            .is_err()
-        );
-        assert!(!placed);
-        assert_eq!(image_index, None);
-        assert_eq!(digest, None);
-        assert_eq!(inner, None);
-        clear_graphics_placement(
-            &mut placed,
-            &mut image_index,
-            &mut digest,
-            &mut inner,
-            || panic!("a repeated cleanup must not write through a removed terminal"),
-        )
-        .expect("repeated cleanup is idempotent");
-    }
-
     #[cfg(unix)]
     #[test]
     fn drop_after_failed_delete_does_not_expect_an_owned_terminal() {
@@ -4071,8 +4004,16 @@ mod graphics_lifecycle_tests {
                 let backend = TerminalBackend::failing_graphics_writer(80, 24);
                 let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
                 attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
-                attached.graphics_placement = true;
+                attached.graphics_placement = Some(GraphicsPlacement {
+                    image_index: 0,
+                    digest: [1; 32],
+                    inner: Rect::new(1, 2, 3, 4),
+                });
                 assert!(attached.release().is_err());
+                assert!(attached.graphics_placement.is_none());
+                attached
+                    .delete_graphics_placement()
+                    .expect("repeated cleanup is idempotent");
                 drop(attached);
             });
     }
