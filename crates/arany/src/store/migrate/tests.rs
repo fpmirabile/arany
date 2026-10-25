@@ -8,9 +8,11 @@ use std::path::Path;
 
 const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
+const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#;
+
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 67] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 68] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -228,6 +230,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 67] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
     ("ProviderCallRecorded", 22, REFUSAL_V19, REFUSAL_V19),
+    ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
 ];
 
 #[test]
@@ -388,7 +391,7 @@ fn editor_refusal_migration_preserves_bytes_and_rejects_forged_old_causes() {
         );
         Event::decode(
             "ProviderCallRecorded",
-            payload_version("ProviderCallRecorded").unwrap(),
+            crate::test_support::payload_version("ProviderCallRecorded"),
             &forged,
             Some(RunId::new()),
             Some(AgentRunId::new()),
@@ -2874,4 +2877,17 @@ fn host_prefix_migration_preserves_source_bytes_but_never_fabricates_authority()
     );
     assert!((step.canonical)(&serde_json::to_string(&verdict).unwrap()).is_none());
     assert!((step.transform)(serde_json::to_value(verdict).unwrap()).is_none());
+}
+
+#[test]
+fn setup_identity_step_rejects_routing_in_a_source_version_without_it() {
+    let step = REGISTRY.event_step("ProviderSetupEditStarted", 1).unwrap();
+    assert_eq!(
+        (step.canonical)(ROLE_SETUP_V1).as_deref(),
+        Some(ROLE_SETUP_V1)
+    );
+    let mut forged: Value = serde_json::from_str(ROLE_SETUP_V1).unwrap();
+    forged["target"] = serde_json::json!({"kind":"RoleRouting","identity":"roles"});
+    assert!((step.canonical)(&forged.to_string()).is_none());
+    assert!((step.transform)(forged).is_none());
 }
