@@ -445,6 +445,7 @@ const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":nu
 const ROOT_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 // Version 20 adds the explicit null user-instruction digest.
 const HOST_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":{"contract_version":1,"config_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"permissions_digest":null,"max_context_bytes":65536,"unguarded_rules_digest":null,"unguarded":"human_only","child_unguarded":"denied"}},"active_deadline_ms":1800000}"#;
+const CURRENT_HOST_RUNSTARTED: &str = r#"{"config":{"supervisor":{"evaluator":1,"window":32,"floors":{"identical":3,"failing":2,"cycle_two":3,"cycle_other":3,"oscillation":1,"stalled":2,"denial_streak":2,"denials_window":65535,"distinct_denied":65535,"alias":1,"files":16,"files_per_root":4,"delete_permille":250,"deleted_files":1,"growth_permille":65535,"changed_kib":65535},"candidates":{"identical":4,"failing":3,"cycle_two":3,"cycle_other":5,"oscillation":2,"stalled":3,"denial_streak":3,"denials_window":4,"distinct_denied":3,"alias":2,"files":32,"files_per_root":8,"delete_permille":500,"deleted_files":8,"growth_permille":4000,"changed_kib":64},"digest":[20,87,236,124,192,233,100,133,79,93,97,82,110,48,83,142,171,60,50,80,167,97,239,123,72,148,181,116,48,36,159,94]},"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":{"contract_version":1,"config_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"permissions_digest":null,"max_context_bytes":65536,"unguarded_rules_digest":null,"unguarded":"human_only","child_unguarded":"denied"}},"active_deadline_ms":1800000}"#;
 const GLOBAL_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 const NESTED_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
@@ -1880,6 +1881,44 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    for kind in [
+        "ToolStarted",
+        "ToolFinished",
+        "RunStarted",
+        "GoalStarted",
+        "GoalFinished",
+        "GoalPlanContractRecorded",
+        "AgentSpawned",
+    ] {
+        let (from, fixture) = EVENT_FIXTURES
+            .iter()
+            .filter(|(fixture_kind, _, _, _)| *fixture_kind == kind)
+            .map(|(_, from, _, expected)| (*from, *expected))
+            .max_by_key(|(from, _)| *from)
+            .expect("canonical payload fixture");
+        assert_eq!(from + 1, crate::session::payload_version(kind).unwrap());
+        // Preserve the historical fixture while pairing its policy with a current Supervisor.
+        let fixture = if kind == "RunStarted" {
+            CURRENT_HOST_RUNSTARTED
+        } else {
+            fixture
+        };
+        let (run_id, agent_run_id) = match kind {
+            "GoalStarted" | "GoalFinished" => (None, None),
+            "RunStarted" | "AgentSpawned" => (
+                Some(RunId::new()),
+                (kind == "AgentSpawned").then(AgentRunId::new),
+            ),
+            "GoalPlanContractRecorded" => (Some(RunId::new()), None),
+            _ => (
+                Some("01a15ecf-a92a-7707-8af6-ce3d36320b67".parse().unwrap()),
+                Some("01a15ecf-a92a-7707-8af6-ce3e0c00af83".parse().unwrap()),
+            ),
+        };
+        let event = Event::decode(kind, from + 1, fixture, run_id, agent_run_id)
+            .unwrap_or_else(|error| panic!("{kind} v{} fixture decode: {error:?}", from + 1));
+        assert_eq!(event.payload().unwrap(), fixture, "{kind}");
+    }
     assert_eq!(
         uncovered_schema(&CHECKPOINT_SCHEMA, checkpoints::SCHEMA_VERSION),
         Vec::<String>::new()

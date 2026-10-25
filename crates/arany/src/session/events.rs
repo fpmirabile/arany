@@ -706,13 +706,124 @@ struct ProviderSetupEditFinishedPayload {
     disposition: ProviderSetupDisposition,
 }
 
+#[derive(Serialize)]
+struct TitlePayloadRef<'a> {
+    title: &'a str,
+}
+#[derive(Serialize)]
+struct StartedPayloadRef<'a> {
+    title: &'a str,
+    workspace_device: u64,
+    workspace_inode: u64,
+}
+#[derive(Serialize)]
+struct ForkPayloadRef<'a> {
+    title: &'a str,
+    source_session_id: SessionId,
+    source_run_id: RunId,
+    source_sequence: u64,
+    prefix_digest: [u8; 32],
+}
+#[derive(Serialize)]
+struct ProviderSetupEditStartedPayloadRef<'a> {
+    operation_id: uuid::Uuid,
+    target: &'a ProviderSetupTarget,
+    expected_digest: Option<[u8; 32]>,
+}
+#[derive(Serialize)]
+struct ContextCompactedPayloadRef<'a> {
+    record: &'a CompactionRecord,
+    active_ms: Option<u64>,
+}
+#[derive(Serialize)]
+struct GoalStartedPayloadRef<'a> {
+    goal_id: GoalId,
+    objective: &'a str,
+    include_paths: &'a Option<Vec<String>>,
+    workspace_device: u64,
+    workspace_inode: u64,
+    budget: GoalBudget,
+    phase: GoalPhase,
+    autonomous: bool,
+    resource_settings: &'a crate::tools::ToolResourceSettings,
+    continues: Option<GoalId>,
+}
+#[derive(Serialize)]
+struct GoalContractPayloadRef<'a> {
+    goal_id: GoalId,
+    contract: &'a GoalPlanContract,
+}
+#[derive(Serialize)]
+struct GoalFinishedPayloadRef<'a> {
+    goal_id: GoalId,
+    status: GoalStatus,
+    active_ms: u64,
+    report: &'a GoalReport,
+    exhausted: bool,
+    budget_refusal: Option<BudgetRefusal>,
+}
+#[derive(Serialize)]
+struct MessagePayloadRef<'a> {
+    skill: &'a Option<String>,
+    text: &'a str,
+    images: &'a Vec<crate::provider::ImageAttachment>,
+}
+#[derive(Serialize)]
+struct TextPayloadRef<'a> {
+    text: &'a str,
+}
+#[derive(Serialize)]
+struct RunStartedPayloadRef<'a> {
+    config: &'a RunConfig,
+    active_deadline_ms: Option<u64>,
+}
+#[derive(Serialize)]
+struct SpawnPayloadRef<'a> {
+    profile: &'a Option<String>,
+    assignment: &'a Option<WorkerAssignment>,
+    definition: &'a Option<String>,
+    role: AgentRole,
+    ordinal: u8,
+    objective: &'a Option<String>,
+    grant: Option<ChildGrant>,
+}
+#[derive(Serialize)]
+struct GoalContextCompactionPayloadRef<'a> {
+    goal_id: GoalId,
+    covered_tool_count: u32,
+    record: &'a CompactionRecord,
+}
+#[derive(Serialize)]
+struct GoalSteeringNotePayloadRef<'a> {
+    goal_id: GoalId,
+    text: &'a str,
+}
+#[derive(Serialize)]
+struct ToolStartedPayloadRef<'a> {
+    intent: &'a ToolIntentRecord,
+    active_ceiling_ms: u64,
+}
+#[derive(Serialize)]
+struct ToolFinishedPayloadRef<'a> {
+    #[serde(flatten)]
+    observation: &'a crate::tools::ToolObservation,
+    checkpoint: &'a Option<super::Checkpoint>,
+}
+#[derive(Serialize)]
+struct AgentFinishedPayloadRef<'a> {
+    worker: &'a Option<WorkerOutcome>,
+    disposition: AgentDisposition,
+    summary: Option<&'a str>,
+    result: Option<&'a str>,
+}
+
 impl Event {
     pub(crate) fn finished_payload_size(summary: &str, result: &str) -> Result<usize, ReplayError> {
-        serialize(&AgentFinishedPayload {
-            worker: None,
+        serialize(&AgentFinishedPayloadRef {
+            worker: &None,
             disposition: AgentDisposition::Finished,
-            summary: Some(summary.into()),
-            result: Some(result.into()),
+            summary: Some(summary),
+            result: Some(result),
         })
         .map(|payload| payload.len())
     }
@@ -920,21 +1031,19 @@ impl Event {
                         device: workspace_device,
                         inode: workspace_inode,
                     },
-            } => serialize(&StartedPayload {
-                title: title.clone(),
+            } => serialize(&StartedPayloadRef {
+                title,
                 workspace_device: *workspace_device,
                 workspace_inode: *workspace_inode,
             }),
-            Self::SessionRenamed { title } => serialize(&TitlePayload {
-                title: title.clone(),
-            }),
+            Self::SessionRenamed { title } => serialize(&TitlePayloadRef { title }),
             Self::ProviderSetupEditStarted {
                 operation_id,
                 target,
                 expected_digest,
-            } => serialize(&ProviderSetupEditStartedPayload {
+            } => serialize(&ProviderSetupEditStartedPayloadRef {
                 operation_id: *operation_id,
-                target: target.clone(),
+                target,
                 expected_digest: *expected_digest,
             }),
             Self::ProviderSetupEditFinished {
@@ -953,17 +1062,19 @@ impl Event {
                 source_run_id,
                 source_sequence,
                 prefix_digest,
-            } => serialize(&ForkPayload {
-                title: title.clone(),
+            } => serialize(&ForkPayloadRef {
+                title,
                 source_session_id: *source_session_id,
                 source_run_id: *source_run_id,
                 source_sequence: *source_sequence,
                 prefix_digest: *prefix_digest,
             }),
-            Self::ContextCompacted { record, active_ms } => serialize(&ContextCompactedPayload {
-                record: record.clone(),
-                active_ms: *active_ms,
-            }),
+            Self::ContextCompacted { record, active_ms } => {
+                serialize(&ContextCompactedPayloadRef {
+                    record,
+                    active_ms: *active_ms,
+                })
+            }
             Self::GoalStarted {
                 goal_id,
                 objective,
@@ -978,16 +1089,16 @@ impl Event {
                 autonomous,
                 resource_settings,
                 continues,
-            } => serialize(&GoalStartedPayload {
+            } => serialize(&GoalStartedPayloadRef {
                 goal_id: *goal_id,
-                objective: objective.clone(),
-                include_paths: include_paths.clone(),
+                objective,
+                include_paths,
                 workspace_device: *workspace_device,
                 workspace_inode: *workspace_inode,
                 budget: *budget,
                 phase: *phase,
                 autonomous: *autonomous,
-                resource_settings: *resource_settings,
+                resource_settings,
                 continues: *continues,
             }),
             Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
@@ -997,9 +1108,9 @@ impl Event {
             Self::GoalResumed { goal_id } => serialize(&GoalIdPayload { goal_id: *goal_id }),
             Self::GoalPlanContractRecorded {
                 goal_id, contract, ..
-            } => serialize(&GoalContractPayload {
+            } => serialize(&GoalContractPayloadRef {
                 goal_id: *goal_id,
-                contract: contract.clone(),
+                contract,
             }),
             Self::GoalFinished {
                 goal_id,
@@ -1008,12 +1119,12 @@ impl Event {
                 report,
                 exhausted,
                 budget_refusal,
-            } => serialize(&GoalFinishedPayload {
+            } => serialize(&GoalFinishedPayloadRef {
                 goal_id: *goal_id,
                 status: *status,
                 active_ms: *active_ms,
                 exhausted: *exhausted,
-                report: report.clone(),
+                report,
                 budget_refusal: *budget_refusal,
             }),
             Self::MessageAccepted {
@@ -1021,18 +1132,18 @@ impl Event {
                 images,
                 skill,
                 ..
-            } => serialize(&MessagePayload {
-                skill: skill.clone(),
-                text: text.clone(),
-                images: images.clone(),
+            } => serialize(&MessagePayloadRef {
+                skill,
+                text,
+                images,
             }),
-            Self::MessageCommitted { text, .. } => serialize(&TextPayload { text: text.clone() }),
+            Self::MessageCommitted { text, .. } => serialize(&TextPayloadRef { text }),
             Self::RunStarted {
                 config,
                 active_deadline_ms,
                 ..
-            } => serialize(&RunStartedPayload {
-                config: config.clone(),
+            } => serialize(&RunStartedPayloadRef {
+                config,
                 active_deadline_ms: *active_deadline_ms,
             }),
             Self::AgentSpawned {
@@ -1044,13 +1155,13 @@ impl Event {
                 profile,
                 assignment,
                 ..
-            } => serialize(&SpawnPayload {
-                profile: profile.clone(),
-                assignment: assignment.clone(),
-                definition: definition.clone(),
+            } => serialize(&SpawnPayloadRef {
+                profile,
+                assignment,
+                definition,
                 role: *role,
                 ordinal: *ordinal,
-                objective: objective.clone(),
+                objective,
                 grant: *grant,
             }),
             Self::ProviderFallbackUsed { fallback, .. } => serialize(fallback),
@@ -1082,16 +1193,16 @@ impl Event {
                 covered_tool_count,
                 record,
                 ..
-            } => serialize(&GoalContextCompactionPayload {
+            } => serialize(&GoalContextCompactionPayloadRef {
                 goal_id: *goal_id,
                 covered_tool_count: *covered_tool_count,
-                record: record.clone(),
+                record,
             }),
             Self::GoalSteeringNoteRecorded { goal_id, text, .. }
             | Self::AgentSteeringNoteRecorded { goal_id, text, .. } => {
-                serialize(&GoalSteeringNotePayload {
+                serialize(&GoalSteeringNotePayloadRef {
                     goal_id: *goal_id,
-                    text: text.clone(),
+                    text,
                 })
             }
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
@@ -1099,17 +1210,17 @@ impl Event {
                 intent,
                 active_ceiling_ms,
                 ..
-            } => serialize(&ToolStartedPayload {
-                intent: intent.clone(),
+            } => serialize(&ToolStartedPayloadRef {
+                intent,
                 active_ceiling_ms: *active_ceiling_ms,
             }),
             Self::ToolFinished {
                 observation,
                 checkpoint,
                 ..
-            } => serialize(&ToolFinishedPayload {
-                observation: observation.clone(),
-                checkpoint: checkpoint.clone(),
+            } => serialize(&ToolFinishedPayloadRef {
+                observation,
+                checkpoint,
             }),
             Self::ToolPermissionDecided { verdict, .. } => serialize(verdict),
             Self::HookStarted { hook, .. } => serialize(hook),
@@ -1120,11 +1231,11 @@ impl Event {
                 result,
                 worker,
                 ..
-            } => serialize(&AgentFinishedPayload {
-                worker: worker.clone(),
+            } => serialize(&AgentFinishedPayloadRef {
+                worker,
                 disposition: *disposition,
-                summary: summary.clone(),
-                result: result.clone(),
+                summary: summary.as_deref(),
+                result: result.as_deref(),
             }),
             Self::WorkerDataChunk { record, .. } => serialize(record),
             Self::WorkerDataSealed { record, .. } => serialize(record),
@@ -1961,8 +2072,8 @@ fn before_operations(
 
 // Checked before the Goal and Message facts that precede RunStarted commit.
 pub(crate) fn run_started_fits(config: &RunConfig) -> bool {
-    serialize(&RunStartedPayload {
-        config: config.clone(),
+    serialize(&RunStartedPayloadRef {
+        config,
         active_deadline_ms: Some(u64::MAX),
     })
     .is_ok_and(|payload| payload.len() <= crate::store::MAX_EVENT_BYTES)
