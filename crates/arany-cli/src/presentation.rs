@@ -401,6 +401,13 @@ pub fn budget_refusal_feedback(view: &SessionView, goal: Option<GoalId>) -> Opti
         .and_then(|run| session_run_feedback(view, run))
 }
 
+pub fn budget_stop_run(view: &SessionView, goal: Option<GoalId>) -> Option<&RunView> {
+    view.runs.iter().rev().find(|run| {
+        view.budget_stop_goal(run)
+            .is_some_and(|candidate| Some(candidate.id) == goal)
+    })
+}
+
 pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
@@ -1480,6 +1487,41 @@ mod goal_status_tests {
             session_run_feedback(&view, &view.runs[0])
         );
         assert_eq!(budget_refusal_feedback(&view, Some(GoalId::new())), None);
+    }
+
+    #[test]
+    fn budget_stop_run_keeps_the_loose_predicate_and_selects_the_latest_run() {
+        let mut view = session_with_goal(true);
+        let mut earlier = crate::presentation::team_view().runs.remove(0);
+        earlier.status = RunStatus::Failed;
+        earlier.failure = Some(arany::RunFailure::BudgetExhausted);
+        earlier.assistant_message = None;
+        let mut latest = crate::presentation::team_view().runs.remove(0);
+        latest.status = RunStatus::Failed;
+        latest.failure = Some(arany::RunFailure::BudgetExhausted);
+        latest.assistant_message = Some("Committed answer".into());
+        let goal_id = view.goals[0].id;
+        view.goals[0].run_ids = vec![earlier.id, latest.id];
+        view.goals[0].provider_calls = 64;
+        view.goals[0].status = GoalStatus::Failed;
+        view.goals[0].budget_closed = true;
+        view.runs = vec![earlier, latest];
+
+        assert_eq!(
+            budget_stop_run(&view, Some(goal_id)).map(|run| run.id),
+            Some(view.runs[1].id)
+        );
+        assert_eq!(budget_refusal_feedback(&view, Some(goal_id)), None);
+        assert!(
+            session_run_feedback(&view, &view.runs[0])
+                .expect("earlier Run receipt")
+                .contains("No answer was committed")
+        );
+        assert!(
+            session_run_feedback(&view, &view.runs[1])
+                .expect("latest Run receipt")
+                .contains("The committed answer is preserved")
+        );
     }
 }
 

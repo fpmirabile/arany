@@ -430,11 +430,14 @@ async fn classify_submission(submission: Submission) -> Result<ClassifiedSubmiss
                     .map_err(|_| "Session history unavailable or invalid")?;
                 store.close().await.map_err(|_| "store shutdown failed")?;
                 if let Some(view) = view
-                    && let Some(run) = view.runs.iter().rev().find(|run| {
-                        view.budget_stop_goal(run)
-                            .is_some_and(|goal| goal.id == goal_id)
+                    && let Some(feedback) = crate::presentation::budget_refusal_feedback(
+                        &view,
+                        Some(goal_id),
+                    )
+                    .or_else(|| {
+                        crate::presentation::budget_stop_run(&view, Some(goal_id))
+                            .and_then(|run| crate::presentation::session_run_feedback(&view, run))
                     })
-                    && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
                 {
                     return Err(feedback);
                 }
