@@ -2,7 +2,7 @@
 
 ## Scope and related contracts
 
-This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
+This contract owns the channel Server and `arany serve --stdio`: their JSON-RPC vocabulary, bounded
 transport, thread and turn projection, and JSON Schema export. The server runs
 `initialize` / `initialized`, `thread/start|resume|fork|unsubscribe|list`, `turn/start|interrupt|steer`,
 `thread/settings/update`, `thread/rewind/preview`, `thread/rewind`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
@@ -14,6 +14,11 @@ The server sends one-use human approval requests and negotiates exact-session sc
 [Goals](./goals.md) owns budgets and recovery, and [Tools](./tools.md) owns
 authority and approval scopes. [Terminal](./terminal.md) owns `exec` and
 `show` output. Protocol serialization adds no authority or Engine policy.
+
+The in-process transport uses the same bounded `ClientMessage` inbound and
+Server message outbound channel pair without newline framing. The Server owns
+the Engine and Run tasks; the caller owns connection shutdown and the human
+approval channel. The library has no protocol dependency. Stdio and ACP retain their existing approval restrictions.
 
 ## Framing and envelope
 
@@ -86,7 +91,7 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 
 | Method | Params and result | Ordering and admission |
 |---|---|---|
-| `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string],hostCommandSessionApproval?:bool}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
+| `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string],hostCommandSessionApproval?:bool,provisionalDisplay?:bool}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
 | `thread/start` | `{cwd,provider,model,effort?,title?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread}` | Selects the Provider and configured role chains as `exec` does. `Engine::create_session` commits `SessionStarted` before the result and subsequent `thread/started`. A thread is a durable Session, including when no turn follows. |
 | `thread/resume` | `{threadId,cwd,provider,model,effort?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and execution configuration with the same settings and defaults as start, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
 | `thread/unsubscribe` | `{threadId}` → `{status:"unsubscribed"\|"notLoaded"}` | Codex app-server shape. Removes the connection's loaded thread and raw subscription; durable Session history remains. An active submission has its approval withdrawn and cancellation signalled, and its committed completion precedes the response and slot release. The thread stays loaded until then so `events/subscribe` reconciliation of the completed turn still works; ACP close ordering is defined by [session/close](./acp.md#behavior). A second close while cancellation is pending returns `busy`. An unloaded ID returns `notLoaded` without inspecting State. |
@@ -167,8 +172,8 @@ An active submission or another request during publication returns busy; an unkn
 ## Notifications and items
 
 All live facts come from committed Events on `RunHandle.events` or the single
-process-wide `Engine::subscribe()` tap for raw subscriptions, never
-Provider previews or `RunHints`. Completion reloads the strict reduced view
+process-wide `Engine::subscribe()` tap for raw subscriptions. Provisional
+display is a separate opt-in stream, never a source of committed facts. Completion reloads the strict reduced view
 to include a following Goal receipt and recover a missing terminal tap. Each
 submission is driven independently of the bounded outbound follower, so a slow
 client cannot hold Journal appends. Notification opt-outs from initialize are
@@ -177,12 +182,38 @@ honored.
 | Notification | Committed source and payload |
 |---|---|
 | `thread/started` | Durable Session creation; `{thread}` after the thread/start or thread/fork result. |
+| `turn/display` | Only with `initialize.capabilities.provisionalDisplay:true`; `{threadId,turnId,update}` from live Run hints, as described below. |
 | `turn/started` | `MessageAccepted`; `{threadId,turn:{id,goalId,status:"inProgress",items:[]}}`. Each subsequent Run of an autonomous Goal has a new turn ID and the same Goal ID. |
 | `item/started` | `MessageAccepted` or `ToolStarted`; `{threadId,turnId,item,startedAtMs}`. |
 | `item/completed` | `MessageAccepted`, `MessageCommitted` or `ToolFinished`; `{threadId,turnId,item,completedAtMs}`. User items start and complete together; final answer items complete without a started notification. |
 | `turn/completed` | `RunFinished`, or the end of a settled submission whose last Run has no terminal receipt, plus reduced Goal state; `{threadId,turn:{id,goalId,status,stopReason?,items:[],error?,goal:{status,stopped?,budgetRefusal?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
 | `events/committed` | After a thread's final subscription page, `{threadId,event:EventLine}` for each later tapped Event in commit order. Events at or before the page head are suppressed. |
 | `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. Raw subscriptions receive one notice per subscribed thread with its last delivered sequence and are then disabled until `events/subscribe` is called again, so a later notice never reports a cursor beyond the first gap. The turn projection also emits `events/resync` for its active thread with its own `lastSequence`, so a subscriber can see two notices; `missed` counts the process-wide tap loss and may include other threads. Recover by paging `events/subscribe` from `lastSequence`, or reconstruct items with `thread/resume`. Live delivery is best effort: a lost append acknowledgment or a fork committed inside Store can leave a gap without Resync; paging supplies completeness. |
+
+`turn/display` follows the provisional streaming pattern of
+[Codex app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server),
+with an explicit opt-in to preserve existing clients. `update` is either
+`{type:"preview",preview:{agentRunId,callIndex,answer,commentary,commentaryLimited,tentative}|null}`
+or `{type:"waiting",intentId:UUID|null}`. Preview fields copy the bounded Engine
+hint exactly; null withdraws a preview or capacity wait. Clients must render
+these untrusted display values inertly and clear them when the turn settles.
+The notifications carry no authority, are not themselves journaled or replayed,
+and never become receipt facts. Opting in enables the Engine's existing
+[durable display checkpoints](./terminal.md#terminal-continuity-and-provisional-text):
+chunk-sized non-tentative answer text, public commentary and eligible published
+completion/cancellation tails append canonical `AssistantDisplayRecorded`
+Events. Those checkpoints survive strict replay independently of notification
+delivery; incomplete text stays qualified and never becomes an accepted Message,
+Provider history or compaction input. Unpublished transport-buffer tails remain
+subject to the [Provider cancellation rule](./provider.md#streaming-and-provisional-text).
+This follows [Codex's rollout persistence policy](https://github.com/openai/codex/blob/rust-v0.114.0/codex-rs/core/src/rollout/policy.rs),
+which omits streaming deltas while retaining canonical message/reasoning items.
+Arany additionally preserves its existing bounded intermediate checkpoints for
+crash and cancellation recovery. Latest preview and wait values coalesce
+independently. Delivery attempts once without waiting; a full queue or an update
+above the encoded line bound drops that update. Notification opt-out suppresses
+both hint collection and delivery. Committed Events retain their existing
+reconciliation path regardless of provisional loss.
 
 `goal.stopped` is the closed stop that one Engine projection
 (`SessionView::run_stop`) derives from committed Goal and Run facts; it equals
@@ -271,7 +302,8 @@ Failure to recover the matching committed intent, or a request above the
 message size limit, records unavailable approval without sending a request.
 
 The client returns `{decision:"accept"|"decline"|"cancel"}`. Accept resolves
-only that one pending ToolApproval; decline denies; cancel signals turn
+only that one pending ToolApproval; decline denies; `unavailable` explicitly
+reports a missing approval channel; cancel signals turn
 cancellation before resolving the pending reply as unavailable. A matching
 client error or invalid result records unavailable approval. Unknown,
 withdrawn, cancelled, finished or already resolved request IDs never change a
@@ -288,10 +320,21 @@ owns eligibility, bounds and expiry. Subsequent turns on the same live binding
 may reuse it; explicit thread/Goal resume, reconnect, restart and fork cannot.
 Clients without this capability receive once/decline/cancel only. A session reply
 without an offered session scope, including for ordinary Tools, is unavailable
-approval. No request offers a remembered prefix, and remember/rule-creation
+approval. Stdio and ACP never offer remembered prefixes; unsolicited scope
 replies reject without saving or dispatching. This follows Codex's
 [`acceptForSession` vocabulary](https://github.com/openai/codex/blob/61f34c35af77777db4d77d0ea2aeb8547a6b4523/codex-rs/app-server-protocol/schema/typescript/v2/CommandExecutionApprovalDecision.ts);
 Arany journals a separate bounded scope grant rather than renewing the old intent.
+
+An in-process attached-terminal caller selects its full human approval channel
+in Server configuration, never through client capabilities or model input.
+Its eligible requests additionally offer `allowPrefixInFolder`, mapping to the
+existing typed `ToolApprovals` reply and [attached prefix rules](./tools.md#remembered-host-prefixes).
+Only offered scopes are accepted, bound to the pending immutable approval.
+`allowAutoEdits:true`, when present on that channel, permits the existing
+file-edit affordance: update the mode through `thread/settings/update`, then
+accept once. Standard clients keep their once/decline/cancel subset and optional
+negotiated exact-session scope. The Engine still validates every decision,
+journals its verdict before dispatch and owns rule-save failure or uncertainty.
 
 Unanswered primary requests remain pending without a wall-clock deadline while
 the owning connection and Run remain live. EOF, turn interruption, pause,
@@ -324,7 +367,7 @@ admission still apply. Hook execution remains owned by the Tools contract.
 | Notification opt-outs | At most 32; invalid params. |
 | Turn input | At least one input item, at most one text of 64 KiB; base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
 | Pending inbound requests | 64 at the reader plus at most 64 deferred messages while sending output; reader buffer 64 KiB. Output waits still accept EOF, matching interruption/unsubscribe and approval replies. Deferred-input overflow cancels the Run and fails the connection. Cancellation or shutdown with output still full drops the blocked presentation operation, settles the Engine and exits with Session-history recovery guidance; ready output still drains normally. |
-| Outbound queue | 256; follower waits and Journal lag is reported through `events/resync`. |
+| Outbound queue | 256; committed follower waits and Journal lag is reported through `events/resync`; see [`turn/display` behavior](#notifications-and-items) for provisional hint coalescing and drop rules. |
 | Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / excess approvals resolve as unavailable (not a decline); loaded threads are never evicted. Reloading a known thread consumes no extra slot; unsubscribe frees one after cancellation settles. |
 | Session list page / cursor | 1–100 entries (default 50) / 128 UTF-8 bytes; invalid limits/cursors refuse with invalidParams. The whole response must fit 1 MiB. |
 | Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
@@ -354,7 +397,7 @@ The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
 `items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `host_command_session_approval_v1`, `events_subscribe_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
-covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`. Breaking wire changes require a new
+covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`, `provisional_display_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats follow the [journal migration contract](./execution.md#journal-migration).
 
@@ -367,6 +410,7 @@ pre-beta; stored formats follow the [journal migration contract](./execution.md#
 | Envelope conformance and bounds | Both version forms accepted; malformed, ambiguous and oversized lines rejected; exact 1 MiB boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
 | Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas; every projected stop has one closed `goal.stopped` value and free text is refused | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs), [stop mapping](../../crates/arany-cli/src/cli/serve/items.rs), [projection table](../../crates/arany/src/session/stop.rs) |
 | CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
+| Provisional display | Opt-in and opt-out, withdrawn tentative text is absent, full-queue Journal settlement; strict reopened history retains canonical non-tentative chunks, public commentary and completion/cancellation tails; display waiting and clearing shapes validate against the schema | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [protocol conformance](../../crates/arany-cli/src/protocol/tests.rs) |
 | Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs) |
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Provider setup blocks continuation | Pending and Uncertain setup edits refuse ordinary/autonomous turns, Goal resume and thread reload with `providerSetupBlocked`; Events remain unchanged and inference/compaction Provider calls stay at zero | [`setup_edits_block_loaded_thread_prompts_without_events_or_provider_calls`](../../crates/arany-cli/tests/serve/in_process.rs) |
@@ -376,7 +420,7 @@ pre-beta; stored formats follow the [journal migration contract](./execution.md#
 | Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |
 | Replay, receipts and forks | Exclusive `since`, count/byte pagination, live Event order and JSONL identity; tap overflow recovery; unknown threads/Goals and future cursors refused; receipt equals committed GoalFinished and oversized receipt refuses without closing the connection; fork lineage and Workspace identity preserved, busy and nonterminal sources refused | [History protocol corpus](../../crates/arany-cli/tests/serve/history.rs) |
-| Host scopes and client failures | Once/session round trips, exact reuse across turns, fresh epoch on resume, unsupported and remembered scopes refused; stale/forged replies, EOF, cancellation and backpressure dispatch nothing unauthorized; closed replay retains host receipts | [Serve approval corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Host scopes and client failures | Once/session round trips, exact reuse across turns, fresh epoch on resume, unsupported scopes and stdio remembered scopes refused; attached in-process prefix save retains its human verdict; stale/forged replies, EOF, cancellation and backpressure dispatch nothing unauthorized; closed replay retains host receipts | [Serve approval corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Shipped process | Cleared credentials: initialize succeeds, Provider selection fails, EOF exits 0, schema-valid stdout and empty stderr; argument/TTY admission exits 2 before State | [Session process tests](../../crates/arany-cli/tests/session_run.rs) |
 
 The compiled error reason `goalIncludesUnavailable` represents continuation or resume whose original admitted include list is unknown; [Goals](./goals.md#budget-continuation) owns that admission rule. The compiled reason `goalInputTooLarge` reports an objective plus includes exceeding the serialized Goal admission envelope before any Event or Provider call. Raw Event subscriptions expose the current required nullable `GoalStarted.include_paths` field and its payload version, as [Execution](./execution.md#admission-persistence-and-recovery) defines.

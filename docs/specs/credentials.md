@@ -45,6 +45,8 @@ Setup prefers the OS keyring. An unavailable, unpinned store may offer a separat
 
 Bare startup first reuses the last explicit saved-source preference, selecting Provider/account/model metadata without loading credentials; disconnected ChatGPT metadata cannot restore access. Without a preference, checked record presence determines available saved routes before either payload is read. When API and ChatGPT records coexist, billing-route choice is explicit. Cancellation reads neither payload and creates no Session; an invalid selected record never falls back to the other route. A legacy unpinned native keyring item without a current backend marker is not a configured account and is never loaded during discovery, including when a ChatGPT index exists. Use explicit native account setup to admit native access; inspection without that marker probes backend availability but returns no saved account.
 
+The [terminal contract](./terminal.md#setup-and-account-choices) owns native account choices, interactive cancellation and account-inspection display.
+
 On Linux, Secret Service admission accepts one bounded `unix:path=` or `unix:abstract=` address with an optional exact GUID, or the bounded absolute `XDG_RUNTIME_DIR`. With both absent, the client connects directly to `/run/user/<uid>/bus` without autolaunch.
 
 ### Selected-item authorization
