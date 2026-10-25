@@ -429,8 +429,8 @@ mod goal_success_tests {
         assert_eq!(event.scope(), (Some(run_id), Some(agent_run_id)));
         let payload = event.payload().unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
-            serde_json::json!({"goal_id":goal_id,"text":"literal /grant all"})
+            payload,
+            format!(r#"{{"goal_id":"{goal_id}","text":"literal /grant all"}}"#)
         );
         assert_eq!(
             Event::decode(event.kind(), 1, &payload, Some(run_id), Some(agent_run_id)).unwrap(),
@@ -476,8 +476,8 @@ mod goal_success_tests {
         assert_eq!(event.scope(), (Some(run_id), None));
         let payload = event.payload().unwrap();
         assert_eq!(
-            Event::decode(event.kind(), event.version(), &payload, Some(run_id), None).unwrap(),
-            event
+            payload,
+            format!(r#"{{"goal_id":"{goal_id}","text":"use the smaller fixture"}}"#)
         );
 
         assert!(note("").validate().is_err());
@@ -808,7 +808,7 @@ mod account_default_tests {
             agent_definitions: None,
             roster: None,
             providers: None,
-            provider: "openai".into(),
+            provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
             model: "gpt-5.4".into(),
             effort: None,
             custom_profile_provenance: None,
@@ -842,7 +842,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -850,6 +850,32 @@ mod account_default_tests {
         else {
             unreachable!()
         };
+        for provider in [
+            serde_json::json!("openai"),
+            serde_json::json!({"kind":"unknown","custom_name":null}),
+            serde_json::json!({"kind":"openai"}),
+            serde_json::json!({"kind":"openai","custom_name":"local"}),
+            serde_json::json!({"kind":"custom","custom_name":null}),
+            serde_json::json!({"kind":"custom","custom_name":""}),
+            serde_json::json!({"kind":"custom","custom_name":"Upper"}),
+            serde_json::json!({"kind":"custom","custom_name":"bad/name"}),
+            serde_json::json!({"kind":"custom","custom_name":"a".repeat(crate::provider::MAX_CUSTOM_PROFILE_NAME_BYTES + 1)}),
+            serde_json::json!({"kind":"openai","custom_name":null,"extra":true}),
+        ] {
+            assert!(serde_json::from_value::<crate::ProviderRecord>(provider.clone()).is_err());
+            let mut payload = serde_json::json!({"config":ordinary,"active_deadline_ms":null});
+            payload["config"]["provider"] = provider;
+            assert!(
+                Event::decode(
+                    "RunStarted",
+                    payload_version("RunStarted").unwrap(),
+                    &payload.to_string(),
+                    Some(RunId::new()),
+                    None
+                )
+                .is_err()
+            );
+        }
         let mut roster_config = ordinary.clone();
         let mut roster = crate::provider::RosterSnapshot {
             preset: "coding".into(),
@@ -991,12 +1017,13 @@ mod account_default_tests {
             Err(ReplayError::InvalidPayload)
         ));
         config.saved_api_account_id = Some(Uuid::now_v7());
-        config.provider = "scripted".into();
+        config.provider = crate::ProviderRecord::parse("custom:local").unwrap();
         assert!(matches!(
             config.validate(),
             Err(ReplayError::InvalidPayload)
         ));
         config.saved_api_account_id = None;
+        config.provider = ordinary.provider.clone();
         assert!(config.validate().is_ok());
         let decoded: RunConfig =
             serde_json::from_value(serde_json::to_value(&config).expect("current JSON"))
@@ -1008,7 +1035,7 @@ mod account_default_tests {
             crate::provider::OutputTokenBound::ProviderEnforced
         );
 
-        config.provider = "chatgpt".into();
+        config.provider = crate::ProviderRecord::parse("chatgpt").unwrap();
         config.model = "visible-model".into();
         config.effort = Some(crate::provider::Effort::High);
         config.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
@@ -1041,14 +1068,13 @@ mod account_default_tests {
         config.provider_concurrency = 1;
         assert!(config.validate().is_ok());
         for (provider, window, budget, valid) in [
-            ("chatgpt-like", None, 376 * 1024, true),
-            ("chatgpt-like", None, 376 * 1024 + 1, false),
+            ("openai", None, 376 * 1024, true),
+            ("openai", None, 376 * 1024 + 1, false),
             ("chatgpt", Some(272_000), 734_400, true),
             ("chatgpt", Some(272_000), 734_401, false),
             ("chatgpt", Some(2_000_000), 1024 * 1024, true),
             ("chatgpt", Some(2_000_001), 64 * 1024, false),
             ("chatgpt", Some(32_767), 64 * 1024, false),
-            ("chatgpt-like", Some(272_000), 64 * 1024, false),
             ("openai", Some(272_000), 64 * 1024, false),
             ("anthropic", Some(272_000), 64 * 1024, true),
         ] {
@@ -1057,7 +1083,7 @@ mod account_default_tests {
             } else {
                 ordinary.clone()
             };
-            pinned.provider = provider.into();
+            pinned.provider = crate::ProviderRecord::parse(provider).unwrap();
             pinned.context_window_tokens = window;
             pinned.context_usage = Some(ContextUsage {
                 used_bytes: 0,
@@ -1705,6 +1731,7 @@ mod payload_version_tests {
             title: "renamed".into(),
         };
         let payload = event.payload().expect("payload");
+        assert_eq!(payload, r#"{"title":"renamed"}"#);
         let version = payload_version(event.kind()).expect("known kind");
         assert_eq!(
             Event::decode(event.kind(), version, &payload, None, None).expect("current replay"),
@@ -2086,7 +2113,7 @@ mod payload_version_tests {
             agent_definitions: None,
             roster: None,
             providers: None,
-            provider: "openai".into(),
+            provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
             model: "gpt-5.4".into(),
             effort: None,
             custom_profile_provenance: None,
@@ -2911,12 +2938,51 @@ fn accepted_message_requires_current_nullable_skill() {
         );
         assert!(Event::decode("MessageAccepted", 6, &payload.to_string(), run_id, None).is_err());
     }
+    for fixture in [
+        r#"{"skill":null,"text":"do X","images":[]}"#,
+        r#"{"skill":"ask-matt","text":"do X","images":[]}"#,
+    ] {
+        assert_eq!(
+            Event::decode("MessageAccepted", 7, fixture, run_id, None)
+                .unwrap()
+                .payload()
+                .unwrap(),
+            fixture
+        );
+        assert!(Event::decode("MessageAccepted", 6, fixture, run_id, None).is_err());
+    }
     for payload in [
         serde_json::json!({"text":"do X", "images":[]}),
         serde_json::json!({"text":"do X", "images":[], "skill":"../escape"}),
         serde_json::json!({"text":"do X", "images":[], "skill":false}),
     ] {
         assert!(Event::decode("MessageAccepted", 7, &payload.to_string(), run_id, None).is_err());
+    }
+}
+
+#[test]
+fn remaining_borrowed_payloads_match_fixed_bytes() {
+    const RECORD: &str = r#"{"covered_run_id":"01900000-0000-7000-8000-000000000001","covered_sequence":1,"source_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"provider":"openai","model":"model","prompt_version":1,"schema_version":1,"compiler_version":3,"source_bytes":4,"source_tokens_estimate":1,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"response_id":null,"wire_provenance":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","status":{"status":"failed","reason":"provider_unavailable"}}"#;
+    let (run, agent) = (Some(RunId::new()), Some(AgentRunId::new()));
+    let cases = [
+        ("SessionStarted", r#"{"title":"started","workspace_device":1,"workspace_inode":2}"#.into(), None, None),
+        ("SessionForked", r#"{"title":"forked","source_session_id":"01900000-0000-7000-8000-000000000003","source_run_id":"01900000-0000-7000-8000-000000000004","source_sequence":3,"prefix_digest":[4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]}"#.into(), None, None),
+        ("ContextCompacted", format!(r#"{{"record":{RECORD},"active_ms":null}}"#), None, None),
+        ("ContextCompacted", format!(r#"{{"record":{RECORD},"active_ms":9}}"#), None, None),
+        ("GoalContextCompacted", format!(r#"{{"goal_id":"01900000-0000-7000-8000-000000000002","covered_tool_count":1,"record":{RECORD}}}"#), run, None),
+        ("MessageCommitted", r#"{"text":"committed"}"#.into(), run, None),
+        ("AgentFinished", r#"{"worker":null,"disposition":"finished","summary":"done","result":"answer"}"#.into(), run, agent),
+        ("AgentFinished", r#"{"worker":{"cleanup":null,"disposition":"failed","cause":"tool_failed","data":null},"disposition":"failed","summary":null,"result":null}"#.into(), run, agent),
+    ];
+    for (kind, fixture, run, agent) in cases {
+        assert_eq!(
+            Event::decode(kind, payload_version(kind).unwrap(), &fixture, run, agent)
+                .unwrap()
+                .payload()
+                .unwrap(),
+            fixture,
+            "{kind}"
+        );
     }
 }
 

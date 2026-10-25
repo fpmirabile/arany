@@ -2475,7 +2475,7 @@ mod call_bound_tests {
         .expect("synthetic account")
         .identity()
         .clone();
-        let native = ProviderIdentity::new("scripted", "model-a", crate::Provenance::native());
+        let native = ProviderIdentity::new("openai", "model-a", crate::Provenance::native());
         assert_eq!(
             native.limits.output_token_bound,
             OutputTokenBound::ProviderEnforced

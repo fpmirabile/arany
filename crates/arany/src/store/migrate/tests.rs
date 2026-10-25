@@ -12,7 +12,7 @@ const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 67] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 68] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -230,6 +230,12 @@ const EVENT_FIXTURES: [EventFixture<'static>; 67] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
     ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
+    (
+        "RunStarted",
+        23,
+        GLOBAL_RUNSTARTED,
+        include_str!("runstarted-v24.json"),
+    ),
 ];
 
 #[test]
@@ -439,6 +445,7 @@ const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":nu
 const ROOT_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 // Version 20 adds the explicit null user-instruction digest.
 const HOST_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":{"contract_version":1,"config_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"permissions_digest":null,"max_context_bytes":65536,"unguarded_rules_digest":null,"unguarded":"human_only","child_unguarded":"denied"}},"active_deadline_ms":1800000}"#;
+const CURRENT_HOST_RUNSTARTED: &str = r#"{"config":{"supervisor":{"evaluator":1,"window":32,"floors":{"identical":3,"failing":2,"cycle_two":3,"cycle_other":3,"oscillation":1,"stalled":2,"denial_streak":2,"denials_window":65535,"distinct_denied":65535,"alias":1,"files":16,"files_per_root":4,"delete_permille":250,"deleted_files":1,"growth_permille":65535,"changed_kib":65535},"candidates":{"identical":4,"failing":3,"cycle_two":3,"cycle_other":5,"oscillation":2,"stalled":3,"denial_streak":3,"denials_window":4,"distinct_denied":3,"alias":2,"files":32,"files_per_root":8,"delete_permille":500,"deleted_files":8,"growth_permille":4000,"changed_kib":64},"digest":[20,87,236,124,192,233,100,133,79,93,97,82,110,48,83,142,171,60,50,80,167,97,239,123,72,148,181,116,48,36,159,94]},"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":{"contract_version":1,"config_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"permissions_digest":null,"max_context_bytes":65536,"unguarded_rules_digest":null,"unguarded":"human_only","child_unguarded":"denied"}},"active_deadline_ms":1800000}"#;
 const GLOBAL_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 const NESTED_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
@@ -505,7 +512,7 @@ fn failed_compaction(run: RunId, covered_sequence: u64, digest: [u8; 32]) -> Com
         covered_run_id: run,
         covered_sequence,
         source_digest: digest,
-        provider: "scripted".into(),
+        provider: "openai".into(),
         model: "test".into(),
         prompt_version: 1,
         schema_version: 1,
@@ -709,12 +716,31 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
     });
 }
 
+fn downgrade_run_provider(connection: &Connection) {
+    repin(connection, |row| {
+        if let Event::RunStarted { config, .. } = decode_row(row) {
+            let tagged = serde_json::to_string(&config.provider).unwrap();
+            let profile = serde_json::to_string(&config.provider.profile()).unwrap();
+            row.payload = row.payload.replacen(&tagged, &profile, 1);
+            row.version = 23;
+        }
+    });
+}
+
 fn downgrade_run_started(connection: &Connection) {
     repin(connection, |row| {
         if row.kind == "RunStarted" {
-            row.payload = row
-                .payload
-                .replacen(r#""user_instruction_digest":null,"#, "", 1);
+            let event = decode_row(row);
+            let Event::RunStarted { config, .. } = &event else {
+                unreachable!()
+            };
+            let tagged = serde_json::to_string(&config.provider).unwrap();
+            let profile = serde_json::to_string(&config.provider.profile()).unwrap();
+            row.payload = row.payload.replacen(&tagged, &profile, 1).replacen(
+                r#""user_instruction_digest":null,"#,
+                "",
+                1,
+            );
             row.version = 19;
         }
     });
@@ -1011,7 +1037,13 @@ fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
 }
 
 #[test]
-fn run_started_v19_migrates_without_reading_user_instructions() {
+fn run_started_migrations_preserve_identity_and_do_not_read_user_instructions() {
+    for version in [19, 23] {
+        migrate_run_started(version);
+    }
+}
+
+fn migrate_run_started(version: i64) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
     let History { root, sessions } = history(&path, true, 0);
@@ -1024,7 +1056,11 @@ fn run_started_v19_migrates_without_reading_user_instructions() {
     let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
     let current = stored_rows(&connection);
     let digests = fork_digests(&connection);
-    downgrade_run_started(&connection);
+    if version == 19 {
+        downgrade_run_started(&connection);
+    } else {
+        downgrade_run_provider(&connection);
+    }
     let downgraded = stored_rows(&connection);
     assert_ne!(downgraded, current);
     assert_ne!(fork_digests(&connection), digests);
@@ -1144,7 +1180,10 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
         let History { root, sessions } = forked_history(&path);
-        restore_pre_check_schema(&Connection::open(path.join(DATABASE_FILE)).unwrap(), 4);
+        let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+        downgrade_run_provider(&connection);
+        restore_pre_check_schema(&connection, 4);
+        drop(connection);
         let database = path.join(DATABASE_FILE);
         let original = std::fs::read(&database).unwrap();
         let original_rows = stored_rows(&Connection::open(&database).unwrap());
@@ -1842,6 +1881,44 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    for kind in [
+        "ToolStarted",
+        "ToolFinished",
+        "RunStarted",
+        "GoalStarted",
+        "GoalFinished",
+        "GoalPlanContractRecorded",
+        "AgentSpawned",
+    ] {
+        let (from, fixture) = EVENT_FIXTURES
+            .iter()
+            .filter(|(fixture_kind, _, _, _)| *fixture_kind == kind)
+            .map(|(_, from, _, expected)| (*from, *expected))
+            .max_by_key(|(from, _)| *from)
+            .expect("canonical payload fixture");
+        assert_eq!(from + 1, crate::session::payload_version(kind).unwrap());
+        // Preserve the historical fixture while pairing its policy with a current Supervisor.
+        let fixture = if kind == "RunStarted" {
+            CURRENT_HOST_RUNSTARTED
+        } else {
+            fixture
+        };
+        let (run_id, agent_run_id) = match kind {
+            "GoalStarted" | "GoalFinished" => (None, None),
+            "RunStarted" | "AgentSpawned" => (
+                Some(RunId::new()),
+                (kind == "AgentSpawned").then(AgentRunId::new),
+            ),
+            "GoalPlanContractRecorded" => (Some(RunId::new()), None),
+            _ => (
+                Some("01a15ecf-a92a-7707-8af6-ce3d36320b67".parse().unwrap()),
+                Some("01a15ecf-a92a-7707-8af6-ce3e0c00af83".parse().unwrap()),
+            ),
+        };
+        let event = Event::decode(kind, from + 1, fixture, run_id, agent_run_id)
+            .unwrap_or_else(|error| panic!("{kind} v{} fixture decode: {error:?}", from + 1));
+        assert_eq!(event.payload().unwrap(), fixture, "{kind}");
+    }
     assert_eq!(
         uncovered_schema(&CHECKPOINT_SCHEMA, checkpoints::SCHEMA_VERSION),
         Vec::<String>::new()
@@ -2590,7 +2667,8 @@ fn pre_host_migrations_never_create_live_authority() {
     let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
     assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_some());
     run["config"]["tool_policy"]["child_unguarded"] = serde_json::json!("human_only");
-    serde_json::from_value::<crate::session::RunConfig>(run["config"].clone()).unwrap();
+    let current = crate::session::run_started_v23_to_v24(run.clone()).unwrap();
+    serde_json::from_value::<crate::session::RunConfig>(current["config"].clone()).unwrap();
     assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_none());
 
     let control: PermissionVerdict = serde_json::from_str(VERDICT_V4).unwrap();
@@ -2854,4 +2932,114 @@ fn setup_identity_step_rejects_routing_in_a_source_version_without_it() {
     forged["target"] = serde_json::json!({"kind":"RoleRouting","identity":"roles"});
     assert!((step.canonical)(&forged.to_string()).is_none());
     assert!((step.transform)(forged).is_none());
+}
+
+#[test]
+fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
+    use crate::provider::{ProviderKind, ProviderRecord};
+    let step = REGISTRY.event_step("RunStarted", 23).unwrap();
+    for profile in ["openai", "anthropic", "chatgpt", "custom:exact-name"] {
+        let record = ProviderRecord::parse(profile).unwrap();
+        let mut source: Value = serde_json::from_str(GLOBAL_RUNSTARTED).unwrap();
+        let config = &mut source["config"];
+        config["provider"] = profile.into();
+        match record.kind() {
+            ProviderKind::OpenAi | ProviderKind::Anthropic => {
+                config["saved_api_account_id"] = serde_json::json!(uuid::Uuid::now_v7());
+            }
+            ProviderKind::ChatGpt => {
+                config["chatgpt_provenance"] = serde_json::json!({
+                    "account_id": uuid::Uuid::now_v7(), "evidence_fingerprint": vec![7; 32],
+                    "admission": "account_consent"
+                });
+                config["effort"] = "high".into();
+                config["output_token_bound"] = "local_acceptance_only".into();
+            }
+            ProviderKind::Custom => {
+                config["custom_profile_provenance"] = serde_json::json!({
+                    "endpoint": "https://example.invalid/v1", "evidence_digest": vec![1; 32],
+                    "capability_evidence_version": 2
+                });
+            }
+        }
+        let historical = (step.canonical)(&source.to_string()).unwrap();
+        assert_eq!((step.canonical)(&historical).unwrap(), historical);
+        let upgraded = (step.transform)(source.clone()).unwrap();
+        source["config"]["provider"] = serde_json::to_value(&record).unwrap();
+        assert_eq!(upgraded, source);
+        let event = Event::decode(
+            "RunStarted",
+            24,
+            &upgraded.to_string(),
+            Some(RunId::new()),
+            None,
+        )
+        .unwrap();
+        migrate_provider_prefix(event.clone());
+        let Event::RunStarted { config, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(config.provider, record);
+        assert_eq!(config.provider.profile(), profile);
+    }
+    let fixture = include_str!("runstarted-v24.json");
+    let event = Event::decode("RunStarted", 24, fixture, Some(RunId::new()), None).unwrap();
+    assert_eq!(event.payload().unwrap(), fixture);
+    for profile in ["", "unknown", "custom:", "custom:Upper", "custom:bad/name"] {
+        let source = GLOBAL_RUNSTARTED.replace(
+            "\"provider\":\"openai\"",
+            &format!("\"provider\":{profile:?}"),
+        );
+        assert!((step.canonical)(&source).is_none());
+        assert!((step.transform)(serde_json::from_str(&source).unwrap()).is_none());
+    }
+    let duplicate = GLOBAL_RUNSTARTED.replace(
+        "\"provider\":\"openai\"",
+        "\"provider\":\"openai\",\"provider\":\"anthropic\"",
+    );
+    assert!((step.canonical)(&duplicate).is_none());
+}
+
+fn migrate_provider_prefix(mut started: Event) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let fixture = crate::session::worker_protocol_fixture();
+    let mut connection = open_connection(&root, false).unwrap();
+    let mut hot = None;
+    for event in fixture.events {
+        if let Event::RunStarted {
+            config: original,
+            active_deadline_ms: deadline,
+            ..
+        } = event
+        {
+            let Event::RunStarted {
+                run_id,
+                config,
+                active_deadline_ms,
+            } = &mut started
+            else {
+                unreachable!()
+            };
+            *run_id = fixture.run;
+            config.workspace_device = original.workspace_device;
+            config.workspace_inode = original.workspace_inode;
+            *active_deadline_ms = deadline;
+            append(&mut connection, &mut hot, fixture.session, started).unwrap();
+            break;
+        }
+        append(&mut connection, &mut hot, fixture.session, event).unwrap();
+    }
+    let original = stored_rows(&connection);
+    downgrade_run_provider(&connection);
+    drop(connection);
+    assert!(
+        root.upgrade_or_archive_history(&REGISTRY)
+            .unwrap()
+            .is_none()
+    );
+    let reopened = open_connection(&root, true).unwrap();
+    assert_eq!(stored_rows(&reopened), original);
+    let (_, view) = resolve_view(&reopened, fixture.session, 0, &mut 0).unwrap();
+    assert!(view.unwrap().runs[0].config.is_some());
 }

@@ -412,7 +412,7 @@ fn assert_checked_run(state: &Path, workspace: &Path) {
             1
         );
         assert_eq!(
-            view.runs[0].config.as_ref().unwrap().provider,
+            view.runs[0].config.as_ref().unwrap().provider.profile(),
             "custom:local"
         );
         assert!(

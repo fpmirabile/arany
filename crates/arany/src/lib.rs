@@ -71,14 +71,15 @@ pub use provider::{
     NamedProviderRoutes, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
     OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText, PromptRole, Provenance,
     Provider, ProviderError, ProviderFailureReason, ProviderFallback, ProviderIdentity,
-    ProviderImage, ProviderKind, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderRetry,
-    ProviderRole, ProviderRoutes, ProviderTurn, ProviderWireProvenance, Providers, RateLimitSlot,
-    RateLimits, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot, RunInput, ToolUseId,
-    UnansweredStatus, Usage, UsedPercent, WorkspaceGuidance, admitted_context_window,
-    check_custom_profile, check_custom_profile_value_with_cancellation,
-    check_custom_profile_with_cancellation, check_native_model, check_native_model_from_env,
-    list_native_models, list_native_models_with_api_key, list_native_models_with_credentials,
-    probe_chatgpt_model, resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
+    ProviderImage, ProviderKind, ProviderOutcome, ProviderRecord, ProviderRequest,
+    ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
+    ProviderWireProvenance, Providers, RateLimitSlot, RateLimits, ResponsePreview, RetryCause,
+    ReviewVerdict, RosterSnapshot, RunInput, ToolUseId, UnansweredStatus, Usage, UsedPercent,
+    WorkspaceGuidance, admitted_context_window, check_custom_profile,
+    check_custom_profile_value_with_cancellation, check_custom_profile_with_cancellation,
+    check_native_model, check_native_model_from_env, list_native_models,
+    list_native_models_with_api_key, list_native_models_with_credentials, probe_chatgpt_model,
+    resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
     validate_native_api_key, validate_native_model_id,
 };
 pub use session::{
@@ -123,7 +124,7 @@ pub fn valid_tool_name(value: &str) -> bool {
     validate::valid_name(value)
 }
 
-pub use tools::catalog::Site;
+pub use tools::catalog::{Family, Site};
 
 // Validates each Event like replay but skips its whole-history compaction checks; for presentation views only.
 pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(), ReplayError> {

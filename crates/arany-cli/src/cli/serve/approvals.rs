@@ -16,6 +16,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 struct Pending {
     id: RequestId,
+    session: bool,
     decide: oneshot::Sender<ApprovalReply>,
 }
 
@@ -114,6 +115,7 @@ impl Approvals {
                         };
                         state.pending = Some(Pending {
                             id: message.id.clone(),
+                            session: approval.unguarded.as_ref().is_some_and(|prompt| prompt.remember),
                             decide,
                         });
                         current = Some(approval);
@@ -145,6 +147,10 @@ impl Approvals {
         }
         let _ = pending.decide.send(match decision {
             Some(ApprovalDecision::Accept) => ApprovalReply::AllowOnce,
+            Some(ApprovalDecision::AcceptForSession) if pending.session => {
+                ApprovalReply::AllowForSession
+            }
+            Some(ApprovalDecision::AcceptForSession) => ApprovalReply::Unavailable,
             Some(ApprovalDecision::Decline) => ApprovalReply::Deny,
             Some(ApprovalDecision::Cancel) | None => ApprovalReply::Unavailable,
         });
@@ -257,6 +263,18 @@ fn request(
                 started_at_ms,
                 intent: serde_json::to_value(intent).ok()?,
                 lines: lines(intent, approval.unguarded.as_ref()),
+                available_decisions: approval
+                    .unguarded
+                    .as_ref()
+                    .filter(|prompt| prompt.remember)
+                    .map(|_| {
+                        vec![
+                            ApprovalDecision::Accept,
+                            ApprovalDecision::AcceptForSession,
+                            ApprovalDecision::Decline,
+                            ApprovalDecision::Cancel,
+                        ]
+                    }),
             })
             .ok()?,
         ),

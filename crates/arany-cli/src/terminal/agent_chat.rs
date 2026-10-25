@@ -1015,6 +1015,8 @@ impl AttachedTerminal {
         view: &SessionView,
         notice: Option<TerminalNotice<'_>>,
     ) -> Result<(), TerminalError> {
+        self.clear_graphics_hover();
+        self.delete_graphics_placement()?;
         let mut acknowledged = false;
         for draft in &mut self.child_drafts {
             acknowledged |= draft.acknowledge(view);

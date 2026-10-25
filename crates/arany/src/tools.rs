@@ -14,6 +14,7 @@ mod executable;
 mod fs;
 mod git;
 mod glob;
+mod grant;
 mod guard;
 mod mcp;
 pub(crate) use mcp::FRAME_BYTES;
@@ -24,6 +25,7 @@ mod search;
 mod selection;
 mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
+pub use grant::ToolGrant;
 pub(crate) mod toolchains;
 pub(crate) mod types;
 pub use types::{DEFAULT_PR_LIMIT, PrState};
@@ -395,18 +397,16 @@ pub(crate) fn load_permissions(state: &StateRoot) -> Result<Option<PermissionSna
 
 impl ToolRuntime {
     pub(crate) fn with_queue_progress(
-        &self,
+        mut self,
         sender: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
     ) -> Self {
-        let mut runtime = self.clone();
-        runtime.queue_progress = sender;
-        runtime
+        self.queue_progress = sender;
+        self
     }
 
-    pub(crate) fn with_queue_accounting(&self) -> Self {
-        let mut runtime = self.clone();
-        runtime.queue_wait = Some(Default::default());
-        runtime
+    pub(crate) fn with_queue_accounting(mut self) -> Self {
+        self.queue_wait = Some(Default::default());
+        self
     }
 
     pub(crate) fn queued_duration(&self) -> Result<Duration, ToolError> {
@@ -424,21 +424,19 @@ impl ToolRuntime {
     }
 
     pub(crate) fn with_active_action_gate(
-        &self,
+        mut self,
         sender: tokio::sync::mpsc::Sender<ActiveActionRequest>,
     ) -> Self {
-        let mut runtime = self.clone();
-        runtime.active_action_gate = Some(sender);
-        runtime
+        self.active_action_gate = Some(sender);
+        self
     }
 
     pub(crate) fn with_checkpoint_gate(
-        &self,
+        mut self,
         sender: tokio::sync::mpsc::Sender<CheckpointRequest>,
     ) -> Self {
-        let mut runtime = self.clone();
-        runtime.checkpoint_gate = Some(sender);
-        runtime
+        self.checkpoint_gate = Some(sender);
+        self
     }
 
     pub(crate) fn rewind_path_allowed(&self, path: &str) -> bool {
@@ -578,10 +576,9 @@ impl ToolRuntime {
         Ok(files)
     }
 
-    pub(crate) fn with_hook_stdin(&self, stdin: &str) -> Self {
-        let mut runtime = self.clone();
-        runtime.hook_stdin = Some(stdin.into());
-        runtime
+    pub(crate) fn with_hook_stdin(mut self, stdin: &str) -> Self {
+        self.hook_stdin = Some(stdin.into());
+        self
     }
 
     pub(crate) fn hook_task_fits(&self, intent: &EffectIntent) -> bool {
@@ -1227,10 +1224,9 @@ impl ToolRuntime {
             .filter(WorkerPolicy::valid)
     }
 
-    pub(crate) fn with_handover(&self, bytes: std::sync::Arc<[u8]>) -> Self {
-        let mut runtime = self.clone();
-        runtime.handover = Some(bytes);
-        runtime
+    pub(crate) fn with_handover(mut self, bytes: std::sync::Arc<[u8]>) -> Self {
+        self.handover = Some(bytes);
+        self
     }
 
     pub(crate) fn editor_context(

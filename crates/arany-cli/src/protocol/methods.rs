@@ -12,6 +12,7 @@ pub const CAPABILITIES: &[&str] = &[
     "items_v1",
     "interrupt_receipt_v1",
     "approvals_v2",
+    "host_command_session_approval_v1",
     "events_subscribe_v1",
     "receipt_get_v1",
     "thread_fork_v1",
@@ -215,6 +216,8 @@ pub struct ClientInfo {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_command_session_approval: bool,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -817,6 +820,8 @@ pub struct ApprovalParams {
     #[schemars(with = "serde_json::Map<String, Value>")]
     pub intent: Value,
     pub lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_decisions: Option<Vec<ApprovalDecision>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -829,6 +834,7 @@ pub struct ApprovalResult {
 #[serde(rename_all = "camelCase")]
 pub enum ApprovalDecision {
     Accept,
+    AcceptForSession,
     Decline,
     Cancel,
 }

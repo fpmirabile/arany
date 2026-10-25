@@ -180,7 +180,7 @@ fn live_route(profile: &str, model: &str, credential_name: &str, team: bool) {
     let run = &view.runs[0];
     assert_eq!(run.status, RunStatus::Finished);
     let config = run.config.as_ref().expect("pinned live config");
-    assert_eq!(config.provider, profile);
+    assert_eq!(config.provider.profile(), profile);
     assert_eq!(config.model, model);
     assert_eq!(
         config.effort,
@@ -346,7 +346,7 @@ fn chatgpt_plan_direct_turn_replays_exact_events() {
             .is_some_and(|text| !text.is_empty())
     );
     let config = run.config.as_ref().expect("pinned ChatGPT Run config");
-    assert_eq!(config.provider, "chatgpt");
+    assert_eq!(config.provider.profile(), "chatgpt");
     assert_eq!(config.model, model);
     assert_eq!(config.effort, Some(effort));
     assert_eq!(config.policy, CollaborationPolicy::Single);

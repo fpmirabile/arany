@@ -1801,6 +1801,186 @@ impl Adapter {
 }
 
 #[tokio::test]
+async fn move_live_and_permission_projection_preserves_file_change_details() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Review changes"}]))
+        .await;
+    let intent = adapter.intent(arany::ToolCall::Move {
+        source: "source\nname.txt".into(),
+        destination: "destination.txt".into(),
+        expected_digest: "a".repeat(64),
+    });
+
+    adapter.item(&intent, None).await;
+    let started = adapter.next().await["params"]["update"].clone();
+    assert_eq!(started["kind"], "edit");
+    assert_eq!(started["title"], "Change files source name.txt");
+    assert_eq!(
+        started["locations"][0]["path"],
+        "/var/workspace/source\nname.txt"
+    );
+    assert_eq!(
+        started["locations"][1]["path"],
+        "/var/workspace/destination.txt"
+    );
+
+    adapter.permission(&intent, 10).await;
+    let request = adapter.next().await;
+    let permission = request["params"]["toolCall"].clone();
+    assert_eq!(permission["kind"], "edit");
+    assert_eq!(permission["title"], "Change files source name.txt");
+    assert_eq!(
+        permission["locations"][0]["path"],
+        "/var/workspace/source\nname.txt"
+    );
+    assert_eq!(
+        permission["locations"][1]["path"],
+        "/var/workspace/destination.txt"
+    );
+    let uncertain = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Uncertain,
+        enforcement_cause: None,
+        limit_cause: None,
+        output: String::new(),
+        attestation: None,
+        approval_cause: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter.item(&intent, Some(&uncertain)).await;
+    let withdrawal = adapter.next().await;
+    assert_eq!(withdrawal["method"], "$/cancel_request");
+    assert_eq!(withdrawal["params"]["requestId"], request["id"]);
+    let completed = adapter.next().await["params"]["update"].clone();
+    assert_eq!(completed["kind"], "edit");
+    assert_eq!(completed["status"], "failed");
+    assert_eq!(completed["_meta"]["arany.status"], "uncertain");
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn move_completion_preserves_denial_projection() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Review changes"}]))
+        .await;
+    let intent = adapter.intent(arany::ToolCall::Move {
+        source: "denied.txt".into(),
+        destination: "denied-new.txt".into(),
+        expected_digest: "b".repeat(64),
+    });
+    adapter.item(&intent, None).await;
+    let _ = adapter.next().await;
+    let observation = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Denied,
+        enforcement_cause: None,
+        limit_cause: None,
+        output: String::new(),
+        attestation: None,
+        approval_cause: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter.item(&intent, Some(&observation)).await;
+    let update = adapter.next().await["params"]["update"].clone();
+    assert_eq!(update["kind"], "edit");
+    assert_eq!(update["status"], "failed");
+    assert!(
+        update["content"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("denied")
+    );
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn move_history_projection_preserves_file_change_details() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut replay = Adapter::new().await;
+    let intent = replay.intent(arany::ToolCall::Move {
+        source: "old.txt".into(),
+        destination: "new.txt".into(),
+        expected_digest: "b".repeat(64),
+    });
+    replay
+        .call(
+            json!(3),
+            "session/load",
+            json!({"sessionId":replay.session,"cwd":"/var/workspace","mcpServers":[]}),
+        )
+        .await;
+    let request = replay.request().await;
+    assert_eq!(request.method, "thread/resume");
+    replay
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: request.id,
+            result: json!({
+                "thread":{"id":replay.session,"title":"History","workspace":"/private/var/workspace","createdAtMs":0},
+                "turns":[{"id":replay.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[
+                    {"type":"userMessage","id":format!("{}:user", replay.run),"text":"Move","images":[]},
+                    serve::items::tool_item(&intent, None, true)
+                ]}]
+            }),
+        }))
+        .await
+        .unwrap();
+    let _ = replay.next().await;
+    let started = replay.next().await["params"]["update"].clone();
+    assert_eq!(started["sessionUpdate"], "tool_call");
+    assert_eq!(started["kind"], "edit");
+    assert_eq!(started["title"], "Change files old.txt");
+    assert_eq!(started["locations"][0]["path"], "/var/workspace/old.txt");
+    assert_eq!(started["locations"][1]["path"], "/var/workspace/new.txt");
+    let completed = replay.next().await["params"]["update"].clone();
+    assert_eq!(completed["sessionUpdate"], "tool_call_update");
+    assert_eq!(completed["status"], "failed");
+    assert_eq!(completed["_meta"]["arany.status"], "uncertain");
+    assert_eq!(replay.next().await["id"], 3);
+    replay.close().await;
+}
+
+#[tokio::test]
+async fn gh_pr_list_projects_as_bounded_read() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"List pull requests"}]))
+        .await;
+    let repository = "github.com/team/\u{001b}[2J\nproject";
+    let intent = adapter.intent(arany::ToolCall::GhPrList {
+        repository: repository.into(),
+        state: arany::PrState::Open,
+        base: None,
+        head: None,
+        limit: 10,
+    });
+    adapter.item(&intent, None).await;
+    let update = adapter.next().await["params"]["update"].clone();
+    assert_eq!(update["kind"], "read");
+    assert_eq!(
+        update["title"],
+        "List GitHub pull requests github.com/team/\\u{001b}[2J project"
+    );
+    assert!(
+        !update["title"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .any(char::is_control)
+    );
+    assert_eq!(update["rawInput"]["operation"], "gh_pr_list");
+    assert_eq!(update["rawInput"]["repository"], repository);
+    assert_eq!(update["locations"], json!([]));
+    adapter.close().await;
+}
+
+#[tokio::test]
 async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans() {
     let _deadline = crate::cli::serve::tests::deadline();
     let exhausted = |limit| json!({"reason":"goalExhausted","limit":limit});
@@ -4226,4 +4406,158 @@ async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
     );
     adapter.close().await;
     drop(close);
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native ACP host policy; requires the arany executable"
+)]
+fn admitted_host_prefixes_follow_h1_without_acp_permission_requests() {
+    let _gate = crate::test_process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let launcher = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("arany");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (mode, rule, restriction, allowed) in [
+                ("default", true, None, true),
+                ("dontAsk", true, None, true),
+                ("auto", true, None, false),
+                ("acceptEdits", true, None, false),
+                ("default", false, None, false),
+                ("default", true, Some("ask"), false),
+                ("dontAsk", true, Some("ask"), false),
+                ("default", true, Some("deny"), false),
+            ] {
+                let _deadline = crate::cli::serve::tests::deadline();
+                host_policy_scenario(launcher.clone(), mode, rule, restriction, allowed).await;
+            }
+        });
+}
+
+async fn host_policy_scenario(
+    launcher: PathBuf,
+    mode: &str,
+    rule: bool,
+    restriction: Option<&str>,
+    allowed: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let call =
+        arany::test_support::approval::seed_host_prefix(&state, &workspace, launcher.clone()).await;
+    let path = state.join("permissions.json");
+    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    settings["permissions"]["defaultMode"] = json!(mode);
+    if !rule {
+        settings["permissions"]["hostPrefixes"] = json!([]);
+    }
+    if let Some(restriction) = restriction {
+        settings["permissions"][restriction] = json!(["Bash"]);
+    }
+    std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            arany::test_support::scenario::tool_outcome(call),
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Host policy settled".into(),
+            }),
+        ])
+        .with_profile("openai", "gpt-5.4"),
+    );
+    let (mut writer, mut reader, task) = start_with_guard(&state, provider.clone(), true, launcher);
+    initialize(&mut writer, &mut reader).await;
+    let session = session(&mut writer, &mut reader, &workspace).await;
+    send(
+        &mut writer,
+        json!(3),
+        "session/prompt",
+        json!({"sessionId":session,"prompt":[{"type":"text","text":"Inspect host value"}]}),
+    )
+    .await;
+    writer.write_all(&encode_line(&json!({"jsonrpc":"2.0","id":999,"result":{"outcome":{"outcome":"selected","optionId":"allow_always"}}})).unwrap()).await.unwrap();
+    let mut tools = 0;
+    loop {
+        let message = next(&mut reader).await;
+        assert_ne!(
+            message["method"], "session/request_permission",
+            "{mode} {restriction:?}"
+        );
+        if message["params"]["update"]["sessionUpdate"] == "tool_call_update" {
+            tools += 1;
+            assert!(
+                message["params"]["update"]["title"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Unguarded command")
+            );
+        }
+        if message["id"] == 3 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+    assert_eq!(tools, 1);
+    writer.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        serde_json::to_vec(&settings).unwrap()
+    );
+    assert_host_policy_history(&state, session, &provider, allowed).await;
+}
+
+async fn assert_host_policy_history(
+    state: &std::path::Path,
+    session: SessionId,
+    provider: &ScriptedProvider,
+    allowed: bool,
+) {
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+    let events = store.load_session(session).await.unwrap();
+    let view = store.load_view(session).await.unwrap().unwrap();
+    store.close().await.unwrap();
+    for prefix in 1..=events.len() {
+        arany::SessionView::replay(session, &events[..prefix]).unwrap();
+    }
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(tool.permission_verdict.as_ref().unwrap().approved, allowed);
+    assert_eq!(view.runs[0].unguarded_tools(), usize::from(allowed));
+    if allowed {
+        assert_eq!(
+            tool.permission_verdict.as_ref().unwrap().source,
+            arany::permissions::PermissionSource::HostPrefixRule
+        );
+        assert!(
+            tool.observation
+                .as_ref()
+                .unwrap()
+                .output
+                .contains("host value")
+        );
+        assert!(matches!(
+            tool.observation.as_ref().unwrap().attestation,
+            Some(arany::Attestation::Unguarded(_))
+        ));
+    } else {
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Denied
+        );
+    }
 }

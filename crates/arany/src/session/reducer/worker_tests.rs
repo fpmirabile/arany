@@ -723,7 +723,7 @@ fn fixture_with_manifest(
         }),
         roster: None,
         providers: None,
-        provider: "openai".into(),
+        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
         model: "gpt-5.4".into(),
         effort: None,
         custom_profile_provenance: None,

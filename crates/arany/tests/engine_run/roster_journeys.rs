@@ -16,7 +16,7 @@ fn gated(
     started: &mpsc::UnboundedSender<Started>,
 ) -> Arc<GatedProvider> {
     let mut identity = gated_identity(concurrency);
-    identity.profile = "scripted".into();
+    identity.profile = "openai".into();
     identity.model = model.into();
     Arc::new(GatedProvider {
         started: started.clone(),
@@ -41,7 +41,7 @@ fn delegate(children: &[(&str, Option<&str>)]) -> ProviderOutcome {
 }
 
 fn unavailable(model: &str, failures: usize) -> Arc<ScriptedProvider> {
-    let mut provider = ScriptedProvider::new(vec![]).with_profile("scripted", model);
+    let mut provider = ScriptedProvider::new(vec![]).with_profile("openai", model);
     provider.identity.limits.concurrency = 1;
     provider.responses = Mutex::new(
         (0..failures)
@@ -53,7 +53,7 @@ fn unavailable(model: &str, failures: usize) -> Arc<ScriptedProvider> {
 
 fn answering(model: &str, answers: &[&str]) -> Arc<ScriptedProvider> {
     let mut provider = ScriptedProvider::new(answers.iter().map(|answer| finish(answer)).collect())
-        .with_profile("scripted", model);
+        .with_profile("openai", model);
     provider.identity.limits.concurrency = 1;
     route(provider)
 }
@@ -101,7 +101,7 @@ async fn exhausted_assigned_chain_fails_its_child_and_starts_no_later_sibling() 
             delegate(&[("A", Some("spare")), ("B", None)]),
             finish("must not synthesize"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
     let first = unavailable("spare-first", ATTEMPTS);
     let last = unavailable("spare-last", 1);
@@ -157,7 +157,7 @@ async fn call_and_token_budgets_refuse_a_selected_profile_switch() {
         let state = temp.path().join("state");
         let primary = route(
             ScriptedProvider::new(vec![delegate(&[("A", Some("spare"))]), finish("done")])
-                .with_profile("scripted", "primary")
+                .with_profile("openai", "primary")
                 .with_known_input_tokens(),
         );
         let first = unavailable("spare-first", ATTEMPTS);
@@ -228,7 +228,7 @@ async fn interruptions_around_spawn_and_switch_acknowledgements_start_no_further
                 delegate(&[("A", Some("spare")), ("B", None)]),
                 finish("done"),
             ])
-            .with_profile("scripted", "primary"),
+            .with_profile("openai", "primary"),
         );
         let first = unavailable("spare-first", ATTEMPTS);
         let last = answering("spare-last", &["spare answer"]);
@@ -363,7 +363,7 @@ async fn slow_heterogeneous_routes_obey_the_lowest_admitted_ceiling() {
             delegate(&[("A", None), ("B", Some("spare")), ("C", None)]),
             finish("done"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
     let wide = gated("wide", 3, &started);
     let narrow = gated("narrow", 1, &started);
@@ -457,7 +457,7 @@ async fn explicit_resume_continues_the_read_only_researcher_only_with_the_same_p
     let planner = || {
         route(
             ScriptedProvider::new(vec![delegate(&[("A", Some("spare"))]), finish("done")])
-                .with_profile("scripted", "primary"),
+                .with_profile("openai", "primary"),
         )
     };
 
@@ -512,7 +512,7 @@ async fn explicit_resume_continues_the_read_only_researcher_only_with_the_same_p
     let primary = planner();
     let first = route(
         ScriptedProvider::new(vec![read_facts(), finish("researched")])
-            .with_profile("scripted", "spare-first"),
+            .with_profile("openai", "spare-first"),
     );
     let last = answering("spare-last", &["never"]);
     let matching = researcher_bindings(&primary, vec![first.clone(), last.clone()]);
@@ -570,7 +570,7 @@ async fn preset_changes_after_a_run_cannot_move_its_pinned_compaction() {
     let compaction = |model: &str| {
         route(
             ScriptedProvider::new(vec![])
-                .with_profile("scripted", model)
+                .with_profile("openai", model)
                 .with_compactions(vec![Ok(CompactionResponse {
                     summary: format!("summary from {model}"),
                     response_id: None,
@@ -631,7 +631,7 @@ async fn every_committed_prefix_of_a_roster_team_run_replays_without_dispatch() 
             delegate(&[("A", Some("spare")), ("B", None)]),
             finish("done"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
     let first = unavailable("spare-first", ATTEMPTS);
     let last = answering("spare-last", &["spare answer"]);
