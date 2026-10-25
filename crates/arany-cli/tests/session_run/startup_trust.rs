@@ -1200,7 +1200,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "New conversation",
+        "Tokens used: no calls yet",
     );
     wait(
         &mut output,

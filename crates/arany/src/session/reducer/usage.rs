@@ -54,6 +54,13 @@ pub struct PlanUsage {
     pub latest_unreported: bool,
 }
 
+impl PlanUsage {
+    #[must_use]
+    pub fn matches_account(&self, account: uuid::Uuid) -> bool {
+        self.account == Some(account)
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UsageView {
     pub plan_limits: Vec<PlanUsage>,
@@ -308,4 +315,28 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
         .cache_creation
         .add(usage.cache_creation_input_tokens)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_usage_matches_only_its_pinned_account() {
+        let account = uuid::Uuid::now_v7();
+        let usage = PlanUsage {
+            account: Some(account),
+            session_id: SessionId::new(),
+            run_id: RunId::new(),
+            provider: "chatgpt".into(),
+            model: "model-a".into(),
+            primary: None,
+            secondary: None,
+            latest_unavailable: None,
+            latest_unreported: true,
+        };
+
+        assert!(usage.matches_account(account));
+        assert!(!usage.matches_account(uuid::Uuid::now_v7()));
+    }
 }
