@@ -635,8 +635,8 @@ fn action_headroom_covers_eligible_chains_longer_than_the_child_default() {
     let mut providers = AdmittedProviders::single(primary.clone());
     let chain: Vec<Arc<dyn Provider>> = vec![
         primary.clone(),
-        Arc::new(ScriptedProvider::new(vec![]).with_profile("scripted", "fallback-a")),
-        Arc::new(ScriptedProvider::new(vec![]).with_profile("scripted", "fallback-b")),
+        Arc::new(ScriptedProvider::new(vec![]).with_profile("openai", "fallback-a")),
+        Arc::new(ScriptedProvider::new(vec![]).with_profile("openai", "fallback-b")),
     ];
     let mut snapshot = RosterSnapshot {
         preset: "coding".into(),

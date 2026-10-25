@@ -180,7 +180,7 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
                 (identity.profile.clone(), identity.model.clone())
             } else {
                 let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
-                (config.provider.clone(), config.model.clone())
+                (config.provider.profile(), config.model.clone())
             }
         }
     };
