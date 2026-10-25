@@ -93,14 +93,14 @@ pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<
     else {
         return Ok(false);
     };
+    presets(&bytes)?;
+    let config: Config = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
     let provider = format!("custom:{name}");
-    Ok(presets(&bytes)?.iter().any(|roster| {
-        roster
-            .profiles
-            .iter()
-            .flat_map(|profile| &profile.routes)
-            .any(|route| route.provider == provider)
-    }))
+    Ok(config
+        .profiles
+        .iter()
+        .flat_map(|profile| &profile.routes)
+        .any(|route| route.provider == provider))
 }
 
 fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
@@ -480,6 +480,39 @@ mod tests {
 
     fn record() -> Value {
         json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
+    }
+
+    #[test]
+    fn custom_references_include_unselected_profiles_and_reject_invalid_rosters() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().canonicalize().unwrap().join("state");
+        let root = StateRoot::admit(&state_dir).unwrap();
+        assert!(!references_custom_profile(root.path(), "example-route").unwrap());
+        let path = root.path().join("provider-roster.json");
+        let mut config = record();
+        config["profiles"].as_array_mut().unwrap().push(json!({
+            "name": "alternative",
+            "routes": [{"provider":"custom:example-route","model":"example-model","effort":null,"account_id":null}]
+        }));
+        for selected in [false, true] {
+            if selected {
+                config["presets"][0]["providers"]["primary"] = json!("alternative");
+                config["presets"][0]["child_profiles"] = json!(["alternative"]);
+            }
+            let bytes = serde_json::to_vec(&config).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(references_custom_profile(root.path(), "example-route").unwrap());
+            assert!(!references_custom_profile(root.path(), "other-route").unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        config["presets"][0]["providers"]["primary"] = json!("missing");
+        let bytes = serde_json::to_vec(&config).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(references_custom_profile(root.path(), "example-route").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]

@@ -1243,19 +1243,6 @@ impl SessionView {
             | Event::SessionDefaultChanged { .. }
             | Event::ContextCompacted { .. } => session::apply(current, &envelope.event, prior)?,
             Event::ProviderSetupEditStarted { operation_id, .. } => {
-                if current.pending_provider_setup_edit.is_some()
-                    || current.provider_setup_uncertain
-                    || current
-                        .runs
-                        .last()
-                        .is_some_and(|run| run.status == RunStatus::Active)
-                    || current
-                        .goals
-                        .iter()
-                        .any(|goal| goal.status == GoalStatus::Running)
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
                 current.pending_provider_setup_edit = Some(*operation_id);
             }
             Event::ProviderSetupEditFinished {

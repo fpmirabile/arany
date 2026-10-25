@@ -3575,6 +3575,74 @@ mod goal_replay_tests {
         assert!(SessionView::replay_open(session_id, &journal(session_id, resumed)).is_err());
     }
 
+    fn assert_setup_recovery_with_open_lifecycle_hook(
+        session_id: SessionId,
+        goal_id: GoalId,
+        prefix: &[Event],
+    ) {
+        for disposition in [
+            ProviderSetupDisposition::Applied,
+            ProviderSetupDisposition::Failed,
+            ProviderSetupDisposition::Cancelled,
+            ProviderSetupDisposition::Uncertain,
+        ] {
+            let operation_id = uuid::Uuid::now_v7();
+            let mut events = prefix.to_vec();
+            events.push(Event::ProviderSetupEditStarted {
+                operation_id,
+                target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::CustomProfile,
+                    identity: "example-route".into(),
+                },
+                expected_digest: None,
+            });
+            let pending =
+                SessionView::replay_open(session_id, &journal(session_id, events.clone()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(pending.pending_provider_setup_edit, Some(operation_id));
+            events.push(Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: (disposition == ProviderSetupDisposition::Applied)
+                    .then_some([1; 32]),
+                disposition,
+            });
+            let journal = journal(session_id, events);
+            let mut view = SessionView::replay_open(session_id, &journal)
+                .expect("setup outcome after an unfinished lifecycle hook")
+                .unwrap();
+            assert_eq!(view.pending_provider_setup_edit, None);
+            assert_eq!(
+                view.provider_setup_uncertain,
+                disposition == ProviderSetupDisposition::Uncertain
+            );
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+            assert!(view.runs[0].lifecycle_hooks[0].outcome.is_none());
+            assert_eq!(view.goal(goal_id).unwrap().status, GoalStatus::Interrupted);
+            assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+            let recovered = SessionView::replay(session_id, &journal).unwrap().unwrap();
+            assert_eq!(recovered.pending_provider_setup_edit, None);
+            assert_eq!(
+                recovered.provider_setup_uncertain,
+                view.provider_setup_uncertain
+            );
+            let renamed = view.apply_committed(&EventEnvelope {
+                sequence: view.last_sequence + 1,
+                session_id,
+                run_id: None,
+                agent_run_id: None,
+                event: Event::SessionRenamed {
+                    title: "Renamed".into(),
+                },
+                created_at_ms: 1,
+            });
+            assert_eq!(
+                renamed.is_ok(),
+                disposition != ProviderSetupDisposition::Uncertain
+            );
+        }
+    }
+
     #[test]
     fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
         use crate::tools::permissions::{HookEvent, HookInvocation, stop_subject};
@@ -3637,6 +3705,7 @@ mod goal_replay_tests {
         assert_eq!(view.runs[0].status, RunStatus::Interrupted);
         assert!(!view.runs[0].hooks_settled());
         assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+        assert_setup_recovery_with_open_lifecycle_hook(session_id, goal_id, &events);
 
         let next_goal = GoalId::new();
         events.push(goal_started(next_goal, GoalBudget::default()));

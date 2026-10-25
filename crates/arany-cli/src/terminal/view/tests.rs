@@ -956,7 +956,7 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
 #[test]
 fn setup_warning_wraps_unicode_without_splitting_utf8() {
     let warning = format!("{}éclair", "a".repeat(15));
-    let lines = wrap_cells(&warning, 16, 0);
+    let lines = wrap_setup_warning(&warning, 16);
     assert_eq!(lines.concat(), warning);
     assert!(
         lines
