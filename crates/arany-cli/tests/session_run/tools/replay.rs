@@ -1263,6 +1263,7 @@ pub(super) async fn native_command_changeset_corpus(
             "test -s \"$(find src -name input -print -quit)\"",
             None,
         ),
+        ("large-changeset", "", None),
         ("depth-33", "true", Some(ToolDisposition::Limit)),
         ("nonzero", "exit 7", None),
         (
@@ -1299,11 +1300,7 @@ pub(super) async fn native_command_changeset_corpus(
             "mkdir src/.git; printf forbidden > src/.git/blocked",
             Some(ToolDisposition::Denied),
         ),
-        (
-            "bytes-overflow",
-            "printf '%8193s' x > src/overflow",
-            Some(ToolDisposition::Limit),
-        ),
+        ("bytes-overflow", "", Some(ToolDisposition::Limit)),
         (
             "files-overflow",
             "i=0; while test $i -lt 65; do printf x > src/extra-$i; i=$((i + 1)); done",
@@ -1320,6 +1317,9 @@ pub(super) async fn native_command_changeset_corpus(
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         crate::private_file(&workspace.join("src/m-modified"), b"before\n");
         crate::private_file(&workspace.join("src/z-deleted"), b"delete\n");
+        if case == "large-changeset" {
+            crate::private_file(&workspace.join("src/large"), &vec![b'a'; 16 * 1024]);
+        }
         if case == "large-snapshot" {
             std::fs::create_dir_all(workspace.join("src/large")).unwrap();
             for index in 0..=2048 {
@@ -1390,7 +1390,19 @@ pub(super) async fn native_command_changeset_corpus(
         } else {
             rejected
         };
-        let call = if native_setid {
+        let call = if case == "bytes-overflow" {
+            ToolCall::Command {
+                program: program.into(),
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "set -eu; printf '%{}s' x > src/overflow; printf payload-complete",
+                        arany::test_support::max_changeset_bytes() + 1
+                    ),
+                ],
+                cwd: "".into(),
+            }
+        } else if native_setid {
             ToolCall::Command {
                 program: program.into(),
                 args: vec!["-c".into(), "set -eu; chmod 4755 src/m-modified".into()],
@@ -1398,6 +1410,15 @@ pub(super) async fn native_command_changeset_corpus(
             }
         } else if case == "partial" {
             ToolCall::Command { program: program.into(), args: vec!["-c".into(), "set -eu; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()], cwd: "".into() }
+        } else if case == "large-changeset" {
+            ToolCall::Command {
+                program: program.into(),
+                args: vec![
+                    "-c".into(),
+                    "set -eu; printf '%16384s' x > src/large; printf payload-complete".into(),
+                ],
+                cwd: "".into(),
+            }
         } else if cfg!(target_os = "macos") && matches!(case, "symlink" | "hardlink") {
             ToolCall::Command {
                 program: "native-links".into(),
@@ -1903,6 +1924,32 @@ pub(super) async fn native_command_changeset_corpus(
                 b"delete\n"
             );
             assert!(view.runs[0].assistant_message.is_none());
+        } else if case == "large-changeset" {
+            let published = std::fs::read(workspace.join("src/large")).unwrap();
+            assert_eq!(published.len(), 16 * 1024);
+            assert!(
+                published[..published.len() - 1]
+                    .iter()
+                    .all(|byte| *byte == b' ')
+            );
+            assert_eq!(published.last(), Some(&b'x'));
+            let result: serde_json::Value =
+                serde_json::from_str(&tools[0].observation.as_ref().unwrap().output).unwrap();
+            assert_eq!(result["changeset"]["files"][0]["path"], "src/large");
+            assert_eq!(
+                result["changeset"]["files"][0]["before"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                4 * (16 * 1024_usize).div_ceil(3)
+            );
+            assert_eq!(
+                result["changeset"]["files"][0]["after"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                4 * (16 * 1024_usize).div_ceil(3)
+            );
         } else if matches!(
             case,
             "nonzero" | "ai-approve" | "selection" | "large-snapshot" | "depth-32"
