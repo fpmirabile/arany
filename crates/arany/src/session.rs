@@ -88,8 +88,8 @@ pub use reducer::{
 };
 pub(crate) use reducer::{
     ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,
-    evidence_admitted, private_criterion_evidence, private_failure, verification_passed,
-    wave_settled,
+    evidence_admitted, private_criterion_evidence, private_failure, validate_editor_request,
+    verification_passed, wave_settled,
 };
 pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};
 

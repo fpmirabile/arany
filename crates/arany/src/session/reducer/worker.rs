@@ -453,81 +453,96 @@ fn proposal(run: &RunView, ordinal: u8) -> Result<&ChildAssignment, ReplayError>
     .ok_or(ReplayError::InvalidTransition)
 }
 
-// The one admission of an editor proposal, at delegation and again when its assignment spawns.
-fn validate_request(
+pub(crate) fn validate_request(
     view: &SessionView,
     run: &RunView,
     request: &EditorAssignment,
     spawning: Option<AgentRunId>,
-) -> Result<(), ReplayError> {
-    let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
-    let policy = config
-        .worker_policy
-        .as_ref()
-        .ok_or(ReplayError::InvalidTransition)?;
-    let goal = active_run_goal(view, run.id).ok_or(ReplayError::InvalidTransition)?;
-    let plan = goal
-        .plan_contract
-        .as_ref()
-        .ok_or(ReplayError::InvalidTransition)?;
-    let registry = super::definition_registry(run)?;
-    let definition = registry
-        .get(&request.definition)
-        .ok_or(ReplayError::InvalidTransition)?;
-    if goal.phase != GoalPhase::Implementation
-        || goal.awaiting_plan_contract
-        || !definition.editor()
-        || definition.background && request.mode != WorkerMode::Background
-        || request.definition_digest
-            != crate::validate::digest(
-                &serde_json::to_vec(definition).map_err(|_| ReplayError::InvalidPayload)?,
-            )
-        || request.max_turns > definition.max_turns
-        || request.max_turns > policy.max_turns
-        || !valid_commands(&request.commands)
+) -> Result<(), crate::session::ProposalRefusalCause> {
+    use crate::session::ProposalRefusalCause::*;
+    let config = run.config.as_ref().ok_or(Phase)?;
+    let policy = config.worker_policy.as_ref().ok_or(EditorGrant)?;
+    let goal = active_run_goal(view, run.id).ok_or(Phase)?;
+    let plan = goal.plan_contract.as_ref().ok_or(Phase)?;
+    if goal.phase != GoalPhase::Implementation || goal.awaiting_plan_contract {
+        return Err(Phase);
+    }
+    let registry = super::definition_registry(run).map_err(|_| EditorDefinition)?;
+    let definition = registry.get(&request.definition).ok_or(EditorDefinition)?;
+    if !definition.editor() || definition.background && request.mode != WorkerMode::Background {
+        return Err(EditorDefinition);
+    }
+    if request.definition_digest
+        != crate::validate::digest(&serde_json::to_vec(definition).map_err(|_| EditorDigest)?)
+    {
+        return Err(EditorDigest);
+    }
+    if request.max_turns > definition.max_turns || request.max_turns > policy.max_turns {
+        return Err(EditorTurns);
+    }
+    if !valid_commands(&request.commands)
         || request.commands.iter().any(|c| {
             !policy.parent_grant.commands.contains(c)
                 || !plan.commands.contains(c)
                 || !definition.allows_worker_tool(WorkerTool::Command)
         })
-        || request
-            .lease
-            .iter()
-            .any(|p| !within(p, &plan.paths) || !within(p, &policy.parent_grant.write_paths))
-        || ![
-            WorkerTool::Write,
-            WorkerTool::Edit,
-            WorkerTool::MultiEdit,
-            WorkerTool::Delete,
-            WorkerTool::Move,
-        ]
-        .iter()
-        .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
-        || match &request.criterion {
-            GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                !plan.allows_call(call)
-                    || matches!(call.as_ref(), ToolCall::Mkdir { .. })
-                    || !policy
-                        .parent_grant
-                        .clone()
-                        .narrowed_for_editor(request, &plan.commands, |tool| {
-                            definition.allows_worker_tool(tool)
-                        })
-                        .allows(call)
-                    || matches!(call.as_ref(), ToolCall::Command { program, .. } if !request.commands.contains(program))
-            }
-            GoalSuccessCriterion::WorkspaceFileContent { path, .. }
-            | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => {
-                !within(path, &plan.paths) || !within(path, &request.lease)
-            }
-        }
     {
-        return Err(ReplayError::InvalidTransition);
+        return Err(EditorCommands);
     }
+    if request
+        .lease
+        .iter()
+        .any(|p| !within(p, &plan.paths) || !within(p, &policy.parent_grant.write_paths))
+    {
+        return Err(EditorLease);
+    }
+    if ![
+        WorkerTool::Write,
+        WorkerTool::Edit,
+        WorkerTool::MultiEdit,
+        WorkerTool::Delete,
+        WorkerTool::Move,
+    ]
+    .iter()
+    .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
+    {
+        return Err(EditorGrant);
+    }
+    validate_editor_criterion(request, policy, plan, definition)?;
     for source in request.resumes.iter().chain(request.supersedes.iter()) {
         if Some(*source) == spawning || view.worker_resume_source(goal.id, *source).is_none() {
-            return Err(ReplayError::InvalidTransition);
+            return Err(EditorResume);
         }
+    }
+    Ok(())
+}
+
+fn validate_editor_criterion(
+    request: &EditorAssignment,
+    policy: &WorkerPolicy,
+    plan: &GoalPlanContract,
+    definition: &crate::tools::definitions::AgentDefinition,
+) -> Result<(), crate::session::ProposalRefusalCause> {
+    use crate::session::ProposalRefusalCause::EditorCriterion;
+    let grant = policy
+        .parent_grant
+        .clone()
+        .narrowed_for_editor(request, &plan.commands, |tool| {
+            definition.allows_worker_tool(tool)
+        });
+    if match &request.criterion {
+        GoalSuccessCriterion::ToolCallSucceeded { call } => {
+            !plan.allows_call(call)
+                || matches!(call.as_ref(), ToolCall::Mkdir { .. })
+                || !grant.allows(call)
+                || matches!(call.as_ref(), ToolCall::Command { program, .. } if !request.commands.contains(program))
+        }
+        GoalSuccessCriterion::WorkspaceFileContent { path, .. }
+        | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => {
+            !within(path, &plan.paths) || !within(path, &request.lease)
+        }
+    } {
+        return Err(EditorCriterion);
     }
     Ok(())
 }
@@ -617,7 +632,8 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
                 .tool_policy
                 .as_ref()
                 .ok_or(ReplayError::InvalidTransition)?;
-            validate_request(view, run, &p.request, Some(id))?;
+            validate_request(view, run, &p.request, Some(id))
+                .map_err(|_| ReplayError::InvalidTransition)?;
             let plan = goal
                 .plan_contract
                 .as_ref()

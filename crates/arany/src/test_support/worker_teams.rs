@@ -25,6 +25,34 @@ pub struct TeamObservation {
     pub view: SessionView,
 }
 
+pub const INVALID_EDITOR_CASES: &[(&str, ProposalRefusalCause)] = &[
+    ("invalid_definition", ProposalRefusalCause::EditorDefinition),
+    ("invalid_digest", ProposalRefusalCause::EditorDigest),
+    ("invalid_commands", ProposalRefusalCause::EditorCommands),
+    ("invalid_turns", ProposalRefusalCause::EditorTurns),
+    ("invalid_lease", ProposalRefusalCause::EditorLease),
+    ("invalid_criterion", ProposalRefusalCause::EditorCriterion),
+    ("invalid_resume", ProposalRefusalCause::EditorResume),
+];
+
+pub fn invalidate_editor(request: &mut EditorAssignment, case: &str) {
+    match case {
+        "invalid_definition" => request.definition = "untrusted-definition-canary".into(),
+        "invalid_digest" => request.definition_digest = [9; 32],
+        "invalid_commands" => request.commands = vec!["unadmitted".into()],
+        "invalid_turns" => request.max_turns = 17,
+        "invalid_lease" => request.lease = vec!["outside".into()],
+        "invalid_criterion" => {
+            request.criterion = GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/unleased".into(),
+                content: "done".into(),
+            }
+        }
+        "invalid_resume" => request.resumes = Some(AgentRunId::new()),
+        _ => panic!("unknown invalid editor scenario"),
+    }
+}
+
 struct TeamProvider {
     identity: ProviderIdentity,
     case: &'static str,
@@ -431,6 +459,9 @@ impl TeamProvider {
                 }
             })
             .collect::<Vec<_>>();
+        if self.case.starts_with("invalid_") {
+            invalidate_editor(children[0].editor.as_mut().unwrap(), self.case);
+        }
         if self.case.starts_with("hook_")
             || matches!(self.case, "mixed" | "c1_failure" | "cancel_mixed")
         {
@@ -755,6 +786,17 @@ impl Provider for TeamProvider {
                 wire_provenance: None,
             });
         }
+        if self.case.starts_with("invalid_") && step > 1 && request.phase == AgentPhase::RootPlan {
+            let expected = INVALID_EDITOR_CASES
+                .iter()
+                .find(|(case, _)| *case == self.case)
+                .unwrap()
+                .1;
+            assert_eq!(
+                request.input.last_answer_refused.as_ref().unwrap().cause,
+                expected
+            );
+        }
         let outcome = if request.phase == AgentPhase::ChildWork {
             self.child(&request, step).await?
         } else {
@@ -817,6 +859,13 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
+    if case == "invalid_turns" {
+        let path = state.join("agents/editor.md");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("isolation: worktree", "isolation: worktree\nmaxTurns: 1");
+        std::fs::write(path, text).unwrap();
+    }
     if case == "worker_command" {
         std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write, Bash\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
     }
@@ -1106,6 +1155,40 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let (events, view) = replayed(&state, session).await;
     assert_action_bounds(&events, false, false);
     let run = &view.runs[0];
+    if let Some((_, cause)) = INVALID_EDITOR_CASES.iter().find(|(name, _)| *name == case) {
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.agents.len(), 1, "no child spawn");
+        assert!(events.iter().all(|e| {
+            !e.event
+                .payload()
+                .unwrap()
+                .contains("untrusted-definition-canary")
+        }));
+        let records = &run.primary().unwrap().provider_calls;
+        assert_eq!(records.iter().filter(|r| r.refusal.is_some()).count(), 3);
+        assert!(
+            records
+                .iter()
+                .filter_map(|r| r.refusal.as_ref())
+                .all(|r| r.cause == *cause)
+        );
+        assert!(!events.iter().any(|e| matches!(&e.event,
+            Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::PrepareWorker { .. }))));
+        assert!(
+            provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| r.phase != AgentPhase::ChildWork)
+        );
+        return TeamObservation {
+            directory,
+            session,
+            events,
+            view,
+        };
+    }
     if case == "large_write" {
         let requests = provider.requests.lock().unwrap();
         assert!(requests.iter().any(|request| {

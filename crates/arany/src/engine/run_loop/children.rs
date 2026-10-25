@@ -630,10 +630,11 @@ impl RunLoop<'_> {
         &self,
         children: &[ChildAssignment],
         agent: Option<&str>,
-    ) -> Result<(), super::ProposalRefusalCause> {
-        let valid = if children.iter().any(|child| child.editor.is_some()) {
-            self.valid_editor_delegation(children, agent)
-        } else {
+    ) -> Result<Result<(), super::ProposalRefusalCause>, EngineError> {
+        if children.iter().any(|child| child.editor.is_some()) {
+            return self.editor_delegation(children, agent);
+        }
+        let valid = {
             self.wave_settled().unwrap_or(false)
                 && !matches!(self.controls.policy, CollaborationPolicy::Single)
                 && crate::provider::valid_assignments(children, agent)
@@ -657,11 +658,11 @@ impl RunLoop<'_> {
                     .iter()
                     .all(|a| self.valid_research_assignment(a, agent))
         };
-        if valid {
+        Ok(if valid {
             Ok(())
         } else {
             Err(super::ProposalRefusalCause::DelegateInvalid)
-        }
+        })
     }
 
     pub(super) fn valid_research_assignment(
