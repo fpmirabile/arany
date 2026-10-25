@@ -1440,7 +1440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+    async fn exec_jsonl_keeps_budget_feedback_for_settled_runs() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
@@ -1455,7 +1455,7 @@ mod tests {
         std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
             .expect("private Tool configuration");
         let budget = GoalBudget {
-            max_active_ms: Some(60_000),
+            max_provider_calls: Some(2),
             ..GoalBudget::default()
         };
         let preferences = serde_json::json!({"version":5,"preferences":{
@@ -1486,8 +1486,7 @@ mod tests {
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
-        .with_profile("openai", "gpt-5.4")
-        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
+        .with_profile("openai", "gpt-5.4");
         let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
         exec.prompt = None;
         exec.goal = Some("Inspect the notes".into());
@@ -1503,22 +1502,161 @@ mod tests {
         let session_id =
             SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
                 .expect("typed Session ID");
-        let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
-        let run = view.runs.last().expect("Finished Run");
-        assert_eq!(run.status, RunStatus::Finished);
+        let (events, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
+        let run = view.runs.last().expect("Failed Run");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.failure, Some(arany::RunFailure::CriterionUnmet));
+        assert!(run.assistant_message.is_none());
         assert_eq!(
             view.goals.last().expect("Failed Goal").status,
             GoalStatus::Failed
         );
         let feedback =
             crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
+        assert_eq!(report.stderr, format!("{feedback}\n"));
+        assert!(!report.success);
+        assert_finished_jsonl_budget_feedback(events);
+    }
+
+    fn assert_finished_jsonl_budget_feedback(events: Vec<arany::EventEnvelope>) {
+        let committed = finished_run_at_active_limit(events);
+        let feedback =
+            crate::presentation::session_run_feedback(&committed.view, &committed.outcome.run)
+                .expect("budget refusal feedback for a committed answer");
+        assert!(feedback.ends_with("The committed answer is preserved."));
+        let answer = committed
+            .outcome
+            .run
+            .assistant_message
+            .clone()
+            .expect("committed answer");
+        let classification = classify_committed_state(&committed).expect("committed outcome");
+        let report = render_committed_outcome(committed, classification).expect("JSONL rendering");
         assert_eq!(
             report.stderr,
             format!(
                 "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
             )
         );
+        let answer_line = report
+            .stdout
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<arany_cli::protocol::EventLine>(line).expect("JSONL Event")
+            })
+            .find(|line| line.kind == "MessageCommitted")
+            .expect("committed answer Event");
+        assert_eq!(answer_line.payload["text"], answer);
         assert!(!report.success);
+    }
+
+    fn finished_run_at_active_limit(events: Vec<arany::EventEnvelope>) -> CommittedOutcome {
+        const ACTIVE_LIMIT_MS: u64 = 60_000;
+        const ANSWER: &str = "The notes remain unchanged";
+        let budget = GoalBudget {
+            max_active_ms: Some(ACTIVE_LIMIT_MS),
+            ..GoalBudget::default()
+        };
+        let mut fixture = Vec::new();
+        for mut envelope in events {
+            if let Some(message) = finish_budget_event(&mut envelope, budget, ANSWER) {
+                fixture.push(message);
+            }
+            fixture.push(envelope);
+        }
+        for (envelope, sequence) in fixture.iter_mut().zip(1..) {
+            envelope.sequence = sequence;
+        }
+        let session_id = fixture[0].session_id;
+        let view = SessionView::replay(session_id, &fixture)
+            .expect("valid late-settlement fixture")
+            .expect("Session");
+        let run = view.runs.last().expect("Finished Run").clone();
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.assistant_message.as_deref(), Some(ANSWER));
+        assert_eq!(
+            view.goals.last().expect("Failed Goal").status,
+            GoalStatus::Failed
+        );
+        CommittedOutcome {
+            output: OutputArg::Jsonl,
+            new_session: true,
+            outcome: arany::RunOutcome {
+                session_id,
+                goal_id: view.goals.last().expect("Failed Goal").id,
+                run,
+            },
+            stopped: Some(RunStop::GoalExhausted(arany::GoalLimit::ActiveTime)),
+            continuation_error: None,
+            interrupted: false,
+            forced: None,
+            events: fixture,
+            view,
+        }
+    }
+
+    fn finish_budget_event(
+        envelope: &mut arany::EventEnvelope,
+        budget: GoalBudget,
+        answer: &str,
+    ) -> Option<arany::EventEnvelope> {
+        let active_limit = budget.max_active_ms.expect("finite fixture budget");
+        match &mut envelope.event {
+            arany::Event::GoalStarted { budget: pinned, .. } => *pinned = budget,
+            arany::Event::RunStarted {
+                active_deadline_ms, ..
+            } => {
+                *active_deadline_ms = Some(active_limit);
+            }
+            arany::Event::GoalProviderCallReserved {
+                active_ceiling_ms, ..
+            } => {
+                *active_ceiling_ms = (*active_ceiling_ms).min(active_limit);
+            }
+            arany::Event::GoalPlanContractRecorded { contract, .. } => contract.budget = budget,
+            arany::Event::AgentFinished {
+                disposition,
+                summary,
+                result,
+                ..
+            } => {
+                *disposition = arany::AgentDisposition::Finished;
+                *summary = Some(answer.into());
+                *result = Some(answer.into());
+            }
+            arany::Event::RunFinished {
+                run_id,
+                disposition,
+                failure,
+                active_ms,
+            } => {
+                *disposition = arany::RunDisposition::Finished;
+                *failure = None;
+                *active_ms = active_limit;
+                return Some(arany::EventEnvelope {
+                    event: arany::Event::MessageCommitted {
+                        run_id: *run_id,
+                        text: answer.into(),
+                    },
+                    ..envelope.clone()
+                });
+            }
+            arany::Event::GoalFinished {
+                active_ms,
+                budget_refusal,
+                ..
+            } => {
+                *active_ms = active_limit;
+                let refusal = budget_refusal.as_mut().expect("budget refusal");
+                refusal.dimension = arany::GoalLimit::ActiveTime;
+                refusal.used = active_limit;
+                refusal.limit = active_limit;
+                refusal.requested = None;
+                refusal.required_minimum = None;
+            }
+            _ => {}
+        }
+        None
     }
 
     #[tokio::test]
