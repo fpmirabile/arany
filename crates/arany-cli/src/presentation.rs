@@ -401,6 +401,13 @@ pub fn budget_refusal_feedback(view: &SessionView, goal: Option<GoalId>) -> Opti
         .and_then(|run| session_run_feedback(view, run))
 }
 
+pub fn budget_stop_run(view: &SessionView, goal: Option<GoalId>) -> Option<&RunView> {
+    view.runs.iter().rev().find(|run| {
+        view.budget_stop_goal(run)
+            .is_some_and(|candidate| Some(candidate.id) == goal)
+    })
+}
+
 pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
@@ -591,6 +598,20 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
             "Arany refused an operation that was not offered. The proposed action did not run."
         }
         Cause::AnswerInvalid => "Arany refused an invalid text answer.",
+        Cause::EditorDefinition => {
+            "Editor definition is unavailable or incompatible. No child started."
+        }
+        Cause::EditorDigest => "Editor definition digest does not match. No child started.",
+        Cause::EditorCommands => "Editor commands exceed admitted authority. No child started.",
+        Cause::EditorTurns => "Editor turns exceed the admitted ceiling. No child started.",
+        Cause::EditorLease => "Editor lease exceeds the admitted scope. No child started.",
+        Cause::EditorCriterion => {
+            "Editor criterion exceeds its lease or authority. No child started."
+        }
+        Cause::EditorResume => {
+            "Editor resume source is unavailable or ineligible. No child started."
+        }
+        Cause::EditorGrant => "Editor work requires an admitted write grant. No child started.",
         Cause::DelegateInvalid => {
             "Arany refused an invalid delegation. No children were started for it."
         }
@@ -1480,6 +1501,41 @@ mod goal_status_tests {
             session_run_feedback(&view, &view.runs[0])
         );
         assert_eq!(budget_refusal_feedback(&view, Some(GoalId::new())), None);
+    }
+
+    #[test]
+    fn budget_stop_run_keeps_the_loose_predicate_and_selects_the_latest_run() {
+        let mut view = session_with_goal(true);
+        let mut earlier = crate::presentation::team_view().runs.remove(0);
+        earlier.status = RunStatus::Failed;
+        earlier.failure = Some(arany::RunFailure::BudgetExhausted);
+        earlier.assistant_message = None;
+        let mut latest = crate::presentation::team_view().runs.remove(0);
+        latest.status = RunStatus::Failed;
+        latest.failure = Some(arany::RunFailure::BudgetExhausted);
+        latest.assistant_message = Some("Committed answer".into());
+        let goal_id = view.goals[0].id;
+        view.goals[0].run_ids = vec![earlier.id, latest.id];
+        view.goals[0].provider_calls = 64;
+        view.goals[0].status = GoalStatus::Failed;
+        view.goals[0].budget_closed = true;
+        view.runs = vec![earlier, latest];
+
+        assert_eq!(
+            budget_stop_run(&view, Some(goal_id)).map(|run| run.id),
+            Some(view.runs[1].id)
+        );
+        assert_eq!(budget_refusal_feedback(&view, Some(goal_id)), None);
+        assert!(
+            session_run_feedback(&view, &view.runs[0])
+                .expect("earlier Run receipt")
+                .contains("No answer was committed")
+        );
+        assert!(
+            session_run_feedback(&view, &view.runs[1])
+                .expect("latest Run receipt")
+                .contains("The committed answer is preserved")
+        );
     }
 }
 

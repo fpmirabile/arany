@@ -1015,6 +1015,10 @@ mod tests {
                 "Arany refused an invalid text answer.",
             ),
             (
+                arany::ProposalRefusalCause::EditorDigest,
+                "Editor definition digest does not match. No child started.",
+            ),
+            (
                 arany::ProposalRefusalCause::DelegateInvalid,
                 "Arany refused an invalid delegation. No children were started for it.",
             ),

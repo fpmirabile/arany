@@ -568,6 +568,14 @@ pub enum ProposalRefusalCause {
     NotOffered,
     AnswerInvalid,
     DelegateInvalid,
+    EditorDefinition,
+    EditorDigest,
+    EditorCommands,
+    EditorTurns,
+    EditorLease,
+    EditorCriterion,
+    EditorResume,
+    EditorGrant,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

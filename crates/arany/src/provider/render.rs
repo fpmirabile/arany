@@ -405,6 +405,18 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
         DelegateInvalid => {
             "Send a valid bounded Delegate using the offered assignments and profiles."
         }
+        EditorDefinition => "Select an admitted editor definition with a compatible mode.",
+        EditorDigest => "Use the exact admitted editor definition digest.",
+        EditorCommands => {
+            "Select editor commands allowed by the definition, plan and parent grant."
+        }
+        EditorTurns => "Reduce editor turns to the definition and worker policy ceilings.",
+        EditorLease => "Choose editor lease paths within the plan and parent write grant.",
+        EditorCriterion => "Choose an editor criterion within its lease, commands and plan.",
+        EditorResume => {
+            "Select an eligible terminal or interrupted child of this Goal as the resume source."
+        }
+        EditorGrant => "Editor work requires an admitted write-capable worker grant.",
     };
     json!({"operation": refusal.operation, "cause": refusal.cause, "remediation": remediation})
 }
