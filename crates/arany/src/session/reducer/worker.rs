@@ -1013,153 +1013,20 @@ pub(super) fn apply(
         }
         Event::WorkerDataChunk { record, .. } => apply::data_chunk(run, record, actor, sequence)?,
         Event::WorkerDataSealed { record, .. } => apply::data_sealed(run, record, actor, sequence)?,
-        Event::WorkerHandoverRecorded { record: h, .. } => {
-            let w = worker(run, h.assignment_id)?;
-            if actor != h.assignment_id
-                || run.workers.stop.is_some()
-                || w.handover.is_some()
-                || w.released.is_some()
-                || w.discarded.is_some()
-                || w.pins.base.sha256 != h.base_digest
-                || h.criterion_evidence != private_criterion_evidence(run, h.assignment_id)?
-                || w.outcome.as_ref().is_none_or(|(_, o)| {
-                    o.disposition != WorkerDisposition::Ready || o.data.as_ref() != Some(&h.data)
-                })
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            valid_delta(run, h.assignment_id, &h.data, true)?;
-            worker_mut(run, h.assignment_id)?.handover = Some((sequence, h.clone()));
+        Event::WorkerHandoverRecorded { record, .. } => {
+            apply::handover(run, record, actor, sequence)?
         }
-        Event::WorkerIntegrationRecorded { record: i, .. } => {
-            if !primary(run, actor) {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let w = worker(run, i.assignment_id)?;
-            let (hseq, h) = w.handover.as_ref().ok_or(ReplayError::InvalidTransition)?;
-            let t = run
-                .tools
-                .iter()
-                .find(|t| {
-                    t.intent.id == i.tool_id && t.finished_sequence == Some(i.finished_sequence)
-                })
-                .ok_or(ReplayError::InvalidTransition)?;
-            let o = t
-                .observation
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            let expected = ChangesetSource::WorkerHandover {
-                assignment_id: i.assignment_id,
-                handover_sequence: *hseq,
-                data: h.data.clone(),
-            };
-            let outcome = match o.disposition {
-                ToolDisposition::Succeeded if o.attested_for(&t.intent) => {
-                    WorkerIntegrationOutcome::Integrated
-                }
-                ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
-                ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
-                ToolDisposition::Failed | ToolDisposition::Limit | ToolDisposition::Cancelled
-                    if o.attestation.is_none() =>
-                {
-                    WorkerIntegrationOutcome::Denied
-                }
-                ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
-                _ => return Err(ReplayError::InvalidTransition),
-            };
-            if *hseq != i.handover_sequence
-                || w.integration.is_some()
-                || w.discarded.is_some()
-                || w.released.is_some()
-                || i.outcome != outcome
-                || !matches!(&t.intent.call, ToolCall::ApplyChangeset { source } if source == &expected)
-                || t.intent.target != EffectTarget::Workspace
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            worker_mut(run, i.assignment_id)?.integration = Some((sequence, i.clone()));
+        Event::WorkerIntegrationRecorded { record, .. } => {
+            apply::integration(run, record, actor, sequence)?
         }
-        Event::WorkerHandoverDiscarded { record: d, .. } => {
-            if !primary(run, actor) {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let w = worker(run, d.assignment_id)?;
-            if w.integration.as_ref().is_some_and(|(_, i)| {
-                matches!(
-                    i.outcome,
-                    WorkerIntegrationOutcome::Integrated | WorkerIntegrationOutcome::Uncertain
-                )
-            }) || w.discarded.is_some()
-                || w.released.is_some()
-                || integration_in_flight(run, d.assignment_id)
-                || d.handover_sequence != w.handover.as_ref().map(|(s, _)| *s)
-                || !valid_discard(run, w, d)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            worker_mut(run, d.assignment_id)?.discarded = Some((sequence, d.clone()));
+        Event::WorkerHandoverDiscarded { record, .. } => {
+            apply::discard(run, record, actor, sequence)?
         }
-        Event::WorkerLeaseReleased { record: r, .. } => {
-            if !primary(run, actor) {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let w = worker(run, r.assignment_id)?;
-            let integrated = w.integration.as_ref().is_some_and(|(seq, i)| {
-                i.outcome == WorkerIntegrationOutcome::Integrated
-                    && r.reason == WorkerSettlementReason::Integrated
-                    && *seq == r.cause_sequence
-            });
-            let disposed = w
-                .discarded
-                .as_ref()
-                .is_some_and(|(seq, d)| *seq == r.cause_sequence && d.reason == r.reason);
-            if w.released.is_some()
-                || w.outcome.is_none()
-                || integration_in_flight(run, r.assignment_id)
-                || r.handover_sequence != w.handover.as_ref().map(|(s, _)| *s)
-                || !(integrated || disposed)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            worker_mut(run, r.assignment_id)?.released = Some(sequence);
+        Event::WorkerLeaseReleased { record, .. } => {
+            apply::lease_release(run, record, actor, sequence)?
         }
-        Event::WorkerVerificationRecorded { record: v, .. } => {
-            if !primary(run, actor) || run.workers.stop.is_some() {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let w = worker(run, v.assignment_id)?;
-            let released = w.released.ok_or(ReplayError::InvalidTransition)?;
-            let criterion = &w.pins.request.criterion;
-            if v.criterion_digest
-                != crate::validate::digest(
-                    &serde_json::to_vec(criterion).map_err(|_| ReplayError::InvalidPayload)?,
-                )
-                || w.verification
-                    .as_ref()
-                    .is_some_and(|(_, prior)| prior.passed)
-                || w.outcome.as_ref().is_none_or(|(_, o)| {
-                    !matches!(
-                        o.disposition,
-                        WorkerDisposition::Ready | WorkerDisposition::NoChange
-                    )
-                })
-                || w.integration
-                    .as_ref()
-                    .is_some_and(|(_, i)| i.outcome != WorkerIntegrationOutcome::Integrated)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let mut contract = verification_contract.ok_or(ReplayError::InvalidTransition)?;
-            contract.success_criterion = criterion.clone();
-            let run = current.runs.last().ok_or(ReplayError::InvalidTransition)?;
-            if v.passed != verification_passed(&contract, run, released, &v.evidence)? {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let run = current
-                .runs
-                .last_mut()
-                .ok_or(ReplayError::InvalidTransition)?;
-            worker_mut(run, v.assignment_id)?.verification = Some((sequence, v.clone()));
+        Event::WorkerVerificationRecorded { record, .. } => {
+            apply::verification(run, record, actor, sequence, verification_contract)?
         }
         _ => return Err(ReplayError::InvalidTransition),
     }
