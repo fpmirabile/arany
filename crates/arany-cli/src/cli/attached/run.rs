@@ -1,16 +1,15 @@
-use super::controls::ActiveSubmission;
 use super::{Admission, Feedback, emit_outcome, load_confirmed_outcome};
 use crate::cli::provider::routing::RoutingError;
 use crate::cli::provider::select::{Selection, SelectionError, select_provider};
 use crate::cli::run_outcome::{SHUTDOWN_GRACE, stop_after_answer, stop_text};
 use crate::terminal::{
-    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
-    TerminalError, TerminalInput, TerminalNotice,
+    AgentChatFollow, AttachedTerminal, Composer, ComposerDraft, ComposerEdit, TerminalError,
+    TerminalInput, TerminalNotice,
 };
 use arany::{
     AdmittedProviders, CompactionRecord, Engine, RunCancellation, RunControls, RunHandle, RunHints,
-    RunId, RunOutcome, RunRequest, RunResult, RunSteering, SessionId, SessionView, SteeringRefused,
-    ToolGrant, native_protection_supported,
+    RunId, RunOutcome, RunRequest, RunResult, RunSteering, SessionId, SessionView, ToolGrant,
+    native_protection_supported,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -19,7 +18,7 @@ mod approval;
 mod input;
 
 use approval::{ApprovalPage, ApprovalUi, withdraw_abandoned_approval};
-use input::{InputFailure, InputRoute};
+use input::{InputFailure, InputRoute, STEERING_SENT, settle_recorded_note};
 
 #[derive(Clone, Copy)]
 pub(super) struct ToolAccess<'a> {
@@ -293,42 +292,6 @@ enum ActiveStop {
     Running,
     Pausing,
     Cancelling,
-}
-
-const STEERING_SENT: &str = "Steering note sent to the agent";
-
-fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
-    match refused {
-        SteeringRefused::RunFull => format!(
-            "No room for more steering notes this Run. {}",
-            draft_retained_notice(autonomous)
-        ),
-        SteeringRefused::TooLarge => "Steering note exceeds 8.0 KB; draft retained".into(),
-        SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
-        SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
-        SteeringRefused::ChildLimit => {
-            "Only eight children accept steering notes at once; draft retained".into()
-        }
-    }
-}
-
-fn settle_recorded_note(
-    delivered: u64,
-    seen: &mut u64,
-    offered: &mut Option<String>,
-    composer: &mut Composer,
-) -> bool {
-    if delivered == *seen {
-        return false;
-    }
-    *seen = delivered;
-    let Some(text) = offered.take() else {
-        return false;
-    };
-    if composer.text() == text && composer.images().is_empty() {
-        composer.take();
-    }
-    true
 }
 
 fn run_settled(view: &SessionView, starting_sequence: u64) -> bool {
@@ -741,156 +704,6 @@ impl<'a> RunProgress<'a> {
                 .map_err(|_| "terminal rendering failed".to_owned())?;
         }
         Ok(())
-    }
-
-    fn offer_note(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        text: String,
-    ) -> Result<Option<Feedback>, InputFailure> {
-        let feedback = if ui.terminal.is_linear() && self.held.is_some() {
-            Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
-        } else if !ui.composer.images().is_empty() {
-            Feedback::Transient("Steering notes are text only; draft retained".into())
-        } else if self.offered.is_some() && !ui.terminal.is_linear() {
-            // The composer still holds the waiting note; editing it withdraws the offer.
-            Feedback::Transient(
-                "Steering note waits for the agent's next step; editing withdraws it".into(),
-            )
-        } else {
-            match self.steering.offer_note(text) {
-                Ok(()) => {
-                    self.offered = Some(ui.composer.text().to_owned());
-                    if ui.terminal.is_linear() {
-                        self.linear_offers.push(ui.composer.take_draft());
-                        Feedback::Transient("Steering note waits for the agent's next step".into())
-                    } else {
-                        Feedback::Transient(
-                            "Steering note waits for the agent's next step; editing withdraws it"
-                                .into(),
-                        )
-                    }
-                }
-                Err(refused) => Feedback::Transient(steering_refusal(refused, self.autonomous)),
-            }
-        };
-        // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
-        if ui.terminal.is_linear()
-            && self.held.is_none()
-            && let Some(draft) = hold_draft(ui.composer)
-        {
-            self.held = Some(draft);
-        }
-        if ui
-            .terminal
-            .restore_draft_input(ui.composer.input_capacity())
-            .is_err()
-        {
-            return Err(InputFailure::Shutdown("terminal input failed".to_owned()));
-        }
-        Ok(Some(feedback))
-    }
-
-    fn pause(&mut self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
-        let notice = match self.stop {
-            ActiveStop::Running => {
-                self.steering.pause();
-                self.stop = ActiveStop::Pausing;
-                ui.terminal
-                    .settle_child_notes(ui.view, &self.steering, true);
-                "Pausing at the next step; Ctrl+C cancels now"
-            }
-            ActiveStop::Pausing => "Already pausing at the next step",
-            ActiveStop::Cancelling => "Run is already cancelling",
-        };
-        // Classic hides the history notice from the status row; linear prints notices as lines.
-        if self
-            .draw(ui, Some(TerminalNotice::History(notice)))
-            .is_err()
-            || (!ui.terminal.is_linear() && self.draw(ui, None).is_err())
-        {
-            return Err(InputFailure::Shutdown(
-                "terminal rendering failed".to_owned(),
-            ));
-        }
-        Ok(None)
-    }
-
-    async fn active_submission(
-        &mut self,
-        ui: &mut RunUi<'_>,
-    ) -> Result<Option<Feedback>, InputFailure> {
-        let submission =
-            super::controls::handle_active_submission(ui.composer, ui.view, self.starting_sequence);
-        Ok(match submission {
-            ActiveSubmission::SteeringNote(text) => return self.offer_note(ui, text),
-            ActiveSubmission::Pause => return self.pause(ui),
-            ActiveSubmission::Rejected(notice) => {
-                if ui.terminal.is_linear() && !ui.composer.has_text_pastes() {
-                    ui.composer.take();
-                }
-                Some(Feedback::History(format!("Error: {notice}")))
-            }
-            ActiveSubmission::Notice(notice) => Some(Feedback::History(notice)),
-            ActiveSubmission::ReadClipboard => Some(match ui.terminal.request_clipboard_paste() {
-                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
-                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
-            }),
-            ActiveSubmission::OpenAgents => {
-                if ui.terminal.open_agents(ui.view, true).await.is_err() {
-                    return Err(InputFailure::Shutdown(
-                        "terminal rendering failed".to_owned(),
-                    ));
-                }
-                None
-            }
-            ActiveSubmission::OpenUsage { status } => {
-                if ui
-                    .terminal
-                    .open_usage(ui.view, status, Some(self.starting_sequence))
-                    .await
-                    .is_err()
-                {
-                    return Err(InputFailure::Shutdown(
-                        "terminal rendering failed".to_owned(),
-                    ));
-                }
-                None
-            }
-            ActiveSubmission::OpenHelp => {
-                if ui.terminal.open_help(ui.view).await.is_err() {
-                    return Err(InputFailure::Shutdown(
-                        "terminal rendering failed".to_owned(),
-                    ));
-                }
-                None
-            }
-            ActiveSubmission::OpenAgentChats(number) => {
-                match ui.terminal.open_agent_chats(ui.view, number).await {
-                    Ok(AgentChatInput::Notice(text)) => Some(Feedback::Transient(text.into())),
-                    Ok(
-                        AgentChatInput::ChildMessage { .. }
-                        | AgentChatInput::ChildEdited(_)
-                        | AgentChatInput::Pass
-                        | AgentChatInput::Handled
-                        | AgentChatInput::Returned,
-                    ) => None,
-                    Err(_) => {
-                        return Err(InputFailure::Shutdown(
-                            "terminal rendering failed".to_owned(),
-                        ));
-                    }
-                }
-            }
-            ActiveSubmission::OpenTranscript => {
-                if ui.terminal.toggle_transcript(ui.view).is_err() || self.draw(ui, None).is_err() {
-                    return Err(InputFailure::Shutdown(
-                        "terminal rendering failed".to_owned(),
-                    ));
-                }
-                None
-            }
-        })
     }
 
     async fn composer_input(
@@ -3209,6 +3022,7 @@ mod driver_tests {
     use super::super::active::session_with_goal;
     use super::approval::interrupt_approval_input;
     use super::*;
+    use arany::SteeringRefused;
 
     #[test]
     fn approval_end_of_input_and_escape_cancel_without_a_decline() {
@@ -3371,15 +3185,15 @@ mod driver_tests {
     #[test]
     fn steering_refusals_name_the_retained_draft_without_echoing_text() {
         assert_eq!(
-            steering_refusal(SteeringRefused::TooLarge, false),
+            super::input::steering_refusal(SteeringRefused::TooLarge, false),
             "Steering note exceeds 8.0 KB; draft retained"
         );
         assert_eq!(
-            steering_refusal(SteeringRefused::Unavailable, true),
+            super::input::steering_refusal(SteeringRefused::Unavailable, true),
             "Steering note unavailable; draft retained"
         );
         assert_eq!(
-            steering_refusal(SteeringRefused::RunFull, true),
+            super::input::steering_refusal(SteeringRefused::RunFull, true),
             "No room for more steering notes this Run. Draft retained; press Enter after this Goal to submit"
         );
     }
