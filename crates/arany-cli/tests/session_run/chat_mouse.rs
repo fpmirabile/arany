@@ -655,7 +655,14 @@ fn strip_kitty_control_strings(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn has_image_chip(transcript: &[u8]) -> bool {
-    visible_screen(transcript)
+    let marker = b"\x1b[?25h";
+    let Some(frame_end) = transcript
+        .windows(marker.len())
+        .rposition(|part| part == marker)
+    else {
+        return false;
+    };
+    visible_screen(&transcript[..frame_end])
         .iter()
         .any(|line| line.contains("[Image #1]"))
 }

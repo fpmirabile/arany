@@ -4017,6 +4017,35 @@ mod graphics_lifecycle_tests {
                 drop(attached);
             });
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opening_agent_chat_clears_preview_and_propagates_delete_failure() {
+        let backend = TerminalBackend::failing_graphics_writer(80, 24);
+        let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+        attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
+        attached.hovered_image = Some(0);
+        attached.graphics_placement = Some(GraphicsPlacement {
+            image_index: 0,
+            digest: [1; 32],
+            inner: Rect::new(1, 2, 3, 4),
+        });
+        let failure = attached
+            .open_agent_chats(&crate::presentation::team_view(), None)
+            .await
+            .err()
+            .expect("graphics delete failure");
+        assert!(matches!(
+            failure,
+            super::TerminalError::Io(error)
+                if error.to_string() == "injected graphics writer failure"
+        ));
+        assert!(attached.hovered_image.is_none());
+        assert!(attached.graphics_placement.is_none());
+        attached
+            .release()
+            .expect("graphics cleanup is not repeated during release");
+    }
 }
 
 #[cfg(test)]
