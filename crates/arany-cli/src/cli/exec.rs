@@ -1439,6 +1439,7 @@ mod tests {
     }
 
     const ACTIVE_LIMIT_MS: u64 = 60_000;
+    const ANSWER_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
     async fn run_with_budget_spent_after_answer(
         exec: ExecArgs,
@@ -1446,7 +1447,6 @@ mod tests {
         provider: ScriptedProvider,
         active_time: std::time::Duration,
     ) -> CommandOutput {
-        const ANSWER_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
         let requests = Arc::clone(&provider.requests);
         let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
         let provider = provider.with_before_call(1, move || {
@@ -1611,9 +1611,10 @@ mod tests {
 
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+        const WATCHDOG_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
         let _deadline = arany::test_support::engine::deadline(
             "JSONL budget feedback",
-            std::time::Duration::from_secs(30),
+            ANSWER_GATE_TIMEOUT + WATCHDOG_GRACE,
         );
         let budget = GoalBudget {
             max_active_ms: Some(ACTIVE_LIMIT_MS),
