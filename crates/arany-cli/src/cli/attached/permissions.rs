@@ -455,12 +455,13 @@ fn host_command_label(call: &arany::ToolCall) -> String {
     else {
         return String::new();
     };
-    let mut label = std::iter::once(program.as_str())
-        .chain(args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let tokens = std::iter::once(program).chain(args).collect::<Vec<_>>();
+    let mut label = serde_json::to_string(&tokens).expect("command tokens");
     if !cwd.is_empty() {
-        label.push_str(&format!(" · cwd {cwd}"));
+        label.push_str(&format!(
+            " · cwd {}",
+            serde_json::to_string(cwd).expect("command cwd")
+        ));
     }
     crate::presentation::escape_terminal(&label)
 }
@@ -896,15 +897,35 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "printf current",
-                "printf current · cwd nested",
-                "printf older"
+                r#"["printf","current"]"#,
+                r#"["printf","current"] · cwd "nested""#,
+                r#"["printf","older"]"#,
             ]
         );
         let hostile = host_candidate("line\u{1b}[31m", "nested\nfolder");
         assert_eq!(
             super::host_command_label(&hostile.intent.call),
-            "printf line\\u{001b}[31m · cwd nested\\u{000a}folder"
+            r#"["printf","line\u001b[31m"] · cwd "nested\nfolder""#
+        );
+    }
+
+    #[test]
+    fn host_command_picker_labels_preserve_argument_boundaries() {
+        let single = host_candidate("alpha beta", "");
+        let mut split = host_candidate("alpha", "");
+        if let arany::ToolCall::CommandUnguarded { args, .. } = &mut split.intent.call {
+            args.push("beta".into());
+        }
+        let tools = [single, split];
+        let candidates = super::host_candidates(tools.iter(), std::path::Path::new("/project"));
+        assert_eq!(candidates.len(), 2);
+        let labels = candidates
+            .iter()
+            .map(|tool| super::host_command_label(&tool.intent.call))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [r#"["printf","alpha beta"]"#, r#"["printf","alpha","beta"]"#]
         );
     }
 
