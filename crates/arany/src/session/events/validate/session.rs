@@ -21,6 +21,7 @@ impl Event {
                         crate::validate::valid_name(&target.identity)
                     }
                     super::ProviderSetupTargetKind::ModelPreferences => target.identity == "models",
+                    super::ProviderSetupTargetKind::RoleRouting => target.identity == "roles",
                 } =>
             {
                 Ok(())

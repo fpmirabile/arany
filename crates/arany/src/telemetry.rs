@@ -277,9 +277,15 @@ impl TraceProvider {
 
     fn name(self) -> &'static str {
         match self {
-            Self::OpenAi => "openai",
-            Self::Anthropic => "anthropic",
-            Self::ChatGpt => "chatgpt",
+            Self::OpenAi => ProviderKind::OpenAi
+                .native_name()
+                .expect("native Provider name"),
+            Self::Anthropic => ProviderKind::Anthropic
+                .native_name()
+                .expect("native Provider name"),
+            Self::ChatGpt => ProviderKind::ChatGpt
+                .native_name()
+                .expect("native Provider name"),
             Self::Custom => "custom",
             Self::Other => "other",
         }
