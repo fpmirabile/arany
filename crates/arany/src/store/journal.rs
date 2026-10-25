@@ -16,7 +16,7 @@ mod tests;
 
 const ADMISSION_HEADROOM_BYTES: i64 = 4 * 1024 * 1024;
 const EVENT_SQLITE_OVERHEAD_PAGES: i64 = 16;
-const MAX_HOT_SESSION_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_HOT_SESSION_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
 const NEXT_SEQUENCE_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events";
 
 pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
