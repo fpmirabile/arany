@@ -733,6 +733,8 @@ mod journey {
         time::Duration,
     };
 
+    const ROSTER_REQUESTS: usize = 11;
+
     fn preset(child_profiles: &[&str]) -> Vec<u8> {
         let route =
             json!({"provider":"custom:local","model":"model-1","effort":null,"account_id":null});
@@ -753,7 +755,7 @@ mod journey {
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             listener.set_nonblocking(true).expect("bounded accept");
-            for index in 0..9 {
+            for index in 0..ROSTER_REQUESTS {
                 let mut stream = crate::process::accept_with_deadline(
                     &listener,
                     Duration::from_secs(60),
@@ -770,7 +772,7 @@ mod journey {
                         json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                     }
                     2 => json!(r#"synthetic summary"#),
-                    3 | 5 => {
+                    3 | 5 | 8 => {
                         assert_eq!(input["phase"], "root_plan");
                         assert!(body.to_string().contains("\"inspect\""));
                         delegate_to_inspect()
@@ -785,7 +787,7 @@ mod journey {
                         let _ = stream.read(&mut [0; 1]);
                         continue;
                     }
-                    6 => {
+                    6 | 9 => {
                         assert_eq!(input["phase"], "child_work");
                         json!("child result")
                     }
@@ -793,10 +795,11 @@ mod journey {
                         assert_eq!(input["phase"], "root_synthesis");
                         json!("resumed answer")
                     }
-                    _ => {
-                        assert_eq!(input["phase"], "root_plan");
+                    10 => {
+                        assert_eq!(input["phase"], "root_synthesis");
                         json!("research answer")
                     }
+                    _ => unreachable!("bounded roster request index"),
                 };
                 super::super::loopback::send_response_for(
                     &mut stream,
@@ -1071,7 +1074,7 @@ mod journey {
         );
         select_alternate(&workspace, &state, session_id, &runtime);
         server.join().unwrap();
-        assert_eq!(served.load(Ordering::SeqCst), 9);
+        assert_eq!(served.load(Ordering::SeqCst), ROSTER_REQUESTS);
     }
 
     fn select_alternate(
@@ -1109,6 +1112,12 @@ mod journey {
             let events = store.load_session(alternate_id).await.unwrap();
             store.close().await.unwrap();
             let alternate = SessionView::replay(alternate_id, &events).unwrap().unwrap();
+            assert_eq!(alternate.runs[0].status, RunStatus::Finished);
+            assert_eq!(alternate.runs[0].agents.len(), 2);
+            assert_eq!(
+                alternate.runs[0].agents[1].profile.as_deref(),
+                Some("inspect")
+            );
             let snapshot = alternate.runs[0]
                 .config
                 .as_ref()

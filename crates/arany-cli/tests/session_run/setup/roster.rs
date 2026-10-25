@@ -343,6 +343,16 @@ fn assert_edits(
     workspace: &Path,
     expected: &[(ProviderSetupTargetKind, ProviderSetupDisposition)],
 ) {
+    if expected.is_empty() {
+        assert_eq!(
+            std::fs::metadata(state.join("events.sqlite3"))
+                .unwrap()
+                .len(),
+            0,
+            "cancelled setup creates no journal or Session"
+        );
+        return;
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -354,9 +364,6 @@ fn assert_edits(
             )
             .await
             .unwrap();
-            if expected.is_empty() {
-                assert!(sessions.is_empty(), "cancelled setup creates no Session");
-            }
             let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
             let mut edits = vec![];
             for session in sessions {
