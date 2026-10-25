@@ -1990,7 +1990,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "host rules editor",
-        &shows("Host command rules"),
+        &shows("Add from a recent eligible host command"),
     );
     input.write_all(b"\r").unwrap();
     until(
@@ -2008,7 +2008,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "host rules return",
-        &shows("Host command rules"),
+        &shows("Add from a recent eligible host command"),
     );
     input.write_all(b"\x1b").unwrap();
     until(
