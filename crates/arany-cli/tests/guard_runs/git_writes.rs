@@ -440,11 +440,16 @@ async fn remember_pr_list(repo: &Repo) {
                 .unwrap()
                 .contains(&json!("git_commit"))
         );
-        assert!(
-            requests[1].input.history[0]
-                .assistant
-                .contains(&expected_output)
-        );
+        let context = requests[1].input.tools.as_ref().unwrap();
+        let [step] = context.steps.as_slice() else {
+            panic!("one PR-list continuation step");
+        };
+        let [observation] = step.observations.as_slice() else {
+            panic!("one PR-list continuation observation");
+        };
+        assert!(matches!(observation.intent.call, ToolCall::GhPrList { .. }));
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.output, expected_output);
         assert!(!format!("{:?}", *requests).contains(CANARY));
     }
     assert!(!format!("{:?}", provider.requests.lock().unwrap()).contains(CANARY));
