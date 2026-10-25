@@ -151,7 +151,7 @@ fn decode(
 pub(crate) fn outcome_failure_stage(
     bytes: &[u8],
     model: &str,
-) -> crate::diagnostics::SubscriptionFailureStage {
+) -> crate::provider::diagnostics::SubscriptionFailureStage {
     outcome_failure_diagnostic(bytes, model).0
 }
 
@@ -159,10 +159,11 @@ pub(crate) fn outcome_failure_diagnostic(
     bytes: &[u8],
     model: &str,
 ) -> (
-    crate::diagnostics::SubscriptionFailureStage,
+    crate::provider::diagnostics::SubscriptionFailureStage,
     Option<crate::diagnostics::ToolArgumentShape>,
 ) {
-    use crate::diagnostics::{SubscriptionFailureStage as Stage, ToolArgumentShape};
+    use crate::diagnostics::ToolArgumentShape;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let Ok(response) = decode_completed_event(bytes) else {
         return (Stage::OutcomeContract, None);
     };
@@ -236,8 +237,8 @@ pub(crate) fn outcome_failure_diagnostic(
 
 fn tool_failure_stage(
     call: &crate::tools::ToolCall,
-) -> crate::diagnostics::SubscriptionFailureStage {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+) -> crate::provider::diagnostics::SubscriptionFailureStage {
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     use crate::tools::{ToolCall, types::MAX_EDIT_CONTENT_BYTES};
     use crate::validate::{valid_digest, valid_name, valid_relative};
     if serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() > call.argument_limit()) {
