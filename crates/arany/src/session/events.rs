@@ -137,7 +137,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
     ("SessionRenamed", 6),
-    ("ProviderSetupEditStarted", 2),
+    ("ProviderSetupEditStarted", 3),
     ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
@@ -482,6 +482,7 @@ pub enum ProviderSetupTargetKind {
     CustomProfile,
     ModelPreferences,
     RoleRouting,
+    Roster,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2177,10 +2178,25 @@ pub(crate) fn pre_role_routing_payload(kind: &str, payload: &str) -> Option<Stri
     }
     let data: ProviderSetupEditStartedPayload = parse(payload).ok()?;
     match data.target.kind {
-        ProviderSetupTargetKind::RoleRouting => None,
+        ProviderSetupTargetKind::RoleRouting | ProviderSetupTargetKind::Roster => None,
         ProviderSetupTargetKind::NativeAccount
         | ProviderSetupTargetKind::ChatGptAccount
         | ProviderSetupTargetKind::CustomProfile
         | ProviderSetupTargetKind::ModelPreferences => serialize(&data).ok(),
+    }
+}
+
+pub(crate) fn pre_roster_setup_payload(kind: &str, payload: &str) -> Option<String> {
+    if kind != "ProviderSetupEditStarted" {
+        return None;
+    }
+    let data: ProviderSetupEditStartedPayload = parse(payload).ok()?;
+    match data.target.kind {
+        ProviderSetupTargetKind::Roster => None,
+        ProviderSetupTargetKind::NativeAccount
+        | ProviderSetupTargetKind::ChatGptAccount
+        | ProviderSetupTargetKind::CustomProfile
+        | ProviderSetupTargetKind::ModelPreferences
+        | ProviderSetupTargetKind::RoleRouting => serialize(&data).ok(),
     }
 }

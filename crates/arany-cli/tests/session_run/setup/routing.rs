@@ -102,7 +102,13 @@ fn add_native(
     presentation.menu(pty, from, "Edit role chain");
 }
 
-fn confirm(pty: &mut SetupPty, presentation: Presentation, from: usize, title: &str, accept: bool) {
+pub(super) fn confirm(
+    pty: &mut SetupPty,
+    presentation: Presentation,
+    from: usize,
+    title: &str,
+    accept: bool,
+) {
     match presentation {
         Presentation::ScreenReader => {
             acknowledge_linear_pages(
