@@ -511,10 +511,21 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             )
             .await
             .unwrap();
-        let charged = store.load_view(session).await.unwrap().unwrap();
-        assert_eq!(charged.goals[0].active_ms, expected);
-        assert_eq!(charged.goals[0].uncertain_active_ms, expected);
-        assert!(charged.runs[0].tools.last().unwrap().observation.is_none());
+        let sealed = store.load_view(session).await.unwrap().unwrap();
+        let goal = &sealed.goals[0];
+        assert_eq!(goal.status, arany::GoalStatus::Interrupted);
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
+        assert_eq!(goal.active_ceiling_ms, expected);
+        let mut bounded = goal.clone();
+        for (limit, admitted) in [(expected, false), (expected + 1, true)] {
+            bounded.plan_contract.as_mut().unwrap().budget.max_active_ms = Some(limit);
+            assert_eq!(
+                bounded.admits_resume(&sealed),
+                admitted,
+                "crash after earlier call: {after_first}, active-time limit: {limit}"
+            );
+        }
+        assert!(sealed.runs[0].tools.last().unwrap().observation.is_none());
         store.close().await.unwrap();
     }
     for stream in ["stdout", "stderr"] {
