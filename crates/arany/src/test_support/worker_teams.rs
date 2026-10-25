@@ -13,6 +13,7 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 const APPROVAL_WITHDRAWAL_WAIT: Duration = Duration::from_secs(5);
 const RETRY_WAIT_MS: u32 = 10_000;
 const BACKGROUND_COMPACTION_READS: usize = 4;
+const BACKGROUND_COMPACTION_PAGE_LINES: u32 = 32;
 // Native setup must reach the held Ask before the synthetic budget exhaustion.
 const RETRY_GOAL_ACTIVE_MS: u64 = 10 * 60 * 1000;
 const RETRY_EXHAUSTION_ADVANCE: Duration = Duration::from_millis(RETRY_GOAL_ACTIVE_MS + 1);
@@ -607,7 +608,7 @@ impl TeamProvider {
                 .is_some_and(|p| !p.is_empty());
         let mut stale = self.stale.lock().unwrap();
         let continue_background_reads =
-            self.case == "background" && prior < BACKGROUND_COMPACTION_READS;
+            self.case == "background" && prior <= BACKGROUND_COMPACTION_READS;
         if pending && (continue_background_reads || (self.case != "background" && prior != 1)) {
             *stale = observations.len() + 1;
             return tool_outcome(if self.case == "background" {
@@ -618,7 +619,7 @@ impl TeamProvider {
                             .try_into()
                             .expect("bounded background read offset"),
                     ),
-                    limit: Some(crate::tools::types::MAX_READ_PAGE_LINES),
+                    limit: Some(BACKGROUND_COMPACTION_PAGE_LINES),
                 }
             } else {
                 Self::read("notes/0")
@@ -640,7 +641,7 @@ impl TeamProvider {
                 | "primary_denial"
         ) && prior
             == if self.case == "background" {
-                BACKGROUND_COMPACTION_READS
+                BACKGROUND_COMPACTION_READS + 1
             } else {
                 1
             }
