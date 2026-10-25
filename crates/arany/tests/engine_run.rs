@@ -264,11 +264,7 @@ impl Provider for WaitingCompactionProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new(
-                    "waiting-compaction",
-                    "test-model",
-                    arany::Provenance::native(),
-                )
+                arany::ProviderIdentity::new("openai", "test-model", arany::Provenance::native())
             });
         &IDENTITY
     }
@@ -415,7 +411,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         .expect("committed Run");
         assert_eq!(outcome.run.status, RunStatus::Finished);
         let config = outcome.run.config.as_ref().expect("Run provenance");
-        assert_eq!(config.provider, "chatgpt");
+        assert_eq!(config.provider.profile(), "chatgpt");
         assert_eq!(
             config.output_token_cap,
             provider.identity().limits.max_output_tokens
@@ -4406,9 +4402,9 @@ async fn one_engine_refuses_a_concurrent_submission_and_takes_a_provider_per_sub
     .expect("engine");
     let answer = |text: &str| ProviderOutcome::Answer(Answer { text: text.into() });
     let first =
-        Arc::new(ScriptedProvider::new(vec![answer("first")]).with_profile("scripted", "model-a"));
+        Arc::new(ScriptedProvider::new(vec![answer("first")]).with_profile("openai", "model-a"));
     let second =
-        Arc::new(ScriptedProvider::new(vec![answer("second")]).with_profile("scripted", "model-b"));
+        Arc::new(ScriptedProvider::new(vec![answer("second")]).with_profile("openai", "model-b"));
 
     drop(
         engine
@@ -4951,7 +4947,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             .unwrap();
         let store = Store::open(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let defaults = arany::SessionDefaults {
-            provider: Some("scripted".into()),
+            provider: Some("openai".into()),
             model: Some("test-model".into()),
             policy: CollaborationPolicy::Single,
             ..Default::default()

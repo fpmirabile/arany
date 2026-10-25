@@ -676,7 +676,7 @@ fn isolated_stage() {
     assert_eq!(run.status, arany::RunStatus::Finished);
     assert_eq!(run.assistant_message.as_deref(), Some("offline answer"));
     let config = run.config.as_ref().expect("pinned Run config");
-    assert_eq!(config.provider, "openai");
+    assert_eq!(config.provider.profile(), "openai");
     assert_eq!(config.model, "gpt-5.4");
     assert_eq!(config.saved_api_account_id, Some(account_id));
     assert_eq!(run.agents.len(), 1);

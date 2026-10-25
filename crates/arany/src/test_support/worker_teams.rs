@@ -879,7 +879,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     };
     let (ready, mut arrivals) = mpsc::channel(16);
     let (completed, mut completions) = mpsc::unbounded_channel();
-    let mut identity = ProviderIdentity::new("scripted", "test-model", Provenance::native());
+    let mut identity = ProviderIdentity::new("openai", "test-model", Provenance::native());
     if case == "large_write" {
         identity.limits.max_output_tokens = crate::provider::MAX_OUTPUT_TOKEN_CAP;
     }
@@ -941,7 +941,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let mut bindings = AdmittedProviders::single(provider.clone());
     let fallback = if case == "fallback" {
         let mut first = super::scenario::ScriptedProvider::new(Vec::new())
-            .with_profile("scripted", "first-child");
+            .with_profile("openai", "first-child");
         first.identity.limits.concurrency = 8;
         // Each editor's first call and its three same-route retries.
         *first.responses.lock().unwrap() = (0..2 * (usize::from(crate::MAX_PROVIDER_RETRIES) + 1))
@@ -1666,7 +1666,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     let (ready, _arrivals) = mpsc::channel(16);
     let (completed, _completions) = mpsc::unbounded_channel();
     let provider = Arc::new(TeamProvider {
-        identity: ProviderIdentity::new("scripted", "test-model", Provenance::native()),
+        identity: ProviderIdentity::new("openai", "test-model", Provenance::native()),
         case: "resume_id",
         source: Some(source),
         workspace: workspace.clone(),

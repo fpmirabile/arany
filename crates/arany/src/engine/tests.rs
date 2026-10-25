@@ -15,7 +15,7 @@ mod goal_workspace_lease_tests {
             static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
                     crate::provider::ProviderIdentity::new(
-                        "scripted",
+                        "openai",
                         "lease-test",
                         crate::provider::Provenance::native(),
                     )

@@ -224,7 +224,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         agent_definitions: None,
                         roster: None,
                         providers: None,
-                        provider: "scripted".into(),
+                        provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                         model: "test-model".into(),
                         effort: None,
                         custom_profile_provenance: None,

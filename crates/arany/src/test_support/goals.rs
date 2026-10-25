@@ -433,7 +433,7 @@ pub struct ForegroundWorkerProvider {
 impl ForegroundWorkerProvider {
     pub fn new(workspace: &Path, case: &'static str, budget: crate::GoalBudget) -> Self {
         let mut identity =
-            crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native());
+            crate::ProviderIdentity::new("openai", "test-model", crate::Provenance::native());
         if matches!(
             case,
             "headroom_background" | "headroom_race" | "clear_background"

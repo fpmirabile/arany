@@ -162,7 +162,7 @@ impl Provider for FastProvider {
         static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 crate::provider::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "test-model",
                     crate::provider::Provenance::native(),
                 )

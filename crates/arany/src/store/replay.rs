@@ -495,7 +495,7 @@ fn scan_session_heads(
 
 fn selection_from_run(config: &RunConfig) -> SessionDefaults {
     SessionDefaults {
-        provider: Some(config.provider.clone()),
+        provider: Some(config.provider.profile()),
         model: Some(config.model.clone()),
         effort: config.effort,
         account_id: config.saved_api_account_id.or_else(|| {

@@ -2536,7 +2536,10 @@ fn assert_retained_setup_conversation(state: &Path, workspace: &Path, runs: Opti
             assert_eq!(view.runs.len(), runs);
             if let Some(run) = view.runs.last() {
                 assert_eq!(run.status, arany::RunStatus::Finished);
-                assert_eq!(run.config.as_ref().unwrap().provider, "custom:local");
+                assert_eq!(
+                    run.config.as_ref().unwrap().provider.profile(),
+                    "custom:local"
+                );
             }
             assert!(!view.provider_setup_blocks_continuation());
             store.close().await.unwrap();

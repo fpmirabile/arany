@@ -96,7 +96,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                     agent_definitions: None,
                     roster: None,
                     providers: None,
-                    provider: "scripted".into(),
+                    provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
                     model: "test-model".into(),
                     effort: None,
                     custom_profile_provenance: None,

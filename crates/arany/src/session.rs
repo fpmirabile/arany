@@ -70,6 +70,7 @@ pub(crate) use events::{
     provider_call_v19_payload, provider_call_v19_to_v20, rebind_intent_pins, replace_intent_pin,
     rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
     run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
+    run_started_v23_payload, run_started_v23_to_v24,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]

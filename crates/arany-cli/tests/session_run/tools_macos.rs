@@ -170,7 +170,7 @@ impl Provider for Journey {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "file-tool-model",
                     arany::Provenance::native(),
                 )
@@ -1037,7 +1037,7 @@ impl Provider for RuntimeJourney {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
                 arany::ProviderIdentity::new(
-                    "scripted",
+                    "openai",
                     "runtime-profile-model",
                     arany::Provenance::native(),
                 )
@@ -2704,11 +2704,7 @@ impl Provider for ApprovalRowProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new(
-                    "scripted",
-                    "approval-rows",
-                    arany::Provenance::native(),
-                )
+                arany::ProviderIdentity::new("openai", "approval-rows", arany::Provenance::native())
             });
         &IDENTITY
     }
