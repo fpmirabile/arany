@@ -12,6 +12,8 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 
 const APPROVAL_WITHDRAWAL_WAIT: Duration = Duration::from_secs(5);
 const RETRY_WAIT_MS: u32 = 10_000;
+const BACKGROUND_COMPACTION_READS: usize = 4;
+const BACKGROUND_COMPACTION_PAGE_LINES: u32 = 32;
 // Native setup must reach the held Ask before the synthetic budget exhaustion.
 const RETRY_GOAL_ACTIVE_MS: u64 = 10 * 60 * 1000;
 const RETRY_EXHAUSTION_ADVANCE: Duration = Duration::from_millis(RETRY_GOAL_ACTIVE_MS + 1);
@@ -60,6 +62,7 @@ struct TeamProvider {
     workspace: PathBuf,
     budget: GoalBudget,
     requests: Mutex<Vec<ProviderRequest>>,
+    primary_tool_calls: Mutex<Vec<ToolCall>>,
     violations: Mutex<Vec<&'static str>>,
     ready: mpsc::Sender<usize>,
     completed: mpsc::UnboundedSender<usize>,
@@ -635,9 +638,23 @@ impl TeamProvider {
                 .as_array()
                 .is_some_and(|p| !p.is_empty());
         let mut stale = self.stale.lock().unwrap();
-        if pending && prior != 1 {
+        let continue_background_reads =
+            self.case == "background" && prior <= BACKGROUND_COMPACTION_READS;
+        if pending && (continue_background_reads || (self.case != "background" && prior != 1)) {
             *stale = observations.len() + 1;
-            return tool_outcome(Self::read("notes/0"));
+            return tool_outcome(if self.case == "background" {
+                ToolCall::Read {
+                    path: "notes/large.txt".into(),
+                    offset: Some(
+                        (prior + 1)
+                            .try_into()
+                            .expect("bounded background read offset"),
+                    ),
+                    limit: Some(BACKGROUND_COMPACTION_PAGE_LINES),
+                }
+            } else {
+                Self::read("notes/0")
+            });
         }
         observations.drain(..(*stale).min(observations.len()));
         drop(stale);
@@ -653,7 +670,12 @@ impl TeamProvider {
                 | "primary_time"
                 | "primary_delegation_deadline"
                 | "primary_denial"
-        ) && prior == 1
+        ) && prior
+            == if self.case == "background" {
+                BACKGROUND_COMPACTION_READS + 1
+            } else {
+                1
+            }
         {
             return tool_outcome(if self.case == "command" {
                 ToolCall::Command {
@@ -802,6 +824,14 @@ impl Provider for TeamProvider {
         } else {
             self.primary(&request)
         };
+        if request.phase != AgentPhase::ChildWork
+            && let ProviderOutcome::Tools(requests) = &outcome
+        {
+            self.primary_tool_calls
+                .lock()
+                .unwrap()
+                .extend(requests.iter().map(|request| request.call.clone()));
+        }
         Ok(ProviderResponse {
             turn: ProviderTurn::scripted(),
             outcome,
@@ -825,6 +855,110 @@ impl Provider for TeamProvider {
     }
 }
 
+fn primary_tool_calls(
+    run_id: RunId,
+    primary: AgentRunId,
+    events: &[EventEnvelope],
+) -> impl DoubleEndedIterator<Item = &ToolCall> {
+    events
+        .iter()
+        .filter_map(move |envelope| match &envelope.event {
+            Event::ToolStarted {
+                run_id: event_run,
+                agent_run_id,
+                intent,
+                ..
+            } if *event_run == run_id
+                && *agent_run_id == primary
+                && !intent.call.is_internal()
+                && !matches!(&intent.call, ToolCall::ApplyChangeset { .. }) =>
+            {
+                Some(&intent.call)
+            }
+            _ => None,
+        })
+}
+
+fn assert_background_primary_context(
+    run_id: RunId,
+    primary: AgentRunId,
+    events: &[EventEnvelope],
+    provider: &TeamProvider,
+) {
+    let expected_calls = provider.primary_tool_calls.lock().unwrap();
+    assert_eq!(
+        primary_tool_calls(run_id, primary, events).collect::<Vec<_>>(),
+        expected_calls.iter().collect::<Vec<_>>(),
+        "every primary model Tool request must match its committed intent"
+    );
+    let identity = &provider.identity;
+    let requests = provider.requests.lock().unwrap();
+    let primary_requests = requests
+        .iter()
+        .filter(|request| request.agent_run_id == primary)
+        .collect::<Vec<_>>();
+    let primary_reservations = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, envelope)| match &envelope.event {
+            Event::GoalProviderCallReserved {
+                run_id: event_run,
+                agent_run_id,
+                ..
+            } if *event_run == run_id && *agent_run_id == primary => Some(index),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(primary_requests.len(), primary_reservations.len());
+    let mut compacted_request = false;
+    for (request, reservation_index) in primary_requests.iter().zip(primary_reservations) {
+        if request.phase != AgentPhase::RootSynthesis {
+            continue;
+        }
+        let context = request.input.tools.as_ref().expect("primary Tool context");
+        let latest_journal_call =
+            primary_tool_calls(run_id, primary, &events[..reservation_index]).next_back();
+        let latest_context_call = context
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| step.requests.last().map(|request| &request.call));
+        assert_eq!(
+            latest_context_call, latest_journal_call,
+            "primary context must retain its latest committed Tool request"
+        );
+        let context_facts = context
+            .steps
+            .last()
+            .and_then(|step| step.facts)
+            .or(request.input.goal_context_facts)
+            .expect("prepared primary context facts");
+        let reservations_before_dispatch = events[..=reservation_index]
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event,
+                    Event::GoalProviderCallReserved { run_id: event_run, .. }
+                        if *event_run == run_id
+                )
+            })
+            .count();
+        assert!(
+            context_facts.provider_calls as usize >= reservations_before_dispatch,
+            "primary context must include its committed Provider reservation"
+        );
+        if context.history_summary.is_some() || context.steps.iter().any(|step| step.cleared) {
+            assert_eq!(request.model, identity.model);
+            assert_eq!(request.max_output_tokens, identity.limits.max_output_tokens);
+            compacted_request = true;
+        }
+    }
+    assert!(
+        compacted_request,
+        "background primary input is compacted before dispatch"
+    );
+}
+
 pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let _deadline = super::engine::deadline(case, std::time::Duration::from_secs(180));
     use std::os::unix::fs::PermissionsExt;
@@ -836,6 +970,13 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         std::fs::write(
             workspace.join(format!("notes/{index}")),
             format!("original {index}"),
+        )
+        .unwrap();
+    }
+    if case == "background" {
+        std::fs::write(
+            workspace.join("notes/large.txt"),
+            format!("{}\n", "x".repeat(1000)).repeat(900),
         )
         .unwrap();
     }
@@ -943,6 +1084,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         workspace: workspace.clone(),
         budget,
         requests: Default::default(),
+        primary_tool_calls: Default::default(),
         violations: Default::default(),
         ready,
         completed,
@@ -1188,6 +1330,9 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             events,
             view,
         };
+    }
+    if case == "background" {
+        assert_background_primary_context(run.id, run.agents[0].id, &events, &provider);
     }
     if case == "large_write" {
         let requests = provider.requests.lock().unwrap();
@@ -1755,6 +1900,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         workspace: workspace.clone(),
         budget: original.view.goals[0].budget,
         requests: Default::default(),
+        primary_tool_calls: Default::default(),
         violations: Default::default(),
         ready,
         completed,
