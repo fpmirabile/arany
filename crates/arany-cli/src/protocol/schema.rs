@@ -29,6 +29,7 @@ pub fn protocol_schema() -> Value {
     let notifications = json!({
         "initialized": {"params": generator.subschema_for::<Empty>()},
         "thread/started": {"params": generator.subschema_for::<ThreadResult>()},
+        "turn/display": {"params": generator.subschema_for::<TurnDisplayNotification>()},
         "turn/started": {"params": generator.subschema_for::<TurnNotification>()},
         "turn/completed": {"params": generator.subschema_for::<TurnNotification>()},
         "item/started": {"params": generator.subschema_for::<ItemStartedNotification>()},
