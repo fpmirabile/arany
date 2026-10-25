@@ -4769,8 +4769,8 @@ fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
 async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
     let mut attached = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
     let lines: Vec<_> = (0..30).map(|index| format!("row-{index:02}")).collect();
-    attached.help_selected = Some(0);
-    attached.usage_panel = Some(crate::terminal::UsagePanel {
+    attached.panels.help_selected = Some(0);
+    attached.panels.usage_panel = Some(crate::terminal::UsagePanel {
         pages: vec![lines.join("\n")],
         page: 0,
         sequence: 0,
@@ -4787,7 +4787,7 @@ async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
         (TerminalInput::Up, 23),
     ] {
         attached.help_input(input);
-        let scroll = attached.help_selected.unwrap();
+        let scroll = attached.panels.help_selected.unwrap();
         assert_eq!(scroll, expected);
         terminal
             .draw(|frame| {

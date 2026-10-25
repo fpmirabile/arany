@@ -27,8 +27,8 @@ pub(super) async fn manage(
     journal: &mut SetupJournal,
     current: &SessionDefaults,
 ) -> Result<(), SetupError> {
-    let state = StateRoot::admit(state_dir).map_err(|error| error.to_string())?;
-    let mut draft = RoutingDraft::load(&state).map_err(|error| error.to_string())?;
+    let state = StateRoot::admit(state_dir).map_err(SetupError::recoverable)?;
+    let mut draft = RoutingDraft::load(&state).map_err(SetupError::recoverable)?;
     let primary = current_route(current)?;
     loop {
         let Some(action) = choose(
@@ -75,7 +75,7 @@ pub(super) async fn manage(
             b'6' => {
                 let bytes = draft
                     .encode(primary.as_ref())
-                    .map_err(|error| error.to_string())?;
+                    .map_err(SetupError::recoverable)?;
                 let text = manifest(&state, &draft, primary.as_ref()).await?;
                 if review_warning(
                     terminal,
@@ -131,8 +131,8 @@ pub(super) fn current_route(defaults: &SessionDefaults) -> Result<Option<Route>,
         effort: defaults.effort,
         account_id: defaults.account_id,
     };
-    route.resolve_effort().map_err(|error| error.to_string())?;
-    route.validate().map_err(|error| error.to_string())?;
+    route.resolve_effort().map_err(SetupError::recoverable)?;
+    route.validate().map_err(SetupError::recoverable)?;
     Ok(Some(route))
 }
 
@@ -349,7 +349,7 @@ pub(super) async fn select_route(
             provider: ProviderRecord::parse("chatgpt").expect("native Provider"),
             model: String::new(),
             effort: None,
-            account_id: Some(chatgpt::selected_account_id().map_err(|error| error.to_string())?),
+            account_id: Some(chatgpt::selected_account_id().map_err(SetupError::recoverable)?),
         },
         b'6' => return select_custom(terminal, state).await,
         _ => return Ok(None),
@@ -369,7 +369,7 @@ async fn saved_native_route(terminal: &mut AttachedTerminal) -> Result<Option<Ro
         return Ok(None);
     };
     let account = inspected
-        .map_err(|error| error.to_string())?
+        .map_err(SetupError::recoverable)?
         .account
         .ok_or("No saved native API account; add one in API accounts")?;
     Ok(Some(Route {
@@ -416,8 +416,8 @@ async fn edit_model_effort(
         return Ok(None);
     };
     route.effort = effort;
-    route.validate().map_err(|error| error.to_string())?;
-    route.resolve_effort().map_err(|error| error.to_string())?;
+    route.validate().map_err(SetupError::recoverable)?;
+    route.resolve_effort().map_err(SetupError::recoverable)?;
     Ok(Some(route))
 }
 
@@ -426,10 +426,10 @@ async fn select_custom(
     state: &StateRoot,
 ) -> Result<Option<Route>, SetupError> {
     let (_, profiles) =
-        CustomProfile::load_all_with_snapshot(state).map_err(|error| error.to_string())?;
+        CustomProfile::load_all_with_snapshot(state).map_err(SetupError::recoverable)?;
     let statuses = CustomProfile::check_statuses(state, &profiles)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SetupError::recoverable)?;
     let choices = profiles
         .iter()
         .enumerate()
@@ -537,10 +537,10 @@ async fn manifest(
     primary: Option<&Route>,
 ) -> Result<String, SetupError> {
     let (_, profiles) =
-        CustomProfile::load_all_with_snapshot(state).map_err(|error| error.to_string())?;
+        CustomProfile::load_all_with_snapshot(state).map_err(SetupError::recoverable)?;
     let statuses = CustomProfile::check_statuses(state, &profiles)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SetupError::recoverable)?;
     let primary_chain = draft
         .providers
         .primary

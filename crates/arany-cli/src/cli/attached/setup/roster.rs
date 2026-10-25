@@ -20,7 +20,7 @@ pub(super) async fn manage(
     journal: &mut SetupJournal,
     current: &SessionDefaults,
 ) -> Result<(), SetupError> {
-    let state = StateRoot::admit(state_dir).map_err(|error| error.to_string())?;
+    let state = StateRoot::admit(state_dir).map_err(SetupError::recoverable)?;
     let mut draft = RosterDraft::load(&state)?;
     let primary = routing::current_route(current)?;
     loop {
@@ -62,7 +62,7 @@ pub(super) async fn manage(
                     Ok(routing) => routing::clear(terminal, &state, journal, &routing)
                         .await
                         .map(|_| ()),
-                    Err(error) => Err(error.to_string().into()),
+                    Err(error) => Err(SetupError::recoverable(error)),
                 };
                 retain_draft(terminal, result).await?;
             }
@@ -84,7 +84,7 @@ async fn roster_choices(
     match state.record(RecordKind::ProviderRouting).present() {
         Ok(true) => choices.push((b'5', "Clear role routing")),
         Ok(false) => {}
-        Err(error) => retain_draft(terminal, Err(error.to_string().into())).await?,
+        Err(error) => retain_draft(terminal, Err(SetupError::recoverable(error))).await?,
     }
     choices.push((b'6', "Back; discard draft"));
     Ok(choices)
@@ -122,7 +122,7 @@ async fn save(
     if state
         .record(RecordKind::ProviderRouting)
         .present()
-        .map_err(|error| error.to_string())?
+        .map_err(SetupError::recoverable)?
     {
         preview.push_str("\nRole routing is present: --profile will refuse until you separately Clear role routing. Save does not clear it.\n");
     }
