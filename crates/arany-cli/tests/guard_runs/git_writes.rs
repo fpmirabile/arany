@@ -490,10 +490,19 @@ async fn remember_pr_list(repo: &Repo) {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert!(shown_payloads.iter().any(|line| {
-        line["kind"] == "ToolFinished"
-            && line["payload"]["observation"]["output"] == expected_output
-    }));
+    let finished = shown_payloads
+        .iter()
+        .find(|line| line["kind"] == "ToolFinished")
+        .expect("exported ToolFinished");
+    assert_eq!(finished["payload"]["output"], expected_output);
+    let committed = events
+        .iter()
+        .find(|event| matches!(event.event, Event::ToolFinished { .. }))
+        .expect("committed ToolFinished");
+    assert_eq!(
+        finished["payload"],
+        serde_json::from_str::<Value>(&committed.event.payload().unwrap()).unwrap()
+    );
     assert!(!shown.contains(CANARY));
     assert_eq!(
         std::fs::read(repo._temp.path().join("gh-invocations")).unwrap(),
