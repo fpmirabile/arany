@@ -1,8 +1,9 @@
 use super::limits;
 use super::responses::StreamDecoder;
 use super::{OPENAI_ENDPOINT, wire};
-use crate::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage, subscription_failure};
+use crate::diagnostics::subscription_failure;
 use crate::provider::conversation::Conversation;
+use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage};
 use crate::provider::{
     AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
     CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_REPORTED_OUTPUT_TOKENS,

@@ -9,6 +9,7 @@ mod catalog;
 mod conversation;
 mod custom;
 mod decode;
+pub(crate) mod diagnostics;
 mod effort;
 pub(crate) mod evidence;
 mod image;
