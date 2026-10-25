@@ -594,8 +594,20 @@ fn protocol_params_reject_unknown_fields_unsupported_modes_and_input_overflow() 
         {"type": "image", "mediaType": "image/png", "data": STANDARD.encode(vec![0; arany::MAX_IMAGE_BYTES - arany::MAX_IMAGE_BYTES / 2])}
     ]);
     assert!(serde_json::from_value::<TurnStartParams>(params).is_ok());
+    for decision in ["accept", "acceptForSession", "decline", "cancel"] {
+        assert!(serde_json::from_value::<ApprovalResult>(json!({"decision":decision})).is_ok());
+    }
+    for decision in ["allowPrefixInFolder", "remember", "allow_always"] {
+        assert!(serde_json::from_value::<ApprovalResult>(json!({"decision":decision})).is_err());
+    }
+    let capabilities: ClientCapabilities = serde_json::from_value(json!({
+        "hostCommandSessionApproval":true,"unknown":true
+    }))
+    .unwrap();
+    assert!(capabilities.host_command_session_approval);
     assert!(
-        serde_json::from_value::<ApprovalResult>(json!({"decision": "acceptForSession"})).is_err()
+        serde_json::from_value::<ClientCapabilities>(json!({"hostCommandSessionApproval":"true"}))
+            .is_err()
     );
     let thread = "019a0011-2233-7444-8555-667788990000";
     for since in [json!(-1), json!(1.5), Value::Null, json!("1")] {

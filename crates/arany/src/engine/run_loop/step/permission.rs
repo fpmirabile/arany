@@ -172,12 +172,11 @@ fn decide_host_prefix(
 ) -> HostPrefixDecision {
     use crate::tools::permissions::PermissionMode;
     if !eligible
-        || !attached
         || !facts.host
         || !facts.settings_admitted
         || facts.epoch.is_none()
         || facts.state_target != Some(false)
-        || facts.terminal_mode != Some(ApprovalMode::Request)
+        || !matches!(facts.terminal_mode, None | Some(ApprovalMode::Request))
         || facts.hook_restriction.is_some()
         || facts.permission.basis == PermissionSource::Rule
     {
@@ -194,7 +193,9 @@ fn decide_host_prefix(
         {
             HostPrefixDecision::Reuse
         }
-        None if matches!(facts.mode, None | Some(PermissionMode::Default))
+        None if attached
+            && facts.terminal_mode == Some(ApprovalMode::Request)
+            && matches!(facts.mode, None | Some(PermissionMode::Default))
             && facts.permission.decision == Decision::Ask
             && facts.permission.basis == PermissionSource::Mode =>
         {
@@ -779,6 +780,20 @@ mod host_prefix_tests {
             decide_host_prefix(&baseline, Some(Decision::Allow), true, true),
             HostPrefixDecision::Reuse
         );
+        for terminal_mode in [None, Some(ApprovalMode::Request)] {
+            let facts = HostReuseFacts {
+                terminal_mode,
+                ..baseline
+            };
+            assert_eq!(
+                decide_host_prefix(&facts, Some(Decision::Allow), true, false),
+                HostPrefixDecision::Reuse
+            );
+            assert_eq!(
+                decide_host_prefix(&facts, None, true, false),
+                HostPrefixDecision::NoReuse
+            );
+        }
         for (facts, rule, eligible, attached) in [
             (
                 HostReuseFacts {
@@ -876,12 +891,218 @@ mod host_prefix_tests {
             (baseline, Some(Decision::Deny), true, true),
             (baseline, Some(Decision::Ask), true, true),
             (baseline, Some(Decision::Allow), false, true),
-            (baseline, Some(Decision::Allow), true, false),
         ] {
             assert_eq!(
                 decide_host_prefix(&facts, rule, eligible, attached),
                 HostPrefixDecision::NoReuse
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    #[test]
+    fn host_reuse_and_session_offers_share_eligibility() {
+        use crate::tools::permissions::PermissionMode as M;
+        let baseline = HostReuseFacts {
+            host: true,
+            settings_admitted: true,
+            mode: Some(M::Default),
+            terminal_mode: Some(ApprovalMode::Request),
+            session_scope: true,
+            permission: Permission {
+                basis: PermissionSource::Mode,
+                ..asks(ApprovalMode::Request)
+            },
+            hook_restriction: None,
+            state_target: Some(false),
+            epoch: Some(uuid::Uuid::now_v7()),
+            source: None,
+            grants: 0,
+        };
+        for (facts, expected) in [
+            (baseline, HostReuse::OfferSession),
+            (
+                HostReuseFacts {
+                    mode: None,
+                    ..baseline
+                },
+                HostReuse::OfferSession,
+            ),
+            (
+                HostReuseFacts {
+                    source: Some([1; 32]),
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    source: Some([1; 32]),
+                    grants: crate::session::MAX_HOST_SESSION_GRANTS,
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    grants: crate::session::MAX_HOST_SESSION_GRANTS,
+                    ..baseline
+                },
+                HostReuse::OnceOnly,
+            ),
+            (
+                HostReuseFacts {
+                    mode: Some(M::DontAsk),
+                    permission: deny(PermissionSource::Mode),
+                    source: Some([1; 32]),
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    mode: Some(M::DontAsk),
+                    permission: deny(PermissionSource::Mode),
+                    ..baseline
+                },
+                HostReuse::OnceOnly,
+            ),
+        ] {
+            assert_eq!(decide_host_reuse(&facts), expected);
+        }
+        for ineligible in [
+            HostReuseFacts {
+                host: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                settings_admitted: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::Auto),
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::AcceptEdits),
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::Plan),
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: None,
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: Some(ApprovalMode::Auto),
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: Some(ApprovalMode::AutoEdits),
+                ..baseline
+            },
+            HostReuseFacts {
+                session_scope: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: allow(PermissionSource::Rule),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: asks(ApprovalMode::Request),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::Rule),
+                mode: Some(M::DontAsk),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::Mode),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::PinnedGrant),
+                mode: Some(M::DontAsk),
+                ..baseline
+            },
+            HostReuseFacts {
+                hook_restriction: Some(Decision::Ask),
+                ..baseline
+            },
+            HostReuseFacts {
+                hook_restriction: Some(Decision::Deny),
+                ..baseline
+            },
+            HostReuseFacts {
+                state_target: Some(true),
+                ..baseline
+            },
+            HostReuseFacts {
+                state_target: None,
+                ..baseline
+            },
+            HostReuseFacts {
+                epoch: None,
+                ..baseline
+            },
+        ] {
+            for source in [None, Some([1; 32])] {
+                assert_eq!(
+                    decide_host_reuse(&HostReuseFacts {
+                        source,
+                        ..ineligible
+                    }),
+                    HostReuse::OnceOnly
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
+        use super::typed_allow_takes_effect;
+        use crate::tools::permissions::PermissionMode as M;
+        assert!(typed_allow_takes_effect(Some(M::Default)));
+        for mode in [
+            None,
+            Some(M::AcceptEdits),
+            Some(M::Plan),
+            Some(M::Auto),
+            Some(M::DontAsk),
+        ] {
+            assert!(!typed_allow_takes_effect(mode), "{mode:?}");
+        }
+    }
+
+    fn allow(basis: PermissionSource) -> Permission {
+        Permission {
+            decision: Decision::Allow,
+            basis,
+            approval: None,
+        }
+    }
+
+    fn asks(mode: ApprovalMode) -> Permission {
+        Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::Rule,
+            approval: Some(mode),
+        }
+    }
+
+    fn deny(basis: PermissionSource) -> Permission {
+        Permission {
+            decision: Decision::Deny,
+            basis,
+            approval: None,
         }
     }
 }

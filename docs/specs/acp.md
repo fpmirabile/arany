@@ -32,7 +32,7 @@ a conflicting explicit tuple. Collaboration and maximum children use `exec`
 defaults and bounds. `--state-dir` selects State. Tools stay off unless `--tools`
 opts into the existing private Tool grant and serve admission, including native
 Guard availability. No client capability or `_meta` supplies authority. Human-only
-approvals are unavailable under the [Tools contract](./tools.md#modes-and-approval-decisions).
+approvals are unavailable under the [Tools contract](./tools.md#modes-and-approval-decisions). H1 permits only eligible admitted user-owned host-prefix allows in default/dontAsk; unresolved host asks deny immediately without a permission request. Auto/acceptEdits still require a fresh human and therefore refuse host commands here.
 
 TTY stdin or stdout is refused before State admission, exit 2 with
 `error: acp requires piped stdin and stdout`. Authority configuration, State,
@@ -219,7 +219,7 @@ withdrawn and cancelled IDs change nothing. ACP request IDs are independent of b
 client request IDs and internal serve IDs. `allow_always` is never offered. The offered rejection ID is `deny`; `reject_once` is its option kind, not an accepted ID. Any other ID records unavailable approval.
 Ordinary client decisions are user-configured verdicts; ACP cannot attest a
 human gesture, so human-only requests follow the
-[Tools contract](./tools.md#modes-and-approval-decisions). All normal Policy,
+[Tools contract](./tools.md#modes-and-approval-decisions). Eligible host-prefix reuse follows the same Engine authority path and emits committed unguarded Tool updates and Goal evidence; neither `allow_once` nor `allow_always` creates host authority or a remembered rule. All normal Policy,
 one-use grant, journal and Guard checks still apply.
 
 Cancellation, Tool completion or serve withdrawal retire the pending
@@ -373,6 +373,7 @@ State storage and all per-action resource limits remain unchanged.
 | Admitted Tool permission round trip | Allow dispatches once; reject denies; reopened intent, verdict and observation equal the permission payload and committed projections | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Permission correlation and withdrawal | Only allow_once/reject_once offered; a late reply to a live primary request remains answerable; unknown, duplicate, withdrawn or invalid/error replies cannot authorize a Tool; client cancellation and server withdrawal remain effective under output backpressure | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Rich prompt and inert Tool data | Oversized resources, blobs, image MIME/base64/count/byte overflow reject; context closing tags neutralized; PNG and image-only conversion, original cwd spelling, uncertain metadata, escaped titles, longer fences and truncation markers validate against the pinned schema | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Host-prefix H1 policy | Existing eligible rules execute only in default/dontAsk without a permission request; auto/acceptEdits, explicit ask/deny and absent rules dispatch nothing; forged client approvals add no authority; closed replay retains the host receipt | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Human-only Asks unavailable | Hook Ask under Auto and unguarded proposals, even with exact project rules, make no client request, dispatch nothing and replay unavailable_approval | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [Guard permission corpus](../../crates/arany-cli/tests/guard_runs/permissions.rs), [unguarded corpus](../../crates/arany-cli/tests/guard_runs/unguarded.rs) |
 
 The ACP corpus also owns `guarded_acp_permissions_publish_once_and_refuse_hook_asks`,
