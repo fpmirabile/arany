@@ -808,7 +808,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 13);
+    assert_eq!(rows.len(), 14);
     for (catalog, accepted) in [
         (
             json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
@@ -880,6 +880,13 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 #[test]
 fn inbound_function_calls_decode_one_native_request_or_outcome() {
     let mut request = primary_request(MODEL);
+    let mut offered = catalog();
+    offered["git"]["host"] = json!(true);
+    offered["git"]["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("gh_pr_list"));
+    request.input.tools = Some(tool_context(offered));
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 2,
     };

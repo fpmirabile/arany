@@ -100,16 +100,16 @@ pub use store::{
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalCause, ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate,
-    CommandChangeset, DefinitionFilePin, DefinitionRegistryPin, EffectIntent, EnforcementCause,
-    FileChange, FileSuggestionSource, FileVersion, GuardReceipt, HostIntent, LimitCause,
-    LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ProjectSkills,
-    RuntimeProfileOption, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
-    ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits,
-    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
-    ToolResourceSettings, ToolStep, TrustRecordError, TrustReset, UnguardedGrant, UnguardedPrompt,
-    UnguardedReceipt, WorkspacePermissions, configured_skill_names, mention_paths,
-    native_protection_supported, now_ms, project_skills, runtime_skill_names, tool_guard_main,
-    tool_host_main,
+    CommandChangeset, DEFAULT_PR_LIMIT, DefinitionFilePin, DefinitionRegistryPin, EffectIntent,
+    EnforcementCause, FileChange, FileSuggestionSource, FileVersion, GuardReceipt, HostIntent,
+    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, PrState,
+    ProjectSkills, RuntimeProfileOption, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME,
+    SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition,
+    ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
+    ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError, TrustReset,
+    UnguardedGrant, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions,
+    configured_skill_names, mention_paths, native_protection_supported, now_ms, project_skills,
+    runtime_skill_names, tool_guard_main, tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

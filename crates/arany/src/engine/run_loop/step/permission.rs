@@ -188,7 +188,8 @@ impl Permission {
                 mode.asks(call)
                     && !(self.basis == PermissionSource::TypedPrefixRule
                         && self.decision == Decision::Allow
-                        && *mode != ApprovalMode::Auto)
+                        && (matches!(call, ToolCall::GhPrList { .. })
+                            || *mode != ApprovalMode::Auto))
             })
         {
             if self.decision == Decision::Allow {
@@ -269,6 +270,7 @@ impl RunLoop<'_> {
                     | ToolCall::GitSwitch { .. }
                     | ToolCall::GitPush { .. }
                     | ToolCall::GhPrCreate { .. }
+                    | ToolCall::GhPrList { .. }
                     | ToolCall::Glob { .. }
                     | ToolCall::Skill { .. } => !call.is_process() || leases.is_empty(),
                 }
@@ -496,7 +498,12 @@ impl RunLoop<'_> {
             basis = PermissionSource::PinnedGrant;
             approval = None;
         }
-        if call.is_host() && decision != Decision::Deny {
+        if call.is_host()
+            && decision != Decision::Deny
+            && !(matches!(call, ToolCall::GhPrList { .. })
+                && decision == Decision::Allow
+                && basis == PermissionSource::TypedPrefixRule)
+        {
             decision = Decision::Ask;
             approval = Some(ApprovalMode::Request);
         }
@@ -535,7 +542,7 @@ pub(super) fn remember_candidate(
     call: &ToolCall,
 ) -> Option<crate::tools::permissions::TypedGitPrefix> {
     (matches!(grant, Grant::Primary { .. })
-        && !call.is_host()
+        && (!call.is_host() || matches!(call, ToolCall::GhPrList { .. }))
         && typed_allow_takes_effect(mode)
         && permission.decision == Decision::Ask
         && permission.basis == PermissionSource::Mode
