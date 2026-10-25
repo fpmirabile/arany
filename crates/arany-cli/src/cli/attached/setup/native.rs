@@ -8,8 +8,8 @@ use crate::terminal::AttachedTerminal;
 use arany::{RecordKind, SessionDefaults};
 use std::path::Path;
 
-pub(super) fn saved_account_presence(path: &Path) -> Result<(bool, bool), String> {
-    let Some(state) = crate::files::open_optional_state(path).map_err(|error| error.to_string())?
+pub(super) fn saved_account_presence(path: &Path) -> Result<(bool, bool), SetupError> {
+    let Some(state) = crate::files::open_optional_state(path).map_err(SetupError::recoverable)?
     else {
         return Ok((false, false));
     };
@@ -17,11 +17,11 @@ pub(super) fn saved_account_presence(path: &Path) -> Result<(bool, bool), String
         state
             .record(RecordKind::SavedAccount)
             .present()
-            .map_err(|error| error.to_string())?,
+            .map_err(SetupError::recoverable)?,
         state
             .record(RecordKind::ChatgptAccounts)
             .present()
-            .map_err(|error| error.to_string())?,
+            .map_err(SetupError::recoverable)?,
     ))
 }
 
@@ -39,7 +39,7 @@ pub(super) async fn saved_native_defaults(
         return Ok(SavedDefaults::Cancelled);
     };
     let account = inspected
-        .map_err(|error| error.to_string())?
+        .map_err(SetupError::recoverable)?
         .account
         .ok_or("saved API account unavailable; use /setup to repair it")?;
     Ok(SavedDefaults::AccessChecked(defaults(&account)))
@@ -50,7 +50,7 @@ pub(super) async fn inspect_native_account(
 ) -> Result<(), SetupError> {
     let inspected = credentials::inspect()
         .await
-        .map_err(|error| SetupError::from(error.to_string()))?;
+        .map_err(SetupError::recoverable)?;
     let Some(account) = inspected.account else {
         await_setup_ack(terminal, "Native API account", "No saved account").await?;
         return Ok(());
@@ -76,7 +76,7 @@ pub(super) async fn select_native_account(
 ) -> Result<Option<SetupSelection>, SetupError> {
     let inspected = credentials::inspect()
         .await
-        .map_err(|error| SetupError::from(error.to_string()))?;
+        .map_err(SetupError::recoverable)?;
     let Some(account) = inspected.account else {
         await_setup_ack(terminal, "Native API account", "No saved account to select").await?;
         return Ok(None);
@@ -96,7 +96,7 @@ pub(super) async fn select_native_account(
     }
     let credentials = credentials::load_selected(account.id, &account.provider.profile())
         .await
-        .map_err(|error| SetupError::from(error.to_string()))?;
+        .map_err(SetupError::recoverable)?;
     let Some(catalog) =
         super::load_catalog(terminal, &account.provider.profile(), &credentials).await?
     else {
@@ -146,15 +146,21 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let current = temp.path().join("current");
-        assert_eq!(saved_account_presence(&current).unwrap(), (false, false));
+        assert!(matches!(
+            saved_account_presence(&current),
+            Ok((false, false))
+        ));
         let root = StateRoot::admit(&current).unwrap();
         root.record(RecordKind::ChatgptAccounts)
             .replace(b"not a parsed account index")
             .unwrap();
-        assert_eq!(saved_account_presence(&current).unwrap(), (false, true));
+        assert!(matches!(
+            saved_account_presence(&current),
+            Ok((false, true))
+        ));
         root.record(RecordKind::SavedAccount)
             .replace(b"not a parsed native account")
             .unwrap();
-        assert_eq!(saved_account_presence(&current).unwrap(), (true, true));
+        assert!(matches!(saved_account_presence(&current), Ok((true, true))));
     }
 }
