@@ -112,6 +112,154 @@ async fn setup_store_with_remaining_slots(
     )
 }
 
+#[tokio::test]
+async fn store_reopens_maximum_worst_case_escaped_compaction_summary() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let fixture = crate::session::worker_compacted_fixture(true);
+    let compacted_index = fixture
+        .events
+        .iter()
+        .position(|event| matches!(event, Event::GoalContextCompacted { .. }))
+        .expect("compaction fixture Event");
+    let store = crate::Store::open(root.try_clone().expect("State handle")).expect("Store");
+    for event in &fixture.events[..compacted_index] {
+        store
+            .append(fixture.session, event.clone())
+            .await
+            .expect("prefix Event");
+    }
+    let prefix = store
+        .load_session(fixture.session)
+        .await
+        .expect("committed prefix");
+    let Event::GoalContextCompacted {
+        goal_id,
+        run_id,
+        covered_tool_count,
+        record,
+    } = fixture.events[compacted_index].clone()
+    else {
+        unreachable!()
+    };
+    let summary = "\u{1}".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
+    let mut record = successful_compaction_record(record, &summary);
+    record.source_digest = crate::session::prefix_digest(&prefix, record.covered_sequence)
+        .expect("stored prefix digest");
+    let session_record = record.clone();
+    let event = Event::GoalContextCompacted {
+        goal_id,
+        run_id,
+        covered_tool_count,
+        record,
+    };
+    let payload = event.payload().expect("valid compaction Event");
+    assert!(payload.len() > super::super::MAX_EVENT_BYTES);
+    assert!(payload.len() <= super::super::MAX_COMPACTION_EVENT_BYTES);
+    store
+        .admit(
+            fixture.session,
+            1,
+            0,
+            crate::store::AdmissionKind::Compaction,
+        )
+        .await
+        .expect("compaction admission headroom");
+    store
+        .append(fixture.session, event)
+        .await
+        .expect("bounded compaction Event");
+    for event in &fixture.events[compacted_index + 1..] {
+        store
+            .append(fixture.session, event.clone())
+            .await
+            .expect("remaining Event");
+    }
+    let view = store
+        .load_view(fixture.session)
+        .await
+        .expect("Session view")
+        .expect("Session");
+    let run = &view.runs[0];
+    let compacted_prefix = store
+        .load_session(fixture.session)
+        .await
+        .expect("stored compaction prefix");
+    let mut record = session_record;
+    record.covered_sequence = run.finished_sequence.expect("finished Run");
+    record.source_digest =
+        crate::session::prefix_digest(&compacted_prefix, record.covered_sequence)
+            .expect("completed Run digest");
+    let event = Event::ContextCompacted {
+        record,
+        active_ms: Some(0),
+    };
+    let payload = event.payload().expect("valid Session compaction Event");
+    assert!(payload.len() > super::super::MAX_EVENT_BYTES);
+    assert!(payload.len() <= super::super::MAX_COMPACTION_EVENT_BYTES);
+    store
+        .admit(
+            fixture.session,
+            2,
+            0,
+            crate::store::AdmissionKind::Compaction,
+        )
+        .await
+        .expect("Session compaction admission headroom");
+    store
+        .append(
+            fixture.session,
+            Event::GoalCompactionCallReserved {
+                goal_id,
+                run_id,
+                active_ceiling_ms: 0,
+            },
+        )
+        .await
+        .expect("Session compaction call reservation");
+    store
+        .append(fixture.session, event)
+        .await
+        .expect("bounded Session compaction Event");
+    store.close().await.expect("close Store");
+
+    let reopened = crate::Store::open(root).expect("reopened Store");
+    let view = reopened
+        .load_view(fixture.session)
+        .await
+        .expect("replayed Session")
+        .expect("Session");
+    assert_eq!(
+        view.runs[0].tool_compaction_summary.as_deref(),
+        Some(summary.as_str())
+    );
+    assert!(matches!(
+        &view.compactions[0].record.status,
+        CompactionStatus::Succeeded { summary: stored, .. } if stored == &summary
+    ));
+    assert_eq!(
+        view.goal(goal_id)
+            .expect("replayed Goal")
+            .compaction_call_reserved,
+        None
+    );
+    reopened.close().await.expect("close reopened Store");
+}
+
+fn successful_compaction_record(
+    mut record: crate::session::CompactionRecord,
+    summary: &str,
+) -> crate::session::CompactionRecord {
+    let summary_bytes = summary.len() as u32;
+    record.status = crate::session::CompactionStatus::Succeeded {
+        content_digest: crate::validate::digest(summary.as_bytes()),
+        summary_bytes,
+        summary_tokens_estimate: summary_bytes.div_ceil(4),
+        summary: summary.to_owned(),
+    };
+    record
+}
+
 async fn publish_setup_profile(
     store: &crate::Store,
     root: &StateRoot,
@@ -717,6 +865,17 @@ fn every_event_slot_admits_a_current_tool_observation() {
         event_payload_limit("ToolPermissionDecided", verdict),
         crate::store::MAX_EVENT_BYTES
     );
+    for kind in ["ContextCompacted", "GoalContextCompacted"] {
+        let version = payload_version(kind).expect("compaction payload version");
+        assert_eq!(
+            event_payload_limit(kind, version),
+            crate::store::MAX_COMPACTION_EVENT_BYTES
+        );
+        assert_eq!(
+            event_payload_limit(kind, version - 1),
+            crate::store::MAX_EVENT_BYTES
+        );
+    }
 }
 
 #[test]

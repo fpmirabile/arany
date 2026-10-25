@@ -946,10 +946,22 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
     for (text, accepted) in [
         (String::new(), false),
         (" \n\t".into(), false),
-        ("x".repeat(8 * 1024), true),
-        ("é".repeat(4 * 1024), true),
-        ("x".repeat(8 * 1024 + 1), false),
-        ("é".repeat(4 * 1024 + 1), false),
+        (
+            "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES),
+            true,
+        ),
+        (
+            "é".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES / 2),
+            true,
+        ),
+        (
+            "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1),
+            false,
+        ),
+        (
+            "é".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES / 2 + 1),
+            false,
+        ),
         ("  summary\n".into(), true),
         (r#"{"summary":"ok","extra":1}"#.into(), true),
     ] {

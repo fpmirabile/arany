@@ -384,7 +384,7 @@ fn subscription_compaction_body_keeps_only_bounded_history_data() {
         value["instructions"]
             .as_str()
             .expect("instructions")
-            .ends_with("Keep the summary under 6144 UTF-8 bytes; a non-ASCII character takes up to 4 bytes.")
+            .ends_with("Keep the summary under 49152 UTF-8 bytes; a non-ASCII character takes up to 4 bytes.")
     );
     for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
@@ -1217,7 +1217,10 @@ async fn compaction_stream_requires_complete_bounded_summary() {
         ("whitespace summary", completed_with_text(Some(12), " \n\t")),
         (
             "oversized summary",
-            completed_with_text(Some(12), &"x".repeat(8 * 1024 + 1)),
+            completed_with_text(
+                Some(12),
+                &"x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1),
+            ),
         ),
         (
             "escaped token reflection",
