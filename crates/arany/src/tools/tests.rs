@@ -72,6 +72,7 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
             args: Vec::new(),
             cwd: ".".into(),
             justification: "Run the failed command once on the host".into(),
+            prefix_rule: None,
         },
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt {
@@ -384,6 +385,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     };
     let runtime = ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),
@@ -2691,6 +2693,7 @@ fn host_command_catalog_is_primary_only_and_needs_no_guarded_program() {
             args: Vec::new(),
             cwd: String::new(),
             justification: "run".into(),
+            prefix_rule: None,
         }
         .is_child_research()
     );
@@ -2741,6 +2744,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
 
     let runtime = |config: Config, git_writes_available: bool| ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available,
         host_authentication: Default::default(),
@@ -2911,6 +2915,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
     });
     let runtime = ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available: true,
         host_authentication: Default::default(),
@@ -2978,6 +2983,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),
@@ -3037,14 +3043,30 @@ fn old_host_rules_are_inactive_and_preserved() {
     runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(&state).unwrap();
     assert!(runtime.has_inactive_host_rules());
     assert_eq!(runtime.receipt().unguarded_rules_digest, None);
-    assert_eq!(
+    assert!(
         state
             .record(crate::store::RecordKind::UnguardedCommands)
             .read()
             .unwrap()
-            .unwrap(),
-        bytes
+            .is_none()
     );
+    let archive = state
+        .path()
+        .join("archive/inactive-host-commands/unguarded-commands.json");
+    assert_eq!(std::fs::read(&archive).unwrap(), bytes);
+    drop(state);
+    let reopened = crate::store::StateRoot::open_existing(&temp.path().join("state")).unwrap();
+    runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(&reopened).unwrap();
+    assert!(runtime.has_inactive_host_rules());
+    assert_eq!(runtime.receipt().unguarded_rules_digest, None);
+    assert!(
+        reopened
+            .record(crate::store::RecordKind::UnguardedCommands)
+            .read()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(std::fs::read(archive).unwrap(), bytes);
 }
 
 async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> ToolObservation {
@@ -4908,6 +4930,95 @@ fn host_pin_requires_explicit_nullable_permissions_digest() {
     );
     value.as_object_mut().unwrap().remove("permissions_digest");
     assert!(serde_json::from_value::<super::types::HostCommandPin>(value).is_err());
+}
+
+#[tokio::test]
+async fn conflicting_host_rules_name_the_saved_entry_and_remain_removable() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("note.txt"), "workspace fact").unwrap();
+    let state = crate::store::StateRoot::admit(&root.join("state")).unwrap();
+    let config = conflicting_host_rule_config(&state, &workspace);
+    let file = state.path().join("permissions.json");
+    let before = std::fs::read(&file).unwrap();
+    let admit = || {
+        super::ToolRuntime::admit(
+            config.clone(),
+            super::load_permissions(&state).unwrap(),
+            None,
+            &workspace,
+            &state,
+            root.join("missing-guard"),
+        )
+    };
+    let error = admit()
+        .err()
+        .expect("the current folder has a conflicting rule");
+    assert!(matches!(
+        error,
+        super::ToolError::HostPrefixConflict { rule: 2 }
+    ));
+    assert_eq!(super::failure_stage(&error), "admission");
+    assert_eq!(
+        error.to_string(),
+        "Saved host command rule 2 conflicts with a declared interpreter or Git executable; open /permissions > Host command rules to review and remove it"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let settings = super::permissions::PermissionSettings::load(&state, &workspace).unwrap();
+    let removed = settings
+        .save_host_edit(
+            &state,
+            &workspace,
+            super::permissions::HostPrefixEdit::Remove { index: 1 },
+        )
+        .unwrap();
+    assert_eq!(removed.host_prefixes().len(), 1);
+    let runtime = admit().expect("removing the conflicting rule restores Tool admission");
+    assert!(runtime.receipt().host_prefixes.is_empty());
+    assert_eq!(
+        run_in_process(
+            &runtime,
+            ToolCall::Read {
+                path: "note.txt".into(),
+                offset: None,
+                limit: None,
+            }
+        )
+        .await
+        .disposition,
+        ToolDisposition::Succeeded
+    );
+}
+
+fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path::Path) -> Config {
+    use std::os::unix::fs::PermissionsExt;
+    let root = workspace.parent().unwrap();
+    let executable = root.join("inspect");
+    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut pin = super::unguarded::pin("inspect", workspace, root.to_str().unwrap()).unwrap();
+    pin.state_roots = [
+        state.path().to_str().unwrap().into(),
+        root.join("account").to_str().unwrap().into(),
+    ];
+    let identity = super::workspace_identity(workspace).unwrap();
+    let rule = json!({
+        "version":super::unguarded::HOST_POLICY_VERSION,
+        "prefix":["inspect","value"],"decision":"allow","pin":pin,
+        "workspace_device":identity.device,"workspace_inode":identity.inode,"cwd":""
+    });
+    let mut other = rule.clone();
+    other["pin"]["workspace"] = json!(root.join("other-workspace"));
+    let before = serde_json::to_vec(&json!({"permissions":{"hostPrefixes":[other,rule]}})).unwrap();
+    let file = state.path().join("permissions.json");
+    std::fs::write(&file, &before).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    serde_json::from_value(json!({
+        "version":1,"workspace_paths":["."],"write":false,"skills":[],"mcp":[],
+        "commands":[{"name":"inspect","executable":executable,"sha256":pin.sha256,"interpreter":true,"inputs":[]}]
+    })).unwrap()
 }
 
 #[tokio::test]

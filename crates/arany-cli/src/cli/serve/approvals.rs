@@ -305,6 +305,7 @@ mod tests {
             args: vec![],
             cwd: String::new(),
             justification: "reason".into(),
+            prefix_rule: None,
         }
     }
 
@@ -331,6 +332,7 @@ mod tests {
             executable: "/bin/sh".into(),
             attribution: None,
             remember: true,
+            prefix: false,
         };
         let warning = lines(&intent, Some(&prompt));
         assert_eq!(warning[0], "Run outside the Guard? (unguarded)");
@@ -380,6 +382,7 @@ mod tests {
             args: vec![],
             cwd: String::new(),
             justification: "x".repeat(MAX_RPC_LINE_BYTES),
+            prefix_rule: None,
         };
         assert!(!arany::test_support::approval::ask(&approvals, &intent(big)).await);
         assert!(output.try_recv().is_err());

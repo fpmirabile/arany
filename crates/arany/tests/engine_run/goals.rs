@@ -6057,6 +6057,7 @@ async fn child_mcp_write_or_unguarded_request_is_rejected_before_dispatch() {
             args: vec!["-c".into(), "exit 0".into()],
             cwd: String::new(),
             justification: "Request forbidden host authority".into(),
+            prefix_rule: None,
         },
         arany::ToolCall::GitStatus { path: ".".into() },
     ];

@@ -1436,6 +1436,54 @@ mod tests {
         .err()
         .expect("a closed Goal is not resumable");
         assert_eq!(error, "Goal is not available for explicit resume");
+        assert_finished_run_jsonl_budget_feedback(state_dir, paused).await;
+    }
+
+    async fn assert_finished_run_jsonl_budget_feedback(
+        state_dir: PathBuf,
+        outcome: arany::RunOutcome,
+    ) {
+        let session_id = outcome.session_id;
+        let mut committed = load_committed_outcome(ClassifiedSubmission {
+            output: OutputArg::Jsonl,
+            state_dir,
+            new_session: true,
+            outcome,
+            stopped: None,
+            continuation_error: None,
+            interrupted: false,
+            forced: None,
+        })
+        .await
+        .expect("reopened exhausted Goal with its committed answer");
+        let run = &committed.outcome.run;
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.assistant_message.as_deref(), Some("first"));
+        assert_eq!(
+            committed.view.goals.last().expect("Failed Goal").status,
+            GoalStatus::Failed
+        );
+        let feedback = crate::presentation::session_run_feedback(&committed.view, run)
+            .expect("budget refusal feedback");
+        committed.stopped = committed.view.run_stop(run);
+        assert_eq!(
+            committed.stopped,
+            Some(RunStop::GoalExhausted(arany::GoalLimit::Calls))
+        );
+        let classification = classify_committed_state(&committed).expect("committed state");
+        let report = render_committed_outcome(committed, classification).expect("JSONL report");
+        assert_jsonl_committed_answer(&report.stdout, "first");
+        let first_event: serde_json::Value =
+            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
+                .expect("JSONL Event");
+        assert_eq!(first_event["session_id"], session_id.to_string());
+        assert_eq!(
+            report.stderr,
+            format!(
+                "{feedback}\nerror: Goal stopped after a committed Run: Goal budget is exhausted\n"
+            )
+        );
+        assert!(!report.success);
     }
 
     const ACTIVE_LIMIT_MS: u64 = 60_000;

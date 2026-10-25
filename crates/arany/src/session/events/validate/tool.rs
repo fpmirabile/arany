@@ -104,6 +104,7 @@ impl Event {
                             | PermissionSource::SessionApproval
                             | PermissionSource::Hook
                             | PermissionSource::TypedPrefixRule
+                            | PermissionSource::HostPrefixRule
                     )
                     && usize::from(verdict.hooks) <= MAX_HOOKS_PER_OCCURRENCE
                     && (verdict.basis != PermissionSource::Hook

@@ -749,6 +749,7 @@ fn fixture_with_manifest(
         compaction_content_digest: None,
         tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
             host_epoch: None,
+            host_prefixes: Vec::new(),
             contract_version: 1,
             config_digest: [1; 32],
             permissions_digest,
@@ -1203,6 +1204,7 @@ fn worker_protocol_refuses_widened_stale_and_unsettled_transitions() {
                 args: Vec::new(),
                 cwd: ".".into(),
                 justification: "Run".into(),
+                prefix_rule: None,
             },
             "git" => ToolCall::GitStatus { path: ".".into() },
             "mcp" => ToolCall::McpCall {
@@ -1957,6 +1959,7 @@ pub(crate) fn session_host_protocol_fixture() -> Fixture {
             args: vec!["-c".into(), "exit 0".into()],
             cwd: String::new(),
             justification: "Run the exact host command".into(),
+            prefix_rule: None,
         },
         EffectTarget::Workspace,
     );
@@ -1970,6 +1973,7 @@ pub(crate) fn session_host_protocol_fixture() -> Fixture {
             agent_run_id: f.primary,
             verdict: PermissionVerdict {
                 host: Some(HostApproval {
+                    rule: None,
                     epoch,
                     session: human,
                     source_intent: (!human).then_some(first),

@@ -1508,6 +1508,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
                 args: vec!["--check".into()],
                 cwd: ".".into(),
                 justification: "Inspect the same command after explicit approval".into(),
+                prefix_rule: None,
             },
             "toolCall",
         ),

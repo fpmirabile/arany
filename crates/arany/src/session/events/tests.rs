@@ -1959,6 +1959,7 @@ mod payload_version_tests {
             args: vec!["-c".into(), "exit 7".into()],
             cwd: String::new(),
             justification: "Run the failed command once".into(),
+            prefix_rule: None,
         };
         let started = Event::ToolStarted {
             run_id: run,

@@ -251,6 +251,29 @@ fn explicit_ask_uses_humans_and_decision_composition_only_narrows() {
 }
 
 #[test]
+fn dont_ask_preserves_explicit_rule_provenance() {
+    let call = ToolCall::CommandUnguarded {
+        program: "printf".into(),
+        args: vec!["host value".into()],
+        cwd: String::new(),
+        justification: "Inspect a synthetic host value".into(),
+        prefix_rule: None,
+    };
+    for (rules, source) in [
+        (json!({}), PermissionSource::Mode),
+        (json!({"ask": ["Bash"]}), PermissionSource::Rule),
+        (json!({"deny": ["Bash"]}), PermissionSource::Rule),
+    ] {
+        let mut permissions = rules;
+        permissions["defaultMode"] = json!("dontAsk");
+        assert_eq!(
+            config(permissions).evaluate(&call),
+            (Decision::Deny, source, None)
+        );
+    }
+}
+
+#[test]
 fn bash_globs_follow_peer_word_boundaries_and_trailing_star() {
     for (pattern, program, args, matched) in [
         ("git diff *", "git", vec!["diff"], true),
@@ -1294,6 +1317,7 @@ fn unguarded_commands_match_bash_deny_and_ask_but_never_allow() {
         args: vec!["-c".into(), "cargo test".into()],
         cwd: String::new(),
         justification: "Run the failed command once".into(),
+        prefix_rule: None,
     };
     let guarded = command("sh", &["-c", "cargo test"]);
     let allow = config(json!({"allow": ["Bash", "command_unguarded", "Bash(sh -c *)"]}));
@@ -1334,6 +1358,7 @@ fn auto_mode_never_routes_an_unguarded_command_to_ai_review() {
         args: vec!["-c".into(), "cargo test".into()],
         cwd: String::new(),
         justification: "Run the failed command once".into(),
+        prefix_rule: None,
     };
     let guarded = command("sh", &["-c", "cargo test"]);
     let parsed = config(json!({"defaultMode": "auto"}));
@@ -2426,6 +2451,213 @@ fn host_git_modes_and_prefixes_never_replace_human_approval() {
                 assert!(!channel.without_human_only().admits_human_only(call, false));
             }
         }
+    }
+}
+
+fn host_intent() -> crate::tools::EffectIntent {
+    let mut pin = crate::tools::types::test_host_pin();
+    pin.executable = "/usr/bin/printf".into();
+    pin.permissions_digest = Some([7; 32]);
+    crate::tools::EffectIntent {
+        host: None,
+        host_command: Some(pin),
+        target: crate::session::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::RunId::new(),
+        agent_run_id: crate::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: ToolCall::CommandUnguarded {
+            program: "printf".into(),
+            args: vec!["value %s".into(), "first".into()],
+            cwd: String::new(),
+            justification: "Inspect synthetic host data".into(),
+            prefix_rule: None,
+        },
+        limits: crate::tools::ToolLimits::default(),
+        use_count: 1,
+    }
+}
+
+#[test]
+fn remembered_host_prefix_revalidates_executable_bytes_before_saving() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&root.join("state")).unwrap();
+    let tools = state.path().join("tools.json");
+    std::fs::write(
+        &tools,
+        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let executable = root.join("inspect");
+    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut intent = host_intent();
+    let identity = crate::tools::workspace_identity(&workspace).unwrap();
+    intent.workspace_device = identity.device;
+    intent.workspace_inode = identity.inode;
+    let mut pin =
+        crate::tools::unguarded::pin("inspect", &workspace, root.to_str().unwrap()).unwrap();
+    pin.state_roots = [
+        state.path().to_str().unwrap().into(),
+        root.join("account").to_str().unwrap().into(),
+    ];
+    intent.host_command = Some(pin);
+    let ToolCall::CommandUnguarded {
+        program,
+        prefix_rule,
+        ..
+    } = &mut intent.call
+    else {
+        unreachable!()
+    };
+    *program = "inspect".into();
+    *prefix_rule = Some(vec![program.clone(), "value %s".into()]);
+    let digest = PermissionSettings::remember_host(&state, &intent, None).unwrap();
+    let file = state.path().join("permissions.json");
+    let before = std::fs::read(&file).unwrap();
+    let mut changed = std::fs::read(&executable).unwrap();
+    changed.extend_from_slice(b"changed");
+    std::fs::write(&executable, changed).unwrap();
+    let ToolCall::CommandUnguarded {
+        args, prefix_rule, ..
+    } = &mut intent.call
+    else {
+        unreachable!()
+    };
+    args[0] = "changed %s".into();
+    prefix_rule.as_mut().unwrap()[1].clone_from(&args[0]);
+    assert!(matches!(
+        PermissionSettings::remember_host(&state, &intent, Some(digest)),
+        Err(SettingsError::Invalid)
+    ));
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let reopened = PermissionSettings::load(&state, &workspace).unwrap();
+    assert_eq!(reopened.host_prefixes().len(), 1);
+    assert_eq!(reopened.digest(), Some(digest));
+}
+
+#[test]
+fn host_prefix_records_enforce_literal_scope_closed_policy_and_settings_bounds() {
+    let intent = host_intent();
+    let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
+    let parsed = config(json!({"hostPrefixes":[rule]}));
+    assert!(parsed.host_rule(&intent).is_some());
+    for change in [
+        "suffix",
+        "prefix",
+        "cwd",
+        "workspace",
+        "identity",
+        "digest",
+        "environment",
+        "state",
+        "shell",
+    ] {
+        let mut changed = intent.clone();
+        let ToolCall::CommandUnguarded { args, cwd, .. } = &mut changed.call else {
+            unreachable!()
+        };
+        match change {
+            "suffix" => args[1] = "second".into(),
+            "prefix" => args[0] = "different %s".into(),
+            "cwd" => *cwd = "other".into(),
+            "workspace" => changed.workspace_inode += 1,
+            "identity" => changed.host_command.as_mut().unwrap().inode += 1,
+            "digest" => changed.host_command.as_mut().unwrap().sha256 = "b".repeat(64),
+            "environment" => changed.host_command.as_mut().unwrap().environment_digest = [8; 32],
+            "state" => args[1] = "--output=/state/permissions.json".into(),
+            "shell" => args[1] = "$(printf data)".into(),
+            _ => unreachable!(),
+        }
+        let matched = parsed.host_rule(&changed);
+        assert_eq!(
+            matched.is_some_and(|rule| rule.matches(&changed)),
+            change == "suffix",
+            "{change}"
+        );
+    }
+    for name in crate::tools::unguarded::PRIVILEGE_TOOLS
+        .iter()
+        .chain(crate::tools::unguarded::WRAPPERS)
+        .chain(crate::tools::unguarded::INTERPRETERS)
+        .chain(["git", "gh", "rm"].iter())
+    {
+        for resolved in [false, true] {
+            let mut record = serde_json::to_value(&rule).unwrap();
+            if resolved {
+                record["pin"]["executable"] = json!(format!("/usr/bin/{name}"));
+            } else {
+                record["prefix"][0] = json!(format!("/usr/bin/{name}"));
+            }
+            assert!(
+                PermissionConfig::parse(
+                    &serde_json::to_vec(&json!({"permissions":{"hostPrefixes":[record]}})).unwrap()
+                )
+                .is_err(),
+                "{name} resolved={resolved}"
+            );
+        }
+    }
+    let mut record = serde_json::to_value(&rule).unwrap();
+    record["version"] = json!(crate::tools::unguarded::HOST_POLICY_VERSION + 1);
+    assert!(
+        PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions":{"hostPrefixes":[record]}})).unwrap()
+        )
+        .is_err()
+    );
+    let duplicate = json!({"permissions":{"hostPrefixes":[rule,rule]}});
+    assert!(PermissionConfig::parse(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+    let oversized =
+        json!({"permissions":{"hostPrefixes":[rule], "allow": vec!["Read"; MAX_RULES]}});
+    assert!(PermissionConfig::parse(&serde_json::to_vec(&oversized).unwrap()).is_err());
+    assert!(PermissionConfig::parse(&vec![b' '; MAX_CONFIG_BYTES + 1]).is_err());
+}
+
+#[test]
+fn host_prefix_scope_normalizes_lexical_paths_without_admitting_directory_aliases() {
+    let intent = host_intent();
+    let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
+    let identity = crate::session::WorkspaceIdentity {
+        device: intent.workspace_device,
+        inode: intent.workspace_inode,
+    };
+    let mut parsed = config(json!({"hostPrefixes": [rule]}));
+    parsed.scope_to(Path::new("//test-workspace/./"), identity);
+    assert!(parsed.host_rule(&intent).is_some());
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join("child")).unwrap();
+    let alias = root.join("alias");
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    assert!(crate::tools::workspace_identity(&workspace).is_ok());
+    assert!(crate::tools::workspace_identity(&alias).is_err());
+    assert!(crate::tools::workspace_identity(&workspace.join("child/..")).is_err());
+}
+
+#[test]
+fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
+    let intent = host_intent();
+    let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
+    let mut config: crate::tools::config::Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    assert!(rule.admitted_by(&config));
+    for name in ["python3.14", "git", "gh"] {
+        let program: crate::tools::config::Program = serde_json::from_value(json!({"name":name,"executable":format!("/opt/bin/{name}"),"sha256":"a".repeat(64),"interpreter":name == "python3.14","inputs":[]})).unwrap();
+        config.commands = vec![program.clone()];
+        assert!(!rule.admitted_by(&config), "{name}");
+        config.commands.clear();
+        config.git = Some(program);
+        assert!(!rule.admitted_by(&config), "typed pin {name}");
+        config.git = None;
     }
 }
 
