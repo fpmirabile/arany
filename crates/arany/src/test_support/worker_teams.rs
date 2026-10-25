@@ -612,7 +612,11 @@ impl TeamProvider {
             return tool_outcome(if self.case == "background" {
                 ToolCall::Read {
                     path: "notes/large.txt".into(),
-                    offset: None,
+                    offset: Some(
+                        (prior + 1)
+                            .try_into()
+                            .expect("bounded background read offset"),
+                    ),
                     limit: Some(crate::tools::types::MAX_READ_PAGE_LINES),
                 }
             } else {
