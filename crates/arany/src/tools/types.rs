@@ -404,6 +404,10 @@ pub enum ToolCall {
         #[serde(default = "default_pr_limit", deserialize_with = "pr_limit_or_default")]
         limit: u8,
     },
+    GhPrView {
+        repository: String,
+        number: u32,
+    },
     // Null or omitted path and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
@@ -517,6 +521,10 @@ pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolE
 }
 
 impl ToolCall {
+    pub(crate) const fn is_host_pr_read(&self) -> bool {
+        matches!(self, Self::GhPrList { .. } | Self::GhPrView { .. })
+    }
+
     pub(crate) fn is_process(&self) -> bool {
         self.facts().spawns_process
     }
@@ -583,7 +591,8 @@ impl ToolCall {
             | Self::GitSwitch { .. }
             | Self::GitPush { .. }
             | Self::GhPrCreate { .. }
-            | Self::GhPrList { .. } => None,
+            | Self::GhPrList { .. }
+            | Self::GhPrView { .. } => None,
         }
     }
 
@@ -757,7 +766,7 @@ pub struct HostIntent {
 impl EffectIntent {
     pub fn effective_timeout_ms(&self) -> u32 {
         let cap = match self.call {
-            ToolCall::GhPrList { .. } => GIT_TIMEOUT_MS,
+            ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => GIT_TIMEOUT_MS,
             _ if self.call.is_host() => 600_000,
             _ if self.call.is_git() => GIT_TIMEOUT_MS,
             ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
@@ -1418,13 +1427,9 @@ impl ToolObservation {
                             receipt.pid > 0
                                 && (self.disposition == ToolDisposition::Uncertain
                                     || self.disposition == ToolDisposition::Failed
-                                        && matches!(self.intent.call, ToolCall::GhPrList { .. })
+                                        && self.intent.call.is_host_pr_read()
                                         && receipt.descendants_confirmed_stopped
-                                        && (self.output == super::git::host::PR_LIST_CAPTURE_LIMIT
-                                            || self.output == super::git::host::PR_LIST_FAILED
-                                                && receipt.exit_code != Some(0)
-                                            || self.output == super::git::host::PR_LIST_INVALID
-                                                && receipt.exit_code == Some(0))
+                                        && valid_host_pr_read_failure(self, receipt)
                                     || self.disposition == ToolDisposition::Failed
                                         && matches!(self.intent.call, ToolCall::GitPush { .. })
                                         && receipt.exit_code == Some(1)
@@ -1433,18 +1438,31 @@ impl ToolObservation {
                                     || self.disposition == ToolDisposition::Succeeded
                                         && receipt.exit_code == Some(0)
                                         && receipt.descendants_confirmed_stopped
-                                        && (!matches!(self.intent.call, ToolCall::GhPrList { .. })
-                                            || match self.intent.call {
-                                                ToolCall::GhPrList { limit, .. } => {
-                                                    super::git::host::valid_pr_list_output(
-                                                        &self.output,
-                                                        limit,
-                                                    )
-                                                }
-                                                _ => false,
-                                            }))
+                                        && match self.intent.call {
+                                            ToolCall::GhPrList { limit, .. } => {
+                                                super::git::host::valid_pr_list_output(
+                                                    &self.output,
+                                                    limit,
+                                                )
+                                            }
+                                            ToolCall::GhPrView {
+                                                ref repository,
+                                                number,
+                                            } => super::git::host::valid_pr_view_output(
+                                                &self.output,
+                                                super::git::host::PrViewIdentity {
+                                                    repository: repository.clone(),
+                                                    number,
+                                                },
+                                            ),
+                                            _ => true,
+                                        })
                         }
-                        None => self.disposition != ToolDisposition::Succeeded,
+                        None => {
+                            self.disposition != ToolDisposition::Succeeded
+                                && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
+                                    && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                        }
                         _ => false,
                     })
             && (!self.intent.call.is_unguarded()
@@ -1461,6 +1479,26 @@ impl ToolObservation {
                         && self.disposition == ToolDisposition::Succeeded
                 }
             }
+    }
+}
+
+fn valid_host_pr_read_failure(observation: &ToolObservation, receipt: &UnguardedReceipt) -> bool {
+    match &observation.intent.call {
+        ToolCall::GhPrList { .. } => {
+            observation.output == super::git::host::PR_LIST_CAPTURE_LIMIT
+                || observation.output == super::git::host::PR_LIST_FAILED
+                    && receipt.exit_code != Some(0)
+                || observation.output == super::git::host::PR_LIST_INVALID
+                    && receipt.exit_code == Some(0)
+        }
+        ToolCall::GhPrView { .. } => {
+            observation.output == super::git::host::PR_VIEW_CAPTURE_LIMIT
+                || observation.output == super::git::host::PR_VIEW_FAILED
+                || (observation.output == super::git::host::PR_VIEW_INVALID
+                    || observation.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                    && receipt.exit_code == Some(0)
+        }
+        _ => false,
     }
 }
 
