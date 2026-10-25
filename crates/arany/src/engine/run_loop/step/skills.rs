@@ -3,8 +3,11 @@ use super::{Grant, RunLoop};
 use crate::engine::EngineError;
 use crate::provider::ProviderRequest;
 use crate::session::RunFailure;
+use crate::tools::definitions::MAX_AGENT_CATALOG_BYTES;
 use crate::tools::types::MAX_TOOL_RESULT_BYTES;
 use crate::tools::{ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
+
+const MAX_NORMALIZED_DEFINITION_BYTES: usize = 1024 * 1024;
 
 #[must_use]
 pub(in crate::engine::run_loop) enum DefinitionInitialization {
@@ -47,7 +50,7 @@ impl RunLoop<'_> {
                 RunProgress::Stopped(cause) => return Ok(RunProgress::Stopped(cause)),
             };
             normalized_bytes += output.len();
-            if normalized_bytes > 1024 * 1024 {
+            if normalized_bytes > MAX_NORMALIZED_DEFINITION_BYTES {
                 return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
             }
             outputs.push(output);
@@ -108,7 +111,7 @@ impl RunLoop<'_> {
         if serde_json::to_vec(&catalog["agents"])
             .map_err(|_| EngineError::InvalidRequest)?
             .len()
-            > 8 * 1024
+            > MAX_AGENT_CATALOG_BYTES
             || tools.catalog().len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()
         {
