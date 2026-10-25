@@ -17,6 +17,7 @@ mod glob;
 mod grant;
 mod guard;
 mod mcp;
+pub(crate) use mcp::FRAME_BYTES;
 mod output;
 pub mod permissions;
 mod process;
