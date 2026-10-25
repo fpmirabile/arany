@@ -760,6 +760,7 @@ impl ProviderCallRecord {
                     ) | (
                         ProviderCallDisposition::InvalidResponse,
                         ProviderFailureReason::StreamProtocol
+                            | ProviderFailureReason::OutcomeDecode
                             | ProviderFailureReason::ResponseContract
                             | ProviderFailureReason::OutcomeContract
                             | ProviderFailureReason::LocalOutputLimit

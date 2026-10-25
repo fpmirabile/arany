@@ -1,5 +1,5 @@
 use super::children::ChildWork;
-use super::stop::{RunProgress, RunRefusal, SizingRefusal, StepEnd, StopCause};
+use super::stop::{RunProgress, RunRefusal, StepEnd, StopCause};
 use super::{ActivePause, ActiveSegment, RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::hints::HintPublisher;
 use crate::engine::ledger::{Action, ActiveDeadlineCause, Admission, duration_ms};
@@ -8,37 +8,39 @@ use crate::provider::{ProviderRequest, ProviderTurn};
 use crate::session::Event;
 use crate::store::AdmissionKind;
 use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
-use crate::tools::types::{CommandChangeset, CommandResult, MAX_TOOL_RESULT_BYTES};
+use crate::tools::types::{CommandResult, MAX_TOOL_RESULT_BYTES};
 use crate::tools::{
     ActiveActionRequest, ActiveToolWindow, ApprovalMode, ApprovalReply, ApprovalWithdrawal,
     CacheUpdate, EffectIntent, ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation,
-    ToolRequest, ToolResourceClass, ToolRuntime, ToolStep, UnguardedPrompt,
+    ToolRequest, ToolResourceClass, ToolRuntime, ToolStep,
 };
 use std::time::Duration;
 use tokio::time::Instant;
 
 const INVOKED_SKILL_ENVELOPE_BYTES: usize = 1024;
-const EDITOR_RUNTIME_DIVISOR: u64 = 4;
-// Cache restoration and publication need additional time within the delegation allowance.
-const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
-
 mod ask;
 mod checkpoint;
 mod dispatch;
 pub(super) mod hooks;
+mod intent;
 mod permission;
 mod review;
 
-use ask::{AskOptions, AskSite, Resolution, Resolver};
+use ask::{AskOptions, AskSite, Resolution, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
-    UnguardedRefusal, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
 
 use hooks::{HookFold, HookStop};
+
+#[cfg(test)]
+use super::stop::SizingRefusal;
+#[cfg(test)]
+use intent::sizing_deadline_refusal;
 
 pub(super) enum Grant<'s> {
     Primary {
@@ -194,13 +196,6 @@ struct Answer {
 struct ActiveTime {
     segment: Option<ActiveSegment>,
     exhausted: bool,
-}
-
-fn sizing_deadline_refusal(cause: Option<ActiveDeadlineCause>) -> SizingRefusal {
-    match cause {
-        Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
-        Some(ActiveDeadlineCause::Delegation) | None => SizingRefusal::DelegationDeadline,
-    }
 }
 
 fn timeout_limit_cause(cause: Option<ActiveDeadlineCause>) -> Option<crate::tools::LimitCause> {
@@ -359,213 +354,6 @@ impl RunLoop<'_> {
         } else {
             cause
         }
-    }
-
-    async fn prepare_step_intent(
-        &self,
-        grant: &Grant<'_>,
-        runtime: &ToolRuntime,
-        step: &ToolStep,
-        call: ToolCall,
-        post_call: &ToolCall,
-    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
-        let sized = self
-            .sized_intent(grant, runtime, step, call.clone(), post_call)
-            .await?;
-        match sized {
-            Ok(intent) => Ok(Ok(intent)),
-            Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(
-                match self
-                    .record_delegation_deadline(grant, runtime, call)
-                    .await?
-                {
-                    Ok(()) => refusal.into(),
-                    Err(admission) => admission.into(),
-                },
-            )),
-            Err(refusal @ SizingRefusal::ActiveTime) => {
-                self.active_time_floor
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                Ok(Err(refusal.into()))
-            }
-            Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
-        }
-    }
-
-    async fn sized_intent(
-        &self,
-        grant: &Grant<'_>,
-        runtime: &ToolRuntime,
-        step: &ToolStep,
-        call: ToolCall,
-        post_call: &ToolCall,
-    ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
-        let intent = match grant {
-            Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
-            Grant::Researcher {
-                child,
-                deadline,
-                active_deadline,
-            } => {
-                let deadline_refusal = sizing_deadline_refusal(
-                    active_deadline
-                        .as_ref()
-                        .filter(|deadline| deadline.reached())
-                        .map(|deadline| deadline.cause),
-                );
-                let deadline = grant.deadline().unwrap_or(*deadline);
-                let Some(mut intent) = self.researcher_intent(runtime, child, call, deadline)
-                else {
-                    return Ok(Err(deadline_refusal));
-                };
-                if child.editor {
-                    self.shape_worker_intent(&mut intent, child.agent_run_id)?;
-                    self.size_editor_runtime(runtime, &mut intent, deadline);
-                    if intent.limits.runtime_ms < 1_000 {
-                        return Ok(Err(deadline_refusal));
-                    }
-                }
-                Some(intent)
-            }
-        };
-        let Some(mut intent) = intent else {
-            return Ok(Err(SizingRefusal::ActiveTime));
-        };
-        let integration = (matches!(intent.call, ToolCall::Command { .. })
-            && matches!(intent.target, crate::worker::EffectTarget::Workspace))
-        .then(|| ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::CommandReceipt {
-                source_intent_digest: intent.digest(),
-                changeset: CommandChangeset { files: Vec::new() },
-            },
-        });
-        let reserved: Vec<_> = std::iter::once(&intent.call).chain(&integration).collect();
-        let overhead = grant.context()?.reserved_len(step, &reserved);
-        let reserve = ToolRuntime::step_context_reserve(
-            integration.is_some(),
-            self.feedback_reserve(runtime, post_call),
-        );
-        let Some(capacity) = runtime.result_capacity(overhead, reserve) else {
-            return Ok(Err(SizingRefusal::ContextFull));
-        };
-        intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
-            128
-        } else if matches!(
-            intent.call,
-            ToolCall::Read { .. }
-                | ToolCall::List { .. }
-                | ToolCall::Search { .. }
-                | ToolCall::Glob { .. }
-                | ToolCall::Skill { .. }
-        ) || intent.call.is_git() && !intent.call.mutates()
-        {
-            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
-        } else if capacity >= MAX_TOOL_RESULT_BYTES {
-            MAX_TOOL_RESULT_BYTES as u32
-        } else {
-            return Ok(Err(SizingRefusal::ContextFull));
-        };
-        Ok(Ok(intent))
-    }
-
-    fn size_editor_runtime(
-        &self,
-        runtime: &ToolRuntime,
-        intent: &mut EffectIntent,
-        deadline: Instant,
-    ) {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .saturating_sub(
-                runtime.intent_reservation_overhead(intent)
-                    + TOOL_CLEANUP_OVERHEAD
-                    + STORE_ACTION_OVERHEAD,
-            );
-        let remaining = remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
-        let runtime_divisor = if intent.limits.cache_bytes > 0 {
-            EDITOR_RUNTIME_WITH_CACHE_DIVISOR
-        } else {
-            EDITOR_RUNTIME_DIVISOR
-        };
-        intent.limits.runtime_ms = intent
-            .limits
-            .runtime_ms
-            .min(u32::try_from(duration_ms(remaining) / runtime_divisor).unwrap_or(u32::MAX));
-        intent.limits.cache_transfer_ms = if intent.limits.cache_bytes > 0 {
-            intent.limits.runtime_ms
-        } else {
-            0
-        };
-    }
-
-    async fn record_delegation_deadline(
-        &self,
-        grant: &Grant<'_>,
-        runtime: &ToolRuntime,
-        call: ToolCall,
-    ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
-        let Grant::Researcher { child, .. } = grant else {
-            return Err(EngineError::CoordinatorFailed);
-        };
-        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        if child.editor {
-            self.shape_worker_intent(&mut intent, child.agent_run_id)?;
-        }
-        let permission = self
-            .permission(grant, runtime, &intent.call)
-            .narrow_terminal(self.terminal_mode(), &intent.call);
-        if let Err(refusal) = self
-            .admit_tool(grant, runtime, &intent, permission, 0, false)
-            .await?
-        {
-            return Ok(Err(refusal));
-        }
-        self.append(Event::ToolStarted {
-            run_id: self.run_id,
-            agent_run_id: child.agent_run_id,
-            intent: intent.clone(),
-            active_ceiling_ms: self.ledger().active_ceiling(0)?,
-        })
-        .await?;
-        if child.editor {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&child.agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
-        }
-        if let Some(mode) = effective_permission_mode(runtime.permissions(), grant) {
-            self.append(Event::ToolPermissionDecided {
-                run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
-                verdict: PermissionVerdict {
-                    host: None,
-                    intent_digest: intent.digest(),
-                    mode: Some(mode),
-                    decision: permission.decision,
-                    basis: permission.basis,
-                    source: if permission.decision == Decision::Ask {
-                        PermissionSource::UnavailableApproval
-                    } else {
-                        permission.basis
-                    },
-                    approved: false,
-                    hook_restriction: None,
-                    hooks: 0,
-                    narrowed: false,
-                },
-            })
-            .await?;
-        }
-        self.append(Event::ToolFinished {
-            run_id: self.run_id,
-            agent_run_id: child.agent_run_id,
-            observation: not_dispatched(intent, &NotDispatched::DelegationDeadline),
-            checkpoint: None,
-        })
-        .await?;
-        Ok(Ok(()))
     }
 
     pub(super) async fn primary_intent(
@@ -1150,51 +938,6 @@ impl RunLoop<'_> {
             .map(Admission::Reserved)
     }
 
-    async fn approval_paused(&self) {
-        match self.controls.steering.as_ref() {
-            Some(steering) => steering.paused().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    async fn human_reply(
-        &self,
-        approvals: &crate::tools::ToolApprovals,
-        intent: &EffectIntent,
-        prompt: Option<UnguardedPrompt>,
-        allow_auto_edits: bool,
-        remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
-    ) -> ApprovalReply {
-        let mut cancellation = self.controls.cancellation.clone();
-        let reply = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => ApprovalReply::Unavailable,
-            () = self.approval_paused() => ApprovalReply::Unavailable,
-            reply = async {
-                match prompt.clone() {
-                    Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => approvals.ask_local(intent, allow_auto_edits, remember_prefix).await,
-                }
-            } => reply,
-        };
-        let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
-        match reply {
-            ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
-            ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
-                if intent.call.is_unguarded() || intent.call.is_host() {
-                    ApprovalReply::Unavailable
-                } else {
-                    ApprovalReply::AllowOnce
-                }
-            }
-            reply @ (ApprovalReply::Deny
-            | ApprovalReply::Unavailable
-            | ApprovalReply::AllowOnce
-            | ApprovalReply::AllowForSession
-            | ApprovalReply::AllowPrefixInFolder) => reply,
-        }
-    }
-
     async fn dispatch_primary(
         &self,
         runtime: &ToolRuntime,
@@ -1411,76 +1154,6 @@ impl RunLoop<'_> {
         if let Some(hints) = self.hints {
             hints.tool_queue().send_replace(None);
         }
-    }
-
-    async fn resolve_ask(
-        &self,
-        intent: &EffectIntent,
-        chain: &[Resolver<'_>],
-        site: AskSite,
-    ) -> Result<Admission<Resolution>, EngineError> {
-        let initial_mode = self.terminal_mode();
-        let mut resolution = Resolution {
-            approved: false,
-            source: PermissionSource::UnavailableApproval,
-            active_time_exhausted: false,
-            save: None,
-            withdrawal: None,
-        };
-        for resolver in chain {
-            match resolver {
-                Resolver::AiReview { objective } => {
-                    let reviewed = self
-                        .resolve_review(objective, intent, &site, initial_mode)
-                        .await?;
-                    resolution.approved = reviewed.approved;
-                    resolution.source = reviewed.source;
-                    resolution.active_time_exhausted = reviewed.active_time_exhausted;
-                    match reviewed.progress {
-                        ReviewProgress::Continue => {}
-                        ReviewProgress::Finish => break,
-                        ReviewProgress::Exhausted => return Ok(Admission::Exhausted),
-                    }
-                }
-                Resolver::Human => match &site {
-                    AskSite::Delegated { active_deadline } => {
-                        let Some(approvals) = self.controls.approvals else {
-                            return Ok(Admission::Reserved(resolution));
-                        };
-                        let (reply, withdrawal) = self
-                            .delegated_human_reply(intent, active_deadline.as_ref(), approvals)
-                            .await?;
-                        resolution.withdrawal = withdrawal;
-                        resolution.approved = matches!(
-                            reply,
-                            ApprovalReply::AllowOnce
-                                | ApprovalReply::AllowForSession
-                                | ApprovalReply::AllowPrefixInFolder
-                        ) && !self.pause_requested()
-                            && !self.controls.cancellation.is_cancelled();
-                        resolution.source = if reply == ApprovalReply::Unavailable {
-                            PermissionSource::UnavailableApproval
-                        } else {
-                            PermissionSource::Human
-                        };
-                        resolution.active_time_exhausted =
-                            active_deadline.as_ref().is_some_and(|deadline| {
-                                deadline.reached()
-                                    && deadline.cause
-                                        == crate::engine::ledger::ActiveDeadlineCause::Goal
-                            });
-                    }
-                    AskSite::Primary(options) => {
-                        self.resolve_primary_human(intent, options, &mut resolution)
-                            .await?;
-                    }
-                },
-            }
-            if resolution.approved {
-                break;
-            }
-        }
-        Ok(Admission::Reserved(resolution))
     }
 
     async fn resolve_primary_human(
@@ -1742,41 +1415,6 @@ pub(super) enum HookDenial {
     Requested,
     Narrowed(String),
     Denied(String),
-}
-
-async fn unguarded_gate(
-    runtime: &ToolRuntime,
-    intent: &EffectIntent,
-) -> Result<UnguardedPrompt, UnguardedRefusal> {
-    let ToolCall::CommandUnguarded { args, .. } = &intent.call else {
-        return Err(UnguardedRefusal::UnavailableProgram);
-    };
-    if crate::tools::unguarded::prohibited_intent(intent) {
-        return Err(UnguardedRefusal::PrivilegeTool);
-    }
-    if !runtime.host_settings_admitted {
-        return Err(UnguardedRefusal::SettingsChanged);
-    }
-    let pin = intent
-        .host_command
-        .as_ref()
-        .ok_or(UnguardedRefusal::UnavailableProgram)?;
-    if !runtime.host_settings_current(pin) {
-        return Err(UnguardedRefusal::SettingsChanged);
-    }
-    if !runtime.host_interpreter_admitted(intent).await {
-        return Err(UnguardedRefusal::InterpreterNotAdmitted);
-    }
-    if crate::tools::types::uses_guard_alias(args) {
-        return Err(UnguardedRefusal::GuardAlias);
-    }
-    Ok(UnguardedPrompt {
-        executable: pin.executable.clone(),
-        attribution: None,
-        remember: true,
-        sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
-        inactive_rules: runtime.has_inactive_host_rules(),
-    })
 }
 
 #[must_use]
@@ -2339,15 +1977,12 @@ mod tests {
     #[test]
     fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
         let step = include_str!("step.rs");
+        let ask = include_str!("step/ask.rs");
         let tools = include_str!("../../tools.rs");
         let guard = include_str!("../../tools/guard.rs");
         for (source, start, end) in [
-            (
-                step,
-                "    async fn human_reply(",
-                "    async fn dispatch_primary(",
-            ),
-            (step, "    async fn resolve_ask(", "\n}\n"),
+            (ask, "    pub(super) async fn human_reply(", "\n    }\n}"),
+            (ask, "    async fn resolve_ask(", "\n    }\n}"),
             (
                 step,
                 "    async fn dispatch_primary(",

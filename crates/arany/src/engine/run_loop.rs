@@ -1995,6 +1995,19 @@ mod decision_tests {
         );
     }
 
+    #[test]
+    fn invalid_outcome_failure_reason_is_recorded() {
+        let result = CallResult::Failed(CallFailure::InvalidResponse(Some(
+            ProviderFailureReason::OutcomeDecode,
+        )));
+        let record = call_record(AgentPhase::RootPlan, &result, false, None, None, None);
+        assert_eq!(record.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(
+            record.failure_reason,
+            Some(ProviderFailureReason::OutcomeDecode)
+        );
+    }
+
     fn tools(count: usize) -> CallResult {
         response(ProviderOutcome::Tools(
             (0..count)
