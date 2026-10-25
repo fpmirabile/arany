@@ -10,6 +10,111 @@ fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
 }
 
 #[test]
+fn image_chip_rectangles_match_only_visible_full_chips() {
+    let model = PresentationModel {
+        status_line: "ready".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+        agent_switch: false,
+    };
+    let mut composer = Composer::default();
+    composer.insert_paste("task").unwrap();
+    for _ in 0..2 {
+        composer
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+    }
+    composer.apply(TerminalInput::Character('!'));
+    for width in [40, 80, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        let mut chips = Vec::new();
+        terminal
+            .draw(|frame| {
+                chips = draw_frame_with_history_and_chips(
+                    frame,
+                    &model,
+                    &composer,
+                    None,
+                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                    &[],
+                    None,
+                )
+                .image_chips;
+            })
+            .unwrap();
+        assert_eq!(chips.len(), 2, "{width} columns");
+        for (index, area) in chips {
+            assert!(area.width > 0 && area.height == 1);
+            let rendered = (area.x..area.right())
+                .map(|column| terminal.backend().buffer()[(column, area.y)].symbol())
+                .collect::<String>();
+            assert_eq!(rendered, format!("[Image #{}]", index + 1));
+        }
+    }
+
+    let mut narrow = Terminal::new(TestBackend::new(16, 8)).unwrap();
+    let mut chips = Vec::new();
+    narrow
+        .draw(|frame| {
+            chips = draw_frame_with_history_and_chips(
+                frame,
+                &model,
+                &composer,
+                None,
+                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                &[],
+                None,
+            )
+            .image_chips;
+        })
+        .unwrap();
+    assert!(chips.is_empty());
+}
+
+#[test]
+fn image_preview_cells_are_hidden_and_skipped_for_terminal_graphics() {
+    let history_text = |buffer: &ratatui::buffer::Buffer| {
+        (3..10)
+            .map(|column| buffer[(column, 4)].symbol())
+            .collect::<String>()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(Paragraph::new("History text"), Rect::new(3, 4, 8, 1));
+        })
+        .unwrap();
+    let mut hidden = false;
+    terminal
+        .draw(|frame| {
+            frame.render_widget(Paragraph::new("History text"), Rect::new(3, 4, 8, 1));
+            draw_image_preview(frame, Rect::new(2, 2, 10, 6), "Image 1: PNG");
+            hidden = frame.buffer_mut()[(3, 4)]
+                .modifier
+                .contains(Modifier::HIDDEN);
+            assert_eq!(frame.buffer_mut()[(3, 4)].diff_option, CellDiffOption::Skip);
+        })
+        .unwrap();
+    assert!(hidden);
+    assert_eq!(history_text(terminal.backend().buffer()), "History");
+
+    let graphics_cell = ratatui::buffer::Cell::new("█");
+    terminal
+        .backend_mut()
+        .draw([(3, 4, &graphics_cell), (3, 5, &graphics_cell)].into_iter())
+        .unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(Paragraph::new("History text"), Rect::new(3, 4, 8, 1));
+        })
+        .unwrap();
+    assert_eq!(history_text(terminal.backend().buffer()), "History");
+    assert_eq!(terminal.backend().buffer()[(3, 5)].symbol(), " ");
+}
+
+#[test]
 fn recognized_slash_tokens_are_accented_and_bold_without_changing_text() {
     let model = PresentationModel {
         status_line: "ready".into(),
