@@ -45,6 +45,8 @@ const PR_VIEW_REVIEW_LIMIT: usize = 50;
 const PR_VIEW_CHECK_LIMIT: usize = 100;
 const PR_VIEW_TEXT_BYTES: usize = 8 * 1024;
 const PR_VIEW_QUERY_BYTES: usize = 8 * 1024;
+const MAX_PR_NUMBER: u32 = i32::MAX as u32;
+const MAX_PR_REPOSITORY_BYTES: usize = 256;
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn valid(call: &ToolCall) -> bool {
@@ -75,7 +77,7 @@ pub(crate) fn valid(call: &ToolCall) -> bool {
             limit,
             ..
         } => {
-            repository.len() <= 256
+            repository.len() <= MAX_PR_REPOSITORY_BYTES
                 && repository_parts(repository).is_some()
                 && base.as_deref().is_none_or(valid_branch)
                 && head.as_deref().is_none_or(valid_branch)
@@ -84,9 +86,9 @@ pub(crate) fn valid(call: &ToolCall) -> bool {
         ToolCall::GhPrView {
             repository, number, ..
         } => {
-            repository.len() <= 256
+            repository.len() <= MAX_PR_REPOSITORY_BYTES
                 && repository_parts(repository).is_some()
-                && (1..=i32::MAX as u32).contains(number)
+                && (1..=MAX_PR_NUMBER).contains(number)
         }
         _ => false,
     }
@@ -211,7 +213,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "gh_pr_list" => vec![
             (
                 "repository",
-                json!({"type":"string", "description":"Exact host/owner/repository, at most 256 bytes; host must match admitted gh authentication."}),
+                json!({"type":"string", "description":format!("Exact host/owner/repository, at most {MAX_PR_REPOSITORY_BYTES} bytes; host must match admitted gh authentication.")}),
             ),
             (
                 "state",
@@ -233,11 +235,11 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "gh_pr_view" => vec![
             (
                 "repository",
-                json!({"type":"string", "description":"Exact host/owner/repository; host must match admitted gh authentication."}),
+                json!({"type":"string", "description":format!("Exact host/owner/repository, at most {MAX_PR_REPOSITORY_BYTES} bytes; host must match admitted gh authentication.")}),
             ),
             (
                 "number",
-                json!({"type":"integer", "minimum":1, "maximum":2147483647}),
+                json!({"type":"integer", "minimum":1, "maximum":MAX_PR_NUMBER}),
             ),
         ],
         _ => return None,
@@ -840,8 +842,8 @@ async fn prepare<R: AsRef<Path> + Send + Sync + 'static>(
     workspace: &Path,
     intent: &EffectIntent,
     root: Arc<R>,
-) -> Result<(Command, String), ToolError> {
-    let (mut command, digest) = {
+) -> Result<(Command, String, Option<PrViewEnvironment>), ToolError> {
+    let (mut command, digest, environment) = {
         let config = config.clone();
         let authentication = authentication.clone();
         let workspace = workspace.to_owned();
@@ -869,7 +871,7 @@ async fn prepare<R: AsRef<Path> + Send + Sync + 'static>(
             credential_config(git, &authentication.git_config, (*root).as_ref()).await?,
         );
     }
-    Ok((command, digest))
+    Ok((command, digest, environment))
 }
 
 fn prepare_command(
@@ -878,7 +880,7 @@ fn prepare_command(
     workspace: &Path,
     intent: &EffectIntent,
     root: &Path,
-) -> Result<(Command, String), ToolError> {
+) -> Result<(Command, String, Option<PrViewEnvironment>), ToolError> {
     let git = config.git.as_ref().ok_or(ToolError::Configuration)?;
     super::verify_host_executable(git)?;
     if !authentication.allows(&intent.call) {
@@ -896,50 +898,8 @@ fn prepare_command(
         .map_err(|_| ToolError::Operation)?;
     authentication.install_gh(root)?;
     let (program, args, auth) = match &intent.call {
-        ToolCall::GitPush { remote, .. } => {
-            let (_, ssh) = destination(remote).ok_or(ToolError::Configuration)?;
-            let mut args = vec![
-                "--no-pager".into(),
-                "-c".into(),
-                "core.hooksPath=/dev/null".into(),
-                "-c".into(),
-                "http.followRedirects=false".into(),
-                "-c".into(),
-                "push.gpgSign=false".into(),
-            ];
-            let auth = if ssh {
-                let socket = authentication
-                    .ssh_agent
-                    .clone()
-                    .ok_or(ToolError::Configuration)?;
-                use std::os::unix::fs::{FileTypeExt, MetadataExt};
-                if !Path::new(&socket).is_absolute()
-                    || !std::fs::symlink_metadata(&socket).is_ok_and(|m| {
-                        m.file_type().is_socket() && m.uid() == rustix::process::geteuid().as_raw()
-                    })
-                {
-                    return Err(ToolError::Configuration);
-                }
-                args.extend(["-c".into(), "core.sshCommand=/usr/bin/ssh -F /dev/null -o BatchMode=yes -o IdentityFile=none -o IdentitiesOnly=no -o StrictHostKeyChecking=yes -o ClearAllForwardings=yes".into()]);
-                Some(socket)
-            } else {
-                None
-            };
-            args.extend([
-                "push".into(),
-                "--porcelain".into(),
-                "--no-verify".into(),
-                "--no-follow-tags".into(),
-                "--recurse-submodules=no".into(),
-                "--".into(),
-                remote.clone(),
-                intent
-                    .host
-                    .as_ref()
-                    .ok_or(ToolError::Configuration)?
-                    .refspec
-                    .clone(),
-            ]);
+        ToolCall::GitPush { .. } => {
+            let (args, auth) = prepare_push_args(authentication, intent)?;
             (git, args, auth)
         }
         ToolCall::GhPrCreate { .. } | ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
@@ -956,12 +916,92 @@ fn prepare_command(
     } else {
         PathBuf::from(&program.executable)
     };
+    let mut command = host_command(&executable, authentication, root, &path, &view);
+    command.args(args);
+    if let Some(socket) = auth {
+        command.env("SSH_AUTH_SOCK", socket);
+    }
+    let environment = match &intent.call {
+        ToolCall::GhPrView { repository, number } => Some(prepare_graphql_command(
+            authentication,
+            root,
+            &path,
+            &view,
+            PrViewIdentity {
+                repository: repository.clone(),
+                number: *number,
+            },
+        )?),
+        _ => None,
+    };
+    Ok((command, program.sha256.clone(), environment))
+}
+
+fn prepare_push_args(
+    authentication: &Authentication,
+    intent: &EffectIntent,
+) -> Result<(Vec<String>, Option<std::ffi::OsString>), ToolError> {
+    let ToolCall::GitPush { remote, .. } = &intent.call else {
+        return Err(ToolError::Configuration);
+    };
+    let (_, ssh) = destination(remote).ok_or(ToolError::Configuration)?;
+    let mut args = vec![
+        "--no-pager".into(),
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        "-c".into(),
+        "http.followRedirects=false".into(),
+        "-c".into(),
+        "push.gpgSign=false".into(),
+    ];
+    let auth = if ssh {
+        let socket = authentication
+            .ssh_agent
+            .clone()
+            .ok_or(ToolError::Configuration)?;
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if !Path::new(&socket).is_absolute()
+            || !std::fs::symlink_metadata(&socket).is_ok_and(|m| {
+                m.file_type().is_socket() && m.uid() == rustix::process::geteuid().as_raw()
+            })
+        {
+            return Err(ToolError::Configuration);
+        }
+        args.extend(["-c".into(), "core.sshCommand=/usr/bin/ssh -F /dev/null -o BatchMode=yes -o IdentityFile=none -o IdentitiesOnly=no -o StrictHostKeyChecking=yes -o ClearAllForwardings=yes".into()]);
+        Some(socket)
+    } else {
+        None
+    };
+    args.extend([
+        "push".into(),
+        "--porcelain".into(),
+        "--no-verify".into(),
+        "--no-follow-tags".into(),
+        "--recurse-submodules=no".into(),
+        "--".into(),
+        remote.clone(),
+        intent
+            .host
+            .as_ref()
+            .ok_or(ToolError::Configuration)?
+            .refspec
+            .clone(),
+    ]);
+    Ok((args, auth))
+}
+
+fn host_command(
+    executable: &Path,
+    authentication: &Authentication,
+    root: &Path,
+    path: &str,
+    view: &Path,
+) -> Command {
     let mut command = Command::new(executable);
     command
-        .args(args)
         .current_dir(root)
         .env_clear()
-        .env("PATH", format!("{}:{path}", bin.display()))
+        .env("PATH", format!("{}:{path}", root.join("bin").display()))
         .env("HOME", &authentication.home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
@@ -988,10 +1028,7 @@ fn prepare_command(
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    if let Some(socket) = auth {
-        command.env("SSH_AUTH_SOCK", socket);
-    }
-    Ok((command, program.sha256.clone()))
+    command
 }
 
 fn prepare_gh_command<'a>(
@@ -1102,71 +1139,46 @@ fn valid_graphql_delimiters(query: &str) -> bool {
 }
 
 fn prepare_graphql_command(
-    config: &Config,
     authentication: &Authentication,
     root: &Path,
-    repository: &str,
-    number: u32,
-) -> Result<(Command, String, Vec<u8>), ToolError> {
-    let (host, owner, name) = repository_parts(repository).ok_or(ToolError::Configuration)?;
-    let gh = config
-        .commands
-        .iter()
-        .find(|program| program.name == "gh" && !program.interpreter && program.inputs.is_empty())
-        .ok_or(ToolError::Configuration)?;
+    path: &str,
+    view: &Path,
+    identity: PrViewIdentity,
+) -> Result<PrViewEnvironment, ToolError> {
+    let (host, owner, name) =
+        repository_parts(&identity.repository).ok_or(ToolError::Configuration)?;
     let query = pr_view_query();
     if !valid_graphql_delimiters(&query) {
         return Err(ToolError::Configuration);
     }
     let input = serde_json::to_vec(&json!({
         "query": query,
-        "variables": {"owner": owner, "name": name, "number": number},
+        "variables": {"owner": owner, "name": name, "number": identity.number},
     }))
     .map_err(|_| ToolError::Configuration)?;
     if input.len() > PR_VIEW_QUERY_BYTES {
         return Err(ToolError::Limit);
     }
-    let path = helper_path(&["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])?;
-    let args = [
-        "api",
-        "graphql",
-        "--hostname",
-        host,
-        "--method",
-        "POST",
-        "--input",
-        "-",
-    ];
-    let mut command = Command::new(root.join("gh-executable"));
+    let mut command = host_command(
+        &root.join("gh-executable"),
+        authentication,
+        root,
+        path,
+        view,
+    );
     command
-        .args(args)
-        .current_dir(root)
-        .env_clear()
-        .env("PATH", format!("{}:{path}", root.join("bin").display()))
-        .env("HOME", &authentication.home)
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "/usr/bin/false")
-        .env("SSH_ASKPASS", "/usr/bin/false")
-        .env("GIT_PAGER", "cat")
-        .env("PAGER", "cat")
-        .env("GH_EDITOR", "/usr/bin/false")
-        .env("GH_BROWSER", "/usr/bin/false")
-        .env("GH_PAGER", "cat")
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1")
-        .env("GH_CONFIG_DIR", root.join("gh"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    Ok((command, gh.sha256.clone(), input))
+        .args([
+            "api",
+            "graphql",
+            "--hostname",
+            host,
+            "--method",
+            "POST",
+            "--input",
+            "-",
+        ])
+        .stdin(Stdio::piped());
+    Ok(PrViewEnvironment { command, input })
 }
 
 pub(crate) async fn run(
@@ -1206,7 +1218,7 @@ pub(crate) async fn run(
         })
         .await
         .map_err(|_| REFUSED)??;
-        let (command, executable) = prepare(
+        let (command, executable, environment) = prepare(
             config,
             authentication,
             workspace,
@@ -1215,7 +1227,7 @@ pub(crate) async fn run(
         )
         .await
         .map_err(|error| preparation_refusal(&error))?;
-        Ok::<_, &'static str>((root, backing, command, executable))
+        Ok::<_, &'static str>((root, backing, command, executable, environment))
     };
     let prepared = tokio::select! {
         biased;
@@ -1223,19 +1235,15 @@ pub(crate) async fn run(
         result = tokio::time::timeout_at(deadline, preparation) =>
             result.unwrap_or(Err(PREPARATION_TIMEOUT)),
     };
-    let (root, backing, command, executable) = match prepared {
+    let (_root, backing, command, executable, environment) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => return observation(intent, ToolDisposition::Denied, reason, None),
     };
-    let mut outcome = if matches!(intent.call, ToolCall::GhPrView { .. }) {
+    let mut outcome = if let Some(environment) = environment {
         supervise_pr_view(PrViewDispatch {
             deadline,
             command,
-            environment: PrViewEnvironment {
-                config,
-                authentication,
-                root: root.as_ref().as_ref(),
-            },
+            environment,
             intent,
             executable,
             cancellation,
@@ -1489,9 +1497,12 @@ fn fit_pr_view_result(mut result: Value, result_bytes: usize) -> Option<String> 
                 .as_array()
                 .is_some_and(|rows| !rows.is_empty())
         }) {
-            result["pull_request"][trimmed]["items"]
-                .as_array_mut()?
-                .pop();
+            let items = result["pull_request"][trimmed]["items"].as_array_mut()?;
+            if trimmed == "checks" {
+                items.pop();
+            } else {
+                items.remove(0);
+            }
             result["pull_request"][trimmed]["truncated"] = Value::Bool(true);
             continue;
         }
@@ -1935,22 +1946,22 @@ async fn supervise(
     .await
 }
 
-struct PrViewEnvironment<'a> {
-    config: &'a Config,
-    authentication: &'a Authentication,
-    root: &'a Path,
+#[derive(Debug)]
+struct PrViewEnvironment {
+    command: Command,
+    input: Vec<u8>,
 }
 
-struct PrViewDispatch<'a> {
+struct PrViewDispatch {
     deadline: tokio::time::Instant,
     command: Command,
-    environment: PrViewEnvironment<'a>,
+    environment: PrViewEnvironment,
     intent: EffectIntent,
     executable: String,
     cancellation: Cancellation,
 }
 
-async fn supervise_pr_view(dispatch: PrViewDispatch<'_>) -> ToolObservation {
+async fn supervise_pr_view(dispatch: PrViewDispatch) -> ToolObservation {
     let PrViewDispatch {
         deadline,
         command,
@@ -1963,7 +1974,7 @@ async fn supervise_pr_view(dispatch: PrViewDispatch<'_>) -> ToolObservation {
         deadline,
         command,
         intent.clone(),
-        executable,
+        executable.clone(),
         cancellation.clone(),
     )
     .await;
@@ -1993,6 +2004,7 @@ async fn supervise_pr_view(dispatch: PrViewDispatch<'_>) -> ToolObservation {
     supervise_pr_view_details(PrViewDetails {
         deadline,
         environment,
+        executable,
         intent,
         scalar,
         scalar_json,
@@ -2002,9 +2014,10 @@ async fn supervise_pr_view(dispatch: PrViewDispatch<'_>) -> ToolObservation {
     .await
 }
 
-struct PrViewDetails<'a> {
+struct PrViewDetails {
     deadline: tokio::time::Instant,
-    environment: PrViewEnvironment<'a>,
+    environment: PrViewEnvironment,
+    executable: String,
     intent: EffectIntent,
     scalar: ToolObservation,
     scalar_json: Value,
@@ -2012,31 +2025,23 @@ struct PrViewDetails<'a> {
     cancellation: Cancellation,
 }
 
-async fn supervise_pr_view_details(details: PrViewDetails<'_>) -> ToolObservation {
+async fn supervise_pr_view_details(details: PrViewDetails) -> ToolObservation {
     let PrViewDetails {
         deadline,
         environment,
+        executable,
         intent,
         scalar,
         scalar_json,
         identity,
         cancellation,
     } = details;
-    let (query, query_executable, input) = match prepare_graphql_command(
-        environment.config,
-        environment.authentication,
-        environment.root,
-        &identity.repository,
-        identity.number,
-    ) {
-        Ok(prepared) => prepared,
-        Err(_) => return pr_view_failure(intent, scalar, PR_VIEW_FAILED),
-    };
+    let PrViewEnvironment { command, input } = environment;
     let query = supervise_input(ProcessDispatch {
         deadline,
-        command: query,
+        command,
         intent: intent.clone(),
-        executable_sha256: query_executable,
+        executable_sha256: executable,
         cancellation,
         input: Some(input),
     })
@@ -2350,14 +2355,30 @@ mod tests {
     #[test]
     fn host_gh_pr_view_query_is_fixed_and_bounded() {
         let temp = tempfile::tempdir().unwrap();
-        let (command, _, input) = prepare_graphql_command(
+        let intent = intent(
+            temp.path(),
+            ToolCall::GhPrView {
+                repository: "github.com/example/project".into(),
+                number: 17,
+            },
+        );
+        let (scalar, _, environment) = prepare_command(
             &config(),
             &authentication(temp.path()),
             temp.path(),
-            "github.com/example/project",
-            17,
+            &intent,
+            temp.path(),
         )
         .unwrap();
+        let PrViewEnvironment { command, input } = environment.unwrap();
+        assert_eq!(
+            scalar.as_std().get_program(),
+            command.as_std().get_program()
+        );
+        assert_eq!(
+            scalar.as_std().get_envs().collect::<Vec<_>>(),
+            command.as_std().get_envs().collect::<Vec<_>>()
+        );
         let args: Vec<_> = command
             .as_std()
             .get_args()
@@ -2418,6 +2439,60 @@ mod tests {
         )
         .unwrap();
         assert!(valid_pr_view_output(&output, pr_view_identity()));
+    }
+
+    #[test]
+    fn host_gh_pr_view_budget_retains_recent_discussion_and_first_checks() {
+        let head = "a".repeat(40);
+        for (connection, field, retained) in [
+            ("comments", "body", 1),
+            ("reviews", "body", 1),
+            ("checks", "name", 0),
+        ] {
+            let mut graph = pr_view_graph(&head, "COMPLETED");
+            let pull = &mut graph["data"]["repository"]["pullRequest"];
+            let check_path = "/commits/nodes/0/commit/statusCheckRollup/contexts/nodes";
+            let mut rows = if connection == "checks" {
+                pull.pointer(check_path).unwrap().clone()
+            } else {
+                pull[connection]["nodes"].clone()
+            };
+            let mut latest = rows[0].clone();
+            rows[0][field] = json!("Earlier");
+            latest[field] = json!("Current");
+            rows.as_array_mut().unwrap().push(latest);
+            for name in ["comments", "reviews"] {
+                pull[name]["nodes"] = json!([]);
+            }
+            *pull.pointer_mut(check_path).unwrap() = json!([]);
+            if connection == "checks" {
+                *pull.pointer_mut(check_path).unwrap() = rows;
+            } else {
+                pull[connection]["nodes"] = rows;
+            }
+            let scalar = pr_view_scalar(&head);
+            let output = pr_view_result(
+                &scalar,
+                &graph.to_string(),
+                pr_view_identity(),
+                crate::tools::types::MAX_TOOL_RESULT_BYTES,
+            )
+            .unwrap();
+            let mut expected: Value = serde_json::from_str(&output).unwrap();
+            let item = expected["pull_request"][connection]["items"][retained].clone();
+            expected["pull_request"][connection]["items"] = json!([item]);
+            expected["pull_request"][connection]["truncated"] = json!(true);
+            let budget = serde_json::to_string(&expected).unwrap().len();
+            let output =
+                pr_view_result(&scalar, &graph.to_string(), pr_view_identity(), budget).unwrap();
+            assert!(output.len() <= budget);
+            assert!(valid_pr_view_output(&output, pr_view_identity()));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output).unwrap(),
+                expected,
+                "{connection}"
+            );
+        }
     }
 
     #[test]
@@ -3156,7 +3231,7 @@ mod tests {
         }
         let private = Arc::new(tempfile::tempdir().unwrap());
         let config = config();
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config,
             &authentication(temp.path()),
             &workspace,
@@ -3222,7 +3297,7 @@ mod tests {
         );
         let rejected = self::intent(&workspace, push());
         let refusal_view = Arc::new(tempfile::tempdir().unwrap());
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config,
             &authentication(temp.path()),
             &workspace,
@@ -3325,7 +3400,7 @@ mod tests {
         for event in &f.events {
             store.append(f.session, event.clone()).await.unwrap();
         }
-        let (mut command, digest) = prepare(
+        let (mut command, digest, _) = prepare(
             &config,
             &authentication,
             &workspace,
@@ -3519,7 +3594,7 @@ done
         let workspace = fixture(temp.path());
         let private = Arc::new(tempfile::tempdir().unwrap());
         let intent = intent(&workspace, pr());
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3588,7 +3663,7 @@ done
             limit: 1,
         };
         let intent = intent(&workspace, call);
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3770,7 +3845,7 @@ done
         let workspace = fixture(temp.path());
         let private = Arc::new(tempfile::tempdir().unwrap());
         let intent = intent(&workspace, pr_list());
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3802,7 +3877,7 @@ done
                 number: 17,
             },
         );
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3831,7 +3906,7 @@ done
         let workspace = fixture(temp.path());
         let private = Arc::new(tempfile::tempdir().unwrap());
         let intent = intent(&workspace, pr_list());
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3861,7 +3936,7 @@ done
         let workspace = fixture(temp.path());
         let private = Arc::new(tempfile::tempdir().unwrap());
         let intent = intent(&workspace, pr_list());
-        let (prepared, digest) = prepare(
+        let (prepared, digest, _) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
@@ -3917,7 +3992,7 @@ done
             let workspace = fixture(temp.path());
             let private = Arc::new(tempfile::tempdir().unwrap());
             let intent = intent(&workspace, pr());
-            let (prepared, digest) = prepare(
+            let (prepared, digest, _) = prepare(
                 &config(),
                 &authentication(temp.path()),
                 &workspace,

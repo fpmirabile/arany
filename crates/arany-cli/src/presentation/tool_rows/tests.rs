@@ -183,7 +183,11 @@ mod peer_row_tests {
     fn git_write_rows_show_their_receipt_and_approvals_the_exact_action() {
         assert_eq!(
             ToolApprovalChoice::GitPrefix(arany::permissions::TypedGitPrefix::PrList).label(),
-            "Yes, and allow gh pr list from the next Run"
+            "Yes, and allow gh pr list in this folder from the next Run"
+        );
+        assert_eq!(
+            ToolApprovalChoice::GitPrefix(arany::permissions::TypedGitPrefix::PrView).label(),
+            "Yes, and allow gh pr view in this folder from the next Run"
         );
         let oid = "a".repeat(40);
         for (call, output, expected) in [

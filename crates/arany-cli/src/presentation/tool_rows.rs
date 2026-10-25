@@ -1054,10 +1054,10 @@ impl ToolApprovalChoice {
                 arany::permissions::TypedGitPrefix::Push
                 | arany::permissions::TypedGitPrefix::PrCreate => "No remembered rule offered",
                 arany::permissions::TypedGitPrefix::PrList => {
-                    "Yes, and allow gh pr list from the next Run"
+                    "Yes, and allow gh pr list in this folder from the next Run"
                 }
                 arany::permissions::TypedGitPrefix::PrView => {
-                    "Yes, and allow gh pr view from the next Run"
+                    "Yes, and allow gh pr view in this folder from the next Run"
                 }
             },
             Self::No => "No",
