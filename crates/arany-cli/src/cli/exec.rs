@@ -1438,12 +1438,15 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
+    const ACTIVE_LIMIT_MS: u64 = 60_000;
+
     async fn run_with_budget_spent_after_answer(
         exec: ExecArgs,
         admission: Admission,
         provider: ScriptedProvider,
         active_time: std::time::Duration,
     ) -> CommandOutput {
+        const ANSWER_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let requests = Arc::clone(&provider.requests);
         let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
         let provider = provider.with_before_call(1, move || {
@@ -1460,14 +1463,22 @@ mod tests {
         });
         let run = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
         tokio::pin!(run);
-        let (entered, release) = tokio::select! {
-            gate = gate_rx.recv() => gate.expect("answer gate installed"),
-            result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
-        };
-        tokio::select! {
-            entered = entered => entered.expect("accepted answer committed"),
-            result = &mut run => panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success)),
-        }
+        let (entered, release) = tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, async {
+            tokio::select! {
+                gate = gate_rx.recv() => gate.expect("answer gate installed"),
+                result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
+            }
+        })
+        .await
+        .expect("answer gate deadline");
+        tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, async {
+            tokio::select! {
+                entered = entered => entered.expect("accepted answer committed"),
+                result = &mut run => panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success)),
+            }
+        })
+        .await
+        .expect("answer commit deadline");
         tokio::time::pause();
         tokio::time::advance(active_time).await;
         tokio::time::resume();
@@ -1585,7 +1596,7 @@ mod tests {
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
         let budget = GoalBudget {
-            max_active_ms: Some(60_000),
+            max_active_ms: Some(ACTIVE_LIMIT_MS),
             ..GoalBudget::default()
         };
         let (report, _, view) = exec_budget_report(budget).await;
@@ -1646,7 +1657,6 @@ mod tests {
     }
 
     fn finished_run_at_active_limit(events: Vec<arany::EventEnvelope>) -> CommittedOutcome {
-        const ACTIVE_LIMIT_MS: u64 = 60_000;
         const ANSWER: &str = "The notes remain unchanged";
         let budget = GoalBudget {
             max_active_ms: Some(ACTIVE_LIMIT_MS),

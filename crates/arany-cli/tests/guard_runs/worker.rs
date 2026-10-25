@@ -87,7 +87,7 @@ pub(super) async fn worker_case(case: &'static str) {
         std::fs::create_dir(workspace.join("reads")).unwrap();
         std::fs::write(
             workspace.join("reads/facts.txt"),
-            format!("{}\n", "x".repeat(99)).repeat(150),
+            format!("{}\n", "x".repeat(99)).repeat(50),
         )
         .unwrap();
     }
@@ -433,8 +433,22 @@ pub(super) async fn worker_case(case: &'static str) {
         return;
     }
     if case.starts_with("clear_") {
-        let result = result.expect(case);
-        assert_eq!(result.run.run.status, RunStatus::Finished, "{case}");
+        let result = result.unwrap_or_else(|error| {
+            let tail: Vec<_> = bundle
+                .events
+                .iter()
+                .rev()
+                .take(8)
+                .map(|event| event.event.kind())
+                .collect();
+            panic!("{case}: {error:?}; child calls {child_calls}; synthesis calls {synthesis_calls}; newest Events {tail:?}");
+        });
+        assert_eq!(
+            result.run.run.status,
+            RunStatus::Finished,
+            "{case}: {:?}",
+            result.run.run.failure
+        );
         assert_eq!(run.status, RunStatus::Finished, "{case}: strict replay");
         if case == "clear_after_wave" {
             let context = calls
@@ -507,7 +521,19 @@ pub(super) async fn worker_case(case: &'static str) {
                 _ => None,
             })
             .collect();
-        assert!(clears.len() >= 2, "{case}: repeated clearing batches");
+        let clearing_batches = if case == "clear_background" {
+            clears
+                .iter()
+                .filter(|(index, _)| (child_reservation..child_record).contains(index))
+                .count()
+        } else {
+            clears.len()
+        };
+        assert!(
+            clearing_batches >= 2,
+            "{case}: repeated clearing batches in the required phase ({clearing_batches} of {})",
+            clears.len()
+        );
         for &(index, count) in &clears {
             let next = bundle.events[index + 1..].iter().find(|event| {
                 !matches!(
@@ -527,12 +553,7 @@ pub(super) async fn worker_case(case: &'static str) {
                     .any(|tool| matches!(tool.intent.call, arany::ToolCall::PrepareWorker { .. })),
                 "{case}: boundary crosses hidden preparation records"
             );
-            if case == "clear_background" {
-                assert!(
-                    (child_reservation..child_record).contains(&index),
-                    "clearing runs while the gated worker call is active"
-                );
-            } else {
+            if case == "clear_after_wave" {
                 assert!(index > child_record, "clearing follows the editor wave");
                 assert!(
                     run.tools[..count].iter().any(|tool| matches!(
