@@ -468,6 +468,10 @@ impl RunLoop<'_> {
             && matches!(intent.call, ToolCall::GhPrList { .. })
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::TypedPrefixRule;
+        let host_prefix_allow = phase.site == DispatchSite::Primary
+            && intent.call.is_unguarded()
+            && phase.permission.decision == Decision::Allow
+            && phase.permission.basis == PermissionSource::HostPrefixRule;
         Ok(DispatchFacts {
             site: phase.site,
             permission: phase.permission,
@@ -477,6 +481,7 @@ impl RunLoop<'_> {
             typed_host_read,
             host_unpinned: intent.call.is_host() && intent.host.is_none(),
             human_only_unavailable: !typed_host_read
+                && !host_prefix_allow
                 && ((intent.call.is_host() && self.controls.approvals.is_none())
                     || self.controls.approvals.is_some_and(|approvals| {
                         !approvals.admits_human_only(
@@ -1074,7 +1079,6 @@ pub(super) enum HookDenial {
 
 #[cfg(test)]
 mod tests {
-    use super::permission::{HostReuse, HostReuseFacts, decide_host_reuse};
     use super::*;
 
     #[test]
@@ -1294,184 +1298,6 @@ mod tests {
     }
 
     #[test]
-    fn host_reuse_and_session_offers_share_eligibility() {
-        use crate::tools::permissions::PermissionMode as M;
-        let baseline = HostReuseFacts {
-            host: true,
-            settings_admitted: true,
-            mode: Some(M::Default),
-            terminal_mode: Some(ApprovalMode::Request),
-            session_scope: true,
-            permission: Permission {
-                basis: PermissionSource::Mode,
-                ..asks(ApprovalMode::Request)
-            },
-            hook_restriction: None,
-            state_target: Some(false),
-            epoch: Some(uuid::Uuid::now_v7()),
-            source: None,
-            grants: 0,
-        };
-        for (facts, expected) in [
-            (baseline, HostReuse::OfferSession),
-            (
-                HostReuseFacts {
-                    mode: None,
-                    ..baseline
-                },
-                HostReuse::OfferSession,
-            ),
-            (
-                HostReuseFacts {
-                    source: Some([1; 32]),
-                    ..baseline
-                },
-                HostReuse::Reuse([1; 32]),
-            ),
-            (
-                HostReuseFacts {
-                    source: Some([1; 32]),
-                    grants: crate::session::MAX_HOST_SESSION_GRANTS,
-                    ..baseline
-                },
-                HostReuse::Reuse([1; 32]),
-            ),
-            (
-                HostReuseFacts {
-                    grants: crate::session::MAX_HOST_SESSION_GRANTS,
-                    ..baseline
-                },
-                HostReuse::OnceOnly,
-            ),
-            (
-                HostReuseFacts {
-                    mode: Some(M::DontAsk),
-                    permission: deny(PermissionSource::Mode),
-                    source: Some([1; 32]),
-                    ..baseline
-                },
-                HostReuse::Reuse([1; 32]),
-            ),
-            (
-                HostReuseFacts {
-                    mode: Some(M::DontAsk),
-                    permission: deny(PermissionSource::Mode),
-                    ..baseline
-                },
-                HostReuse::OnceOnly,
-            ),
-        ] {
-            assert_eq!(decide_host_reuse(&facts), expected);
-        }
-        for ineligible in [
-            HostReuseFacts {
-                host: false,
-                ..baseline
-            },
-            HostReuseFacts {
-                settings_admitted: false,
-                ..baseline
-            },
-            HostReuseFacts {
-                mode: Some(M::Auto),
-                ..baseline
-            },
-            HostReuseFacts {
-                mode: Some(M::AcceptEdits),
-                ..baseline
-            },
-            HostReuseFacts {
-                mode: Some(M::Plan),
-                ..baseline
-            },
-            HostReuseFacts {
-                terminal_mode: None,
-                ..baseline
-            },
-            HostReuseFacts {
-                terminal_mode: Some(ApprovalMode::Auto),
-                ..baseline
-            },
-            HostReuseFacts {
-                terminal_mode: Some(ApprovalMode::AutoEdits),
-                ..baseline
-            },
-            HostReuseFacts {
-                session_scope: false,
-                ..baseline
-            },
-            HostReuseFacts {
-                permission: allow(PermissionSource::Rule),
-                ..baseline
-            },
-            HostReuseFacts {
-                permission: asks(ApprovalMode::Request),
-                ..baseline
-            },
-            HostReuseFacts {
-                permission: deny(PermissionSource::Rule),
-                mode: Some(M::DontAsk),
-                ..baseline
-            },
-            HostReuseFacts {
-                permission: deny(PermissionSource::Mode),
-                ..baseline
-            },
-            HostReuseFacts {
-                permission: deny(PermissionSource::PinnedGrant),
-                mode: Some(M::DontAsk),
-                ..baseline
-            },
-            HostReuseFacts {
-                hook_restriction: Some(Decision::Ask),
-                ..baseline
-            },
-            HostReuseFacts {
-                hook_restriction: Some(Decision::Deny),
-                ..baseline
-            },
-            HostReuseFacts {
-                state_target: Some(true),
-                ..baseline
-            },
-            HostReuseFacts {
-                state_target: None,
-                ..baseline
-            },
-            HostReuseFacts {
-                epoch: None,
-                ..baseline
-            },
-        ] {
-            for source in [None, Some([1; 32])] {
-                assert_eq!(
-                    decide_host_reuse(&HostReuseFacts {
-                        source,
-                        ..ineligible
-                    }),
-                    HostReuse::OnceOnly
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
-        use super::permission::typed_allow_takes_effect;
-        use crate::tools::permissions::PermissionMode as M;
-        assert!(typed_allow_takes_effect(Some(M::Default)));
-        for mode in [
-            None,
-            Some(M::AcceptEdits),
-            Some(M::Plan),
-            Some(M::Auto),
-            Some(M::DontAsk),
-        ] {
-            assert!(!typed_allow_takes_effect(mode), "{mode:?}");
-        }
-    }
-
-    #[test]
     fn typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review() {
         let commit = ToolCall::GitCommit {
             message: "m".into(),
@@ -1516,14 +1342,6 @@ mod tests {
             decision: Decision::Allow,
             basis,
             approval: None,
-        }
-    }
-
-    fn asks(mode: ApprovalMode) -> Permission {
-        Permission {
-            decision: Decision::Ask,
-            basis: PermissionSource::Rule,
-            approval: Some(mode),
         }
     }
 

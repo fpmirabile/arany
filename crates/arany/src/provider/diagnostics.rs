@@ -1,0 +1,62 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubscriptionFailureStage {
+    RequestTransport,
+    Deadline,
+    HttpStatus,
+    Destination,
+    ContentEncoding,
+    ContentLength,
+    ReadTransport,
+    EndBeforeCompleted,
+    StreamLimit,
+    EventFraming,
+    EventJson,
+    EventType,
+    CredentialReflection,
+    RemoteFailure,
+    IncompleteResponse,
+    CompletedResponse,
+    ResponseEnvelope,
+    ResponseModel,
+    ResponseStatus,
+    ResponseIdentifier,
+    ResponseMessage,
+    ResponseContent,
+    ResponsePhase,
+    ResponseMissingFinalMessage,
+    ResponseDuplicateFinalMessage,
+    ResponseAmbiguousFinalMessage,
+    ResponseLateCommentary,
+    OutcomeContract,
+    OutcomeEncoding,
+    OutcomeFields,
+    OutcomeReadBounds,
+    OutcomeToolArguments,
+    OutcomeToolPath,
+    OutcomeToolDigest,
+    OutcomeToolEmptyEdit,
+    OutcomeToolTextSize,
+    OutcomeToolArgumentSize,
+    OutcomeToolProgram,
+    UsageContract,
+    LocalOutputLimit,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StreamCounts {
+    pub(crate) bytes: usize,
+    pub(crate) events: usize,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) response_shape: Option<ResponseShape>,
+    pub(crate) tool_arguments: Option<crate::diagnostics::ToolArgumentShape>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ResponseShape {
+    pub(crate) messages: usize,
+    pub(crate) commentary: usize,
+    pub(crate) finals: usize,
+    pub(crate) unphased: usize,
+    pub(crate) done_messages: usize,
+    pub(crate) done_finals: usize,
+}

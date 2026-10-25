@@ -20,7 +20,7 @@ pub(super) struct CustomTransport {
 
 struct TransportResponse {
     bytes: Vec<u8>,
-    counts: crate::diagnostics::StreamCounts,
+    counts: crate::provider::diagnostics::StreamCounts,
 }
 
 #[derive(Clone, Copy)]
@@ -140,14 +140,14 @@ impl CustomTransport {
         .map_err(|_| TransportError::InvalidOutcome)?;
         if !valid_usage(response.usage, request.max_output_tokens) {
             self.log_messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::UsageContract,
+                crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
                 received.counts,
             );
             return Err(TransportError::InvalidOutcome);
         }
         if response.reflects_secret(&self.key) {
             self.log_messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
                 received.counts,
             );
             return Err(TransportError::InvalidOutcome);
@@ -185,14 +185,14 @@ impl CustomTransport {
         .map_err(|_| TransportError::InvalidOutcome)?;
         if !valid_usage(response.usage, request.max_output_tokens) {
             self.log_messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::UsageContract,
+                crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
                 received.counts,
             );
             return Err(TransportError::InvalidOutcome);
         }
         if response.reflects_secret(&self.key) {
             self.log_messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
                 received.counts,
             );
             return Err(TransportError::InvalidOutcome);
@@ -202,8 +202,8 @@ impl CustomTransport {
 
     fn log_messages_failure(
         &self,
-        stage: crate::diagnostics::SubscriptionFailureStage,
-        counts: crate::diagnostics::StreamCounts,
+        stage: crate::provider::diagnostics::SubscriptionFailureStage,
+        counts: crate::provider::diagnostics::StreamCounts,
     ) {
         if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
             crate::diagnostics::messages_failure(stage, counts);
@@ -264,7 +264,7 @@ impl CustomTransport {
             )
             .await
             .map(|bytes| TransportResponse {
-                counts: crate::diagnostics::StreamCounts {
+                counts: crate::provider::diagnostics::StreamCounts {
                     bytes: bytes.len(),
                     http_status: Some(response.status().as_u16()),
                     ..Default::default()
@@ -315,7 +315,7 @@ impl CustomTransport {
             return Ok(());
         }
         self.log_messages_failure(
-            crate::diagnostics::SubscriptionFailureStage::Destination,
+            crate::provider::diagnostics::SubscriptionFailureStage::Destination,
             response_counts(status),
         );
         streaming_admission(status, false)
@@ -328,7 +328,7 @@ impl CustomTransport {
         if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
             crate::provider::parse_response_json(&received.bytes).map_err(|_| {
                 self.log_messages_failure(
-                    crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
                     received.counts,
                 );
                 TransportError::InvalidOutcome
@@ -349,11 +349,11 @@ impl CustomTransport {
         request.send().await.map_err(|error| {
             self.log_messages_failure(
                 if error.is_timeout() {
-                    crate::diagnostics::SubscriptionFailureStage::Deadline
+                    crate::provider::diagnostics::SubscriptionFailureStage::Deadline
                 } else {
-                    crate::diagnostics::SubscriptionFailureStage::RequestTransport
+                    crate::provider::diagnostics::SubscriptionFailureStage::RequestTransport
                 },
-                crate::diagnostics::StreamCounts::default(),
+                crate::provider::diagnostics::StreamCounts::default(),
             );
             send_failure(&error)
         })
@@ -365,8 +365,8 @@ impl CustomTransport {
     ) -> Result<TransportResponse, TransportError> {
         if response.url().as_str() != self.endpoint {
             self.log_messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::Destination,
-                crate::diagnostics::StreamCounts {
+                crate::provider::diagnostics::SubscriptionFailureStage::Destination,
+                crate::provider::diagnostics::StreamCounts {
                     http_status: Some(response.status().as_u16()),
                     ..Default::default()
                 },
@@ -376,7 +376,7 @@ impl CustomTransport {
         if let Some(stage) = response_failure_stage(true, response.status()) {
             self.log_messages_failure(
                 stage,
-                crate::diagnostics::StreamCounts {
+                crate::provider::diagnostics::StreamCounts {
                     http_status: Some(response.status().as_u16()),
                     ..Default::default()
                 },
@@ -389,11 +389,11 @@ impl CustomTransport {
             .map_err(|error| {
                 self.log_messages_failure(
                     if matches!(error, ProviderError::PartialTransport) {
-                        crate::diagnostics::SubscriptionFailureStage::ReadTransport
+                        crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
                     } else {
-                        crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope
+                        crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope
                     },
-                    crate::diagnostics::StreamCounts {
+                    crate::provider::diagnostics::StreamCounts {
                         http_status: Some(status),
                         ..Default::default()
                     },
@@ -407,8 +407,8 @@ impl CustomTransport {
         if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
             crate::provider::parse_response_json(&bytes).map_err(|_| {
                 self.log_messages_failure(
-                    crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
-                    crate::diagnostics::StreamCounts {
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
+                    crate::provider::diagnostics::StreamCounts {
                         bytes: bytes.len(),
                         http_status: Some(status),
                         ..Default::default()
@@ -419,8 +419,8 @@ impl CustomTransport {
         }
         if raw_reflects_secret(&bytes, &self.key) {
             self.log_messages_failure(
-                crate::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                crate::diagnostics::StreamCounts {
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                crate::provider::diagnostics::StreamCounts {
                     bytes: bytes.len(),
                     http_status: Some(status),
                     ..Default::default()
@@ -429,7 +429,7 @@ impl CustomTransport {
             return Err(TransportError::InvalidOutcome);
         }
         Ok(TransportResponse {
-            counts: crate::diagnostics::StreamCounts {
+            counts: crate::provider::diagnostics::StreamCounts {
                 bytes: bytes.len(),
                 http_status: Some(status),
                 ..Default::default()
@@ -442,8 +442,8 @@ impl CustomTransport {
 fn response_failure_stage(
     destination_matches: bool,
     status: reqwest::StatusCode,
-) -> Option<crate::diagnostics::SubscriptionFailureStage> {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+) -> Option<crate::provider::diagnostics::SubscriptionFailureStage> {
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     if !destination_matches {
         Some(Stage::Destination)
     } else if !status.is_success() {
@@ -453,8 +453,8 @@ fn response_failure_stage(
     }
 }
 
-fn response_counts(status: reqwest::StatusCode) -> crate::diagnostics::StreamCounts {
-    crate::diagnostics::StreamCounts {
+fn response_counts(status: reqwest::StatusCode) -> crate::provider::diagnostics::StreamCounts {
+    crate::provider::diagnostics::StreamCounts {
         http_status: Some(status.as_u16()),
         ..Default::default()
     }

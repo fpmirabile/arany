@@ -33,7 +33,7 @@ The full product contract is successful when it proves all of these together:
 9. cancellation reaches the primary and every admitted child without fabricating completion; and
 10. explicitly enabled primary Tools use typed one-use intents, restrict-only Policy, native Guard enforcement, bounded continuation and durable non-executing replay.
 
-Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The primary-only [host-command exception](../specs/tools.md#primary-host-commands) requires explicit human authority and a pinned, supervised command, never automatic fallback. Engine owns live epochs and journaled scope/reuse validation; Tools owns executable admission and supervision. Host effects cannot be published as Guard changesets or rewound, and the same user can modify Arany state and journal.
+Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The primary-only [host-command exception](../specs/tools.md#primary-host-commands) requires explicit human or admitted user-owned rule authority and a pinned, supervised command, never automatic fallback. Engine owns live epochs and journaled scope/reuse validation; Tools owns executable admission and supervision. Host effects cannot be published as Guard changesets or rewound, and the same user can modify Arany state and journal.
 
 Tools owns one private model-input projection shared by the native adapters. It exposes structured bounded catalog/output data and ordered call/disposition/workspace-effect facts, while keeping journal intent identities, enforcement digests, limits and receipts out of current Tool observations sent to the model. Canonical Tool observations retain all enforcement evidence; projection changes neither authority nor replay. Native Run adapters use the [Provider text-answer and automatic Tool-selection contract](../specs/provider.md#structured-outcomes-and-tool-encoding). The adapter reconstructs paired model action/result items with request-local correlation labels and carries each model-action observation only in its result item. Engine-generated integration outcomes use separate untrusted user-data records, with no fabricated model function or advertised integration operation. The adapter omits the duplicate observation list from the task-data envelope. Provider instructions explain continuation and completion evidence independently of untrusted result text.
 
@@ -52,7 +52,9 @@ owns Engine lifetime and admission.
 The binary's `serve` Server owns a bounded submission/response channel loop over
 that Engine. Its stdio adapter, ACP translator and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
-vocabulary at the binary edge. Each active submission has an owned task driving
+vocabulary at the binary edge; its translator owns the exhaustive typed Tool
+projection and preserves serve's Move FileChange path while giving GhPrList an
+explicit read projection. Each active submission has an owned task driving
 its RunHandle while the Server projects its committed Event subscription; bounded client backpressure
 cannot hold Journal appends. The library has no protocol or transport dependency. Supervised stdio avoids
 listener and discovery ownership; browser or multi-client transports require
@@ -68,6 +70,9 @@ transitions. `GoalLedger` admits, reserves and settles actions over the reducer'
 approval, dispatch, committed observation and continuation have one owner.
 Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
 it during admission, so the source dependency points from Engine to Tools.
+Engine permission selection, host session reuse and remembering eligibility live
+in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
+shared ask and dispatch flow.
 The Engine composes per-dispatch queue progress, active-action and checkpoint
 senders through consuming ToolRuntime builders; Guard dispatch makes one owned
 copy from its borrowed runtime before consuming that chain.
@@ -84,6 +89,9 @@ separate provisional data. The tap belongs to Journal rather than the Store
 thread so persistence does not own observer delivery. [Execution](../specs/execution.md#committed-event-stream),
 [telemetry](../specs/telemetry.md) and [diagnostics](../specs/diagnostics.md) own
 their observable contracts.
+Provider-owned diagnostic stage, count and response-shape types live in
+`provider/diagnostics.rs`; root `diagnostics.rs` retains record formatting and
+the bounded private sink.
 
 ```mermaid
 flowchart LR
@@ -194,7 +202,7 @@ modules.
 | Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
 | Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
 | SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
-| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
+| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
 
 [Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
 shared support. [Library](../../agents/arany.md) and
