@@ -10,7 +10,7 @@ use crossterm::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
     },
 };
-use ratatui::{Terminal, backend::Backend, layout::Rect};
+use ratatui::{Terminal, backend::Backend, buffer::CellWidth, layout::Rect};
 #[cfg(unix)]
 use rustix::process::{Signal, getpid, kill_process};
 #[cfg(unix)]
@@ -20,6 +20,8 @@ use rustix::termios::{
 use std::collections::HashSet;
 use std::io::{self, IsTerminal, Stderr, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 mod agent_chat;
 mod agents;
@@ -38,7 +40,9 @@ use agent_chat::AgentChat;
 pub use agent_chat::{AgentChatFollow, AgentChatInput};
 use agents::{AgentPanel, PanelUpdate, window_start};
 use backend::TerminalBackend;
-use clipboard::{ClipboardContent, ClipboardRead};
+use clipboard::{
+    COPY_TOO_LARGE, ClipboardContent, ClipboardRead, MAX_COPY_BYTES, display_bytes, display_text,
+};
 use commands::help_len;
 pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
@@ -69,6 +73,154 @@ struct UsagePanel {
     starting_sequence: Option<u64>,
     rows: usize,
     visible: usize,
+}
+
+#[derive(Default)]
+struct PanelSelection {
+    enabled: bool,
+    area: Option<Rect>,
+    lines: Vec<String>,
+    anchor: Option<(usize, usize)>,
+    head: Option<(usize, usize)>,
+    feedback: Option<String>,
+}
+
+struct PanelCopy {
+    task: tokio::task::JoinHandle<Result<Option<String>, String>>,
+    selection: String,
+    request: clipboard::CopyRequest,
+}
+
+struct PanelCopyResult {
+    selection: String,
+    request: clipboard::CopyRequest,
+    result: Result<Option<String>, String>,
+}
+
+enum InputRead {
+    Input(TerminalInput),
+    PanelCopy(PanelCopyResult),
+}
+
+async fn wait_panel_copy(panel_copy: &mut Option<PanelCopy>) -> PanelCopyResult {
+    let Some(copy) = panel_copy.as_mut() else {
+        return std::future::pending().await;
+    };
+    let selection = copy.selection.clone();
+    let request = copy.request.clone();
+    let result = match (&mut copy.task).await {
+        Ok(result) => result,
+        Err(_) => Err("Copy unavailable: clipboard operation failed".to_owned()),
+    };
+    PanelCopyResult {
+        selection,
+        request,
+        result,
+    }
+}
+
+impl PanelSelection {
+    fn clear(&mut self) {
+        self.anchor = None;
+        self.head = None;
+    }
+
+    fn selecting(&self) -> bool {
+        self.anchor.is_some()
+    }
+
+    fn shown(&self) -> bool {
+        self.anchor
+            .zip(self.head)
+            .is_some_and(|(anchor, head)| anchor != head)
+    }
+
+    fn select(&mut self, column: usize, row: usize) {
+        self.anchor = Some((row, column));
+        self.head = Some((row, column));
+    }
+
+    fn extend(&mut self, column: usize, row: usize) {
+        if self.selecting() {
+            self.head = Some((row, column));
+        }
+    }
+
+    fn text(&self) -> Option<Result<String, &'static str>> {
+        let (mut start, mut end) = self.anchor.zip(self.head)?;
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        let mut selected = String::new();
+        let mut bytes = 0usize;
+        for row in start.0..=end.0 {
+            let line = self.lines.get(row)?;
+            let from = if row == start.0 { start.1 } else { 0 };
+            let to = if row == end.0 {
+                end.1.saturating_add(1)
+            } else {
+                usize::MAX
+            };
+            let mut column = 0;
+            if row > start.0 {
+                bytes = bytes.saturating_add(1);
+                if bytes > MAX_COPY_BYTES {
+                    return Some(Err(COPY_TOO_LARGE));
+                }
+                selected.push('\n');
+            }
+            for grapheme in line.graphemes(true) {
+                let next = column + UnicodeWidthStr::width(grapheme);
+                if next > from && column < to {
+                    bytes = bytes.saturating_add(display_bytes(grapheme));
+                    if bytes > MAX_COPY_BYTES {
+                        return Some(Err(COPY_TOO_LARGE));
+                    }
+                    selected.push_str(grapheme);
+                }
+                column = next;
+            }
+        }
+        let selected = selected.trim_end();
+        (!selected.is_empty()).then(|| Ok(display_text(selected)))
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame<'_>) {
+        if self.area.is_none_or(|area| area.is_empty()) {
+            return;
+        }
+        let (Some(area), Some((mut start_row, mut start_col)), Some((mut end_row, mut end_col))) =
+            (self.area, self.anchor, self.head)
+        else {
+            return;
+        };
+        if (end_row, end_col) < (start_row, start_col) {
+            std::mem::swap(&mut start_row, &mut end_row);
+            std::mem::swap(&mut start_col, &mut end_col);
+        }
+        for row in start_row..=end_row {
+            let from = if row == start_row { start_col } else { 0 };
+            let to = if row == end_row {
+                end_col
+            } else {
+                usize::from(area.width).saturating_sub(1)
+            };
+            for column in from..=to {
+                if let (Ok(x), Ok(y)) = (u16::try_from(column), u16::try_from(row)) {
+                    let x = area.x.saturating_add(x);
+                    let y = area.y.saturating_add(y);
+                    if area.contains(ratatui::layout::Position::new(x, y))
+                        && let Some(cell) = frame.buffer_mut().cell_mut((x, y))
+                    {
+                        cell.set_style(cell.style().add_modifier(
+                            ratatui::style::Modifier::REVERSED
+                                | ratatui::style::Modifier::UNDERLINED,
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Visual sessions negotiate modifier support. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
@@ -471,6 +623,8 @@ pub struct AttachedTerminal {
     pointer: PointerSettings,
     pointer_modes: Option<ModeGuard>,
     history_area: Option<Rect>,
+    panel_selection: PanelSelection,
+    panel_copy: Option<PanelCopy>,
     selection_cue: Option<String>,
     #[cfg(unix)]
     bracketed_paste: Option<ModeGuard>,
@@ -800,6 +954,8 @@ impl AttachedTerminal {
             pointer,
             pointer_modes,
             history_area: None,
+            panel_selection: PanelSelection::default(),
+            panel_copy: None,
             selection_cue: None,
             #[cfg(unix)]
             bracketed_paste,
@@ -887,22 +1043,22 @@ impl AttachedTerminal {
         let clipboard_ready = self.input.as_ref().is_some_and(TerminalReader::paste_ready);
         #[cfg(unix)]
         let input = tokio::select! {
-            input = Self::active_reader(&mut self.input).recv() => input?,
+            input = Self::active_reader(&mut self.input).recv() => InputRead::Input(input?),
             signal = self.interrupt.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
-                TerminalInput::Interrupt
+                InputRead::Input(TerminalInput::Interrupt)
             },
             signal = self.suspend.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
-                TerminalInput::Suspend
+                InputRead::Input(TerminalInput::Suspend)
             },
             signal = self.hangup.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
-                TerminalInput::Shutdown(ShutdownSignal::Hangup)
+                InputRead::Input(TerminalInput::Shutdown(ShutdownSignal::Hangup))
             },
             signal = self.terminate.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
-                TerminalInput::Shutdown(ShutdownSignal::Terminate)
+                InputRead::Input(TerminalInput::Shutdown(ShutdownSignal::Terminate))
             },
             paste = async {
                 match self.clipboard.as_mut() {
@@ -912,12 +1068,15 @@ impl AttachedTerminal {
             }, if clipboard_ready => {
                 self.clipboard.take();
                 self.clipboard_paste = Some(paste);
-                TerminalInput::Paste
+                InputRead::Input(TerminalInput::Paste)
+            },
+            result = wait_panel_copy(&mut self.panel_copy) => {
+                InputRead::PanelCopy(result)
             },
         };
         #[cfg(not(unix))]
         let input = tokio::select! {
-            input = Self::active_reader(&mut self.input).recv() => input?,
+            input = Self::active_reader(&mut self.input).recv() => InputRead::Input(input?),
             paste = async {
                 match self.clipboard.as_mut() {
                     Some(read) => read.recv().await,
@@ -926,9 +1085,27 @@ impl AttachedTerminal {
             }, if clipboard_ready => {
                 self.clipboard.take();
                 self.clipboard_paste = Some(paste);
-                TerminalInput::Paste
+                InputRead::Input(TerminalInput::Paste)
+            },
+            result = wait_panel_copy(&mut self.panel_copy) => {
+                InputRead::PanelCopy(result)
             },
         };
+        let input = match input {
+            InputRead::Input(input) => input,
+            InputRead::PanelCopy(result) => {
+                let mut stderr = io::stderr();
+                let terminal_output = self
+                    .input
+                    .is_some()
+                    .then_some(&mut stderr as &mut dyn Write);
+                self.finish_panel_copy(result, terminal_output);
+                return Ok(TerminalInput::PanelSelectionChanged);
+            }
+        };
+        if let Some(result) = self.panel_pointer_input(input).await {
+            return Ok(result);
+        }
         if let Some(linear) = &mut self.linear {
             match input {
                 TerminalInput::Submit => {
@@ -1388,6 +1565,124 @@ impl AttachedTerminal {
         }
     }
 
+    async fn panel_pointer_input(&mut self, input: TerminalInput) -> Option<TerminalInput> {
+        if !self.panel_selection.enabled
+            || self.is_linear()
+            || self.mode != TerminalMode::Fullscreen
+            || self.pointer.mouse.effective() != MouseMode::WheelAndClicks
+        {
+            return None;
+        }
+        if self.panel_selection.selecting()
+            && !matches!(
+                input,
+                TerminalInput::PointerDrag { .. }
+                    | TerminalInput::PointerRelease { .. }
+                    | TerminalInput::CopySelection
+                    | TerminalInput::Escape
+            )
+        {
+            self.panel_selection.clear();
+        }
+        let area = self.panel_selection.area?;
+        let cell = |column, row| {
+            area.contains(ratatui::layout::Position::new(column, row))
+                .then(|| (usize::from(column - area.x), usize::from(row - area.y)))
+        };
+        match input {
+            TerminalInput::PointerClick { column, row, .. } => {
+                let (column, row) = cell(column, row)?;
+                self.panel_selection.select(column, row);
+                Some(TerminalInput::PanelSelectionChanged)
+            }
+            TerminalInput::PointerDrag { column, row } if self.panel_selection.selecting() => {
+                let column = column.clamp(area.x, area.right().saturating_sub(1));
+                let row = row.clamp(area.y, area.bottom().saturating_sub(1));
+                let (column, row) = cell(column, row)?;
+                self.panel_selection.extend(column, row);
+                Some(TerminalInput::PanelSelectionChanged)
+            }
+            TerminalInput::PointerRelease { .. }
+                if self.pointer.copy_on_select && self.panel_selection.shown() =>
+            {
+                self.start_panel_copy();
+                Some(TerminalInput::PanelSelectionChanged)
+            }
+            TerminalInput::CopySelection if self.panel_selection.shown() => {
+                self.start_panel_copy();
+                Some(TerminalInput::PanelSelectionChanged)
+            }
+            TerminalInput::Escape if self.panel_selection.shown() => {
+                self.panel_selection.clear();
+                Some(TerminalInput::PanelSelectionChanged)
+            }
+            _ => None,
+        }
+    }
+
+    fn start_panel_copy(&mut self) {
+        if self.panel_copy.is_some() {
+            self.panel_selection.feedback = Some("Copy already in progress".to_owned());
+            return;
+        }
+        let Some(text) = self.panel_selection.text() else {
+            return;
+        };
+        let selection = match text {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.panel_selection.feedback = Some(error.to_owned());
+                return;
+            }
+        };
+        match clipboard::CopyRequest::selection(selection.clone()) {
+            Ok(request) => {
+                let local_request = request.clone();
+                self.panel_copy = Some(PanelCopy {
+                    task: tokio::spawn(async move { clipboard::copy_local(&local_request).await }),
+                    selection,
+                    request,
+                });
+            }
+            Err(error) => self.panel_selection.feedback = Some(error.to_owned()),
+        }
+    }
+
+    fn finish_panel_copy(
+        &mut self,
+        result: PanelCopyResult,
+        terminal_output: Option<&mut dyn Write>,
+    ) {
+        self.panel_copy = None;
+        let PanelCopyResult {
+            selection,
+            request,
+            result,
+        } = result;
+        let result = match result {
+            Ok(Some(cue)) => Ok(cue),
+            Ok(None) => {
+                let terminal_output = (!self.is_linear()).then_some(terminal_output).flatten();
+                clipboard::copy_to_terminal(&request, terminal_output)
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(cue) => {
+                let same_selection = self
+                    .panel_selection
+                    .text()
+                    .and_then(Result::ok)
+                    .is_some_and(|current| current == selection);
+                if same_selection {
+                    self.panel_selection.clear();
+                }
+                self.panel_selection.feedback = Some(cue);
+            }
+            Err(error) => self.panel_selection.feedback = Some(error),
+        }
+    }
+
     // Pointer input with nothing to do, discarded while chat waits so it causes no redraw.
     pub fn ignores_pointer(&mut self, input: TerminalInput) -> bool {
         let selects = !self.is_linear()
@@ -1423,7 +1718,9 @@ impl AttachedTerminal {
         };
         let mut stderr = io::stderr();
         let copied = match text.and_then(clipboard::CopyRequest::selection) {
-            Ok(request) => clipboard::copy(request, Some(&mut stderr as &mut dyn Write)).await,
+            Ok(request) => {
+                clipboard::copy(request, Some(&mut stderr as &mut (dyn Write + Send))).await
+            }
             Err(error) => Err(error.to_owned()),
         };
         match copied {
@@ -1508,7 +1805,8 @@ impl AttachedTerminal {
         let mut stderr = io::stderr();
         clipboard::copy(
             request,
-            (self.input.is_some() && !self.is_linear()).then_some(&mut stderr as &mut dyn Write),
+            (self.input.is_some() && !self.is_linear())
+                .then_some(&mut stderr as &mut (dyn Write + Send)),
         )
         .await
     }
@@ -1675,6 +1973,8 @@ impl AttachedTerminal {
         height: u16,
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<(), TerminalError> {
+        self.panel_selection.area = None;
+        self.panel_selection.enabled = false;
         self.prepare_frame_height(height)?;
         let terminal = self.owned();
         terminal.draw(|frame| render(frame, frame.area()))?;
@@ -1686,6 +1986,10 @@ impl AttachedTerminal {
     // A selector opens unarmed; `arm_dialog` admits input once the reader barrier completes.
     pub fn begin_dialog(&mut self) {
         self.dialog_armed = false;
+        self.panel_selection.enabled = false;
+        self.panel_selection.area = None;
+        self.panel_selection.clear();
+        self.panel_selection.feedback = None;
         if let Some(linear) = &mut self.linear {
             linear.disarm();
         }
@@ -1714,20 +2018,37 @@ impl AttachedTerminal {
         let palette = self.palette();
         let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
         let history = &mut self.history;
+        let feedback = if self.panel_selection.enabled {
+            self.panel_selection.feedback.clone()
+        } else {
+            None
+        };
+        let selection = &self.panel_selection;
         let terminal = Self::owned_terminal(&mut self.terminal);
         let mut area = Rect::default();
         let classic = self.mode == TerminalMode::Classic;
         let mut history_area = None;
+        let mut panel_lines = Vec::new();
         terminal.draw(|frame| {
             area = dialog_area(frame.area(), height, classic);
             if let Some(session) = session {
                 history_area = Some(draw_history_above(frame, history, session, area.y, palette));
             }
             render(frame, area);
+            panel_lines = rendered_panel_lines(frame.buffer_mut(), area);
+            selection.render(frame);
+            if let Some(feedback) = &feedback {
+                draw_panel_feedback(frame, area, feedback, palette);
+            }
         })?;
         let full = terminal.get_frame().area();
         terminal.backend_mut().set_area(full);
+        if feedback.is_some() {
+            self.panel_selection.feedback = None;
+        }
         self.history_area = history_area;
+        self.panel_selection.area = Some(area);
+        self.panel_selection.lines = panel_lines;
         Ok(area)
     }
 
@@ -2335,6 +2656,7 @@ impl AttachedTerminal {
                 .draw_settings(rows, notice)
                 .map_err(TerminalError::Io);
         }
+        self.panel_selection.enabled = true;
         let palette = self.palette();
         let armed = self.dialog_armed;
         let width = self.owned().size()?.width;
@@ -2359,6 +2681,7 @@ impl AttachedTerminal {
         session: &SessionView,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
+        self.panel_selection.enabled = true;
         let palette = self.palette();
         let armed = self.dialog_armed;
         self.draw_dialog(Some(session), 7, |frame, area| {
@@ -2476,6 +2799,7 @@ impl AttachedTerminal {
     }
 
     fn draw_help(&mut self, selected: usize, session: &SessionView) -> Result<(), TerminalError> {
+        self.panel_selection.enabled = true;
         let palette = self.palette();
         let armed = self.dialog_armed;
         if let Some(panel) = &mut self.usage_panel {
@@ -2841,6 +3165,8 @@ impl AttachedTerminal {
         replacement.newline_shortcut = self.newline_shortcut;
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
+        replacement.panel_selection = std::mem::take(&mut self.panel_selection);
+        replacement.panel_copy = self.panel_copy.take();
         replacement.dialog_armed = self.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
         replacement.child_drafts = std::mem::take(&mut self.child_drafts);
@@ -2863,6 +3189,45 @@ impl AttachedTerminal {
         self.shutdown_clipboard_on_drop = false;
         *self = replacement;
     }
+}
+
+fn rendered_panel_lines(buffer: &ratatui::buffer::Buffer, area: Rect) -> Vec<String> {
+    (area.y..area.bottom())
+        .map(|y| {
+            let mut line = String::new();
+            let mut skip = 0u16;
+            for x in area.x..area.right() {
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+                if let Some(cell) = buffer.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                    skip = cell.cell_width().saturating_sub(1);
+                }
+            }
+            line.trim_end().to_owned()
+        })
+        .collect()
+}
+
+fn draw_panel_feedback(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    feedback: &str,
+    palette: Palette,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let text = crate::presentation::escape_terminal(feedback);
+    let text = crate::presentation::safe_truncate(&text, usize::from(area.width));
+    let feedback_area = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+    frame.render_widget(ratatui::widgets::Clear, feedback_area);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(text).style(palette.attention()),
+        feedback_area,
+    );
 }
 
 // A Classic viewport is exactly its dialog; Fullscreen dialogs sit at the bottom under live
@@ -3655,4 +4020,248 @@ fn usage_now() -> Option<i64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+}
+
+#[cfg(test)]
+mod panel_selection_tests {
+    use super::{
+        MouseMode, PanelCopy, PanelSelection, PointerSettings, TerminalInput, TerminalMode,
+        rendered_panel_lines, wait_panel_copy,
+    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::Paragraph};
+
+    #[test]
+    fn panel_selection_copies_visible_rows_and_wide_graphemes() {
+        let mut selection = PanelSelection {
+            lines: vec!["Usage: café界".into(), "  remaining".into()],
+            ..PanelSelection::default()
+        };
+        selection.select(7, 0);
+        selection.extend(3, 1);
+        assert_eq!(selection.text().unwrap().unwrap(), "café界\n  re");
+    }
+
+    #[test]
+    fn panel_selection_requires_a_drag_before_it_is_shown() {
+        let mut selection = PanelSelection {
+            lines: vec!["panel".into()],
+            ..PanelSelection::default()
+        };
+        selection.select(1, 0);
+        assert!(!selection.shown());
+        selection.extend(2, 0);
+        assert!(selection.shown());
+        selection.clear();
+        assert!(!selection.selecting());
+    }
+
+    #[test]
+    fn panel_selection_reads_wide_graphemes_from_a_rendered_buffer() {
+        let mut terminal = Terminal::new(TestBackend::new(8, 1)).expect("test terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new("界abc"), frame.area()))
+            .expect("wide text frame");
+        let lines = rendered_panel_lines(terminal.backend().buffer(), Rect::new(0, 0, 8, 1));
+        assert_eq!(lines[0], "界abc");
+
+        let mut selection = PanelSelection {
+            lines,
+            ..PanelSelection::default()
+        };
+        selection.select(2, 0);
+        selection.extend(3, 0);
+        assert_eq!(selection.text().unwrap().unwrap(), "ab");
+    }
+
+    #[tokio::test]
+    async fn pending_panel_copy_survives_run_progress_and_reports_once() {
+        let mut terminal = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
+        terminal.panel_selection.lines = vec!["abc".into()];
+        terminal.panel_selection.select(0, 0);
+        terminal.panel_selection.extend(2, 0);
+
+        let (copy_started, copy_started_rx) = tokio::sync::oneshot::channel();
+        let (finish_copy, finish_copy_rx) = tokio::sync::oneshot::channel();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed_task = completed.clone();
+        let request = crate::terminal::clipboard::CopyRequest::selection("abc".into())
+            .expect("small test selection");
+        terminal.panel_copy = Some(PanelCopy {
+            task: tokio::spawn(async move {
+                let _ = copy_started.send(());
+                let _ = finish_copy_rx.await;
+                completed_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some("Copied selection to clipboard".to_owned()))
+            }),
+            selection: "abc".into(),
+            request,
+        });
+        copy_started_rx.await.expect("copy started");
+
+        let (progress, progress_rx) = tokio::sync::oneshot::channel();
+        progress
+            .send("progress")
+            .expect("progress receiver is waiting");
+        let copy_wait = wait_panel_copy(&mut terminal.panel_copy);
+        tokio::select! {
+            _ = copy_wait => panic!("copy completed before release"),
+            result = progress_rx => assert_eq!(result.expect("Run progress"), "progress"),
+        }
+
+        finish_copy.send(()).expect("copy task is waiting");
+        let result = wait_panel_copy(&mut terminal.panel_copy).await;
+        terminal.finish_panel_copy(result, None);
+
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            terminal.panel_selection.feedback.as_deref(),
+            Some("Copied selection to clipboard")
+        );
+        assert!(!terminal.panel_selection.shown());
+    }
+
+    #[tokio::test]
+    async fn panel_copy_feedback_keeps_the_clipboard_error_prefix_once() {
+        let mut terminal = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
+        let request = crate::terminal::clipboard::CopyRequest::selection("abc".into())
+            .expect("small test selection");
+        terminal.panel_copy = Some(PanelCopy {
+            task: tokio::spawn(async { Err("Copy unavailable: clipboard unavailable".to_owned()) }),
+            selection: "abc".into(),
+            request,
+        });
+
+        let result = wait_panel_copy(&mut terminal.panel_copy).await;
+        terminal.finish_panel_copy(result, None);
+
+        assert_eq!(
+            terminal.panel_selection.feedback.as_deref(),
+            Some("Copy unavailable: clipboard unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_panel_copy_does_not_use_osc52_after_linear_replacement() {
+        let mut terminal = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
+        terminal.mode = TerminalMode::Fullscreen;
+        terminal.panel_selection.lines = vec!["abc".into()];
+        terminal.panel_selection.select(0, 0);
+        terminal.panel_selection.extend(2, 0);
+        let request = crate::terminal::clipboard::CopyRequest::selection("abc".into())
+            .expect("small test selection");
+        let (copy_started, copy_started_rx) = tokio::sync::oneshot::channel();
+        let (finish_copy, finish_copy_rx) = tokio::sync::oneshot::channel();
+        terminal.panel_copy = Some(PanelCopy {
+            task: tokio::spawn(async move {
+                let _ = copy_started.send(());
+                let _ = finish_copy_rx.await;
+                Ok(None)
+            }),
+            selection: "abc".into(),
+            request,
+        });
+        copy_started_rx.await.expect("copy started");
+
+        let replacement = crate::terminal::clipboard::cleanup_tests::released_terminal(Some(
+            crate::terminal::linear::LinearState::new("test"),
+        ));
+        terminal.replace_released(replacement);
+        assert!(terminal.is_linear());
+        assert!(
+            terminal.panel_copy.is_some(),
+            "the pending task survives replacement"
+        );
+
+        finish_copy.send(()).expect("copy task is waiting");
+        let result = wait_panel_copy(&mut terminal.panel_copy).await;
+        let mut output = Vec::new();
+        terminal.finish_panel_copy(result, Some(&mut output));
+
+        assert!(output.is_empty(), "linear fallback emits no OSC 52");
+        assert_eq!(
+            terminal.panel_selection.feedback.as_deref(),
+            Some(
+                "Copy unavailable: no native or tmux clipboard worked; OSC 52 unavailable in linear mode"
+            )
+        );
+        assert!(
+            terminal.panel_selection.shown(),
+            "failed copy keeps selection"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panel_copy_journey_keeps_failed_selection_and_escape_precedes_close() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut terminal =
+                    crate::terminal::clipboard::cleanup_tests::released_terminal(None);
+                terminal.mode = TerminalMode::Fullscreen;
+                terminal.pointer = PointerSettings {
+                    mouse: MouseMode::WheelAndClicks,
+                    copy_on_select: false,
+                };
+                terminal.panel_selection.enabled = true;
+                terminal.panel_selection.area = Some(Rect::new(0, 0, 4_096, 25));
+                terminal.panel_selection.lines = vec!["a".repeat(4_096); 25];
+
+                assert_eq!(
+                    terminal
+                        .panel_pointer_input(TerminalInput::PointerClick {
+                            column: 0,
+                            row: 0,
+                            clicks: 1
+                        })
+                        .await,
+                    Some(TerminalInput::PanelSelectionChanged)
+                );
+                assert_eq!(
+                    terminal
+                        .panel_pointer_input(TerminalInput::PointerDrag {
+                            column: 4_095,
+                            row: 24,
+                        })
+                        .await,
+                    Some(TerminalInput::PanelSelectionChanged)
+                );
+                assert_eq!(
+                    terminal
+                        .panel_pointer_input(TerminalInput::PointerRelease {
+                            column: 4_095,
+                            row: 24,
+                        })
+                        .await,
+                    None,
+                    "Copy on select is disabled"
+                );
+                assert!(terminal.panel_selection.shown());
+
+                assert_eq!(
+                    terminal
+                        .panel_pointer_input(TerminalInput::CopySelection)
+                        .await,
+                    Some(TerminalInput::PanelSelectionChanged),
+                    "explicit copy still runs"
+                );
+                assert!(terminal.panel_selection.shown(), "failure keeps selection");
+                assert_eq!(
+                    terminal.panel_selection.feedback.as_deref(),
+                    Some(super::COPY_TOO_LARGE)
+                );
+                assert_eq!(
+                    terminal.panel_pointer_input(TerminalInput::Escape).await,
+                    Some(TerminalInput::PanelSelectionChanged)
+                );
+                assert!(!terminal.panel_selection.selecting());
+                assert_eq!(
+                    terminal.panel_pointer_input(TerminalInput::Escape).await,
+                    None,
+                    "the next Escape reaches the panel's close handler"
+                );
+            });
+    }
 }
