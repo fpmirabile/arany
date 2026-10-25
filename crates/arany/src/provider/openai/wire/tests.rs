@@ -1154,7 +1154,7 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
 
 #[test]
 fn typed_argument_failures_reach_the_engine_but_wire_bounds_still_reject() {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let request = primary_request(MODEL);
     for (call, expected) in [
         (
@@ -1276,7 +1276,7 @@ fn padded_read_arguments(escaped: bool, len: usize) -> String {
 
 #[test]
 fn ordinary_call_arguments_are_bounded_as_raw_text_before_parsing() {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let request = primary_request(MODEL);
     let limit = crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES;
     for escaped in [false, true] {
@@ -1308,7 +1308,7 @@ fn ordinary_call_arguments_are_bounded_as_raw_text_before_parsing() {
 
 #[test]
 fn native_tool_argument_limits_include_outer_whitespace() {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let mut request = primary_request(MODEL);
     request.max_output_tokens = 128_000;
     for (operation, input) in [
