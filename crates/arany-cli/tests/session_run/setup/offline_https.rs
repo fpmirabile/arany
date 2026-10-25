@@ -592,7 +592,7 @@ fn isolated_stage() {
         SETUP_SHELL,
         &[
             (
-                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
                 b"API accounts\r",
             ),
             (
@@ -792,7 +792,7 @@ fn isolated_stage() {
         &[
             (b"Input:\r\n", b"/setup\r"),
             (
-                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
                 b"API accounts\r",
             ),
             (
