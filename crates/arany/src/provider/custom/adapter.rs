@@ -4,7 +4,7 @@ use super::{
 };
 use crate::provider::{
     CompactionRequest, CompactionResponse, CustomProfileProvenance, Effort, Provenance, Provider,
-    ProviderError, ProviderIdentity, ProviderRequest, ProviderResponse,
+    ProviderError, ProviderIdentity, ProviderKind, ProviderRequest, ProviderResponse,
 };
 use crate::store::{StateRoot, Store};
 
@@ -48,7 +48,7 @@ impl CustomProvider {
             .map_err(|_| CustomProfileError::CredentialUnavailable)?;
         let transport = CustomTransport::new(&profile, &destination, key)?;
         let mut identity = ProviderIdentity::new(
-            format!("custom:{}", profile.name()),
+            ProviderKind::custom_profile(profile.name()),
             profile.model(),
             Provenance::Custom(CustomProfileProvenance {
                 endpoint: profile.endpoint().to_owned(),

@@ -137,7 +137,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
     ("SessionRenamed", 6),
-    ("ProviderSetupEditStarted", 1),
+    ("ProviderSetupEditStarted", 2),
     ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
@@ -481,6 +481,7 @@ pub enum ProviderSetupTargetKind {
     ChatGptAccount,
     CustomProfile,
     ModelPreferences,
+    RoleRouting,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2168,4 +2169,18 @@ pub(crate) fn add_command_selection(
         *output = text.into();
     }
     Some(value)
+}
+
+pub(crate) fn pre_role_routing_payload(kind: &str, payload: &str) -> Option<String> {
+    if kind != "ProviderSetupEditStarted" {
+        return None;
+    }
+    let data: ProviderSetupEditStartedPayload = parse(payload).ok()?;
+    match data.target.kind {
+        ProviderSetupTargetKind::RoleRouting => None,
+        ProviderSetupTargetKind::NativeAccount
+        | ProviderSetupTargetKind::ChatGptAccount
+        | ProviderSetupTargetKind::CustomProfile
+        | ProviderSetupTargetKind::ModelPreferences => serialize(&data).ok(),
+    }
 }

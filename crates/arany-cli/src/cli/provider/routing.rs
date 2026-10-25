@@ -3,9 +3,11 @@ use arany::{
     AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderKind, ProviderRole,
     Providers, RecordFormat, RecordKind, StateRoot,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{path::Path, str::FromStr, sync::Arc};
 use uuid::{Uuid, Version};
+
+pub(crate) const MAX_ROLE_MODEL_BYTES: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RoutingError {
@@ -44,14 +46,14 @@ pub(crate) enum RoutingError {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoutingConfig {
     version: u8,
     providers: Providers<Option<Vec<Route>>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Route {
     pub(crate) provider: String,
@@ -63,11 +65,11 @@ pub(crate) struct Route {
 }
 
 impl Route {
-    pub(super) fn validate(&self) -> Result<(), RoutingError> {
+    pub(crate) fn validate(&self) -> Result<(), RoutingError> {
         let profile =
             ProviderArg::from_str(&self.provider).map_err(RoutingError::InvalidProvider)?;
         if self.model.is_empty()
-            || self.model.len() > 128
+            || self.model.len() > MAX_ROLE_MODEL_BYTES
             || self.model.chars().any(char::is_control)
             || self
                 .account_id
@@ -89,6 +91,91 @@ impl Route {
                 }
             }
             ProviderArg::Custom(_) => {}
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct RoutingDraft {
+    pub(crate) providers: Providers<Option<Vec<Route>>>,
+    expected: Option<Vec<u8>>,
+}
+
+impl RoutingDraft {
+    pub(crate) fn load(state: &StateRoot) -> Result<Self, RoutingError> {
+        let expected = state
+            .read_current(&PROVIDER_ROUTING)
+            .map_err(|_| RoutingError::RoutingUnavailable)?;
+        let providers = match &expected {
+            Some(bytes) => parse(bytes)?.providers,
+            None => Providers::all(None),
+        };
+        Ok(Self {
+            providers,
+            expected,
+        })
+    }
+
+    pub(crate) fn expected(&self) -> Option<&[u8]> {
+        self.expected.as_deref()
+    }
+
+    pub(crate) fn encode(&self, primary: Option<&Route>) -> Result<Vec<u8>, RoutingError> {
+        let mut providers = self.providers.clone();
+        for chain in [
+            &mut providers.primary,
+            &mut providers.child,
+            &mut providers.review,
+            &mut providers.compaction,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for route in chain {
+                route.resolve_effort()?;
+            }
+        }
+        let bytes = serde_json::to_vec(&RoutingConfig {
+            version: 1,
+            providers,
+        })
+        .map_err(|_| RoutingError::InvalidConfiguration)?;
+        let config = parse(&bytes)?;
+        if config
+            .providers
+            .primary
+            .as_ref()
+            .is_some_and(|chain| Some(&chain[0]) != primary)
+        {
+            return Err(RoutingError::PrimarySelectionMismatch);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn publish(
+        &self,
+        state: &StateRoot,
+        bytes: Option<&[u8]>,
+    ) -> Result<(), arany::StoreError> {
+        state.edit_provider_record(
+            arany::ProviderRecordTarget::Routing,
+            self.expected(),
+            bytes.map_or(
+                arany::ProviderRecordEdit::Remove,
+                arany::ProviderRecordEdit::Replace,
+            ),
+            &PROVIDER_ROUTING,
+        )
+    }
+}
+
+impl Route {
+    pub(crate) fn resolve_effort(&mut self) -> Result<(), RoutingError> {
+        if ProviderKind::parse(&self.provider).is_some_and(ProviderKind::is_native_api) {
+            self.effort = Some(
+                arany::resolve_native_effort_for_run(&self.provider, &self.model, self.effort)
+                    .map_err(|_| RoutingError::InvalidModelEffort)?,
+            );
         }
         Ok(())
     }
@@ -121,7 +208,7 @@ pub(crate) fn references_custom_profile(
         .into_iter()
         .flatten()
         .flatten()
-        .any(|route| route.provider == format!("custom:{name}")))
+        .any(|route| route.provider == ProviderKind::custom_profile(name)))
 }
 
 fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {
@@ -241,6 +328,67 @@ pub(super) async fn admit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_routing_edits_reopen_inheritance_and_refuse_stale_replacement_and_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let mut draft = RoutingDraft::load(&root).unwrap();
+        let stale = RoutingDraft::load(&root).unwrap();
+        let primary = Route {
+            provider: "openai".into(),
+            model: "gpt-5.4".into(),
+            effort: Some(Effort::Low),
+            account_id: None,
+        };
+        let fallback = Route {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+            effort: Some(Effort::High),
+            account_id: None,
+        };
+        draft.providers.primary = Some(vec![primary.clone(), fallback.clone()]);
+        draft.providers.child = Some(vec![fallback.clone()]);
+        let bytes = draft.encode(Some(&primary)).unwrap();
+        draft.publish(&root, Some(&bytes)).unwrap();
+        assert!(matches!(
+            stale.publish(&root, Some(&bytes)),
+            Err(arany::StoreError::RecordChanged)
+        ));
+        assert!(matches!(
+            stale.publish(&root, None),
+            Err(arany::StoreError::RecordChanged)
+        ));
+        let reopened = RoutingDraft::load(&StateRoot::open_existing(root.path()).unwrap()).unwrap();
+        assert_eq!(
+            reopened.providers.primary,
+            Some(vec![primary.clone(), fallback.clone()])
+        );
+        assert_eq!(reopened.providers.child, Some(vec![fallback.clone()]));
+        assert_eq!(reopened.providers.review, None);
+        assert_eq!(reopened.providers.compaction, None);
+        assert!(matches!(
+            reopened.encode(Some(&fallback)),
+            Err(RoutingError::PrimarySelectionMismatch)
+        ));
+        assert!(matches!(
+            root.record(RecordKind::ProviderRouting).replace(&bytes),
+            Err(arany::StoreError::ReadOnly)
+        ));
+        reopened.publish(&root, None).unwrap();
+        assert!(RoutingDraft::load(&root).unwrap().expected().is_none());
+        draft.providers.primary = Some(vec![
+            fallback.clone(),
+            Route {
+                effort: None,
+                ..fallback.clone()
+            },
+        ]);
+        assert!(matches!(
+            draft.encode(Some(&fallback)),
+            Err(RoutingError::DuplicateRoute)
+        ));
+    }
 
     #[test]
     fn routing_error_display_preserves_cli_text() {
