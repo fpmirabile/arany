@@ -1543,7 +1543,7 @@ impl AttachedTerminal {
         if !self.panel_selection.enabled
             || self.is_linear()
             || self.mode != TerminalMode::Fullscreen
-            || self.pointer.mouse.effective() != MouseMode::WheelAndClicks
+            || !mouse_capture_enabled()
         {
             return None;
         }
@@ -3981,7 +3981,7 @@ fn usage_now() -> Option<i64> {
 #[cfg(test)]
 mod panel_selection_tests {
     use super::{
-        MouseMode, PanelCopy, PanelSelection, PointerSettings, TerminalInput, TerminalMode,
+        PanelCopy, PanelSelection, PointerSettings, TerminalInput, TerminalMode,
         rendered_panel_lines, wait_panel_copy,
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::Paragraph};
@@ -4196,7 +4196,6 @@ mod panel_selection_tests {
                     crate::terminal::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
                 terminal.pointer = PointerSettings {
-                    mouse: MouseMode::WheelAndClicks,
                     copy_on_select: false,
                 };
                 terminal.panel_selection.enabled = true;
