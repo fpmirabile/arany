@@ -2902,12 +2902,13 @@ impl RunLoop<'_> {
                     return Ok(Admission::Reserved(SlotDispatch::Stopped));
                 }
             }
-            let mut request = root_request.clone();
+            let mut model = root_request.model.clone();
+            let mut max_output_tokens = root_request.max_output_tokens;
             self.routing.bind(
                 crate::provider::ProviderRole::Primary,
                 self.primary_id,
-                &mut request.model,
-                &mut request.max_output_tokens,
+                &mut model,
+                &mut max_output_tokens,
             )?;
             if !self.admit_worker_call(queue).await? {
                 return Ok(Admission::Reserved(SlotDispatch::Stopped));
@@ -2919,7 +2920,9 @@ impl RunLoop<'_> {
                 return Ok(Admission::Exhausted);
             };
             self.primary_context(root_request).await?;
-            request.input = root_request.input.clone();
+            let mut request = root_request.clone();
+            request.model = model;
+            request.max_output_tokens = max_output_tokens;
             self.spawn_wave_primary(queue, request, deadline)?;
             queue.primary_pending = true;
             return Ok(Admission::Reserved(SlotDispatch::Started));

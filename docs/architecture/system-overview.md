@@ -79,6 +79,8 @@ copy from its borrowed runtime before consuming that chain.
 Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file or command view and its private cache restore, attests private mutation/capture and publishes only the primary's eligible changeset. Editor commands use the shared permission and delegated hook path; the coordinator gates answer on private evidence before handover, while primary verification remains independent. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
+The RunLoop owns wave-primary request assembly; the [Execution collaboration contract](../specs/execution.md#collaboration) owns its preparation and admission ordering.
+
 The Engine owns the Supervisor's bounded evaluation state and pure evaluator over committed reducer facts. The RunLoop explicitly decides whether to journal a shadow verdict and commits that verdict as its own Event before continuation. The reducer owns only the recorded-verdict projection and shape/placement validation; replay accepts recorded decisions without reevaluating signals. The Supervisor does not subscribe to the lossy tap and has no enforcement authority. The [Supervisor contract](../specs/tools.md#supervisor-adapter) owns signals, bounds and replay.
 
 `Journal::append` publishes only committed Events to a bounded broadcast ring of
