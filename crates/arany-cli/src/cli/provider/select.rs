@@ -25,7 +25,7 @@ impl ProviderArg {
             Self::Openai => ProviderKind::OpenAi,
             Self::Anthropic => ProviderKind::Anthropic,
             Self::Chatgpt => ProviderKind::ChatGpt,
-            Self::Custom(name) => return format!("custom:{name}"),
+            Self::Custom(name) => return ProviderKind::custom_profile(name),
         };
         provider.native_name().expect("native Provider name").into()
     }
@@ -40,7 +40,7 @@ impl FromStr for ProviderArg {
             Some(ProviderKind::Anthropic) => Ok(Self::Anthropic),
             Some(ProviderKind::ChatGpt) => Ok(Self::Chatgpt),
             Some(ProviderKind::Custom) | None => {
-                let name = value.strip_prefix("custom:").ok_or("invalid Provider")?;
+                let name = ProviderKind::custom_name(value).ok_or("invalid Provider")?;
                 if !arany::valid_profile_name(name) {
                     return Err("invalid custom Provider name");
                 }
@@ -205,9 +205,7 @@ async fn select_provider_inner(
             if selection.account_id.is_some() {
                 return Err(SelectionError::SavedAccountRequiresNative);
             }
-            let name = selection
-                .profile
-                .strip_prefix("custom:")
+            let name = ProviderKind::custom_name(selection.profile)
                 .ok_or(SelectionError::UnsupportedProfile)?;
             let root = StateRoot::open_existing(state_dir)
                 .map_err(|_| SelectionError::StateUnavailable)?;
@@ -249,7 +247,7 @@ pub(crate) async fn authenticate(
         }
         Some(ProviderKind::ChatGpt) => chatgpt::authenticate(account_id).await.is_ok(),
         Some(ProviderKind::Custom) | None => {
-            let Some(name) = profile.strip_prefix("custom:") else {
+            let Some(name) = ProviderKind::custom_name(profile) else {
                 return false;
             };
             let Ok(root) = StateRoot::open_existing(state_dir) else {
