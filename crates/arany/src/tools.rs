@@ -461,7 +461,7 @@ impl ToolRuntime {
             workspace_device: self.workspace_identity.device,
             workspace_inode: self.workspace_identity.inode,
             policy_digest: self.config.digest(),
-            enforcement_digest: self.enforcement_digest,
+            enforcement_digest: FileReceipt::enforcement_digest(),
         }
     }
 
@@ -1443,15 +1443,9 @@ impl ToolRuntime {
         bytes: std::sync::Arc<[u8]>,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        if let Err(error) = worker::decode_handover(&intent, &bytes, &self.config) {
-            return unstarted_observation(intent, error);
-        }
         let mut runtime = self.clone();
         runtime.handover = Some(bytes);
-        match guard::execute(&runtime, &intent, cancellation).await {
-            Ok(observation) => observation,
-            Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
-        }
+        runtime.run_file(intent, cancellation).await
     }
 
     pub(crate) async fn execute(
@@ -1538,6 +1532,9 @@ impl ToolRuntime {
     }
 
     async fn run_file(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
+        if !self.guard_available {
+            return unstarted_observation(intent, ToolError::ProtectionUnavailable);
+        }
         if !fs::in_process_mutation(&intent) {
             return unstarted_observation(intent, ToolError::Configuration);
         }
@@ -1575,7 +1572,12 @@ impl ToolRuntime {
             let _permit = permit;
             let control = blocking_control;
             let root = runtime.pinned_root(&file_intent)?;
-            let result = fs::mutate(&root, &file_intent.call, &runtime.config, &control);
+            let result = if let Some(bytes) = &runtime.handover {
+                let changeset = worker::decode_handover(&file_intent, bytes, &runtime.config)?;
+                fs::apply_worker_changeset(&root, &changeset, &control)
+            } else {
+                fs::mutate(&root, &file_intent.call, &runtime.config, &control)
+            };
             Ok::<_, ToolError>(result)
         });
         let result = match tokio::time::timeout_at(deadline, writing).await {

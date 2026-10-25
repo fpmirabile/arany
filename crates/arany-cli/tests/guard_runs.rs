@@ -3834,7 +3834,7 @@ async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly
         assert_eq!(observation.output, text);
         assert!(matches!(
             observation.attestation,
-            Some(arany::Attestation::Guard(_))
+            Some(arany::Attestation::InProcess { .. })
         ));
     }
     for step in &view.runs[0].tools[3..] {

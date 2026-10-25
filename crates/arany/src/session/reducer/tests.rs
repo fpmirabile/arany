@@ -8419,7 +8419,18 @@ mod goal_replay_tests {
                 observation: read_attested,
             }
         ));
-        apply(&mut view, tool_finished(run, agent, &write, b"after")).expect("Guard receipt");
+        let finished = tool_finished(run, agent, &write, b"after");
+        let bytes = finished.payload().unwrap();
+        let decoded = Event::decode(
+            finished.kind(),
+            finished.version(),
+            &bytes,
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        apply(&mut view, decoded).expect("historical Guard receipt");
+        assert_eq!(finished.payload().unwrap(), bytes);
     }
 
     #[test]

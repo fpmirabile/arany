@@ -841,7 +841,13 @@ async fn native_file_journey_helper() {
                     ToolCall::Read { .. }
                         | ToolCall::Search { .. }
                         | ToolCall::Skill { .. }
+                        | ToolCall::Write { .. }
+                        | ToolCall::Edit { .. }
+                        | ToolCall::MultiEdit { .. }
                         | ToolCall::Mkdir { .. }
+                        | ToolCall::Delete { .. }
+                        | ToolCall::Move { .. }
+                        | ToolCall::ApplyChangeset { .. }
                 ));
                 if observation.disposition == ToolDisposition::Succeeded
                     && !matches!(
