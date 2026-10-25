@@ -1442,6 +1442,10 @@ mod tests {
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
         use std::os::unix::fs::PermissionsExt;
+        let _deadline = arany::test_support::engine::deadline(
+            "JSONL budget feedback",
+            std::time::Duration::from_secs(30),
+        );
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
         let state_dir = temp.path().join("state");
@@ -1466,8 +1470,18 @@ mod tests {
         root.record(arany::RecordKind::UiPreferences)
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
             .expect("record settings");
-        drop(root);
-
+        let engine = arany::test_support::engine::open(
+            root,
+            EngineConfig {
+                guard_executable: std::env::current_exe().ok(),
+                ..EngineConfig::default()
+            },
+        )
+        .expect("engine");
+        let session_id = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .expect("Session");
         let contract = arany::GoalPlanContract {
             mission: "Inspect the notes and report the result".into(),
             paths: vec!["notes".into()],
@@ -1486,29 +1500,55 @@ mod tests {
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
-        .with_profile("openai", "gpt-5.4")
-        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
+        .with_profile("openai", "gpt-5.4");
+        let requests = Arc::clone(&provider.requests);
+        let (entered, release) =
+            arany::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
+                matches!(event, arany::Event::MessageCommitted { .. })
+            });
         let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
         exec.prompt = None;
         exec.goal = Some("Inspect the notes".into());
+        exec.session_id = Some(session_id.to_string());
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
         let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
-            .await
-            .expect("completed Run with an exhausted Goal");
-        let first_event: serde_json::Value =
-            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
-                .expect("JSONL Event");
-        let session_id =
-            SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
-                .expect("typed Session ID");
+        let report = run_on_engine(
+            exec,
+            admission,
+            AdmittedProviders::single(Arc::new(provider)),
+            engine,
+            None,
+        );
+        tokio::pin!(report);
+        tokio::select! {
+            result = &mut report => panic!("exec ended before its answer committed: {:?}", result.map(|output| output.success)),
+            entered = entered => entered.expect("answer reached its acknowledgment"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_millis(
+            budget.max_active_ms.expect("finite active-time budget"),
+        ))
+        .await;
+        tokio::time::resume();
+        release.send(()).expect("release the committed answer");
+        let report = report.await.expect("completed Run with an exhausted Goal");
         let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
         let run = view.runs.last().expect("Finished Run");
         assert_eq!(run.status, RunStatus::Finished);
         assert_eq!(
-            view.goals.last().expect("Failed Goal").status,
-            GoalStatus::Failed
+            run.assistant_message.as_deref(),
+            Some("The notes remain unchanged")
+        );
+        assert_eq!(requests.lock().expect("Provider requests").len(), 2);
+        let goal = view.goals.last().expect("Failed Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(
+            goal.budget_refusal
+                .as_ref()
+                .expect("budget refusal")
+                .dimension,
+            arany::GoalLimit::ActiveTime
         );
         let feedback =
             crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
