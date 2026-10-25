@@ -657,6 +657,37 @@ fn graphics_probe_allowed(mode: TerminalMode) -> bool {
         && std::env::var_os("TMUX").is_none()
 }
 
+#[cfg(unix)]
+fn graphics_protocol(
+    kitty_supported: bool,
+    tmux: bool,
+    term_program: Option<&str>,
+    lc_terminal: Option<&str>,
+) -> Option<GraphicsProtocol> {
+    if kitty_supported {
+        Some(GraphicsProtocol::Kitty)
+    } else if !tmux
+        && (matches!(term_program, Some("iTerm.app" | "WezTerm")) || lc_terminal == Some("iTerm2"))
+    {
+        Some(GraphicsProtocol::ITerm2)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn detected_graphics_protocol(input: &TerminalReader, probe: bool) -> Option<GraphicsProtocol> {
+    if !probe {
+        return None;
+    }
+    graphics_protocol(
+        input.kitty_graphics_supported(),
+        std::env::var_os("TMUX").is_some(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var("LC_TERMINAL").ok().as_deref(),
+    )
+}
+
 fn hovered_image_at(chips: &[(usize, Rect)], column: u16, row: u16) -> Option<usize> {
     chips.iter().find_map(|(index, area)| {
         area.contains(ratatui::layout::Position::new(column, row))
@@ -1052,6 +1083,7 @@ pub struct AttachedTerminal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GraphicsProtocol {
     Kitty,
+    ITerm2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1340,9 +1372,7 @@ impl AttachedTerminal {
         #[cfg(unix)]
         let keyboard = keyboard_mode(&input, graphics_probe)?;
         #[cfg(unix)]
-        let graphics_protocol = input
-            .kitty_graphics_supported()
-            .then_some(GraphicsProtocol::Kitty);
+        let graphics_protocol = detected_graphics_protocol(&input, graphics_probe);
         #[cfg(not(unix))]
         let graphics_protocol = None;
         let pointer_modes = pointer_modes(
@@ -1771,10 +1801,7 @@ impl AttachedTerminal {
         {
             let graphics_probe = graphics_probe_allowed(self.mode);
             self.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
-            self.graphics_protocol = self
-                .reader()
-                .kitty_graphics_supported()
-                .then_some(GraphicsProtocol::Kitty);
+            self.graphics_protocol = detected_graphics_protocol(self.reader(), graphics_probe);
         }
         self.pointer_modes = pointer_modes(
             self.mode,
@@ -2489,6 +2516,9 @@ impl AttachedTerminal {
         if self.graphics_placement.take().is_none() {
             return Ok(());
         }
+        if self.graphics_protocol != Some(GraphicsProtocol::Kitty) {
+            return Ok(());
+        }
         self.terminal.as_mut().map_or(Ok(()), |terminal| {
             terminal
                 .backend_mut()
@@ -2817,13 +2847,16 @@ impl AttachedTerminal {
             return Ok(());
         }
         let mut bytes = Vec::new();
-        if self.graphics_placement.take().is_some() {
+        if self.graphics_placement.take().is_some()
+            && self.graphics_protocol == Some(GraphicsProtocol::Kitty)
+        {
             bytes.extend_from_slice(graphics::kitty_delete());
         }
-        if let (Some(GraphicsProtocol::Kitty), Some((_, image, inner))) =
-            (self.graphics_protocol, preview)
-        {
-            bytes.extend_from_slice(&graphics::kitty_image(image, inner));
+        if let (Some(protocol), Some((_, image, inner))) = (self.graphics_protocol, preview) {
+            bytes.extend_from_slice(&match protocol {
+                GraphicsProtocol::Kitty => graphics::kitty_image(image, inner),
+                GraphicsProtocol::ITerm2 => graphics::inline_image(image, inner),
+            });
             self.graphics_placement = placement;
         }
         if !bytes.is_empty() {
@@ -3961,8 +3994,52 @@ impl Drop for AttachedTerminal {
 
 #[cfg(test)]
 mod graphics_lifecycle_tests {
-    use super::{GraphicsPlacement, TerminalBackend, hovered_image_at, transition_hover};
+    use super::{
+        GraphicsPlacement, GraphicsProtocol, TerminalBackend, graphics_protocol, hovered_image_at,
+        transition_hover,
+    };
     use ratatui::{Terminal, layout::Rect};
+
+    #[test]
+    fn graphics_detection_prefers_kitty_and_suppresses_inline_in_tmux() {
+        for (kitty, tmux, program, lc_terminal, expected) in [
+            (
+                true,
+                false,
+                Some("iTerm.app"),
+                None,
+                Some(GraphicsProtocol::Kitty),
+            ),
+            (
+                false,
+                false,
+                Some("iTerm.app"),
+                None,
+                Some(GraphicsProtocol::ITerm2),
+            ),
+            (
+                false,
+                false,
+                Some("WezTerm"),
+                None,
+                Some(GraphicsProtocol::ITerm2),
+            ),
+            (
+                false,
+                false,
+                None,
+                Some("iTerm2"),
+                Some(GraphicsProtocol::ITerm2),
+            ),
+            (false, true, Some("iTerm.app"), Some("iTerm2"), None),
+            (false, false, Some("iTerm"), None, None),
+        ] {
+            assert_eq!(
+                graphics_protocol(kitty, tmux, program, lc_terminal),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn hover_enter_leave_request_one_frame_and_motion_inside_is_suppressed() {
@@ -4003,6 +4080,7 @@ mod graphics_lifecycle_tests {
             .block_on(async {
                 let backend = TerminalBackend::failing_graphics_writer(80, 24);
                 let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+                attached.graphics_protocol = Some(GraphicsProtocol::Kitty);
                 attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
                 attached.graphics_placement = Some(GraphicsPlacement {
                     image_index: 0,
@@ -4023,6 +4101,7 @@ mod graphics_lifecycle_tests {
     async fn opening_agent_chat_clears_preview_and_propagates_delete_failure() {
         let backend = TerminalBackend::failing_graphics_writer(80, 24);
         let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+        attached.graphics_protocol = Some(GraphicsProtocol::Kitty);
         attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
         attached.hovered_image = Some(0);
         attached.graphics_placement = Some(GraphicsPlacement {
