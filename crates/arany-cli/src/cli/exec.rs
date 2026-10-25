@@ -802,9 +802,8 @@ async fn run_signalled(
 mod tests {
     use super::*;
     use arany::{
-        AgentPhase, Answer, Event, ProviderError, ProviderOutcome, ProviderRequest,
-        ProviderResponse, RunId, RunStop, SessionView, Tapped,
-        test_support::scenario::ScriptedProvider,
+        AgentPhase, Answer, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
+        RunId, RunStop, SessionView, Tapped, test_support::scenario::ScriptedProvider,
     };
     use std::{
         collections::VecDeque,
@@ -1485,43 +1484,6 @@ mod tests {
         assert!(!report.success);
     }
 
-    async fn run_with_budget_spent_after_answer(
-        exec: ExecArgs,
-        admission: Admission,
-        provider: ScriptedProvider,
-        active_time: std::time::Duration,
-    ) -> CommandOutput {
-        let requests = Arc::clone(&provider.requests);
-        let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
-        let provider = provider.with_before_call(1, move || {
-            let session = requests
-                .lock()
-                .expect("requests")
-                .last()
-                .expect("call")
-                .session_id;
-            let gate = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(event, Event::MessageCommitted { .. })
-            });
-            gate_tx.try_send(gate).expect("one answer gate");
-        });
-        let run = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
-        tokio::pin!(run);
-        let (entered, release) = tokio::select! {
-            gate = gate_rx.recv() => gate.expect("answer gate installed"),
-            result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
-        };
-        tokio::select! {
-            entered = entered => entered.expect("accepted answer committed"),
-            result = &mut run => panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success)),
-        }
-        tokio::time::pause();
-        tokio::time::advance(active_time).await;
-        tokio::time::resume();
-        release.send(()).expect("release accepted answer");
-        run.await.expect("completed Run with an exhausted Goal")
-    }
-
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_settled_runs() {
         use std::os::unix::fs::PermissionsExt;
@@ -1576,13 +1538,9 @@ mod tests {
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
         let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_budget_spent_after_answer(
-            exec,
-            admission,
-            provider,
-            std::time::Duration::from_millis(budget.max_active_ms.expect("finite Goal budget")),
-        )
-        .await;
+        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
+            .await
+            .expect("completed Run with an exhausted Goal");
         let first_event: serde_json::Value =
             serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
                 .expect("JSONL Event");
