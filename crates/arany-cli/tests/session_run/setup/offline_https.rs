@@ -823,6 +823,10 @@ fn isolated_stage() {
             ),
             (
                 b"Image 1: PNG 1x1, 69 B",
+                b"\x1b[200~ notes\nphoto.png\x1b[201~",
+            ),
+            (
+                b"Image 1: PNG 1x1, 69 B",
                 b"\x01\x04",
             ),
             (
@@ -830,7 +834,7 @@ fn isolated_stage() {
                 b"!\x04",
             ),
             (
-                b"Notice: Draft: 14 characters; catalog loading; Ctrl+C cancels",
+                b"Notice: Draft: 30 characters; catalog loading; Ctrl+C cancels",
                 b"\x03",
             ),
             (b"Notice: Model catalog cancelled", b"\x04"),
@@ -871,13 +875,17 @@ fn isolated_stage() {
         1
     );
     assert_eq!(
-        text.matches("Notice: Draft: 14 characters; catalog loading; Ctrl+C cancels\r\n")
+        text.matches("Notice: Draft: 30 characters; catalog loading; Ctrl+C cancels\r\n")
             .count(),
         1
     );
     assert!(
         text.contains("Draft (not sent):\r\n  catalog draft\r\n  Image 1: PNG 1x1, 69 B\r\n"),
         "retained draft does not contain the pasted image beside its existing text"
+    );
+    assert!(
+        text.contains("Draft (not sent):\r\n  catalog draft notes\r\n  photo.png\r\n  Image 1: PNG 1x1, 69 B\r\n"),
+        "multiline text ending in a PNG filename was not retained beside the image"
     );
     assert!(!text.contains("Notice: Catalog loading; draft retained; Ctrl+C cancels"));
     unsaved("/root/state-six");

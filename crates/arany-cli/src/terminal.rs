@@ -80,7 +80,10 @@ fn pasted_png_path(
     workspace: &std::path::Path,
 ) -> Result<Option<std::path::PathBuf>, &'static str> {
     let path = input.trim().trim_matches(['"', '\'']);
-    if path.len() > MAX_PASTED_PNG_PATH_BYTES || !path.to_ascii_lowercase().ends_with(".png") {
+    if path.len() > MAX_PASTED_PNG_PATH_BYTES
+        || path.contains(char::is_control)
+        || !path.to_ascii_lowercase().ends_with(".png")
+    {
         return Ok(None);
     }
     let pasted_path = std::path::Path::new(path);
