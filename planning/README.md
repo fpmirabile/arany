@@ -54,5 +54,10 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Primary host commands](./primary-host-commands/README.md) | `Ready`: guarantee wording and H1 approved; S1 primary escalation, session approval and privilege-tool refusal, S2 user-owned host prefixes, S3 serve/ACP/exec |
 | [Image chip hover preview](./image-hover-preview/README.md) | `Ready`; after image attachment chips (#425); S1 Kitty-protocol balloon with any-motion capture, S2 iTerm2 inline images, S3 Sixel gated on `png` dependency approval |
+| [Spec limits generation](./spec-limits-generation/README.md) | `Ready`: S1 generated `limits.md` for Tool bounds, S2 Session/execution/Goal/Provider rows (after K1/K2), S3 spec word-budget and restatement check in CI, S4 `tools.md` native split (after C3) |
+| [Multi-call Tool steps](./multi-call-steps/README.md) | `Ready`; after J1/J2, E8a–E8c, C2 (Engine) and P5/P4 (adapters): S1 1–4 calls per step with sequential dispatch, S2 Anthropic parallel calls, S3 concurrent in-process reads, S4 OpenAI/ChatGPT constant tool list and parallel calls |
+| [Context budgets](./context-budgets/README.md) | `Ready`: S1 compaction summary budget, S2 recent-files list on the compaction record (after J2/K1), S3 output spill file and `spill:` Read (after J1/J2, E8a–E8c, C3; security pass) |
+| [Tool-step Event folding](./tool-event-folding/README.md) | `Ready`; after J1/J2/K1/C2, E8a–E8c and B14: S1 verdict folded into `ToolStarted` with floor/archive fixture, S2 Engine pre-validates through the reducer (after G5), S3 lenient `show` projection |
+| [OpenAI Chat Completions family](./openai-chat-completions-family/README.md) | `Ready`; after P5, P4a–P4d, K2: S1 `openai-chat-completions` custom profiles end to end with `provider check`; S2 setup form and recipe (after provider-setup-ui S3 and U1h–U1k) |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
