@@ -1006,7 +1006,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "third\n");
 
     repo.change("echo\n");
-    let (outcome, asked, _, engine) = repo
+    let (outcome, asked, calls, engine) = repo
         .run_replying(
             vec![tool_outcome(commit("fourth")), answer()],
             false,
@@ -1015,6 +1015,19 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .await;
     let second = outcome.unwrap();
     assert_eq!(asked, 0);
+    assert_eq!(calls, 2, "one commit attempt followed by the answer");
+    assert_eq!(second.run.tools.len(), 1, "one remembered commit attempt");
+    let tool = &second.run.tools[0];
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::TypedPrefixRule
+    );
+    assert_eq!(
+        tool.observation.as_ref().map(|value| value.disposition),
+        Some(ToolDisposition::Succeeded),
+        "remembered commit: {}",
+        tool_report(tool.observation.as_ref())
+    );
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "fourth\n");
     let after = tree_snapshot(&repo.workspace);
     let (events, view) = repo.reopen(engine, second.session_id).await;
