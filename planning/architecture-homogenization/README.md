@@ -478,7 +478,8 @@ Every PR below is **at most 600 added plus deleted lines**, including tests, imp
 - **Problem/evidence:** N1’s [cli:setup.rs:532](../../crates/arany-cli/src/cli/attached/setup.rs) routes into custom management :894, native setup :1944 and ChatGPT setup :1789; prompts :1708 and workspace admission :3202 share the same file. Correction to the review: **`SetupError` already exists at :32**, with conversions :39–69; repeated string erasure remains, for example :147,600,904,1957,2049. The task is to consolidate that owner, not add a competing enum.
 - **Scope/files:** `cli/attached/setup.rs` retains public entry points and setup-journal coordination; private `setup/{chatgpt,native,custom,routes,prompts}.rs` own complete operations, with focused tests following their flow. Keep credential/OAuth/storage authority in existing account owners. Preserve `setup::removal` and `setup::tests::assert_uncertain_publication` paths/re-exports used by process fixtures, using a narrow test bridge instead of duplicating fixtures. U2 gives the existing error classifications/conversions one `setup/error.rs` owner and removes flow-local `to_string` mapping where that conversion applies; preserve terminal/shutdown/recoverable/uncertain distinctions and exact messages. P5 owns `custom:` construction.
 - **Behavior/format:** none, including admission-before-secret-access, confirmation/journal/publication order, cancellation, uncertainty, defaults and no inference during browsing. **Evidence owners:** setup unit tables, `setup/removal.rs`, `session_run::{setup,custom,model_catalog,account_lock,roster}`, retained Run setup process tests, `accounts/chatgpt/account/tests.rs` uncertainty and selection, existing provider-setup-ui role/roster editor corpora. No new test corpus.
-- **Gates:** **U1 and U2 only after [the roster editor](../../docs/specs/provider.md#named-roster-presets) merges**; U2 after all U1 increments. P5 releases setup first; reserve configured-route files against K2 and serialize shared setup test/entry-point edits. Re-verify the S3 additions at that gate; preserve their existing flow owners rather than collecting them back into setup.rs.
+- **Owner sequencing decision (2026-10-25):** run U2 after U1a and before U1b–U1o, establishing the shared `SetupError` conversion owner before the remaining operations move. This changes checkpoint order only; each operation still moves in its named U1 slice.
+- **Gates:** **U1a and U2 only after [the roster editor](../../docs/specs/provider.md#named-roster-presets) merges**. U2 follows U1a and precedes U1b–U1o; each later flow move retains `setup::SetupError` and its shared conversions. P5 releases setup first; reserve configured-route files against K2 and serialize shared setup test/entry-point edits. Re-verify the S3 additions at that gate; preserve their existing flow owners rather than collecting them back into setup.rs.
 
 Each U1 increment moves ≤260 total production/test lines and allows ≤80 registration/import/visibility and required documentation changes (**≤600 changed lines**); smaller ceilings below leave room for the named glue. Tests are included in the move inventory. Keep large process fixtures at stable paths; do not move their whole bodies to satisfy a file-size target.
 
@@ -503,7 +504,7 @@ Each U1 increment moves ≤260 total production/test lines and allows ≤80 regi
 | U2b | Consolidate native and saved-access error conversions through that owner | ≤450 |
 | U2c | Consolidate ChatGPT/custom/route conversions and split touched long phase logic where needed | ≤600 |
 
-U1a … U1o → U2a → U2b → U2c are serial checkpoints, not one large move. Each PR states its exact moved function/test inventory within the ceiling; the S3 re-inventory may split an oversized checkpoint further before implementation. No checkpoint drops an error/cancellation branch or a test to fit.
+U1a → U2a → U2b → U2c → U1b … U1o are serial checkpoints, not one large move. Each PR states its exact moved function/test inventory within the ceiling; the S3 re-inventory may split an oversized checkpoint further before implementation. No checkpoint drops an error/cancellation branch or a test to fit.
 
 ### G5 — Shared upfront editor validation; keep direct base/integration routing
 
@@ -555,7 +556,7 @@ The original tracks above describe the initial inventory; their old batch counts
 | ACP | B14a → B14b | B9/current ACP work releases translator/tools and protocol evidence |
 | Tool rows | B15a → B15b | B11/current Tool-row editors release production and test owners; does not edit exec/presentation.rs |
 | Terminal | image-hover-preview S2 → B4′a → B4′b → B5′a → B5′b | Exclusive `terminal.rs` ownership; reserve image-preview evidence and any later S3 terminal edit |
-| Setup | provider-setup-ui S3 → U1a … U1o → U2a → U2b → U2c | Exclusive setup entry-point/flow/test ownership; P5 first and K2 consumer transfer if overlapping |
+| Setup | provider-setup-ui S3 → U1a → U2a → U2b → U2c → U1b … U1o | Exclusive setup entry-point/flow/test ownership; P5 first and K2 consumer transfer if overlapping. Later U1 moves retain the shared `setup::SetupError` owner and its conversions. |
 
 Every follow-up also edits `docs/architecture/system-overview.md` and its matrix-listed specs. Code work may run in parallel on disjoint files, but reserve shared documentation sections and merge/rebase each complete code/test/doc PR serially; no blanket parallel-file claim or separate documentation PR.
 
@@ -563,7 +564,7 @@ Follow-up waves (original completed refactors need no second pass):
 
 1. **Small ownership fixes:** P5 and T2 first, in parallel after reserving their disjoint files. J1 → J2 may progress when their existing gates clear, serializing the P5 overlap; K1 cannot open until P5 is merged.
 2. **Independent cuts:** P4, E8’s Engine track, E8’s attached track, B13, B14, B15, G5 and C1–C3 can progress concurrently only after their table gates and file reservations clear; G5/C2 require J1, while C1/C3 have no dependency gate. Within each family use the bounded serial increments; shared evidence imports still acquire exclusive ownership. K1 → K2 can interleave only after the same-file transfers above.
-3. **Feature-gated cuts:** terminal B4′ → B5′ waits for image-hover-preview S2; setup U1 → U2 waits for provider-setup-ui S3. Those feature plans are dependencies, not architecture implementation slices. Terminal and setup may run in parallel after both gates clear because their production files differ; serialize shared PTY evidence edits.
+3. **Feature-gated cuts:** terminal B4′ → B5′ waits for image-hover-preview S2; setup U1a and U2 wait for provider-setup-ui S3. Those feature plans are dependencies, not architecture implementation slices. U2 follows U1a and precedes U1b–U1o so the error owner is established before their flow moves. Terminal and setup may run in parallel after both feature gates clear because their production files differ; serialize shared PTY evidence edits.
 4. **Closeout:** whichever bounded implementation slice lands last must verify all exit criteria and delete this plan and its `planning/README.md` row in that same PR. J/K completion alone cannot close the plan. G5 and C1–C3 are required implementation slices, not deferred owner questions.
 
 ## Exit criteria
