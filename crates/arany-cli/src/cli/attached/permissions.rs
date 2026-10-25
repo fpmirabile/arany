@@ -75,7 +75,8 @@ const ENTRY_BASE: u8 = 2;
 const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
 const HOST_NOTE: &str = "host; human approval required";
-const PR_LIST_DISCLOSURE: &str = "This host read can send private PR data to the current Provider.";
+const HOST_READ_DISCLOSURE: &str =
+    "This host read can send private pull request data to the current Provider.";
 
 pub(super) enum PermissionArea {
     FolderTrust,
@@ -119,7 +120,7 @@ fn decision_label(decision: Decision) -> &'static str {
 }
 
 fn verb_label(prefix: TypedGitPrefix) -> String {
-    if prefix == TypedGitPrefix::PrList {
+    if matches!(prefix, TypedGitPrefix::PrList | TypedGitPrefix::PrView) {
         format!("{} (host; human approval or typed allow)", prefix.label())
     } else if !matches!(prefix, TypedGitPrefix::Push | TypedGitPrefix::PrCreate) {
         prefix.label().to_owned()
@@ -236,8 +237,8 @@ pub(super) async fn manage_rules(
             }
         };
         let Some(edit) = edit else { continue };
-        if requires_pr_list_disclosure(&edit, &entries)
-            && !confirm_pr_list_disclosure(terminal).await?
+        if requires_host_read_disclosure(&edit, &entries)
+            && !confirm_host_read_disclosure(terminal).await?
         {
             notice = Some("Allow rule not saved.".into());
             continue;
@@ -493,31 +494,37 @@ fn host_command_label(call: &arany::ToolCall) -> String {
     crate::presentation::escape_terminal(&label)
 }
 
-fn requires_pr_list_disclosure(
+fn requires_host_read_disclosure(
     edit: &TypedPrefixEdit,
     entries: &[arany::permissions::TypedPrefixEntry],
 ) -> bool {
     match edit {
         TypedPrefixEdit::Insert {
             prefix, decision, ..
-        } => *prefix == TypedGitPrefix::PrList && *decision == Decision::Allow,
+        } => {
+            matches!(*prefix, TypedGitPrefix::PrList | TypedGitPrefix::PrView)
+                && *decision == Decision::Allow
+        }
         TypedPrefixEdit::Replace { index, decision } => {
             *decision == Decision::Allow
-                && entries
-                    .get(*index)
-                    .is_some_and(|entry| entry.prefix == TypedGitPrefix::PrList)
+                && entries.get(*index).is_some_and(|entry| {
+                    matches!(
+                        entry.prefix,
+                        TypedGitPrefix::PrList | TypedGitPrefix::PrView
+                    )
+                })
         }
         TypedPrefixEdit::Remove { .. } => false,
     }
 }
 
-async fn confirm_pr_list_disclosure(terminal: &mut AttachedTerminal) -> Result<bool, SetupError> {
+async fn confirm_host_read_disclosure(terminal: &mut AttachedTerminal) -> Result<bool, SetupError> {
     Ok(matches!(
         super::setup::choose_focused(
             terminal,
             2,
             "Private PR disclosure",
-            PR_LIST_DISCLOSURE,
+            HOST_READ_DISCLOSURE,
             &[(b'1', "Save allow rule"), (b'0', "Cancel")],
             None,
         )
@@ -884,7 +891,7 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PR_LIST_DISCLOSURE, parse_linear_selection, requires_pr_list_disclosure, toggle_profile,
+        HOST_READ_DISCLOSURE, parse_linear_selection, requires_host_read_disclosure, toggle_profile,
     };
     use arany::permissions::{Decision, TypedGitPrefix, TypedPrefixEdit};
 
@@ -1221,35 +1228,39 @@ mod tests {
     }
 
     #[test]
-    fn pr_list_allow_edits_require_provider_disclosure_confirmation() {
-        let entries = [arany::permissions::TypedPrefixEntry {
-            prefix: TypedGitPrefix::PrList,
-            decision: Decision::Ask,
-            folder: None,
-        }];
-        assert!(requires_pr_list_disclosure(
-            &TypedPrefixEdit::Insert {
-                prefix: TypedGitPrefix::PrList,
-                decision: Decision::Allow,
-                folder: false,
-            },
-            &[]
-        ));
-        assert!(requires_pr_list_disclosure(
-            &TypedPrefixEdit::Replace {
-                index: 0,
-                decision: Decision::Allow,
-            },
-            &entries
-        ));
-        assert!(!requires_pr_list_disclosure(
-            &TypedPrefixEdit::Replace {
-                index: 0,
-                decision: Decision::Deny,
-            },
-            &entries
-        ));
-        assert!(PR_LIST_DISCLOSURE.contains("private PR data"));
-        assert!(PR_LIST_DISCLOSURE.contains("current Provider"));
+    fn host_read_allow_edits_require_provider_disclosure_confirmation() {
+        for prefix in [TypedGitPrefix::PrList, TypedGitPrefix::PrView] {
+            assert!(requires_host_read_disclosure(
+                &TypedPrefixEdit::Insert {
+                    prefix,
+                    decision: Decision::Allow,
+                    folder: false,
+                },
+                &[]
+            ));
+            for previous in [Decision::Ask, Decision::Deny] {
+                let entries = [arany::permissions::TypedPrefixEntry {
+                    prefix,
+                    decision: previous,
+                    folder: None,
+                }];
+                assert!(requires_host_read_disclosure(
+                    &TypedPrefixEdit::Replace {
+                        index: 0,
+                        decision: Decision::Allow,
+                    },
+                    &entries
+                ));
+                assert!(!requires_host_read_disclosure(
+                    &TypedPrefixEdit::Replace {
+                        index: 0,
+                        decision: Decision::Deny,
+                    },
+                    &entries
+                ));
+            }
+        }
+        assert!(HOST_READ_DISCLOSURE.contains("private pull request data"));
+        assert!(HOST_READ_DISCLOSURE.contains("current Provider"));
     }
 }

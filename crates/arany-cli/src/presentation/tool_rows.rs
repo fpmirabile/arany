@@ -31,7 +31,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
                     safe_truncate(&observation.output, 160)
                 }
-                ToolCall::GhPrList { .. } => safe_truncate(&observation.output, 160),
+                ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
+                    safe_truncate(&observation.output, 160)
+                }
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -720,7 +722,10 @@ impl ToolApprovalChoice {
                 arany::permissions::TypedGitPrefix::Push
                 | arany::permissions::TypedGitPrefix::PrCreate => "No remembered rule offered",
                 arany::permissions::TypedGitPrefix::PrList => {
-                    "Yes, and allow gh pr list from the next Run"
+                    "Yes, and allow gh pr list in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::PrView => {
+                    "Yes, and allow gh pr view in this folder from the next Run"
                 }
             },
             Self::No => "No",
@@ -760,7 +765,10 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         choices.push(ToolApprovalChoice::ExactCommand);
     } else if approval.unguarded.is_none()
         && (!approval.intent.call.is_host()
-            || matches!(approval.intent.call, arany::ToolCall::GhPrList { .. }))
+            || matches!(
+                approval.intent.call,
+                arany::ToolCall::GhPrList { .. } | arany::ToolCall::GhPrView { .. }
+            ))
     {
         if approval.allow_auto_edits && !approval.intent.call.is_host() {
             choices.push(ToolApprovalChoice::AutoEdits);

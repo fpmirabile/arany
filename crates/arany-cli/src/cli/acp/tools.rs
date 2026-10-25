@@ -137,7 +137,10 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             output,
         } => {
             let typed: ToolCall = serde_json::from_value(call.clone()).ok()?;
-            let is_gh_pr_list = matches!(&typed, ToolCall::GhPrList { .. });
+            let is_gh_pr_read = matches!(
+                &typed,
+                ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. }
+            );
             let (kind, label) = match typed {
                 ToolCall::CommandUnguarded { .. } => ("execute", "Unguarded command"),
                 ToolCall::Read { .. } => ("read", "Read"),
@@ -153,6 +156,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                 ToolCall::Search { .. } => ("search", "Search"),
                 ToolCall::Glob { .. } => ("search", "Glob"),
                 ToolCall::GhPrList { .. } => ("read", "List GitHub pull requests"),
+                ToolCall::GhPrView { .. } => ("read", "Inspect GitHub pull request"),
                 ToolCall::ParseAgentDefinition { .. }
                 | ToolCall::Mkdir { .. }
                 | ToolCall::Write { .. }
@@ -177,7 +181,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                     .or_else(|| call["name"].as_str())
                     .or_else(|| call["program"].as_str())
                     .or_else(|| call["branch"].as_str())
-                    .or_else(|| is_gh_pr_list.then(|| call["repository"].as_str()).flatten())
+                    .or_else(|| is_gh_pr_read.then(|| call["repository"].as_str()).flatten())
                     .or_else(|| {
                         call["message"]
                             .as_str()

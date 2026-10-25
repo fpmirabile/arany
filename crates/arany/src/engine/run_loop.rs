@@ -1302,6 +1302,7 @@ impl<'a> RunLoop<'a> {
             | crate::tools::ToolCall::GitPush { .. }
             | crate::tools::ToolCall::GhPrCreate { .. }
             | crate::tools::ToolCall::GhPrList { .. }
+            | crate::tools::ToolCall::GhPrView { .. }
             | crate::tools::ToolCall::Glob { .. } => true,
         }
     }

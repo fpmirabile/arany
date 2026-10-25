@@ -141,7 +141,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 45] = [
     ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 12),
+    ("GoalPlanContractRecorded", 13),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
@@ -150,7 +150,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 45] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 15),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 23),
+    ("ProviderCallRecorded", 24),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -168,14 +168,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 45] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 7),
-    ("HookStarted", 11),
-    ("HookFinished", 17),
-    ("ToolFinished", 28),
+    ("HookStarted", 12),
+    ("HookFinished", 18),
+    ("ToolFinished", 29),
     ("RunStarted", 24),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 21),
+    ("ToolStarted", 22),
     ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
@@ -1979,6 +1979,14 @@ pub(crate) fn pre_host_git_payload(kind: &str, payload: &str) -> Option<String> 
 }
 
 pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String> {
+    before_typed_pr_read(kind, payload, "gh_pr_list")
+}
+
+pub(crate) fn pre_gh_pr_view_payload(kind: &str, payload: &str) -> Option<String> {
+    before_typed_pr_read(kind, payload, "gh_pr_view")
+}
+
+fn before_typed_pr_read(kind: &str, payload: &str, operation: &str) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()
     }
@@ -1991,7 +1999,7 @@ pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, &["gh_pr_list"], None)).then_some(text)
+    (!mentions(&serde_json::from_str(&text).ok()?, &[operation], None)).then_some(text)
 }
 
 pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {

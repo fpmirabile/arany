@@ -1,5 +1,24 @@
+#[cfg(unix)]
+use crate::store::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
 use crate::{
-    store::{AGGREGATE_BYTES, MAX_ARCHIVE_BYTES},
+    provider::{
+        COMPACTION_INPUT_EXPANSION, COMPACTION_REQUEST_ENVELOPE_BYTES, MAX_PROVIDER_REQUEST_BYTES,
+    },
+    session::{
+        AUTO_COMPACTION_HISTORY_BYTES, MAX_BUDGET_REFUSAL_BYTES, MAX_COMPACTION_INPUT_BYTES,
+        MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, MAX_COMPACTION_TURNS,
+        MAX_CONTEXT_CONTENT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PROVIDER_CALLS,
+        MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, MAX_HISTORY_RUNS, MAX_STEERING_NOTE_BYTES,
+        MAX_STEP_TOOL_CALLS, MAX_USER_MESSAGE_BYTES, MAX_WINDOW_CONTENT_BYTES,
+    },
+    store::{
+        AGGREGATE_BYTES, MAX_ARCHIVE_BYTES, MAX_DISCOVERED_SESSIONS, MAX_EVENT_BYTES,
+        MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_GOAL_FINISHED_BYTES, MAX_GOAL_STARTED_BYTES,
+        MAX_HOT_SESSION_PAYLOAD_BYTES, MAX_LIST_SCAN_EVENTS, MAX_MESSAGE_ACCEPTED_BYTES,
+        MAX_NATIVE_EVIDENCE_ROWS, MAX_SESSION_EVENTS, MAX_TOOL_FINISHED_BYTES,
+        MAX_TOOL_STARTED_BYTES,
+    },
+    supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
         FRAME_BYTES,
         permissions::MAX_CONFIG_BYTES,
@@ -12,8 +31,8 @@ use crate::{
             MAX_COMMAND_TIMEOUT_MS, MAX_FILE_BYTES, MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
             MAX_PROCESSES_OR_THREADS, MAX_READ_LINE_CHARS, MAX_READ_PAGE_LINES, MAX_RUNTIME_BYTES,
             MAX_SKILLS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES, MAX_TOOL_ARGUMENT_BYTES,
-            MAX_TOOL_CATALOG_BYTES, MAX_TOOL_RESULT_BYTES, MCP_TIMEOUT_MS, MEMORY_BYTES,
-            SCRATCH_BYTES,
+            MAX_TOOL_CATALOG_BYTES, MAX_TOOL_OBSERVATION_BYTES, MAX_TOOL_RESULT_BYTES,
+            MCP_TIMEOUT_MS, MEMORY_BYTES, SCRATCH_BYTES,
         },
     },
 };
@@ -33,6 +52,237 @@ pub struct LimitsTable {
 
 pub const LIMITS: LimitsTable = LimitsTable {
     rows: &[
+        Limit {
+            name: "MAX_CONTEXT_CONTENT_BYTES",
+            value: MAX_CONTEXT_CONTENT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session.rs",
+        },
+        Limit {
+            name: "MAX_WINDOW_CONTENT_BYTES",
+            value: MAX_WINDOW_CONTENT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session.rs",
+        },
+        Limit {
+            name: "MAX_USER_MESSAGE_BYTES",
+            value: MAX_USER_MESSAGE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session.rs",
+        },
+        Limit {
+            name: "MAX_HISTORY_RUNS",
+            value: MAX_HISTORY_RUNS as u64,
+            unit: "Runs",
+            owner: "crates/arany/src/session.rs",
+        },
+        Limit {
+            name: "MAX_COMPACTION_INPUT_BYTES",
+            value: MAX_COMPACTION_INPUT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/compaction.rs",
+        },
+        Limit {
+            name: "MAX_COMPACTION_TURNS",
+            value: MAX_COMPACTION_TURNS as u64,
+            unit: "turns",
+            owner: "crates/arany/src/session/compaction.rs",
+        },
+        Limit {
+            name: "MAX_COMPACTION_OUTPUT_TOKENS",
+            value: MAX_COMPACTION_OUTPUT_TOKENS as u64,
+            unit: "tokens",
+            owner: "crates/arany/src/session/compaction.rs",
+        },
+        Limit {
+            name: "MAX_COMPACTION_SUMMARY_BYTES",
+            value: MAX_COMPACTION_SUMMARY_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/compaction.rs",
+        },
+        Limit {
+            name: "AUTO_COMPACTION_HISTORY_BYTES",
+            value: AUTO_COMPACTION_HISTORY_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/compaction.rs",
+        },
+        Limit {
+            name: "COMPACTION_INPUT_EXPANSION",
+            value: COMPACTION_INPUT_EXPANSION as u64,
+            unit: "times",
+            owner: "crates/arany/src/provider.rs",
+        },
+        Limit {
+            name: "COMPACTION_REQUEST_ENVELOPE_BYTES",
+            value: COMPACTION_REQUEST_ENVELOPE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider.rs",
+        },
+        Limit {
+            name: "MAX_PROVIDER_REQUEST_BYTES",
+            value: MAX_PROVIDER_REQUEST_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider.rs",
+        },
+        Limit {
+            name: "MAX_GOAL_PROVIDER_CALLS",
+            value: MAX_GOAL_PROVIDER_CALLS as u64,
+            unit: "Provider calls",
+            owner: "crates/arany/src/session/events/goal.rs",
+        },
+        Limit {
+            name: "MAX_GOAL_ACTIVE_MS",
+            value: MAX_GOAL_ACTIVE_MS,
+            unit: "ms",
+            owner: "crates/arany/src/session/events/goal.rs",
+        },
+        Limit {
+            name: "MAX_GOAL_RUNS",
+            value: MAX_GOAL_RUNS as u64,
+            unit: "Runs",
+            owner: "crates/arany/src/session/events/goal.rs",
+        },
+        Limit {
+            name: "MAX_EVENT_BYTES",
+            value: MAX_EVENT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store.rs",
+        },
+        #[cfg(unix)]
+        Limit {
+            name: "MAX_SESSION_LOCK_FILES",
+            value: MAX_SESSION_LOCK_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/store/state/lock.rs",
+        },
+        #[cfg(unix)]
+        Limit {
+            name: "MAX_STATE_OVERHEAD_FILES",
+            value: MAX_STATE_OVERHEAD_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/store/state/lock.rs",
+        },
+        #[cfg(unix)]
+        Limit {
+            name: "MAX_WORKSPACE_LOCK_FILES",
+            value: MAX_WORKSPACE_LOCK_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/store/state/lock.rs",
+        },
+        Limit {
+            name: "MAX_HOT_SESSION_PAYLOAD_BYTES",
+            value: MAX_HOT_SESSION_PAYLOAD_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store/journal.rs",
+        },
+        Limit {
+            name: "MAX_VERDICT_BYTES",
+            value: MAX_VERDICT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/supervisor.rs",
+        },
+        Limit {
+            name: "MAX_VERDICTS",
+            value: MAX_VERDICTS as u64,
+            unit: "verdicts per Run",
+            owner: "crates/arany/src/supervisor.rs",
+        },
+        Limit {
+            name: "MAX_SESSION_EVENTS",
+            value: MAX_SESSION_EVENTS as u64,
+            unit: "Events",
+            owner: "crates/arany/src/store/replay.rs",
+        },
+        Limit {
+            name: "MAX_STEP_TOOL_CALLS",
+            value: MAX_STEP_TOOL_CALLS as u64,
+            unit: "Tool calls",
+            owner: "crates/arany/src/session/events.rs",
+        },
+        Limit {
+            name: "MAX_STEERING_NOTE_BYTES",
+            value: MAX_STEERING_NOTE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session.rs",
+        },
+        Limit {
+            name: "MAX_GOAL_REPORT_BYTES",
+            value: MAX_GOAL_REPORT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/events/goal.rs",
+        },
+        Limit {
+            name: "MAX_BUDGET_REFUSAL_BYTES",
+            value: MAX_BUDGET_REFUSAL_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/events/goal.rs",
+        },
+        Limit {
+            name: "MAX_GOAL_STARTED_BYTES",
+            value: MAX_GOAL_STARTED_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store.rs",
+        },
+        Limit {
+            name: "MAX_GOAL_FINISHED_BYTES",
+            value: MAX_GOAL_FINISHED_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store.rs",
+        },
+        Limit {
+            name: "MAX_MESSAGE_ACCEPTED_BYTES",
+            value: MAX_MESSAGE_ACCEPTED_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store.rs",
+        },
+        Limit {
+            name: "MAX_TOOL_STARTED_BYTES",
+            value: MAX_TOOL_STARTED_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store.rs",
+        },
+        Limit {
+            name: "MAX_TOOL_OBSERVATION_BYTES",
+            value: MAX_TOOL_OBSERVATION_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/types.rs",
+        },
+        Limit {
+            name: "MAX_TOOL_FINISHED_BYTES",
+            value: MAX_TOOL_FINISHED_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/store.rs",
+        },
+        Limit {
+            name: "MAX_EVIDENCE_ROWS",
+            value: MAX_EVIDENCE_ROWS as u64,
+            unit: "custom Provider rows",
+            owner: "crates/arany/src/store/evidence.rs",
+        },
+        Limit {
+            name: "MAX_NATIVE_EVIDENCE_ROWS",
+            value: MAX_NATIVE_EVIDENCE_ROWS as u64,
+            unit: "native Provider rows",
+            owner: "crates/arany/src/store/evidence.rs",
+        },
+        Limit {
+            name: "MAX_EVIDENCE_AGE_MS",
+            value: MAX_EVIDENCE_AGE_MS as u64,
+            unit: "ms",
+            owner: "crates/arany/src/store/evidence.rs",
+        },
+        Limit {
+            name: "MAX_DISCOVERED_SESSIONS",
+            value: MAX_DISCOVERED_SESSIONS as u64,
+            unit: "Sessions",
+            owner: "crates/arany/src/store/replay.rs",
+        },
+        Limit {
+            name: "MAX_LIST_SCAN_EVENTS",
+            value: MAX_LIST_SCAN_EVENTS as u64,
+            unit: "Events",
+            owner: "crates/arany/src/store/replay.rs",
+        },
         Limit {
             name: "MAX_TOOL_ARGUMENT_BYTES",
             value: MAX_TOOL_ARGUMENT_BYTES as u64,
