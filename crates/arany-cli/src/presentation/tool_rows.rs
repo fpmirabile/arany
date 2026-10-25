@@ -504,8 +504,14 @@ fn approval_call_lines(call: &arany::ToolCall) -> Vec<String> {
                 lines.push("Private GitHub PR data may be sent to the current Provider.".into());
                 lines.push(format!("Repository: {}", escape_terminal(repository)));
                 lines.push(format!("State: {}", state.as_str()));
-                lines.push(format!("Base: {}", base.as_deref().unwrap_or("any")));
-                lines.push(format!("Head: {}", head.as_deref().unwrap_or("any")));
+                lines.push(format!(
+                    "Base: {}",
+                    escape_terminal(base.as_deref().unwrap_or("any"))
+                ));
+                lines.push(format!(
+                    "Head: {}",
+                    escape_terminal(head.as_deref().unwrap_or("any"))
+                ));
                 lines.push(format!("Limit: {limit}"));
             }
             _ => {}

@@ -1072,24 +1072,11 @@ fn observation(
     output: &str,
     receipt: Option<UnguardedReceipt>,
 ) -> ToolObservation {
-    let output = if matches!(intent.call, ToolCall::GhPrList { .. })
+    let output = if disposition == ToolDisposition::Denied
+        && matches!(intent.call, ToolCall::GhPrList { .. })
         && output.len() > intent.limits.result_bytes as usize
     {
-        match disposition {
-            ToolDisposition::Denied => PR_LIST_REFUSAL_BUDGET,
-            ToolDisposition::Uncertain => {
-                "host: remote outcome unknown; inspect remote state; never retry automatically."
-            }
-            ToolDisposition::Failed => "host: pull request read failed within the pinned budget.",
-            ToolDisposition::Cancelled => {
-                "host: pull request read cancelled within the pinned budget."
-            }
-            ToolDisposition::Limit => "host: pull request read exceeded the pinned budget.",
-            ToolDisposition::Conflict => {
-                "host: pull request read conflicted within the pinned budget."
-            }
-            ToolDisposition::Succeeded => "host: pull request result exceeded the pinned budget.",
-        }
+        PR_LIST_REFUSAL_BUDGET
     } else {
         output
     };
@@ -2795,8 +2782,7 @@ done
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
         let private = Arc::new(tempfile::tempdir().unwrap());
-        let mut intent = intent(&workspace, pr_list());
-        intent.limits.runtime_ms = 1;
+        let intent = intent(&workspace, pr_list());
         let (prepared, digest) = prepare(
             &config(),
             &authentication(temp.path()),
@@ -2806,12 +2792,32 @@ done
         )
         .await
         .unwrap();
-        let command = synthetic_peer(
+        let (ready, child_ready) = std::os::unix::net::UnixStream::pair().unwrap();
+        ready.set_nonblocking(true).unwrap();
+        let mut ready = tokio::net::UnixStream::from_std(ready).unwrap();
+        let mut command = synthetic_peer(
             &prepared,
             Path::new("/bin/sh"),
-            &["-c".into(), "sleep 1".into()],
+            &["-c".into(), "printf ready >&0; read -r release".into()],
         );
-        let observation = supervise(command, intent, digest, Cancellation::new()).await;
+        command.stdin(Stdio::from(std::os::fd::OwnedFd::from(child_ready)));
+        let timeout = Duration::from_millis(u64::from(intent.effective_timeout_ms()));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let gate = async {
+            let mut signal = [0; 5];
+            tokio::time::timeout(Duration::from_secs(30), ready.read_exact(&mut signal))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&signal, b"ready");
+            tokio::time::pause();
+            tokio::time::advance(timeout).await;
+            tokio::time::resume();
+        };
+        let (observation, ()) = tokio::join!(
+            super::supervise(deadline, command, intent, digest, Cancellation::new()),
+            gate
+        );
         assert_eq!(observation.disposition, ToolDisposition::Uncertain);
         assert_eq!(observation.output, UNKNOWN_HOST_GIT_OUTCOME);
         assert!(observation.valid());

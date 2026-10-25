@@ -7097,6 +7097,7 @@ mod goal_replay_tests {
         });
         intent.limits.network = crate::tools::types::NetworkGrant::Host;
         apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        assert_host_pr_list_forbidden_verdicts(&view, &intent);
         let typed = verdict_event(
             &intent,
             Some(PermissionMode::Plan),
@@ -7127,6 +7128,50 @@ mod goal_replay_tests {
             observation,
         };
         apply(&mut view, finish).expect("typed host read is committed");
+    }
+
+    fn assert_host_pr_list_forbidden_verdicts(view: &SessionView, intent: &EffectIntent) {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        for (mode, decision, basis, source) in [
+            (
+                Some(PermissionMode::Plan),
+                Decision::Allow,
+                PermissionSource::Rule,
+                PermissionSource::Rule,
+            ),
+            (
+                Some(PermissionMode::Plan),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::AiReview,
+            ),
+            (
+                Some(PermissionMode::Plan),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::SessionApproval,
+            ),
+            (
+                Some(PermissionMode::DontAsk),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+            ),
+            (
+                None,
+                Decision::Allow,
+                PermissionSource::TypedPrefixRule,
+                PermissionSource::TypedPrefixRule,
+            ),
+        ] {
+            assert!(
+                rejected(
+                    view,
+                    verdict_event(intent, mode, decision, basis, source, true)
+                ),
+                "{source:?} in {mode:?}"
+            );
+        }
     }
 
     #[test]

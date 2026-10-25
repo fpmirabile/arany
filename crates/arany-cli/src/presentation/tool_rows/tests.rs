@@ -324,6 +324,23 @@ mod peer_row_tests {
         assert!(lines.contains(&"Repository hooks and configuration do not run".to_owned()));
     }
 
+    #[test]
+    fn host_pr_list_approval_escapes_branch_filters() {
+        let tool = tool_fixture(
+            arany::ToolCall::GhPrList {
+                repository: "github.com/o/r".into(),
+                state: arany::PrState::Open,
+                base: Some("main\u{1b}[2J\nRepository: trusted".into()),
+                head: Some("topic\u{202e}".into()),
+                limit: arany::DEFAULT_PR_LIMIT,
+            },
+            "",
+        );
+        let lines = tool_approval_lines(&tool.intent);
+        assert!(lines.contains(&r"Base: main\u{001b}[2J\u{000a}Repository: trusted".to_owned()));
+        assert!(lines.contains(&r"Head: topic\u{202e}".to_owned()));
+    }
+
     #[tokio::test]
     async fn host_git_approval_and_transcript_show_destination_payload_and_once_only_choice() {
         for call in [
@@ -365,16 +382,17 @@ mod peer_row_tests {
                     .any(|line| line == "Allow once for this exact action")
             );
             assert!(lines.contains("host · remote operation"));
-            if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
-                assert!(lines.contains(&"1".repeat(40)) && lines.contains("refs/heads/topic"));
-            } else {
-                assert!(!lines.contains(&"1".repeat(40)) && lines.contains("remote head branch"));
-            }
             match &tool.intent.call {
-                arany::ToolCall::GitPush { remote, .. } => assert!(lines.contains(remote)),
+                arany::ToolCall::GitPush { remote, .. } => {
+                    assert!(lines.contains(&"1".repeat(40)) && lines.contains("refs/heads/topic"));
+                    assert!(lines.contains(remote));
+                }
                 arany::ToolCall::GhPrCreate {
                     repository, title, ..
                 } => {
+                    assert!(
+                        !lines.contains(&"1".repeat(40)) && lines.contains("remote head branch")
+                    );
                     assert!(lines.contains(repository) && lines.contains(title));
                     assert!(
                         lines.contains("Base: main")
@@ -391,6 +409,9 @@ mod peer_row_tests {
                     assert!(lines.ends_with(&format!("  {}", escape_terminal("\u{1b}[2J"))));
                 }
                 arany::ToolCall::GhPrList { .. } => {
+                    assert!(
+                        !lines.contains(&"1".repeat(40)) && !lines.contains("remote head branch")
+                    );
                     assert!(
                         lines.contains(
                             "Private GitHub PR data may be sent to the current Provider."
