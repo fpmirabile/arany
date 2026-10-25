@@ -488,6 +488,8 @@ impl RunLoop<'_> {
                 Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
                     gate: unguarded_gate(runtime, intent).await.map(|mut prompt| {
                         prompt.remember = phase.host_permission.remember;
+                        prompt.prefix =
+                            phase.host_permission.prefix && runtime.host_prefix_candidate(intent);
                         prompt
                     }),
                 }),
@@ -924,12 +926,27 @@ impl RunLoop<'_> {
                     resolution.save = match reply {
                         ApprovalReply::AllowForSession => Some(RuleSave::Session),
                         ApprovalReply::AllowPrefixInFolder => {
-                            options.remember_prefix.map(RuleSave::Prefix)
+                            options.remember_prefix.map(RuleSave::Prefix).or_else(|| {
+                                options
+                                    .unguarded_prompt
+                                    .as_ref()
+                                    .filter(|prompt| prompt.prefix)
+                                    .map(|_| RuleSave::HostPrefix)
+                            })
                         }
                         ApprovalReply::Deny
                         | ApprovalReply::Unavailable
                         | ApprovalReply::AllowOnce => None,
                     };
+                    if reply == ApprovalReply::AllowPrefixInFolder && resolution.save.is_none()
+                        || reply == ApprovalReply::AllowForSession
+                            && !options
+                                .unguarded_prompt
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.remember)
+                    {
+                        resolution.approved = false;
+                    }
                     let resume_at = resolution.approved.then(Instant::now);
                     self.settle_active_pause(pause, resume_at)?;
                 }

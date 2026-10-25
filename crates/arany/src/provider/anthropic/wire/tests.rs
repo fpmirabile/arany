@@ -151,6 +151,22 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
                 .get("plan_contract")
                 .is_none()
     }));
+    let host = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "arany_command_unguarded")
+        .unwrap();
+    assert_eq!(
+        host["input_schema"]["properties"]["prefix_rule"]["type"],
+        json!(["array", "null"])
+    );
+    assert!(
+        host["input_schema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("prefix_rule"))
+    );
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(
         messages

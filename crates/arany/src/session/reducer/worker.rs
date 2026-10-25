@@ -871,7 +871,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
             agent_run_id,
             intent,
             ..
-        } => before::tool_started(run, agent_run_id, intent)?,
+        } => before::tool_started(run, agent_run_id, &intent.clone().into())?,
         Event::ToolFinished {
             agent_run_id,
             observation: o,

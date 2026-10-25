@@ -2064,11 +2064,12 @@ mod tests {
         let crate::Event::ToolStarted { intent, .. } = &f.events[f.events.len() - 2] else {
             unreachable!()
         };
+        let intent = EffectIntent::from(intent.clone());
         let row = format!(
             "!\t{}\t[rejected] (non-fast-forward)\n",
             intent.host.as_ref().unwrap().refspec
         );
-        assert!(non_fast_forward(intent, row.as_bytes()));
+        assert!(non_fast_forward(&intent, row.as_bytes()));
         for output in [
             "authentication refused",
             "PR already exists",
@@ -2076,7 +2077,7 @@ mod tests {
             &format!("{row}{row}"),
             &row.replace("refs/heads/main", "refs/heads/other"),
         ] {
-            assert!(!non_fast_forward(intent, output.as_bytes()));
+            assert!(!non_fast_forward(&intent, output.as_bytes()));
         }
         let mut pr_intent = intent.clone();
         pr_intent.call = pr();
@@ -2269,7 +2270,7 @@ mod tests {
         let end = f.events.len();
         for event in &mut f.events[end - 2..] {
             match event {
-                crate::Event::ToolStarted { intent, .. } => *intent = approved.clone(),
+                crate::Event::ToolStarted { intent, .. } => *intent = approved.clone().into(),
                 crate::Event::ToolPermissionDecided { verdict, .. } => {
                     verdict.intent_digest = approved.digest()
                 }

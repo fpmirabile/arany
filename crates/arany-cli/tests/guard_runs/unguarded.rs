@@ -34,6 +34,7 @@ fn unguarded(script: &str) -> ToolCall {
         args: vec!["-c".into(), script.into()],
         cwd: String::new(),
         justification: "The sandbox may have blocked it".into(),
+        prefix_rule: None,
     }
 }
 
@@ -68,6 +69,7 @@ struct Host {
     state: PathBuf,
     engine: Engine,
     restricted_approvals: bool,
+    uncertain_save: bool,
     session: Option<SessionId>,
     policy: CollaborationPolicy,
 }
@@ -118,15 +120,19 @@ impl Host {
             state,
             engine,
             restricted_approvals: false,
+            uncertain_save: false,
             session: None,
             policy: CollaborationPolicy::Single,
         }
     }
 
     fn rules(&self) -> Option<Value> {
-        std::fs::read(self.state.join("unguarded-commands.json"))
-            .ok()
-            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+        std::fs::read(
+            self.state
+                .join("archive/inactive-host-commands/unguarded-commands.json"),
+        )
+        .ok()
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
     }
 
     async fn run(
@@ -161,10 +167,10 @@ impl Host {
         let mut prompts = Vec::new();
         let mut intents = Vec::new();
         replies.reverse();
-        let outcome = loop {
+        let result = loop {
             tokio::select! {
                 biased;
-                result = &mut running => break result.unwrap(),
+                result = &mut running => break result,
                 approval = inbox.next(), if terminal.is_some() => {
                     let approval = approval.unwrap();
                     match approval.unguarded.clone() {
@@ -181,6 +187,7 @@ impl Host {
                 }
             }
         };
+        let outcome = self.observed_outcome(workspace, result).await;
         let requests = provider.requests.lock().unwrap().len();
         let unconsumed = provider.responses.lock().unwrap().len();
         let seen = Seen {
@@ -194,7 +201,9 @@ impl Host {
         for tool in &seen.outcome.run.tools {
             let observation = tool.observation.as_ref();
             assert!(
-                observation.is_none_or(|o| o.disposition != arany::ToolDisposition::Uncertain),
+                self.uncertain_save
+                    || observation
+                        .is_none_or(|o| o.disposition != arany::ToolDisposition::Uncertain),
                 "no Tool ends Uncertain: {}",
                 tool_report(observation)
             );
@@ -211,6 +220,36 @@ impl Host {
             )
         );
         seen
+    }
+
+    async fn observed_outcome(
+        &self,
+        workspace: &Path,
+        result: Result<arany::RunOutcome, EngineError>,
+    ) -> arany::RunOutcome {
+        if !self.uncertain_save {
+            return result.unwrap();
+        }
+        assert!(
+            matches!(result, Err(EngineError::Tool(arany::ToolError::Uncertain))),
+            "an unconfirmed save stops continuation: {result:?}"
+        );
+        let sessions = list_sessions(
+            StateRoot::open_existing(&self.state).unwrap(),
+            workspace.to_owned(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session_id = sessions[0].id;
+        let (_, view) = arany::test_support::goals::replayed(&self.state, session_id).await;
+        let run = view.runs.last().unwrap().clone();
+        assert_eq!(run.status, RunStatus::Interrupted);
+        arany::RunOutcome {
+            session_id,
+            goal_id: view.goals.last().unwrap().id,
+            run,
+        }
     }
 
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {
@@ -629,6 +668,7 @@ async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
                 args: vec!["sh".into(), "-c".into(), "printf inspected".into()],
                 cwd: String::new(),
                 justification: "Inspect through an explicit interpreter".into(),
+                prefix_rule: None,
             }
         };
         let seen = host
@@ -671,6 +711,7 @@ async fn non_reusable_host_requests_offer_once_only() {
                 ],
                 cwd: String::new(),
                 justification: "Inspect a user-requested state target".into(),
+                prefix_rule: None,
             }
         };
         let seen = host
@@ -704,6 +745,7 @@ async fn primary_inspects_an_absolute_host_target_without_guarded_programs_or_fa
         args: vec![outside.display().to_string(), "-type".into(), "f".into()],
         cwd: String::new(),
         justification: "Inspect the exact host directory the user requested".into(),
+        prefix_rule: None,
     };
     let seen = host
         .run(
@@ -937,6 +979,7 @@ async fn every_privilege_tool_is_handed_off_without_approval_or_dispatch() {
                 args: vec!["echo".into(), "canary".into()],
                 cwd: String::new(),
                 justification: "Inspect host".into(),
+                prefix_rule: None,
             };
             let seen = host
                 .run(
@@ -1254,6 +1297,7 @@ async fn wrapped_privilege_tools_are_handed_off_before_any_approval() {
             args: args.into_iter().map(str::to_owned).collect(),
             cwd: String::new(),
             justification: "Inspect host".into(),
+            prefix_rule: None,
         };
         let seen = host
             .run(
@@ -1318,6 +1362,7 @@ async fn wrapped_privilege_symlink_is_handed_off_before_approval() {
         args: vec!["./alias".into(), "true".into()],
         cwd: String::new(),
         justification: "Inspect host".into(),
+        prefix_rule: None,
     };
     let seen = host
         .run(
@@ -1340,4 +1385,590 @@ async fn wrapped_privilege_symlink_is_handed_off_before_approval() {
             .attestation
             .is_none()
     );
+}
+
+fn prefix_call() -> ToolCall {
+    ToolCall::CommandUnguarded {
+        program: "printf".into(),
+        args: vec!["host prefix %s".into(), "first".into()],
+        cwd: String::new(),
+        justification: "Inspect a bounded synthetic host value".into(),
+        prefix_rule: Some(vec!["printf".into(), "host prefix %s".into()]),
+    }
+}
+
+#[tokio::test]
+async fn host_prefix_save_reuses_next_run_and_revocation_restores_the_prompt() {
+    let host = Host::new(None);
+    let call = prefix_call();
+    let first = host
+        .run(
+            &host.workspace,
+            vec![
+                tool_outcome(call.clone()),
+                tool_outcome(call.clone()),
+                finish("done"),
+            ],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowPrefixInFolder, ApprovalReply::AllowOnce],
+        )
+        .await;
+    assert_eq!(
+        first.prompts.len(),
+        2,
+        "a saved rule cannot change its Run snapshot"
+    );
+    assert!(first.prompts[0].prefix);
+    assert_eq!(first.outcome.run.unguarded_tools(), 2);
+    let mut next = call.clone();
+    let ToolCall::CommandUnguarded { args, .. } = &mut next else {
+        unreachable!()
+    };
+    args[1] = "second".into();
+    let second = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(next), finish("done")],
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert!(second.prompts.is_empty());
+    let tool = last_tool(&second);
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::HostPrefixRule
+    );
+    assert!(
+        tool.observation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("host prefix second")
+    );
+    let state = StateRoot::open_existing(&host.state).unwrap();
+    let settings = arany::permissions::PermissionSettings::load(&state, &host.workspace).unwrap();
+    assert_eq!(settings.host_prefixes().len(), 1);
+    settings
+        .save_host_edit(
+            &state,
+            &host.workspace,
+            arany::permissions::HostPrefixEdit::Remove { index: 0 },
+        )
+        .unwrap();
+    host.engine.readmit_host_permissions().unwrap();
+    let third = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(call), finish("refused")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::Deny],
+        )
+        .await;
+    denied(&third, "user_declined");
+    let (events, view) = host.reopen(second.outcome.session_id).await;
+    assert_eq!(view.runs[0].unguarded_tools(), 1);
+    assert!(events.iter().any(|event| matches!(&event.event, Event::ToolPermissionDecided { verdict, .. }
+        if verdict.source == PermissionSource::HostPrefixRule && verdict.host.as_ref().is_some_and(|host| host.rule.is_some()))));
+    for prefix in 1..=events.len() {
+        SessionView::replay(second.outcome.session_id, &events[..prefix]).unwrap();
+    }
+    for mutation in [
+        "missing", "prefix", "cwd", "deny", "mode", "session", "epoch", "typed", "snapshot",
+    ] {
+        let mut forged = events.clone();
+        let verdict = forged
+            .iter_mut()
+            .find_map(|event| match &mut event.event {
+                Event::ToolPermissionDecided { verdict, .. }
+                    if verdict.source == PermissionSource::HostPrefixRule =>
+                {
+                    Some(verdict)
+                }
+                _ => None,
+            })
+            .unwrap();
+        match mutation {
+            "missing" => verdict.host.as_mut().unwrap().rule = None,
+            "prefix" => {
+                verdict.host.as_mut().unwrap().rule.as_mut().unwrap().prefix[0] = "other".into()
+            }
+            "cwd" => verdict.host.as_mut().unwrap().rule.as_mut().unwrap().cwd = "notes".into(),
+            "deny" => {
+                verdict
+                    .host
+                    .as_mut()
+                    .unwrap()
+                    .rule
+                    .as_mut()
+                    .unwrap()
+                    .decision = Decision::Deny
+            }
+            "mode" => verdict.mode = Some(arany::permissions::PermissionMode::Auto),
+            "session" => verdict.host.as_mut().unwrap().session = true,
+            "epoch" => verdict.host.as_mut().unwrap().epoch = uuid::Uuid::now_v7(),
+            "typed" => verdict.source = PermissionSource::TypedPrefixRule,
+            "snapshot" => {}
+            _ => unreachable!(),
+        }
+        if mutation == "snapshot" {
+            for event in &mut forged {
+                if let Event::RunStarted { config, .. } = &mut event.event {
+                    config.tool_policy.as_mut().unwrap().host_prefixes.clear();
+                }
+            }
+        }
+        assert!(
+            SessionView::replay(second.outcome.session_id, &forged).is_err(),
+            "{mutation}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_prefix_modes_channels_and_explicit_rules_never_widen_authority() {
+    for (mode, terminal, channel, restriction, reuse) in [
+        ("default", ApprovalMode::Request, true, None, true),
+        ("dontAsk", ApprovalMode::Request, true, None, true),
+        ("dontAsk", ApprovalMode::Request, true, Some("ask"), false),
+        ("auto", ApprovalMode::Request, true, None, false),
+        ("acceptEdits", ApprovalMode::Request, true, None, false),
+        ("default", ApprovalMode::Auto, true, None, false),
+        ("default", ApprovalMode::AutoEdits, true, None, false),
+        ("default", ApprovalMode::Request, false, None, false),
+        ("default", ApprovalMode::Request, true, Some("ask"), false),
+        ("default", ApprovalMode::Request, true, Some("deny"), false),
+        ("plan", ApprovalMode::Request, true, None, false),
+    ] {
+        let host = Host::new(None);
+        let call = prefix_call();
+        let first = host
+            .run(
+                &host.workspace,
+                vec![tool_outcome(call.clone()), finish("done")],
+                Some(ApprovalMode::Request),
+                vec![ApprovalReply::AllowPrefixInFolder],
+            )
+            .await;
+        assert_eq!(first.outcome.run.unguarded_tools(), 1);
+        let file = host.state.join("permissions.json");
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        value["permissions"]["defaultMode"] = json!(mode);
+        if let Some(restriction) = restriction {
+            value["permissions"][restriction] = json!(["Bash"]);
+        }
+        private_file(&file, &serde_json::to_vec(&value).unwrap());
+        host.engine.readmit_host_permissions().unwrap();
+        let prompts =
+            channel && !reuse && restriction != Some("deny") && !matches!(mode, "plan" | "dontAsk");
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![tool_outcome(call), finish("done")],
+                channel.then_some(terminal),
+                if prompts {
+                    vec![ApprovalReply::AllowOnce]
+                } else {
+                    vec![]
+                },
+            )
+            .await;
+        assert_eq!(
+            seen.prompts.len(),
+            usize::from(prompts),
+            "{mode} {terminal:?} {channel} {restriction:?}"
+        );
+        assert_eq!(
+            seen.outcome.run.unguarded_tools(),
+            usize::from(reuse || prompts)
+        );
+        let source = last_tool(&seen).permission_verdict.as_ref().unwrap().source;
+        assert_eq!(source == PermissionSource::HostPrefixRule, reuse);
+        let (events, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(
+            view.runs[0].unguarded_tools(),
+            usize::from(reuse || prompts)
+        );
+        if mode == "dontAsk" && restriction == Some("ask") {
+            assert_host_ask_denial(&seen, &events);
+        }
+    }
+}
+
+fn assert_host_ask_denial(seen: &Seen, events: &[arany::EventEnvelope]) {
+    let verdict = last_tool(seen).permission_verdict.as_ref().unwrap();
+    assert_eq!(verdict.decision, Decision::Deny);
+    assert_eq!(verdict.basis, PermissionSource::Rule);
+    assert!(!verdict.approved && verdict.host.is_none());
+    let observation = last_tool(seen).observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+    assert!(observation.attestation.is_none());
+    for prefix in 1..=events.len() {
+        SessionView::replay(seen.outcome.session_id, &events[..prefix]).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn host_prefix_state_targets_and_unadmitted_settings_changes_dispatch_nothing() {
+    for drift in [false, true] {
+        let host = Host::new(None);
+        let mut call = prefix_call();
+        host.run(
+            &host.workspace,
+            vec![tool_outcome(call.clone()), finish("done")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowPrefixInFolder],
+        )
+        .await;
+        if drift {
+            let file = host.state.join("permissions.json");
+            let mut bytes = std::fs::read(&file).unwrap();
+            bytes.push(b' ');
+            private_file(&file, &bytes);
+        } else {
+            let ToolCall::CommandUnguarded { args, .. } = &mut call else {
+                unreachable!()
+            };
+            args[1] = host.state.display().to_string();
+        }
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![tool_outcome(call), finish("refused")],
+                Some(ApprovalMode::Request),
+                if drift {
+                    vec![]
+                } else {
+                    vec![ApprovalReply::Deny]
+                },
+            )
+            .await;
+        assert_eq!(seen.outcome.run.unguarded_tools(), 0);
+        assert!(
+            !last_tool(&seen)
+                .permission_verdict
+                .as_ref()
+                .unwrap()
+                .approved
+        );
+        let (_, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(view.runs[0].unguarded_tools(), 0);
+    }
+}
+
+#[tokio::test]
+async fn host_prefix_byte_budget_preserves_settings_and_run_admission() {
+    use arany::permissions::{HostPrefixEdit, PermissionSettings};
+    let host = Host::new(None);
+    let first = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(prefix_call()), finish("done")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    let state = StateRoot::open_existing(&host.state).unwrap();
+    let rules = save_host_rules_at_byte_limit(&first.intents[0], &state, &host.workspace);
+    let file = host.state.join("permissions.json");
+    let before = std::fs::read(&file).unwrap();
+    host.engine.readmit_host_permissions().unwrap();
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(prefix_call()), finish("refused")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowPrefixInFolder],
+        )
+        .await;
+    let observation = last_tool(&seen).observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+    assert!(observation.attestation.is_none());
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let mut older: Value = serde_json::from_slice(&before).unwrap();
+    older["permissions"]["hostPrefixes"][0]["prefix"][1] =
+        json!(format!("{} ", rules[0].prefix[1]));
+    private_file(&file, &serde_json::to_vec(&older).unwrap());
+    let loaded = PermissionSettings::load(&state, &host.workspace).unwrap();
+    let removed = loaded
+        .save_host_edit(&state, &host.workspace, HostPrefixEdit::Remove { index: 0 })
+        .unwrap();
+    assert_eq!(removed.host_prefixes(), &rules[1..]);
+    let (events, view) = host.reopen(seen.outcome.session_id).await;
+    let config = view.runs[0].config.as_ref().unwrap();
+    assert_eq!(config.tool_policy.as_ref().unwrap().host_prefixes, rules);
+    let payload = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::RunStarted { .. } => Some(event.event.payload().unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(payload.len() < 2 * arany::permissions::MAX_HOST_PREFIX_BYTES);
+}
+
+fn save_host_rules_at_byte_limit(
+    intent: &arany::EffectIntent,
+    state: &StateRoot,
+    workspace: &Path,
+) -> Vec<arany::permissions::HostPrefixRule> {
+    use arany::permissions::{HostPrefixEdit, PermissionSettings, SettingsError};
+    const RULE_COUNT: usize = 8;
+    let mut rules = (0..RULE_COUNT)
+        .map(|index| {
+            let mut rule = arany::permissions::HostPrefixRule::from_intent(intent, 2).unwrap();
+            rule.prefix[1] = format!("bounded prefix {index} ");
+            rule
+        })
+        .collect::<Vec<_>>();
+    let spare =
+        arany::permissions::MAX_HOST_PREFIX_BYTES - serde_json::to_vec(&rules).unwrap().len();
+    for (index, rule) in rules.iter_mut().enumerate() {
+        rule.prefix[1]
+            .push_str(&" ".repeat(spare / RULE_COUNT + usize::from(index < spare % RULE_COUNT)));
+    }
+    assert_eq!(
+        serde_json::to_vec(&rules).unwrap().len(),
+        arany::permissions::MAX_HOST_PREFIX_BYTES
+    );
+    let mut settings = PermissionSettings::load(state, workspace).unwrap();
+    for (index, rule) in rules.iter().enumerate() {
+        if index + 1 == rules.len() {
+            let before = std::fs::read(state.path().join("permissions.json")).unwrap();
+            let mut overflow = rule.clone();
+            overflow.prefix[1].push(' ');
+            assert!(matches!(
+                settings.save_host_edit(
+                    state,
+                    workspace,
+                    HostPrefixEdit::Insert(Box::new(overflow)),
+                ),
+                Err(SettingsError::Invalid)
+            ));
+            assert_eq!(
+                std::fs::read(state.path().join("permissions.json")).unwrap(),
+                before
+            );
+        }
+        settings = settings
+            .save_host_edit(
+                state,
+                workspace,
+                HostPrefixEdit::Insert(Box::new(rule.clone())),
+            )
+            .unwrap();
+    }
+    rules
+}
+
+#[tokio::test]
+async fn host_prefix_overflow_and_unconfirmed_save_never_spawn() {
+    for uncertain in [false, true] {
+        let mut host = if uncertain {
+            Host::new(None)
+        } else {
+            Host::new(Some(
+                &json!({"permissions":{"allow":vec!["Read"; arany::permissions::MAX_RULES]}}),
+            ))
+        };
+        host.uncertain_save = uncertain;
+        if uncertain {
+            arany::FaultPlan::fail_record_sync(host.state.clone(), "permissions.json");
+        }
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![tool_outcome(prefix_call()), finish("refused")],
+                Some(ApprovalMode::Request),
+                vec![ApprovalReply::AllowPrefixInFolder],
+            )
+            .await;
+        let tool = last_tool(&seen);
+        assert!(
+            tool.permission_verdict
+                .as_ref()
+                .unwrap()
+                .host
+                .as_ref()
+                .unwrap()
+                .rule
+                .is_some(),
+            "the human's save action is committed before saving"
+        );
+        let observation = tool.observation.as_ref().unwrap();
+        assert!(
+            observation.attestation.is_none(),
+            "the host program never ran"
+        );
+        assert_eq!(
+            observation.disposition,
+            if uncertain {
+                arany::ToolDisposition::Uncertain
+            } else {
+                arany::ToolDisposition::Denied
+            }
+        );
+        assert_eq!(seen.requests, if uncertain { 1 } else { 2 });
+        assert_eq!(seen.unconsumed, usize::from(uncertain));
+        let (events, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
+                .count(),
+            1,
+            "the Tool is never retried"
+        );
+        assert_eq!(
+            view.runs[0]
+                .tools
+                .last()
+                .unwrap()
+                .observation
+                .as_ref()
+                .unwrap()
+                .disposition,
+            observation.disposition
+        );
+    }
+}
+
+#[tokio::test]
+async fn permissions_can_explicitly_create_one_token_but_model_proposals_cannot() {
+    let host = Host::new(None);
+    let call = prefix_call();
+    let first = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(call.clone()), finish("done")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    let state = StateRoot::open_existing(&host.state).unwrap();
+    let settings = arany::permissions::PermissionSettings::load(&state, &host.workspace).unwrap();
+    let rule = arany::permissions::HostPrefixRule::from_intent(&first.intents[0], 1).unwrap();
+    let saved = settings
+        .save_host_edit(
+            &state,
+            &host.workspace,
+            arany::permissions::HostPrefixEdit::Insert(Box::new(rule)),
+        )
+        .unwrap();
+    assert_eq!(saved.host_prefixes()[0].prefix, ["printf"]);
+    assert!(matches!(
+        settings.save_host_edit(
+            &state,
+            &host.workspace,
+            arany::permissions::HostPrefixEdit::Remove { index: 0 }
+        ),
+        Err(arany::permissions::SettingsError::Conflict)
+    ));
+    host.engine.readmit_host_permissions().unwrap();
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(call), finish("done")],
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert_eq!(seen.outcome.run.unguarded_tools(), 1);
+    let mut bad = prefix_call();
+    let ToolCall::CommandUnguarded { prefix_rule, .. } = &mut bad else {
+        unreachable!()
+    };
+    *prefix_rule = Some(vec!["printf".into()]);
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(bad), finish("refused")],
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert!(seen.prompts.is_empty());
+    assert_eq!(seen.outcome.run.unguarded_tools(), 0);
+    host.reopen(seen.outcome.session_id).await;
+}
+
+#[tokio::test]
+async fn remembered_host_rules_never_become_child_authority() {
+    let mut host = Host::new(None);
+    let call = prefix_call();
+    host.run(
+        &host.workspace,
+        vec![tool_outcome(call.clone()), finish("done")],
+        Some(ApprovalMode::Request),
+        vec![ApprovalReply::AllowPrefixInFolder],
+    )
+    .await;
+    host.policy = CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        editor: None,
+                        objective: "Inspect a synthetic value".into(),
+                        profile: None,
+                    }],
+                }),
+                tool_outcome(call),
+                finish("report"),
+                finish("answer"),
+            ],
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert!(seen.prompts.is_empty());
+    assert_eq!(seen.outcome.run.unguarded_tools(), 0);
+    let (_, view) = host.reopen(seen.outcome.session_id).await;
+    let child = &view.runs[0].agents[1];
+    assert_eq!(
+        child.grant,
+        Some(arany::ChildGrant::ReadOnly {
+            unguarded: arany::UnguardedGrant::Denied
+        })
+    );
+    assert!(child.tools.iter().all(|tool| !tool.ran_unguarded()));
+}
+
+#[tokio::test]
+async fn a_host_write_to_settings_creates_no_new_authority_and_blocks_reuse() {
+    let host = Host::new(None);
+    let call = prefix_call();
+    host.run(
+        &host.workspace,
+        vec![tool_outcome(call.clone()), finish("done")],
+        Some(ApprovalMode::Request),
+        vec![ApprovalReply::AllowPrefixInFolder],
+    )
+    .await;
+    let settings = host.state.join("permissions.json");
+    let path = serde_json::to_string(settings.to_str().unwrap()).unwrap();
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![
+                tool_outcome(unguarded(&format!("printf ' ' >> {path}"))),
+                tool_outcome(call),
+                finish("settings changed"),
+            ],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    assert_eq!(seen.prompts.len(), 1);
+    assert_eq!(seen.outcome.run.unguarded_tools(), 1);
+    let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
+    assert!(!verdict.approved && verdict.host.is_none());
+    let (events, view) = host.reopen(seen.outcome.session_id).await;
+    assert_eq!(view.runs[0].unguarded_tools(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(&event.event, Event::ToolPermissionDecided { verdict, .. } if verdict.approved)).count(), 1);
 }

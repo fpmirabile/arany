@@ -2859,7 +2859,9 @@ mod escape_tests {
 #[cfg(test)]
 mod approval_reply_tests {
     use super::approval::{linear_approval_choice, withdraw_abandoned_approval};
-    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
+    use crate::presentation::ToolApprovalChoice::{
+        AutoEdits, ExactCommand, GitPrefix, HostPrefix, No, Yes,
+    };
     use crate::terminal::{Composer, TerminalInput};
     use std::time::Duration;
 
@@ -2936,6 +2938,7 @@ mod approval_reply_tests {
             vec![Yes, No],
             vec![Yes, AutoEdits, No],
             vec![Yes, ExactCommand, No],
+            vec![Yes, HostPrefix, No],
         ] {
             for (index, choice) in choices.iter().enumerate() {
                 assert_eq!(
@@ -2959,6 +2962,10 @@ mod approval_reply_tests {
         assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
         assert_eq!(No.reply(), arany::ApprovalReply::Deny);
         assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
+        assert_eq!(
+            HostPrefix.reply(),
+            arany::ApprovalReply::AllowPrefixInFolder
+        );
     }
 }
 

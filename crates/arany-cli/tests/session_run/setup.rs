@@ -29,6 +29,14 @@ use uuid::Uuid;
 const API_ACCOUNTS_PROMPT: &[u8] =
     b"Credentials belong to this OS user; type a listed choice number or exact name (1-6); empty Enter selects 1\r\nInput:\r\n";
 
+#[cfg(debug_assertions)]
+const PRIVATE_FILE_PROMPT: &[u8] =
+    b"Choose: NOT encrypted; same-user apps read key; type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n";
+
+#[cfg(debug_assertions)]
+const PROVIDER_PROMPT: &[u8] =
+    b"Choose: Only the selected Provider receives requests; type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n";
+
 #[path = "setup/offline_https.rs"]
 mod offline_https;
 
@@ -3547,14 +3555,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"Provider setup",
-    );
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Input:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     let (shell_pid, before) = {
         let text = String::from_utf8_lossy(&transcript);
@@ -3600,15 +3601,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut transcript,
         &mut answered,
         access_at,
-        b"NOT encrypted",
-    );
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        access_at,
-        b"Input:\r\n",
+        PRIVATE_FILE_PROMPT,
     );
     let consent_at = transcript.len();
     input
@@ -3620,19 +3613,8 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut transcript,
         &mut answered,
         consent_at,
-        b"Choose Provider",
+        PROVIDER_PROMPT,
     );
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        consent_at,
-        b"Input:\r\n",
-    );
-    assert!(String::from_utf8_lossy(&transcript[consent_at..]).contains(
-        "Choose: Only the selected Provider receives requests; type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n"
-    ));
     input
         .write_all(b"Anthropic\r")
         .expect("named Anthropic choice");
@@ -3868,15 +3850,7 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
             &mut transcript,
             &mut answered,
             access_at,
-            b"NOT encrypted",
-        );
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            access_at,
-            b"Input:\r\n",
+            PRIVATE_FILE_PROMPT,
         );
         let consent_at = transcript.len();
         input
@@ -3888,15 +3862,7 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
             &mut transcript,
             &mut answered,
             consent_at,
-            b"Choose Provider",
-        );
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            consent_at,
-            b"Input:\r\n",
+            PROVIDER_PROMPT,
         );
         input.write_all(b"OpenAI\r").expect("OpenAI choice");
         wait_for(

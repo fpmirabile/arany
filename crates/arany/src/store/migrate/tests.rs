@@ -8,11 +8,11 @@ use std::path::Path;
 
 const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
-type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
-// One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
 const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#;
 
-const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
+type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
+// One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
+const EVENT_FIXTURES: [EventFixture<'static>; 67] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -177,6 +177,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
     ("ToolStarted", 17, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 23, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("ToolPermissionDecided", 5, VERDICT_V4, VERDICT_V4),
+    ("ToolPermissionDecided", 6, VERDICT_V6_HOST, VERDICT_V6_HOST),
     ("AgentSpawned", 13, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("HookStarted", 7, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
     ("HookFinished", 12, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
@@ -230,6 +231,59 @@ const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
     ),
     ("ProviderSetupEditStarted", 1, ROLE_SETUP_V1, ROLE_SETUP_V1),
 ];
+
+#[test]
+fn migrated_intent_records_preserve_runtime_bytes() {
+    for (kind, from, input, _) in EVENT_FIXTURES {
+        let payload = REGISTRY
+            .upgrade_payload(kind, from, input)
+            .unwrap()
+            .unwrap_or_else(|| input.to_owned());
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        let intent = value
+            .get("intent")
+            .or_else(|| value.get("observation")?.get("intent"));
+        assert_eq!(
+            intent.is_some(),
+            matches!(
+                kind,
+                "ToolStarted" | "ToolFinished" | "HookStarted" | "HookFinished"
+            ),
+            "{kind} v{from}"
+        );
+        if let Some(intent) = intent {
+            assert_intent_record_bytes(intent.clone());
+        }
+    }
+    for fixture in [
+        crate::session::worker_protocol_fixture(),
+        crate::session::worker_command_protocol_fixture(),
+        crate::session::worker_compacted_fixture(true),
+        crate::session::host_protocol_fixture(),
+        crate::session::session_host_protocol_fixture(),
+    ] {
+        for envelope in fixture.envelopes() {
+            if let Event::ToolStarted { intent, .. } = &envelope.event {
+                assert_intent_record_bytes(serde_json::to_value(intent).unwrap());
+            }
+        }
+    }
+}
+
+fn assert_intent_record_bytes(value: Value) {
+    let runtime: crate::tools::EffectIntent = serde_json::from_value(value.clone()).unwrap();
+    let record: crate::session::ToolIntentRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&runtime).unwrap(),
+        serde_json::to_vec(&record).unwrap()
+    );
+    assert_eq!(
+        crate::session::ToolIntentRecord::from(runtime.clone()),
+        record
+    );
+    assert_eq!(crate::tools::EffectIntent::from(record), runtime);
+}
+
 const GOAL_STARTED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_STARTED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","include_paths":null,"workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_FINISHED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true}"#;
@@ -368,6 +422,7 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     }
 }
 const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
+const VERDICT_V6_HOST: &str = r#"{"host":{"epoch":"01900000-0000-7000-8000-000000000001","session":false,"source_intent":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]},"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"session_approval","source":"session_approval","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
 const REFUSAL_V18: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
 const REFUSAL_V19: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
 const PROVIDER_CALL_V19: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":null,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
@@ -2527,6 +2582,7 @@ fn pre_host_migrations_never_create_live_authority() {
         args: vec![".".into()],
         cwd: String::new(),
         justification: "Inspect the Workspace".into(),
+        prefix_rule: None,
     })
     .unwrap();
     assert!(crate::session::pre_host_payload("ToolStarted", &tool.to_string()).is_none());
@@ -2748,6 +2804,43 @@ fn file_removal_identity_steps_reject_new_calls_and_capabilities_in_old_payloads
         assert!((step.canonical)(&run.to_string()).is_none());
         assert!((step.transform)(run).is_none());
     }
+}
+
+#[test]
+fn host_prefix_migration_preserves_source_bytes_but_never_fabricates_authority() {
+    let step = REGISTRY
+        .event_step(
+            "ToolPermissionDecided",
+            crate::test_support::payload_version("ToolPermissionDecided") - 1,
+        )
+        .unwrap();
+    assert_eq!((step.canonical)(VERDICT_V4).as_deref(), Some(VERDICT_V4));
+    for field in ["basis", "source"] {
+        let mut forged: Value = serde_json::from_str(VERDICT_V4).unwrap();
+        forged[field] = serde_json::json!("host_prefix_rule");
+        assert!((step.transform)(forged.clone()).is_none());
+        assert!((step.canonical)(&forged.to_string()).is_none());
+    }
+    assert_eq!(
+        (step.canonical)(VERDICT_V6_HOST).as_deref(),
+        Some(VERDICT_V6_HOST)
+    );
+    let legacy: Value = serde_json::from_str(VERDICT_V6_HOST).unwrap();
+    assert_eq!((step.transform)(legacy.clone()), Some(legacy));
+    let mut verdict: crate::tools::permissions::PermissionVerdict =
+        serde_json::from_str(VERDICT_V6_HOST).unwrap();
+    let mut pin = crate::tools::types::test_host_pin();
+    pin.executable = "/usr/bin/printf".into();
+    verdict.host.as_mut().unwrap().rule = Some(
+        serde_json::from_value(serde_json::json!({
+            "version": crate::tools::unguarded::HOST_POLICY_VERSION,
+            "prefix": ["printf", "value"], "decision": "allow", "pin": pin,
+            "workspace_device": 1, "workspace_inode": 2, "cwd": "",
+        }))
+        .unwrap(),
+    );
+    assert!((step.canonical)(&serde_json::to_string(&verdict).unwrap()).is_none());
+    assert!((step.transform)(serde_json::to_value(verdict).unwrap()).is_none());
 }
 
 #[test]

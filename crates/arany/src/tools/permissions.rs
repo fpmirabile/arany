@@ -1,4 +1,6 @@
 mod hooks;
+mod host;
+pub use host::HostPrefixRule;
 mod prefix;
 
 pub use hooks::{
@@ -12,7 +14,8 @@ pub(crate) use hooks::{
     stop_feedback, stop_subject,
 };
 pub use prefix::{
-    PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit, TypedPrefixEntry,
+    HostPrefixEdit, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
+    TypedPrefixEntry,
 };
 
 use super::catalog::Family;
@@ -23,7 +26,9 @@ use std::borrow::Cow;
 use std::path::Path;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
+pub const MAX_HOST_PREFIX_BYTES: usize = crate::store::MAX_EVENT_BYTES / 2;
 pub const MAX_RULES: usize = 128;
+pub(crate) const MIN_HOST_PREFIX_TOKENS: usize = 2;
 pub const MAX_RULE_PATTERN_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,11 +62,14 @@ pub enum PermissionSource {
     SessionApproval,
     Hook,
     TypedPrefixRule,
+    HostPrefixRule,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostApproval {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<HostPrefixRule>,
     pub epoch: uuid::Uuid,
     pub session: bool,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -119,6 +127,7 @@ pub struct PermissionConfig {
     mode: PermissionMode,
     rules: Vec<(Decision, Rule)>,
     typed: Vec<prefix::TypedRule>,
+    pub(crate) host: Vec<HostPrefixRule>,
     scoped: bool,
     hooks: HookConfig,
 }
@@ -145,6 +154,8 @@ struct Permissions {
     ask: Vec<String>,
     #[serde(default)]
     typed_prefixes: Vec<prefix::RawTypedRule>,
+    #[serde(default)]
+    host_prefixes: Vec<HostPrefixRule>,
 }
 
 impl PermissionConfig {
@@ -156,6 +167,7 @@ impl PermissionConfig {
             + permissions.deny.len()
             + permissions.ask.len()
             + permissions.typed_prefixes.len()
+            + permissions.host_prefixes.len()
             > MAX_RULES
         {
             return Err(ConfigError::Limit("128 permission rules in total"));
@@ -179,6 +191,7 @@ impl PermissionConfig {
             mode: permissions.default_mode,
             rules,
             typed: prefix::parse_rules(permissions.typed_prefixes)?,
+            host: host::parse_rules(permissions.host_prefixes)?,
             scoped: false,
             hooks: HookConfig::validate(settings.hooks)?,
         })
@@ -192,6 +205,7 @@ impl PermissionConfig {
     pub(crate) fn scope_to(&mut self, path: &Path, identity: crate::session::WorkspaceIdentity) {
         self.typed
             .retain(|rule| rule.in_folder(path, identity.device, identity.inode));
+        self.host.retain(|rule| rule.in_folder(path, identity));
         self.scoped = true;
     }
 
@@ -202,6 +216,17 @@ impl PermissionConfig {
             .filter(|rule| rule.prefix() == prefix && rule.applies(self.scoped))
             .map(prefix::TypedRule::decision)
             .reduce(Decision::narrow)
+    }
+
+    pub(crate) fn host_rule(&self, intent: &super::EffectIntent) -> Option<&HostPrefixRule> {
+        self.host
+            .iter()
+            .filter(|rule| rule.scope_matches(intent))
+            .max_by_key(|rule| match rule.decision {
+                Decision::Allow => 0,
+                Decision::Ask => 1,
+                Decision::Deny => 2,
+            })
     }
 
     pub fn hooks(&self) -> &HookConfig {
@@ -259,6 +284,7 @@ impl PermissionConfig {
             mode,
             rules: Vec::new(),
             typed: Vec::new(),
+            host: Vec::new(),
             scoped: true,
             hooks: HookConfig::validate(Default::default()).expect("empty hooks"),
         }
@@ -422,20 +448,19 @@ impl PermissionConfig {
                 Decision::Ask
             }
         });
-        if self.mode == PermissionMode::DontAsk && decision == Decision::Ask {
-            (Decision::Deny, PermissionSource::Mode)
+        let source = if typed_wins {
+            PermissionSource::TypedPrefixRule
+        } else if matched.is_some() {
+            PermissionSource::Rule
         } else {
-            (
-                decision,
-                if typed_wins {
-                    PermissionSource::TypedPrefixRule
-                } else if matched.is_some() {
-                    PermissionSource::Rule
-                } else {
-                    PermissionSource::Mode
-                },
-            )
-        }
+            PermissionSource::Mode
+        };
+        let decision = if self.mode == PermissionMode::DontAsk && decision == Decision::Ask {
+            Decision::Deny
+        } else {
+            decision
+        };
+        (decision, source)
     }
 }
 

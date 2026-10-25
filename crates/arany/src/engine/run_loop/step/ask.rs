@@ -228,7 +228,10 @@ impl RunLoop<'_> {
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
         match reply {
             ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
-            ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
+            ApprovalReply::AllowPrefixInFolder
+                if remember_prefix.is_none()
+                    && !prompt.as_ref().is_some_and(|prompt| prompt.prefix) =>
+            {
                 if intent.call.is_unguarded() || intent.call.is_host() {
                     ApprovalReply::Unavailable
                 } else {
@@ -274,6 +277,7 @@ pub(super) async fn unguarded_gate(
         executable: pin.executable.clone(),
         attribution: None,
         remember: true,
+        prefix: false,
         sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
         inactive_rules: runtime.has_inactive_host_rules(),
     })
