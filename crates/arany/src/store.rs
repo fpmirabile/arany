@@ -51,6 +51,10 @@ pub(crate) use state::{capture_archive_with_limit, restore_archive_with_limit};
 const DATABASE_FILE: &str = "events.sqlite3";
 const PROVIDER_SETUP_EDIT_EVENT_SLOTS: usize = 2;
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_COMPACTION_EVENT_BYTES: usize = 400 * 1024;
+const COMPACTION_EVENT_WRAPPER_BYTES: usize = 1024;
+pub(crate) const MAX_COMPACTION_RECORD_BYTES: usize =
+    MAX_COMPACTION_EVENT_BYTES - COMPACTION_EVENT_WRAPPER_BYTES;
 // JSON escaping writes at most six bytes (`\u00XX`) per objective byte.
 const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_BYTES;
 pub(crate) const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
@@ -73,6 +77,9 @@ fn event_payload_limit(kind: &str, version: i64) -> usize {
             crate::supervisor::MAX_VERDICT_BYTES
         }
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
+        "ContextCompacted" | "GoalContextCompacted" if payload_version(kind) == Some(version) => {
+            MAX_COMPACTION_EVENT_BYTES
+        }
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
         "GoalFinished" if payload_version(kind) == Some(version) => MAX_GOAL_FINISHED_BYTES,
         "ToolStarted" if payload_version(kind) == Some(version) => MAX_TOOL_STARTED_BYTES,
@@ -227,6 +234,7 @@ impl From<ReplayError> for StoreError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionKind {
     Operation,
+    Compaction,
     // Reserve the objective and image envelopes.
     RunStart,
     // The allowance budgets its own sealed-data chunks, so it is not headroom for later Events.

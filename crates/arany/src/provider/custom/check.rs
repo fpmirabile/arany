@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const CUSTOM_CHECK_VERSION: &str =
-    "custom-protocol-text-compaction-conformance-effort-stream-journal-v40";
+    "custom-protocol-text-compaction-conformance-effort-stream-journal-v41";
 
 pub struct CustomProfileCheck {
     profile_name: String,

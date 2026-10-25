@@ -230,7 +230,7 @@ async fn probe_model_at(
     journal_probe(check, crate::CheckCallKind::Compaction, async {
         let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
         if response.summary.trim().is_empty()
-            || response.summary.len() > 8 * 1024
+            || response.summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES
             || !response
                 .response_id
                 .as_deref()

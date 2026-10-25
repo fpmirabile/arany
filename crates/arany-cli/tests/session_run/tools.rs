@@ -408,7 +408,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(compacted.compiler_version, 4);
+    assert_eq!(compacted.compiler_version, 5);
     engine.close().await.unwrap();
     assert_eq!(
         outcome.run.status,
@@ -516,7 +516,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         assert_eq!(compactions[0].session_id, outcome.session_id);
         assert_eq!(compactions[0].covered_run_id, outcome.run.id);
         assert_eq!(compactions[0].model, "tool-model");
-        assert_eq!(compactions[0].max_output_tokens, 1024);
+        assert_eq!(compactions[0].max_output_tokens, 4096);
         assert!(compactions[0].previous_summary.is_none());
         let [CompactionItem::Completed(turn)] = compactions[0].items.as_slice() else {
             panic!("complete Tool turn required");

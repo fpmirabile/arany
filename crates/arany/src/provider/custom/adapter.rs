@@ -108,7 +108,10 @@ impl Provider for CustomProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.identity.model || !(1..=1024).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=crate::session::MAX_COMPACTION_OUTPUT_TOKENS
+                .min(super::CUSTOM_OUTPUT_TOKEN_CAP))
+                .contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -186,6 +189,88 @@ mod tests {
         }
     }
 
+    async fn local_custom_provider(port: u16, messages: bool) -> CustomProvider {
+        let mut profile = CustomProfile {
+            name: "local".into(),
+            protocol: super::super::Protocol::OpenaiResponses,
+            endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
+            model: "model-1".into(),
+            credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
+            capability_evidence_version: 2,
+            efforts: Vec::new(),
+        };
+        if messages {
+            let base_url = format!("http://127.0.0.1:{port}/anthropic");
+            profile.endpoint = format!("{base_url}/v1/messages");
+            profile.protocol = super::super::Protocol::AnthropicMessages {
+                base_url,
+                auth: super::super::MessagesAuth::ApiKey,
+            };
+        }
+        let destination = profile.resolve_destination().await.unwrap();
+        CustomProvider {
+            identity: ProviderIdentity::new(
+                "custom:local",
+                "model-1",
+                Provenance::Custom(CustomProfileProvenance {
+                    endpoint: profile.endpoint().into(),
+                    evidence_digest: fingerprint(&profile),
+                    capability_evidence_version: 2,
+                }),
+            ),
+            transport: CustomTransport::new(&profile, &destination, "synthetic-key".into())
+                .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+    async fn custom_compaction_refuses_caps_above_profile_before_dispatch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for messages in [false, true] {
+            let provider = local_custom_provider(port, messages).await;
+            for max_output_tokens in [
+                0,
+                super::super::CUSTOM_OUTPUT_TOKEN_CAP + 1,
+                crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+            ] {
+                let request = CompactionRequest {
+                    session_id: crate::SessionId::new(),
+                    covered_run_id: RunId::new(),
+                    model: provider.identity.model.clone(),
+                    previous_summary: None,
+                    items: vec![crate::CompactionItem::Completed(crate::HistoryTurn {
+                        user: "Synthetic question".into(),
+                        assistant: "Synthetic answer".into(),
+                    })],
+                    max_output_tokens,
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    assert!(matches!(
+                        provider.compact(request.clone()).await,
+                        Err(ProviderError::Rejected)
+                    ));
+                    assert!(matches!(
+                        provider.transport.compact(&request, None).await,
+                        Err(TransportError::InvalidOutcome)
+                    ));
+                })
+                .await
+                .expect("bounded compaction refusal");
+            }
+        }
+        assert!(
+            listener
+                .into_std()
+                .unwrap()
+                .accept()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+            "rejected cap must not open a transport connection"
+        );
+    }
+
     #[tokio::test]
     // Skipped in the Guard: local test IPC capability is missing.
     #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
@@ -193,37 +278,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         for messages in [false, true] {
-            let mut profile = CustomProfile {
-                name: "local".into(),
-                protocol: super::super::Protocol::OpenaiResponses,
-                endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
-                model: "model-1".into(),
-                credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-                capability_evidence_version: 2,
-                efforts: Vec::new(),
-            };
-            if messages {
-                let base_url = format!("http://127.0.0.1:{port}/anthropic");
-                profile.endpoint = format!("{base_url}/v1/messages");
-                profile.protocol = super::super::Protocol::AnthropicMessages {
-                    base_url,
-                    auth: super::super::MessagesAuth::ApiKey,
-                };
-            }
-            let destination = profile.resolve_destination().await.unwrap();
-            let provider = CustomProvider {
-                identity: ProviderIdentity::new(
-                    "custom:local",
-                    "model-1",
-                    Provenance::Custom(CustomProfileProvenance {
-                        endpoint: profile.endpoint().into(),
-                        evidence_digest: fingerprint(&profile),
-                        capability_evidence_version: 2,
-                    }),
-                ),
-                transport: CustomTransport::new(&profile, &destination, "synthetic-key".into())
-                    .unwrap(),
-            };
+            let provider = local_custom_provider(port, messages).await;
             assert_eq!(
                 provider.identity().limits.deadline,
                 std::time::Duration::from_secs(120)

@@ -1228,7 +1228,9 @@ mod subscription_compaction_tests {
                 invalid[field] = serde_json::json!(version);
                 let invalid: CompactionRecord = serde_json::from_value(invalid).unwrap();
                 let historical_compiler = field == "compiler_version"
-                    && version == crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION;
+                    && (crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION
+                        ..=crate::session::COMPACTION_COMPILER_VERSION)
+                        .contains(&version);
                 assert_eq!(
                     invalid.validate().is_ok(),
                     historical_compiler,

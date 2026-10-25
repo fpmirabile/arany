@@ -1050,7 +1050,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("summary request");
                     let input: serde_json::Value = crate::semantic::input(&wire);
-                    assert_eq!(wire["max_output_tokens"], 1024);
+                    assert_eq!(wire["max_output_tokens"], 4096);
                     assert_eq!(input["items"].as_array().expect("accepted turns").len(), 1);
                     assert!(input.get("workspace_guidance").is_none());
                     assert!(input.get("includes").is_none());
