@@ -398,6 +398,7 @@ impl AttachedTerminal {
             | TerminalInput::HistoryLive
             | TerminalInput::Transcript
             | TerminalInput::CopySelection
+            | TerminalInput::PanelSelectionChanged
             | TerminalInput::PointerMove { .. }
             | TerminalInput::PointerClick { .. }
             | TerminalInput::PointerDrag { .. }

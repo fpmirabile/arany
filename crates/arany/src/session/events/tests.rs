@@ -266,6 +266,71 @@ mod goal_success_tests {
     }
 
     #[test]
+    fn delete_and_move_scope_and_file_success_follow_both_paths() {
+        let digest = crate::validate::hex_digest(b"original");
+        let mut contract = criterion(GoalSuccessCriterion::WorkspaceFileDigest {
+            path: "src/source".into(),
+            sha256: digest.clone(),
+        });
+        contract.paths = vec!["src".into()];
+        let read = observation(
+            ToolCall::Read {
+                path: "src/source".into(),
+                offset: None,
+                limit: None,
+            },
+            ToolDisposition::Succeeded,
+            serde_json::json!({"sha256":digest}).to_string(),
+        );
+        assert!(matches_success(&contract, std::slice::from_ref(&read)));
+        for call in [
+            ToolCall::Delete {
+                path: "src/source".into(),
+                expected_digest: digest.clone(),
+            },
+            ToolCall::Move {
+                source: "src/source".into(),
+                destination: "src/target".into(),
+                expected_digest: digest.clone(),
+            },
+        ] {
+            assert!(contract.allows_call(&call));
+            let removed = observation(
+                call,
+                ToolDisposition::Succeeded,
+                serde_json::json!({"removed":{"sha256":digest,"bytes":8,"executable":false}})
+                    .to_string(),
+            );
+            assert!(!matches_success(&contract, &[read.clone(), removed]));
+        }
+        for (source, destination) in [
+            ("src/source", "other/target"),
+            ("other/source", "src/target"),
+        ] {
+            assert!(!contract.allows_call(&ToolCall::Move {
+                source: source.into(),
+                destination: destination.into(),
+                expected_digest: digest.clone()
+            }));
+        }
+        contract.success_criterion = GoalSuccessCriterion::WorkspaceFileDigest {
+            path: "src/target".into(),
+            sha256: digest.clone(),
+        };
+        let moved = observation(
+            ToolCall::Move {
+                source: "src/source".into(),
+                destination: "src/target".into(),
+                expected_digest: digest.clone(),
+            },
+            ToolDisposition::Succeeded,
+            serde_json::json!({"removed":{"sha256":digest,"bytes":8,"executable":false}})
+                .to_string(),
+        );
+        assert!(matches_success(&contract, &[moved]));
+    }
+
+    #[test]
     fn plan_contract_scopes_git_reads_by_path() {
         use crate::tools::ToolCall;
         let contract = |paths: Vec<&str>| GoalPlanContract {

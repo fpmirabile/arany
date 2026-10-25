@@ -402,6 +402,50 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn delete_and_move_summaries_and_approvals_name_every_path_inertly() {
+        for (call, summary, actions) in [
+            (
+                ToolCall::Delete {
+                    path: "src/source".into(),
+                    expected_digest: "0".repeat(64),
+                },
+                "⏺ Delete(src/source)\n  ⎿ applied",
+                vec!["Delete src/source · only if the file is unchanged"],
+            ),
+            (
+                ToolCall::Move {
+                    source: "src/source".into(),
+                    destination: "dest/target".into(),
+                    expected_digest: "0".repeat(64),
+                },
+                "⏺ Move(src/source → dest/target)\n  ⎿ applied",
+                vec![
+                    "Move src/source → dest/target",
+                    "Only if the source is unchanged and the destination is absent",
+                ],
+            ),
+        ] {
+            let tool = tool_fixture(call, "{}");
+            assert_eq!(tool_summary(&tool), summary);
+            let lines = tool_approval_lines(&tool.intent);
+            assert_eq!(&lines[1..1 + actions.len()], actions);
+        }
+        let tool = tool_fixture(
+            ToolCall::Move {
+                source: "source\u{1b}[2J".into(),
+                destination: "target\nline".into(),
+                expected_digest: "0".repeat(64),
+            },
+            "{}",
+        );
+        assert!(
+            tool_approval_lines(&tool.intent)
+                .iter()
+                .all(|line| !line.contains('\u{1b}') && !line.contains('\n'))
+        );
+    }
+
+    #[test]
     fn multiedit_summary_and_approval_keep_one_outcome_and_every_ordered_replacement() {
         let tool = tool_fixture(
             ToolCall::MultiEdit {

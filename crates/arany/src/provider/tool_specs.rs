@@ -135,6 +135,8 @@ mod tests {
                 "arany_git_branch",
                 "arany_git_switch",
                 "arany_multiedit",
+                "arany_delete",
+                "arany_move",
                 "arany_plan"
             ]
         );

@@ -182,9 +182,11 @@ impl ToolArgumentShape {
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
             | ToolCall::Edit { path, .. }
+            | ToolCall::Delete { path, .. }
             | ToolCall::MultiEdit {
                 file_path: path, ..
             } => Some((path, false)),
+            ToolCall::Move { source, .. } => Some((source, false)),
             ToolCall::Command { cwd, .. } => Some((cwd, true)),
             _ => None,
         };
@@ -193,7 +195,13 @@ impl ToolArgumentShape {
             shape.path_valid = Some(valid_relative(path, root));
         }
         let digest = match call {
-            ToolCall::Edit {
+            ToolCall::Delete {
+                expected_digest, ..
+            }
+            | ToolCall::Move {
+                expected_digest, ..
+            }
+            | ToolCall::Edit {
                 expected_digest, ..
             }
             | ToolCall::MultiEdit {

@@ -29,6 +29,8 @@ fn operation(call: &ToolCall) -> Operation {
         | ToolCall::Mkdir { .. }
         | ToolCall::Write { .. }
         | ToolCall::MultiEdit { .. }
+        | ToolCall::Delete { .. }
+        | ToolCall::Move { .. }
         | ToolCall::CommandUnguarded { .. }
         | ToolCall::ApplyChangeset { .. }
         | ToolCall::PrepareWorker { .. }

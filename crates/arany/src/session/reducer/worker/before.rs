@@ -225,10 +225,16 @@ pub(super) fn tool_started(
             let paths: Vec<_> = match &intent.call {
                 ToolCall::Write { path, .. }
                 | ToolCall::Edit { path, .. }
+                | ToolCall::Delete { path, .. }
                 | ToolCall::MultiEdit {
                     file_path: path, ..
                 }
                 | ToolCall::Mkdir { path } => vec![path],
+                ToolCall::Move {
+                    source,
+                    destination,
+                    ..
+                } => vec![source, destination],
                 ToolCall::ApplyChangeset {
                     source: ChangesetSource::CommandReceipt { changeset, .. },
                 } => changeset.files.iter().map(|f| &f.path).collect(),
@@ -309,55 +315,14 @@ pub(super) fn tool_finished(
             return Err(ReplayError::InvalidTransition);
         }
         let changes = valid_delta(run, *agent_run_id, &mutation.data, false)?;
-        let expected_path = match &o.intent.call {
-            ToolCall::Write { path, .. }
-            | ToolCall::Edit { path, .. }
-            | ToolCall::MultiEdit {
-                file_path: path, ..
-            }
-            | ToolCall::Mkdir { path } => path,
-            _ => return Err(ReplayError::InvalidTransition),
-        };
-        if changes
-            .iter()
-            .any(|f| &f.path != expected_path || f.after == WorkerBaseVersion::Absent)
-        {
-            return Err(ReplayError::InvalidTransition);
+        if matches!(
+            o.intent.call,
+            ToolCall::Delete { .. } | ToolCall::Move { .. }
+        ) {
+            validate_removal(&changes, o)?;
+        } else {
+            validate_literal_mutation(&changes, &o.intent.call)?;
         }
-        for change in &changes {
-            let expected_digest = match &o.intent.call {
-                ToolCall::Write {
-                    expected_digest, ..
-                } => expected_digest.as_deref(),
-                ToolCall::Edit {
-                    expected_digest, ..
-                }
-                | ToolCall::MultiEdit {
-                    expected_digest, ..
-                } => Some(expected_digest.as_str()),
-                _ => None,
-            };
-            let before_digest = match &change.before {
-                WorkerBaseVersion::File { sha256, .. } => Some(sha256.as_str()),
-                _ => None,
-            };
-            if expected_digest != before_digest
-                || matches!(
-                    (&change.before, &change.after),
-                    (
-                        WorkerBaseVersion::Absent,
-                        WorkerBaseVersion::File {
-                            executable: true,
-                            ..
-                        }
-                    )
-                )
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-        }
-        if let ToolCall::Write { content, .. } = &o.intent.call
-            && !changes.iter().all(|f| matches!(&f.after, WorkerBaseVersion::File { sha256, .. } if *sha256 == crate::validate::hex_digest(content.as_bytes()))) { return Err(ReplayError::InvalidTransition); }
     }
     if o.disposition == ToolDisposition::Succeeded
         && matches!(o.intent.target, EffectTarget::WorkerView { .. })
@@ -473,6 +438,103 @@ pub(super) fn check(
                     .count()
                     >= usize::from(w.pins.request.max_turns)
         {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    Ok(())
+}
+
+fn validate_literal_mutation(
+    changes: &[WorkerFileFact],
+    call: &ToolCall,
+) -> Result<(), ReplayError> {
+    let expected_path = match call {
+        ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        }
+        | ToolCall::Mkdir { path } => path,
+        _ => return Err(ReplayError::InvalidTransition),
+    };
+    if changes
+        .iter()
+        .any(|f| &f.path != expected_path || f.after == WorkerBaseVersion::Absent)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    for change in changes {
+        let expected_digest = match call {
+            ToolCall::Write {
+                expected_digest, ..
+            } => expected_digest.as_deref(),
+            ToolCall::Edit {
+                expected_digest, ..
+            }
+            | ToolCall::MultiEdit {
+                expected_digest, ..
+            } => Some(expected_digest.as_str()),
+            _ => None,
+        };
+        let before_digest = match &change.before {
+            WorkerBaseVersion::File { sha256, .. } => Some(sha256.as_str()),
+            _ => None,
+        };
+        if expected_digest != before_digest
+            || matches!(
+                (&change.before, &change.after),
+                (
+                    WorkerBaseVersion::Absent,
+                    WorkerBaseVersion::File {
+                        executable: true,
+                        ..
+                    }
+                )
+            )
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    if let ToolCall::Write { content, .. } = call
+            && !changes.iter().all(|f| matches!(&f.after, WorkerBaseVersion::File { sha256, .. } if *sha256 == crate::validate::hex_digest(content.as_bytes()))) { return Err(ReplayError::InvalidTransition); }
+    Ok(())
+}
+
+fn validate_removal(
+    changes: &[WorkerFileFact],
+    o: &crate::tools::ToolObservation,
+) -> Result<(), ReplayError> {
+    let (source, destination, expected) = match &o.intent.call {
+        ToolCall::Delete {
+            path,
+            expected_digest,
+        } => (path, None, expected_digest),
+        ToolCall::Move {
+            source,
+            destination,
+            expected_digest,
+        } => (source, Some(destination), expected_digest),
+        _ => return Err(ReplayError::InvalidTransition),
+    };
+    let removed = changes
+        .iter()
+        .find(|f| &f.path == source)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let result: crate::session::rewind::RemovedFileResult =
+        serde_json::from_str(&o.output).map_err(|_| ReplayError::InvalidPayload)?;
+    if !matches!(&removed.before, WorkerBaseVersion::File { sha256, bytes, executable }
+        if sha256 == expected && sha256 == &result.removed.sha256 && *bytes == result.removed.bytes && *executable == result.removed.executable)
+        || removed.after != WorkerBaseVersion::Absent
+        || changes.len() != if destination.is_some() { 2 } else { 1 }
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if let Some(destination) = destination {
+        let created = changes
+            .iter()
+            .find(|f| &f.path == destination)
+            .ok_or(ReplayError::InvalidTransition)?;
+        if created.before != WorkerBaseVersion::Absent || created.after != removed.before {
             return Err(ReplayError::InvalidTransition);
         }
     }
