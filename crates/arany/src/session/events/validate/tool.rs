@@ -9,7 +9,7 @@ impl Event {
                 intent,
                 ..
             } => {
-                if intent.valid()
+                if crate::tools::EffectIntent::from(intent.clone()).valid()
                     && !matches!(
                         intent.call,
                         crate::tools::ToolCall::ApplyChangeset {
@@ -104,6 +104,7 @@ impl Event {
                             | PermissionSource::SessionApproval
                             | PermissionSource::Hook
                             | PermissionSource::TypedPrefixRule
+                            | PermissionSource::HostPrefixRule
                     )
                     && usize::from(verdict.hooks) <= MAX_HOOKS_PER_OCCURRENCE
                     && (verdict.basis != PermissionSource::Hook

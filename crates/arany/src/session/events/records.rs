@@ -1,6 +1,68 @@
 use super::*;
 use crate::provider::{AgentPhase, ProviderKind};
+use crate::tools::types::HostCommandPin;
+use crate::tools::{EffectIntent, HostIntent, ToolCall, ToolLimits};
 use crate::validate::MAX_PATH_BYTES;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolIntentRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_command: Option<HostCommandPin>,
+    pub target: EffectTarget,
+    pub id: Uuid,
+    pub run_id: RunId,
+    pub agent_run_id: AgentRunId,
+    pub policy_digest: [u8; 32],
+    pub enforcement_digest: [u8; 32],
+    pub workspace_device: u64,
+    pub workspace_inode: u64,
+    pub call: ToolCall,
+    pub limits: ToolLimits,
+    pub use_count: u8,
+}
+
+impl From<EffectIntent> for ToolIntentRecord {
+    fn from(intent: EffectIntent) -> Self {
+        Self {
+            host: intent.host,
+            host_command: intent.host_command,
+            target: intent.target,
+            id: intent.id,
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            policy_digest: intent.policy_digest,
+            enforcement_digest: intent.enforcement_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+            call: intent.call,
+            limits: intent.limits,
+            use_count: intent.use_count,
+        }
+    }
+}
+
+impl From<ToolIntentRecord> for EffectIntent {
+    fn from(intent: ToolIntentRecord) -> Self {
+        Self {
+            host: intent.host,
+            host_command: intent.host_command,
+            target: intent.target,
+            id: intent.id,
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            policy_digest: intent.policy_digest,
+            enforcement_digest: intent.enforcement_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+            call: intent.call,
+            limits: intent.limits,
+            use_count: intent.use_count,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]

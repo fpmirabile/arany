@@ -1200,7 +1200,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "New conversation",
+        "Tokens used: no calls yet",
     );
     wait(
         &mut output,
@@ -1799,6 +1799,41 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "area menu",
         &shows("Choose what to manage"),
     );
+    assert!(!file.exists());
+    input.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "host rules first-save policy warning",
+        &shows("which also governs other Tools."),
+    );
+    assert!(super::session_picker::screen_contains(
+        &transcript,
+        80,
+        24,
+        "The first save creates permissions.json with the default mode,"
+    ));
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "host rules first-save cancellation",
+        &shows("Host command rules unchanged"),
+    );
+    assert!(!file.exists());
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "typed area menu",
+        &shows("Choose what to manage"),
+    );
     input.write_all(b"\x1b[B\r").unwrap();
     until(
         &mut output,
@@ -1938,6 +1973,53 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "saved notice",
         &shows("Typed Git rules saved"),
     );
+    let before_host_editor = std::fs::read(&file).unwrap();
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "host area menu",
+        &shows("Choose what to manage"),
+    );
+    input.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "host rules editor",
+        &shows("Add from a recent eligible host command"),
+    );
+    input.write_all(b"\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "recent host command picker",
+        &shows("No command runs here"),
+    );
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "host rules return",
+        &shows("Add from a recent eligible host command"),
+    );
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "host rules notice",
+        &shows("Host command rules unchanged"),
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), before_host_editor);
     input.write_all(b"\x03").unwrap();
     until(
         &mut output,

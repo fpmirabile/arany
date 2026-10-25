@@ -954,6 +954,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         args: vec!["check".into()],
         cwd: String::new(),
         justification: "Run the failed command once".into(),
+        prefix_rule: None,
     };
     let mut intent = read_intent(&call);
     intent.run_id = run_id;
@@ -1156,6 +1157,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
         args: vec!["check".into()],
         cwd: String::new(),
         justification: "Run the failed command once".into(),
+        prefix_rule: None,
     };
     let mut intent = read_intent(&call);
     intent.run_id = run.id;

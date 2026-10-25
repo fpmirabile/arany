@@ -830,7 +830,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
         .position(|event| {
             matches!(
                 &event.event,
-                arany::Event::ToolStarted { intent, .. } if intent == &tool.intent
+                arany::Event::ToolStarted { intent, .. } if *intent == tool.intent.clone().into()
             )
         })
         .unwrap();

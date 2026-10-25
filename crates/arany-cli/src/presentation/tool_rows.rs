@@ -202,6 +202,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(match verdict.source {
             arany::permissions::PermissionSource::Rule => " · permission deny rule",
             arany::permissions::PermissionSource::TypedPrefixRule => " · typed Git deny rule",
+            arany::permissions::PermissionSource::HostPrefixRule => " · host command deny rule",
             arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
             arany::permissions::PermissionSource::Hook => " · hook denial",
             _ => " · permission mode denial",
@@ -372,6 +373,7 @@ pub fn unguarded_approval_lines(
         args,
         cwd,
         justification,
+        ..
     } = &intent.call
     else {
         return tool_approval_lines(intent);
@@ -421,8 +423,15 @@ pub fn unguarded_approval_lines(
     }
     if prompt.inactive_rules {
         lines.push(
-            "Previous exact project approvals are inactive; fresh approval is required.".into(),
+            "Previous exact project approvals were archived intact under archive/inactive-host-commands; fresh approval is required.".into(),
         );
+    }
+    if let Some(prefix) = host_prefix_proposal(intent, prompt) {
+        lines.push(format!(
+            "Remember literal argv prefix (JSON): {}",
+            escape_terminal(&serde_json::to_string(prefix).expect("prefix tokens"))
+        ));
+        lines.push("Every eligible suffix is authorized host behavior, not confinement. Saving approves this action once; the rule applies next Run. The first save creates default permission settings for other Tools.".into());
     }
     lines.push(match prompt.attribution {
         Some(cause) => format!("Guard attribution: {}", cause.diagnostic()),
@@ -1018,6 +1027,7 @@ pub enum ToolApprovalChoice {
     Yes,
     AutoEdits,
     ExactCommand,
+    HostPrefix,
     GitPrefix(arany::permissions::TypedGitPrefix),
     No,
 }
@@ -1030,6 +1040,7 @@ impl ToolApprovalChoice {
             Self::ExactCommand => {
                 "Yes, and don't ask again for: this identical command in this live session (unguarded)"
             }
+            Self::HostPrefix => "Yes, and allow this host prefix in this folder from the next Run",
             Self::GitPrefix(prefix) => match prefix {
                 arany::permissions::TypedGitPrefix::Commit => {
                     "Yes, and allow git commit in this folder from the next Run"
@@ -1057,9 +1068,22 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
             Self::ExactCommand => arany::ApprovalReply::AllowForSession,
-            Self::GitPrefix(_) => arany::ApprovalReply::AllowPrefixInFolder,
+            Self::GitPrefix(_) | Self::HostPrefix => arany::ApprovalReply::AllowPrefixInFolder,
             Self::No => arany::ApprovalReply::Deny,
         }
+    }
+}
+
+fn host_prefix_proposal<'a>(
+    intent: &'a arany::EffectIntent,
+    prompt: &arany::UnguardedPrompt,
+) -> Option<&'a [String]> {
+    match &intent.call {
+        arany::ToolCall::CommandUnguarded {
+            prefix_rule: Some(prefix),
+            ..
+        } if prompt.prefix => Some(prefix),
+        _ => None,
     }
 }
 
@@ -1084,6 +1108,14 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         if let Some(prefix) = approval.remember_prefix {
             choices.push(ToolApprovalChoice::GitPrefix(prefix));
         }
+    }
+    if approval
+        .unguarded
+        .as_ref()
+        .and_then(|prompt| host_prefix_proposal(&approval.intent, prompt))
+        .is_some()
+    {
+        choices.push(ToolApprovalChoice::HostPrefix);
     }
     choices.push(ToolApprovalChoice::No);
     choices

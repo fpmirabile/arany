@@ -463,6 +463,22 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         "the raw items are adjacent in the request bytes"
     );
     assert_eq!(rendered["tools"].as_array().unwrap().len(), 22);
+    let host = rendered["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "arany_command_unguarded")
+        .unwrap();
+    assert_eq!(
+        host["parameters"]["properties"]["prefix_rule"]["type"],
+        json!(["array", "null"])
+    );
+    assert!(
+        host["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("prefix_rule"))
+    );
 }
 
 #[test]

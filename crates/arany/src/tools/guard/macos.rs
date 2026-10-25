@@ -995,6 +995,7 @@ impl Task {
             .map(|bytes| Arc::from(bytes.as_slice()));
         let runtime = ToolRuntime {
             host_settings_admitted: false,
+            host_settings_saved: Default::default(),
             guard_available: false,
             git_writes_available: false,
             host_authentication: Default::default(),

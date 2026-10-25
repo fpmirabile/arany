@@ -6,6 +6,7 @@ use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
 use serde_json::{Value, json};
 
 pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
+pub(super) const MAX_COMMAND_ARGS: usize = 64;
 
 const WORKER_CAPTURE_RESULT_BYTES: usize = 512;
 
@@ -23,8 +24,16 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             args,
             cwd,
             justification,
+            prefix_rule,
         } => {
-            (valid_name(program)
+            prefix_rule.as_ref().is_none_or(|prefix| {
+                (super::permissions::MIN_HOST_PREFIX_TOKENS..=args.len() + 1)
+                    .contains(&prefix.len())
+                    && std::iter::once(program)
+                        .chain(args)
+                        .take(prefix.len())
+                        .eq(prefix.iter())
+            }) && (valid_name(program)
                 || (std::path::Path::new(program).is_absolute()
                     && program.len() <= MAX_PATH_BYTES
                     && !program.chars().any(char::is_control)))
@@ -41,7 +50,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
 pub(super) fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
     valid_name(program)
         && valid_relative(cwd, true)
-        && args.len() <= 64
+        && args.len() <= MAX_COMMAND_ARGS
         && args
             .iter()
             .all(|arg| arg.len() <= MAX_ARGUMENT_BYTES && !arg.contains('\0'))
@@ -55,6 +64,7 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
     ];
     if name == "command_unguarded" {
         fields.push(("justification", string()));
+        fields.push(("prefix_rule", json!({"type":["array","null"], "items":{"type":"string"}, "description":format!("Optional literal argv prefix including the executable; at least {} tokens. Suggest remembrance only for a narrow eligible command, never scripts, interpreters, wrappers, Git/gh or rm.", super::permissions::MIN_HOST_PREFIX_TOKENS)})));
     }
     Some(fields)
 }

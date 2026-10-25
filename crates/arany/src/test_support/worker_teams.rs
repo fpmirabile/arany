@@ -1604,7 +1604,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation: ToolObservation {
-                    intent: intent.clone(),
+                    intent: intent.clone().into(),
                     disposition: ToolDisposition::Uncertain,
                     output: "Private outcome unknown".into(),
                     attestation: None,

@@ -67,6 +67,16 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             {
                 return Err(ReplayError::InvalidTransition);
             }
+            if (verdict.basis == PermissionSource::HostPrefixRule
+                || verdict.source == PermissionSource::HostPrefixRule)
+                && !(permissions_pinned
+                    && primary
+                    && unguarded
+                    && verdict.basis == PermissionSource::HostPrefixRule
+                    && (!verdict.approved || host_valid))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             if verdict.mode.is_some() != (permissions_pinned || definition_mode.is_some())
                 || !(permissions_pinned
                     || definition_mode.is_some()

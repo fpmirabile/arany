@@ -84,7 +84,7 @@ async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider()
 }
 
 #[tokio::test]
-async fn inactive_host_rules_enforce_file_admission_but_ignore_contents() {
+async fn inactive_host_rules_archive_private_bytes_without_admitting_authority() {
     for (case, admitted) in [
         ("group-readable", false),
         ("symlink", false),
@@ -179,7 +179,13 @@ async fn inactive_host_rules_enforce_file_admission_but_ignore_contents() {
             assert!(provider.requests.lock().unwrap().is_empty(), "{case}");
         }
         engine.close().await.unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), original, "{case}");
+        let preserved = if admitted {
+            state.join("archive/inactive-host-commands/unguarded-commands.json")
+        } else {
+            path.clone()
+        };
+        assert_eq!(std::fs::read(preserved).unwrap(), original, "{case}");
+        assert_eq!(path.exists(), !admitted, "{case}");
         let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
         let started: i64 = connection
             .query_row(
@@ -193,7 +199,7 @@ async fn inactive_host_rules_enforce_file_admission_but_ignore_contents() {
 }
 
 #[tokio::test]
-async fn run_started_does_not_pin_inactive_rules_before_or_after_edits() {
+async fn inactive_host_archive_never_pins_authority_and_recreated_sources_refuse() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
     let state = temp.path().join("state");
@@ -240,13 +246,23 @@ async fn run_started_does_not_pin_inactive_rules_before_or_after_edits() {
             ..Default::default()
         },
     )
-    .await
-    .unwrap();
-    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    .await;
+    assert!(matches!(
+        second,
+        Err(EngineError::Tool(
+            arany::ToolError::InactiveHostArchiveConflict
+        ))
+    ));
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
     engine.close().await.unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), edited);
-    for outcome in [&first, &second] {
+    assert_eq!(
+        std::fs::read(state.join("archive/inactive-host-commands/unguarded-commands.json"))
+            .unwrap(),
+        original
+    );
+    for outcome in [&first] {
         let events = store.load_session(outcome.session_id).await.unwrap();
         let view = SessionView::replay(outcome.session_id, &events)
             .unwrap()

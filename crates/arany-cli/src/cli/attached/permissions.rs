@@ -81,6 +81,7 @@ const HOST_READ_DISCLOSURE: &str =
 pub(super) enum PermissionArea {
     FolderTrust,
     TypedGitRules,
+    HostRules,
 }
 
 pub(super) async fn choose_area(
@@ -95,6 +96,7 @@ pub(super) async fn choose_area(
             &[
                 (b'1', "Folder trust"),
                 (b'2', "Typed Git rules"),
+                (b'3', "Host command rules"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -103,6 +105,7 @@ pub(super) async fn choose_area(
         {
             Some(b'1') => Some(PermissionArea::FolderTrust),
             Some(b'2') => Some(PermissionArea::TypedGitRules),
+            Some(b'3') => Some(PermissionArea::HostRules),
             _ => None,
         },
     )
@@ -217,7 +220,11 @@ pub(super) async fn manage_rules(
         let edit = match choice {
             Some(ADD) => add_edit(terminal).await?,
             Some(value) if value >= ENTRY_BASE => {
-                entry_edit(terminal, usize::from(value - ENTRY_BASE)).await?
+                let index = usize::from(value - ENTRY_BASE);
+                entry_edit(terminal).await?.map(|edit| match edit {
+                    EntryEdit::Change(decision) => TypedPrefixEdit::Replace { index, decision },
+                    EntryEdit::Remove => TypedPrefixEdit::Remove { index },
+                })
             }
             _ => {
                 return Ok(if uncertain {
@@ -254,6 +261,237 @@ pub(super) async fn manage_rules(
             }
         }
     }
+}
+
+pub(super) enum HostRuleEditOutcome {
+    Confirmed(String),
+    Uncertain,
+}
+
+pub(super) async fn manage_host_rules(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+    workspace: &Path,
+    view: &arany::SessionView,
+) -> Result<HostRuleEditOutcome, SetupError> {
+    let mut notice = "Host rules authorize every eligible suffix in this folder and exact cwd. They apply next Run. This is not confinement.".to_owned();
+    let mut saved = false;
+    let mut last_error = None;
+    loop {
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(HostRuleEditOutcome::Confirmed(host_rule_edit_notice(
+                Some("state unavailable"),
+                saved,
+            )));
+        };
+        let settings = match PermissionSettings::load(&state, workspace) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return Ok(HostRuleEditOutcome::Confirmed(host_rule_edit_notice(
+                    Some(&error.to_string()),
+                    saved,
+                )));
+            }
+        };
+        let choice = choose_host_rule(terminal, &settings, workspace, &notice).await?;
+        let edit = match choice {
+            Some(ADD) => add_host_edit(terminal, view, workspace).await?,
+            Some(value) if value >= ENTRY_BASE => {
+                let index = usize::from(value - ENTRY_BASE);
+                entry_edit(terminal).await?.map(|edit| match edit {
+                    EntryEdit::Change(decision) => {
+                        arany::permissions::HostPrefixEdit::Replace { index, decision }
+                    }
+                    EntryEdit::Remove => arany::permissions::HostPrefixEdit::Remove { index },
+                })
+            }
+            _ => {
+                return Ok(HostRuleEditOutcome::Confirmed(host_rule_edit_notice(
+                    last_error.as_deref(),
+                    saved,
+                )));
+            }
+        };
+        let Some(edit) = edit else { continue };
+        match settings.save_host_edit(&state, workspace, edit) {
+            Ok(_) => {
+                saved = true;
+                last_error = None;
+                notice = host_rule_edit_notice(None, saved);
+            }
+            Err(SettingsError::NotConfirmed) => return Ok(HostRuleEditOutcome::Uncertain),
+            Err(error) => {
+                last_error = Some(error.to_string());
+                notice = host_rule_edit_notice(last_error.as_deref(), saved);
+            }
+        }
+    }
+}
+
+async fn choose_host_rule(
+    terminal: &mut AttachedTerminal,
+    settings: &PermissionSettings,
+    workspace: &Path,
+    notice: &str,
+) -> Result<Option<u8>, SetupError> {
+    let mut rows = vec![(ADD, "Add from a recent eligible host command".to_owned())];
+    rows.extend(
+        settings
+            .host_prefixes()
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                (
+                    ENTRY_BASE + u8::try_from(index).expect("rules bounded"),
+                    format!(
+                        "{} {} · {} · cwd {}",
+                        decision_label(rule.decision),
+                        crate::presentation::escape_terminal(
+                            &serde_json::to_string(&rule.prefix).expect("prefix")
+                        ),
+                        scope_label(Some(rule.workspace()), workspace),
+                        crate::presentation::escape_terminal(&rule.cwd)
+                    ),
+                )
+            }),
+    );
+    rows.push((BACK, "Back".into()));
+    let labels = rows
+        .iter()
+        .map(|(key, label)| (*key, label.as_str()))
+        .collect::<Vec<_>>();
+    let instruction = [if settings.exists() { "" } else { SETTINGS_NOTE }, notice].join(" ");
+    super::setup::choose_focused(
+        terminal,
+        2,
+        "Host command rules",
+        &instruction,
+        &labels,
+        None,
+    )
+    .await
+}
+
+fn host_rule_edit_notice(reason: Option<&str>, saved: bool) -> String {
+    let Some(reason) = reason else {
+        return if saved {
+            "Host command rules saved; they apply from the next Run".into()
+        } else {
+            "Host command rules unchanged".into()
+        };
+    };
+    let status = if saved {
+        "earlier host rule edits were saved; reopen /permissions to verify their current state"
+    } else {
+        "host rules unchanged"
+    };
+    format!("Error: {reason}; {status}")
+}
+
+async fn add_host_edit(
+    terminal: &mut AttachedTerminal,
+    view: &arany::SessionView,
+    workspace: &Path,
+) -> Result<Option<arany::permissions::HostPrefixEdit>, SetupError> {
+    let candidates = host_candidates(
+        view.runs
+            .iter()
+            .rev()
+            .flat_map(|run| run.tools.iter().rev()),
+        workspace,
+    );
+    let options = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| (index, host_command_label(&tool.intent.call)))
+        .collect::<Vec<_>>();
+    let Some(index) = pick(
+        terminal,
+        "Host command",
+        "Choose a recent command to pin. No command runs here.",
+        &options,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let intent = &candidates[index].intent;
+    let arany::ToolCall::CommandUnguarded { args, .. } = &intent.call else {
+        unreachable!("host candidate")
+    };
+    let prefixes = (1..=args.len() + 1)
+        .filter_map(|count| {
+            arany::permissions::HostPrefixRule::from_intent(intent, count)
+                .ok()
+                .map(|rule| {
+                    (
+                        count,
+                        crate::presentation::escape_terminal(
+                            &serde_json::to_string(&rule.prefix).expect("prefix"),
+                        ),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    let Some(count) = pick(terminal, "Host prefix", "Choose literal tokens. ONE TOKEN authorizes every eligible argument to this executable. Host effects cannot be rewound; private data may reach the Provider.", &prefixes).await? else { return Ok(None) };
+    let Some(decision) = pick(
+        terminal,
+        "Host decision",
+        "Choose a decision; every eligible suffix is covered.",
+        &decisions(),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Ok(mut rule) = arany::permissions::HostPrefixRule::from_intent(intent, count) else {
+        return Ok(None);
+    };
+    rule.decision = decision;
+    Ok(Some(arany::permissions::HostPrefixEdit::Insert(Box::new(
+        rule,
+    ))))
+}
+
+fn host_candidates<'a>(
+    tools: impl Iterator<Item = &'a arany::ToolView>,
+    workspace: &Path,
+) -> Vec<&'a arany::ToolView> {
+    let mut seen = std::collections::HashSet::new();
+    tools
+        .filter(|tool| {
+            tool.intent
+                .host_command
+                .as_ref()
+                .is_some_and(|pin| Path::new(&pin.workspace) == workspace)
+                && arany::permissions::HostPrefixRule::from_intent(&tool.intent, 1).is_ok()
+        })
+        .filter(|tool| match &tool.intent.call {
+            arany::ToolCall::CommandUnguarded {
+                program, args, cwd, ..
+            } => seen.insert((program, args, cwd)),
+            _ => false,
+        })
+        .take(arany::permissions::MAX_RULES)
+        .collect()
+}
+
+fn host_command_label(call: &arany::ToolCall) -> String {
+    let arany::ToolCall::CommandUnguarded {
+        program, args, cwd, ..
+    } = call
+    else {
+        return String::new();
+    };
+    let tokens = std::iter::once(program).chain(args).collect::<Vec<_>>();
+    let mut label = serde_json::to_string(&tokens).expect("command tokens");
+    if !cwd.is_empty() {
+        label.push_str(&format!(
+            " · cwd {}",
+            serde_json::to_string(cwd).expect("command cwd")
+        ));
+    }
+    crate::presentation::escape_terminal(&label)
 }
 
 fn requires_host_read_disclosure(
@@ -339,10 +577,12 @@ fn decisions() -> Vec<(Decision, String)> {
         .to_vec()
 }
 
-async fn entry_edit(
-    terminal: &mut AttachedTerminal,
-    index: usize,
-) -> Result<Option<TypedPrefixEdit>, SetupError> {
+enum EntryEdit {
+    Change(Decision),
+    Remove,
+}
+
+async fn entry_edit(terminal: &mut AttachedTerminal) -> Result<Option<EntryEdit>, SetupError> {
     let mut options = decisions()
         .into_iter()
         .map(|(decision, label)| (Some(decision), format!("Change to {label}")))
@@ -352,8 +592,8 @@ async fn entry_edit(
         pick(terminal, "Rule", "Change or remove this rule", &options)
             .await?
             .map(|decision| match decision {
-                Some(decision) => TypedPrefixEdit::Replace { index, decision },
-                None => TypedPrefixEdit::Remove { index },
+                Some(decision) => EntryEdit::Change(decision),
+                None => EntryEdit::Remove,
             }),
     )
 }
@@ -654,6 +894,118 @@ mod tests {
         HOST_READ_DISCLOSURE, parse_linear_selection, requires_host_read_disclosure, toggle_profile,
     };
     use arany::permissions::{Decision, TypedGitPrefix, TypedPrefixEdit};
+
+    #[test]
+    fn host_rule_editor_feedback_distinguishes_failed_saved_and_unchanged_edits() {
+        for reason in ["state unavailable", "permission settings are invalid"] {
+            assert_eq!(
+                super::host_rule_edit_notice(Some(reason), false),
+                format!("Error: {reason}; host rules unchanged")
+            );
+            assert_eq!(
+                super::host_rule_edit_notice(Some(reason), true),
+                format!(
+                    "Error: {reason}; earlier host rule edits were saved; reopen /permissions to verify their current state"
+                )
+            );
+        }
+        assert_eq!(
+            super::host_rule_edit_notice(None, false),
+            "Host command rules unchanged"
+        );
+        assert_eq!(
+            super::host_rule_edit_notice(None, true),
+            "Host command rules saved; they apply from the next Run"
+        );
+    }
+
+    fn host_candidate(value: &str, cwd: &str) -> arany::ToolView {
+        let pin = serde_json::from_value(serde_json::json!({
+            "state_roots": ["/state", "/account"], "permissions_digest": null,
+            "workspace": "/project", "executable": "/usr/bin/printf", "device": 1, "inode": 2,
+            "sha256": "a".repeat(64), "path": "/usr/bin:/bin", "environment_digest": vec![4; 32],
+        }))
+        .unwrap();
+        arany::ToolView {
+            intent: arany::EffectIntent {
+                host: None,
+                host_command: Some(pin),
+                target: arany::worker::EffectTarget::Workspace,
+                id: uuid::Uuid::now_v7(),
+                run_id: arany::RunId::new(),
+                agent_run_id: arany::AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call: arany::ToolCall::CommandUnguarded {
+                    program: "printf".into(),
+                    args: vec![value.into()],
+                    cwd: cwd.into(),
+                    justification: "Reason hidden from picker labels".into(),
+                    prefix_rule: None,
+                },
+                limits: arany::ToolLimits::default(),
+                use_count: 1,
+            },
+            checkpoint: None,
+            observation: None,
+            review_call_index: None,
+            permission_verdict: None,
+            hooks: Vec::new(),
+            hook_sequence: None,
+            finished_sequence: None,
+        }
+    }
+
+    #[test]
+    fn host_picker_deduplicates_before_limiting_and_labels_only_command_and_cwd() {
+        let newest = host_candidate("current", "");
+        let nested = host_candidate("current", "nested");
+        let older = host_candidate("older", "");
+        let mut tools = vec![newest; arany::permissions::MAX_RULES];
+        tools.extend([nested, older]);
+        let candidates = super::host_candidates(tools.iter(), std::path::Path::new("/project"));
+        assert_eq!(candidates.len(), 3);
+        assert!(std::ptr::eq(candidates[0], &tools[0]));
+        let labels = candidates
+            .iter()
+            .map(|tool| super::host_command_label(&tool.intent.call))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                r#"["printf","current"]"#,
+                r#"["printf","current"] · cwd "nested""#,
+                r#"["printf","older"]"#,
+            ]
+        );
+        let hostile = host_candidate("line\u{1b}[31m", "nested\nfolder");
+        assert_eq!(
+            super::host_command_label(&hostile.intent.call),
+            r#"["printf","line\u001b[31m"] · cwd "nested\nfolder""#
+        );
+    }
+
+    #[test]
+    fn host_command_picker_labels_preserve_argument_boundaries() {
+        let single = host_candidate("alpha beta", "");
+        let mut split = host_candidate("alpha", "");
+        if let arany::ToolCall::CommandUnguarded { args, .. } = &mut split.intent.call {
+            args.push("beta".into());
+        }
+        let tools = [single, split];
+        let candidates = super::host_candidates(tools.iter(), std::path::Path::new("/project"));
+        assert_eq!(candidates.len(), 2);
+        let labels = candidates
+            .iter()
+            .map(|tool| super::host_command_label(&tool.intent.call))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [r#"["printf","alpha beta"]"#, r#"["printf","alpha","beta"]"#]
+        );
+    }
 
     #[cfg(all(unix, debug_assertions))]
     #[test]

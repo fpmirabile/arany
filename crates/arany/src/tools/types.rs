@@ -323,6 +323,8 @@ pub enum ToolCall {
         args: Vec<String>,
         cwd: String,
         justification: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_rule: Option<Vec<String>>,
     },
     ApplyChangeset {
         source: ChangesetSource,
@@ -643,6 +645,8 @@ pub(crate) fn validate_mention_path(value: &str, root: bool) -> Result<(), super
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicyReceipt {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_prefixes: Vec<super::permissions::HostPrefixRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_epoch: Option<Uuid>,
     pub contract_version: u32,
@@ -685,6 +689,13 @@ pub enum ToolResourceClass {
 impl ToolPolicyReceipt {
     pub(crate) fn valid(&self) -> bool {
         self.contract_version == 1
+            && self.host_prefixes.len() <= super::permissions::MAX_RULES
+            && (self.host_prefixes.is_empty() || self.permissions_digest.is_some())
+            && self
+                .host_prefixes
+                .iter()
+                .enumerate()
+                .all(|(index, rule)| rule.valid() && !self.host_prefixes[..index].contains(rule))
             && self.config_digest != [0; 32]
             && self.permissions_digest != Some([0; 32])
             && self.unguarded_rules_digest != Some([0; 32])
@@ -2012,6 +2023,7 @@ mod unguarded_vocabulary_tests {
             args: args.iter().map(|arg| (*arg).into()).collect(),
             cwd: cwd.into(),
             justification: "Run the failed command once".into(),
+            prefix_rule: None,
         }
     }
 
