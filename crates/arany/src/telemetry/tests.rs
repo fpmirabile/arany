@@ -1854,6 +1854,7 @@ fn provider_identity_maps_only_known_profiles_to_fixed_metadata() {
     for (profile, kind, address) in [
         ("openai", "openai", Some("api.openai.com")),
         ("anthropic", "anthropic", Some("api.anthropic.com")),
+        ("chatgpt", "chatgpt", Some("api.openai.com")),
         ("custom:private-canary", "custom", None),
         ("private-canary", "other", None),
     ] {
