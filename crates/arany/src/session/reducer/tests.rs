@@ -5945,6 +5945,10 @@ mod goal_replay_tests {
             assert!(rejected(&view, started(intent.digest(), &foreign)));
             apply(&mut view, started(intent.digest(), &hook_intent)).unwrap();
             assert!(!view.runs[0].hooks_settled());
+            assert!(
+                rejected(&view, reserve_child_call(goal, run, agent)),
+                "an open PreToolUse hook blocks the actor's review reservation"
+            );
             let mut wrong_actor = started(intent.digest(), &hook_intent);
             if let Event::HookStarted { agent_run_id, .. } = &mut wrong_actor {
                 *agent_run_id = AgentRunId::new();
@@ -6244,10 +6248,12 @@ mod goal_replay_tests {
                     Some(0),
                 ),
             };
-            let mut open = view.clone();
-            apply(&mut open, reserve_child_call(goal, run, agent)).unwrap();
             assert!(
-                rejected(&open, continuation.clone()),
+                rejected(&view, reserve_child_call(goal, run, agent)),
+                "no Provider call is reserved while the actor's PostToolUse hook is open"
+            );
+            assert!(
+                rejected(&view, continuation.clone()),
                 "no continuation is recorded while a PostToolUse hook is open"
             );
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
@@ -8238,6 +8244,19 @@ mod goal_replay_tests {
             rejected(&view, tool_finished(run, agent, &first, b"one")),
             "all declared intents must start before any observation"
         );
+        for stage in ["active", "reviewed"] {
+            let mut busy = view.clone();
+            let tool = busy.runs[0].tools.last_mut().unwrap();
+            if stage == "active" {
+                tool.active_time_reserved = true;
+            } else {
+                tool.review_call_index = Some(0);
+            }
+            assert!(
+                rejected(&busy, tool_started(run, agent, &second)),
+                "no new intent during {stage} Tool work"
+            );
+        }
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
@@ -8392,10 +8411,8 @@ mod goal_replay_tests {
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
-        assert!(
-            rejected(&view, reserve_child_call(goal, run, agent)),
-            "no Provider dispatch with a pending observation"
-        );
+        apply(&mut view, reserve_child_call(goal, run, agent))
+            .expect("a pending Tool can reserve its review call");
         let continuation = Event::ProviderCallRecorded {
             run_id: run,
             agent_run_id: agent,
@@ -8410,7 +8427,6 @@ mod goal_replay_tests {
             "the second declared request is unobserved"
         );
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
-        apply(&mut view, reserve_child_call(goal, run, agent)).expect("continuation call");
         apply(&mut view, continuation).expect("all declared requests observed");
     }
 

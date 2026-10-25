@@ -264,6 +264,19 @@ impl SessionView {
             .iter()
             .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
         let run = current_run(self, *run_id)?;
+        let actor = run
+            .agents
+            .iter()
+            .find(|agent| agent.id == *agent_run_id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        let tools = if actor.role == AgentRole::Primary {
+            &run.tools
+        } else {
+            &actor.tools
+        };
+        if tools.iter().any(|tool| !tool.hooks_settled()) {
+            return Err(ReplayError::InvalidTransition);
+        }
         if run.primary().is_some_and(|agent| {
             agent.id == *agent_run_id
                 && (agent.refusal_limit_reached()

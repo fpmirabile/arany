@@ -364,13 +364,7 @@ impl RunView {
             .tools
             .iter()
             .chain(self.agents.iter().flat_map(|agent| &agent.tools))
-            .all(|tool| {
-                tool.hooks.iter().all(|hook| {
-                    hook.outcome
-                        .as_ref()
-                        .is_some_and(|outcome| !outcome.observation.stops_run())
-                })
-            })
+            .all(ToolView::hooks_settled)
     }
 
     fn stopped_hooks(&self) -> impl Iterator<Item = (&HookView, Option<&str>)> {
@@ -577,16 +571,20 @@ impl ToolView {
         )
     }
 
+    fn hooks_settled(&self) -> bool {
+        self.hooks.iter().all(|hook| {
+            hook.outcome
+                .as_ref()
+                .is_some_and(|outcome| !outcome.observation.stops_run())
+        })
+    }
+
     // A hook whose outcome is unknown stops the Run exactly like an uncertain Tool.
     pub(crate) fn settled_without_stop(&self) -> bool {
         self.observation
             .as_ref()
             .is_some_and(|observation| !observation.stops_run())
-            && !self.hooks.iter().any(|hook| {
-                hook.outcome
-                    .as_ref()
-                    .is_none_or(|outcome| outcome.observation.stops_run())
-            })
+            && self.hooks_settled()
     }
 
     pub fn ran_host(&self) -> bool {
