@@ -421,7 +421,9 @@ fn dispatch_gate<'a>(
         let stop = match facts.site {
             DispatchSite::Primary if recoverable_primary_refusal(&reason) => None,
             DispatchSite::Researcher if recoverable_child_refusal(&reason) => None,
-            _ => Some(refusal_cause(after.paused, after.cancelled, after.deadline)),
+            DispatchSite::Primary | DispatchSite::Researcher => {
+                Some(refusal_cause(after.paused, after.cancelled, after.deadline))
+            }
         };
         Err(refuse(reason, stop))
     };
@@ -480,12 +482,27 @@ fn dispatch_gate<'a>(
 }
 
 fn recoverable_child_refusal(reason: &NotDispatched) -> bool {
-    matches!(
-        reason,
+    match reason {
         NotDispatched::HumanOnlyUnavailable
-            | NotDispatched::ApprovalUnavailable
-            | NotDispatched::ApprovalRefused
-    )
+        | NotDispatched::ApprovalUnavailable
+        | NotDispatched::ApprovalRefused => true,
+        NotDispatched::TimeoutLimit { .. }
+        | NotDispatched::HookDenied(_)
+        | NotDispatched::DelegationDeadline
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
+        | NotDispatched::ModeDenied
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::Paused
+        | NotDispatched::Cancelled
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::SaveUnconfirmed
+        | NotDispatched::UnguardedNeedsHuman => false,
+    }
 }
 
 pub(super) fn decide_queue_pause(reserved: bool, paused: bool) -> Result<(), Refusal<'static>> {

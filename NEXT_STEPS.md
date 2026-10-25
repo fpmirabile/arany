@@ -62,7 +62,7 @@ Done when a normal engineering day in this repository needs no fallback to anoth
 
 ### Frozen areas
 
-The owner lifted this freeze for Pursue item 4 (C3 views and the Supervisor in shadow mode), for the [typed Git writes](./docs/specs/tools.md#typed-git-writes) of Daily use first item 10 ([rationale](./docs/research/git-writes-2026-10.md)), and on 2026-10-22 for MultiEdit only in Daily use first item 11 ([MultiEdit contract](./docs/specs/tools.md#atomic-single-file-multiedit)). It stays in force for the rest of the list below until the owner lifts it.
+The owner lifted this freeze for Pursue item 4 (C3 views and the Supervisor in shadow mode), for the [typed Git writes](./docs/specs/tools.md#typed-git-writes) ([rationale](./docs/research/git-writes-2026-10.md)), and on 2026-10-22 for [MultiEdit](./docs/specs/tools.md#atomic-single-file-multiedit) only. It stays in force for the rest of the list below until the owner lifts it.
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set and the explicitly approved exceptions above. Typed delete, typed move and parallel reads retain their existing scope and gates.
 
