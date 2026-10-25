@@ -8405,6 +8405,7 @@ mod goal_replay_tests {
         apply(&mut view, tool_started(run, agent, &write)).expect("write starts");
         let mut read_attested = observation_for(write.clone(), b"after");
         read_attested.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
             policy_digest: write.policy_digest,
             workspace_device: write.workspace_device,
             workspace_inode: write.workspace_inode,
@@ -8419,6 +8420,63 @@ mod goal_replay_tests {
             }
         ));
         apply(&mut view, tool_finished(run, agent, &write, b"after")).expect("Guard receipt");
+    }
+
+    #[test]
+    fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
+        use crate::tools::{Attestation, EnforcementCause, FileReceipt, GuardReceipt};
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let call = ToolCall::Mkdir {
+            path: "src/new".into(),
+        };
+        let mut intent = child_intent(run, agent, call);
+        intent.enforcement_digest = FileReceipt::enforcement_digest();
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let finish = |observation| Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        let observed = observation_for(intent.clone(), b"after");
+        let mut guarded = observed.clone();
+        guarded.attestation = Some(Attestation::Guard(GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        }));
+        assert!(rejected(&view, finish(guarded)));
+        let mut bootstrap = observed.clone();
+        bootstrap.disposition = ToolDisposition::Failed;
+        bootstrap.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
+        bootstrap.attestation = None;
+        assert!(rejected(&view, finish(bootstrap)));
+        let receipt = FileReceipt {
+            intent_digest: intent.digest(),
+            before: None,
+            after: None,
+            executable: false,
+        };
+        let mut forged = receipt.clone();
+        forged.intent_digest = [9; 32];
+        for candidate in [None, Some(forged), Some(receipt.clone())] {
+            let correct = candidate.as_ref() == Some(&receipt);
+            let mut observation = observed.clone();
+            observation.attestation = Some(Attestation::InProcess {
+                receipt: candidate,
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            });
+            if correct {
+                apply(&mut view, finish(observation)).expect("in-process File receipt");
+            } else {
+                assert!(rejected(&view, finish(observation)));
+            }
+        }
     }
 
     #[test]
@@ -8461,6 +8519,7 @@ mod goal_replay_tests {
             };
             let mut in_process = guarded.clone();
             in_process.attestation = Some(crate::tools::Attestation::InProcess {
+                receipt: None,
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
@@ -9198,6 +9257,7 @@ mod goal_replay_tests {
         );
         let mut in_process = observation.clone();
         in_process.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
             policy_digest: intent.policy_digest,
             workspace_device: 1,
             workspace_inode: 2,

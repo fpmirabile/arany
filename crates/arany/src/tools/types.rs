@@ -991,6 +991,21 @@ impl GuardReceipt {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FileReceipt {
+    pub intent_digest: [u8; 32],
+    pub before: Option<[u8; 32]>,
+    pub after: Option<[u8; 32]>,
+    pub executable: bool,
+}
+
+impl FileReceipt {
+    pub(crate) fn enforcement_digest() -> [u8; 32] {
+        digest(b"arany-in-process-file-v1")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnguardedReceipt {
     pub contract_version: u32,
     pub intent_digest: [u8; 32],
@@ -1014,6 +1029,8 @@ impl UnguardedReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Attestation {
     InProcess {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<FileReceipt>,
         policy_digest: [u8; 32],
         workspace_device: u64,
         workspace_inode: u64,
@@ -1098,13 +1115,18 @@ impl Attestation {
                     }
             }
             Self::InProcess {
+                receipt,
                 policy_digest,
                 workspace_device,
                 workspace_inode,
             } => {
                 intent.target == EffectTarget::Workspace
                     && intent.call.facts().site == Site::InProcess
+                    && (!intent.call.facts().mutates || super::fs::in_process_mutation(intent))
                     && !matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
+                    && receipt.as_ref().is_none_or(|receipt| {
+                        intent.call.facts().mutates && receipt.intent_digest == intent.digest()
+                    })
                     && *policy_digest == intent.policy_digest
                     && *workspace_device == intent.workspace_device
                     && *workspace_inode == intent.workspace_inode
@@ -1113,7 +1135,10 @@ impl Attestation {
                 intent.target == EffectTarget::Workspace
                     && !matches!(intent.call, ToolCall::PrepareWorker { .. })
                     && (intent.call.facts().site == Site::Guard
-                        || super::discovery::possible(&intent.call))
+                        || super::discovery::possible(&intent.call)
+                        || intent.call.facts().family == super::catalog::Family::File
+                            && intent.call.facts().mutates
+                            && !super::fs::in_process_mutation(intent))
                     && receipt.valid_for(intent)
             }
             Self::Host(receipt) => {
@@ -1136,13 +1161,18 @@ impl Attestation {
 
     #[cfg(test)]
     pub(crate) fn for_site(intent: &EffectIntent) -> Self {
-        let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. }) {
+        let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
+            || intent.call.facts().mutates
+                && intent.call.facts().family == super::catalog::Family::File
+                && !super::fs::in_process_mutation(intent)
+        {
             Site::Guard
         } else {
             intent.call.facts().site
         };
         match site {
             Site::InProcess => Self::InProcess {
+                receipt: None,
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
@@ -1407,6 +1437,10 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|attestation| attestation.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
+            && (!super::fs::in_process_mutation(&self.intent)
+                || self.disposition != ToolDisposition::Succeeded
+                || matches!(&self.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. })
+                    if super::fs::file_receipt(&self.intent, &self.output).is_ok_and(|expected| expected == *receipt)))
             && match self.enforcement_cause {
                 None => true,
                 Some(EnforcementCause::FilesystemDenied) => {
@@ -1415,8 +1449,11 @@ impl ToolObservation {
                 Some(EnforcementCause::GuardBootstrap) => {
                     self.disposition == ToolDisposition::Failed
                         && self.attestation.is_none()
+                        && !super::fs::in_process_mutation(&self.intent)
                         && (self.intent.call.facts().site == super::catalog::Site::Guard
-                            || super::discovery::possible(&self.intent.call))
+                            || super::discovery::possible(&self.intent.call)
+                            || self.intent.call.facts().family == super::catalog::Family::File
+                                && self.intent.call.facts().mutates)
                 }
             }
             && (!self.intent.call.is_host()
@@ -2074,6 +2111,7 @@ mod unguarded_vocabulary_tests {
         assert!(!guard_receipt.valid_for(&host));
         assert!(
             !Attestation::InProcess {
+                receipt: None,
                 policy_digest: host.policy_digest,
                 workspace_device: host.workspace_device,
                 workspace_inode: host.workspace_inode,

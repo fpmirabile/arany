@@ -113,11 +113,14 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         2,
         "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
     ),
-    write_row(
-        "mkdir",
-        8,
-        "Create a new directory whose parent already exists. Does not edit an existing file.",
-    ),
+    OperationFacts {
+        site: Site::InProcess,
+        ..write_row(
+            "mkdir",
+            8,
+            "Create a new directory whose parent already exists. Does not edit an existing file.",
+        )
+    },
     write_row(
         "write",
         9,
@@ -868,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn only_file_and_skill_reads_run_in_process() {
+    fn only_file_operations_and_skill_reads_run_in_process() {
         assert!(
             ToolCall::CommandUnguarded {
                 program: "cargo".into(),
@@ -886,11 +889,17 @@ mod tests {
             .filter(|facts| facts.site == Site::InProcess)
             .map(|facts| facts.name)
             .collect();
-        assert_eq!(in_process, ["list", "read", "search", "skill", "glob"]);
+        assert_eq!(
+            in_process,
+            ["list", "read", "search", "mkdir", "skill", "glob"]
+        );
         assert!(
             ALL.iter()
                 .filter(|facts| facts.site == Site::InProcess)
-                .all(|facts| !facts.mutates && !facts.spawns_process && !facts.asks_approval)
+                .all(|facts| !facts.spawns_process
+                    && matches!(facts.family, Family::File | Family::Skill)
+                    && (!facts.mutates || facts.family == Family::File)
+                    && facts.asks_approval == facts.mutates)
         );
     }
 

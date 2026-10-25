@@ -82,7 +82,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
         Err(ToolError::Timeout(_)) => b"SELECT_TIMEOUT\n",
         Err(ToolError::ChangedInput) => b"SELECT_CHANGED\n",
         Err(ToolError::Configuration) => b"SELECT_CONFIGURATION\n",
-        Err(ToolError::Operation) => b"SELECT_OPERATION\n",
+        Err(ToolError::Cancelled | ToolError::Operation) => b"SELECT_OPERATION\n",
         Err(ToolError::NotFound) => b"SELECT_NOT_FOUND\n",
         Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
         Err(
