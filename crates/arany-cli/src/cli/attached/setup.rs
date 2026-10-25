@@ -690,7 +690,7 @@ async fn remove_native_saved_access(
     let removal =
         credentials::NativeRemoval::prepare(workspace).map_err(|error| error.to_string())?;
     let Some(removal) = removal else {
-        terminal.draw_setup(1, "Native API account", "No saved account", 0, None)?;
+        await_setup_ack(terminal, "Native API account", "No saved account").await?;
         return Ok(());
     };
     if review_warning(
@@ -757,7 +757,7 @@ async fn remove_chatgpt_saved_access(
     let (selected, ids, expected_index) = match chatgpt::saved_account_index(workspace) {
         Ok(accounts) => accounts,
         Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
-            terminal.draw_setup(1, "ChatGPT account", "No saved account", 0, None)?;
+            await_setup_ack(terminal, "ChatGPT account", "No saved account").await?;
             return Ok(());
         }
         Err(error) => return Err(error.to_string().into()),
@@ -1249,7 +1249,7 @@ fn custom_profile_choices(
 
 fn format_verified_until(expires_at_ms: i64) -> String {
     let now = i64::try_from(arany::now_ms()).unwrap_or(i64::MAX);
-    let remaining_ms = expires_at_ms.saturating_sub(now).max(0) as u64;
+    let remaining_ms = u64::try_from(expires_at_ms.saturating_sub(now)).unwrap_or(0);
     format!("verified; {} left", format_duration(remaining_ms))
 }
 
@@ -1273,7 +1273,6 @@ async fn inspect_custom_route(
         escape_terminal(profile.model()),
         escape_terminal(profile.credential_env()),
     );
-    terminal.draw_setup(1, "Custom route", &details, 0, None)?;
     await_setup_ack(terminal, "Custom route", &details).await?;
     Ok(())
 }

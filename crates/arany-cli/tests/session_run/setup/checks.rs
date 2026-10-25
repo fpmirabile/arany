@@ -266,6 +266,11 @@ fn manager_check_acknowledgment_selects_verified_route_and_completes_a_turn() {
         presentation.menu(&mut pty, action, "Custom route local");
         let inspected = presentation.choose(&mut pty, 1);
         let (listing, details) = acknowledge_result(&mut pty, presentation, inspected);
+        assert!(
+            !String::from_utf8_lossy(&pty.transcript[inspected..listing])
+                .contains("Choose: Protocol:"),
+            "inspection must not announce an extra unpaged copy"
+        );
         assert_result_contains(&details, "Check: verified; ");
         assert_result_contains(&details, " left");
         presentation.menu(&mut pty, listing, "Custom routes");
@@ -370,6 +375,39 @@ fn assert_checked_run(state: &Path, workspace: &Path) {
         );
         store.close().await.unwrap();
     });
+}
+
+#[test]
+fn manager_empty_account_removal_waits_for_acknowledgment() {
+    for presentation in [Presentation::ScreenReader, Presentation::Inline] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut pty = presentation.start(&temp, &workspace, &state, None);
+        let accounts = presentation.choose(&mut pty, 1);
+        presentation.menu(&mut pty, accounts, "API accounts");
+        for kind in [1, 2] {
+            let removal = presentation.choose(&mut pty, 5);
+            presentation.menu(&mut pty, removal, "Remove saved access");
+            let result = presentation.choose(&mut pty, kind);
+            let (accounts, message) = acknowledge_result(&mut pty, presentation, result);
+            assert_result_contains(&message, "No saved account");
+            presentation.menu(&mut pty, accounts, "API accounts");
+        }
+        let chat = presentation.choose(&mut pty, 6);
+        presentation.composer(&mut pty, chat);
+        pty.input.write_all(b"/exit\r").unwrap();
+        finish_check_pty(pty);
+        runtime().block_on(async {
+            assert!(
+                arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace,)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+    }
 }
 
 #[test]
