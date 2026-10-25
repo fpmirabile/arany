@@ -33,6 +33,7 @@ struct TeamProvider {
     workspace: PathBuf,
     budget: GoalBudget,
     requests: Mutex<Vec<ProviderRequest>>,
+    primary_tool_calls: Mutex<Vec<ToolCall>>,
     violations: Mutex<Vec<&'static str>>,
     ready: mpsc::Sender<usize>,
     completed: mpsc::UnboundedSender<usize>,
@@ -780,6 +781,14 @@ impl Provider for TeamProvider {
         } else {
             self.primary(&request)
         };
+        if request.phase != AgentPhase::ChildWork
+            && let ProviderOutcome::Tools(requests) = &outcome
+        {
+            self.primary_tool_calls
+                .lock()
+                .unwrap()
+                .extend(requests.iter().map(|request| request.call.clone()));
+        }
         Ok(ProviderResponse {
             turn: ProviderTurn::scripted(),
             outcome,
@@ -803,13 +812,44 @@ impl Provider for TeamProvider {
     }
 }
 
+fn primary_tool_calls(
+    run_id: RunId,
+    primary: AgentRunId,
+    events: &[EventEnvelope],
+) -> impl DoubleEndedIterator<Item = &ToolCall> {
+    events
+        .iter()
+        .filter_map(move |envelope| match &envelope.event {
+            Event::ToolStarted {
+                run_id: event_run,
+                agent_run_id,
+                intent,
+                ..
+            } if *event_run == run_id
+                && *agent_run_id == primary
+                && !intent.call.is_internal()
+                && !matches!(&intent.call, ToolCall::ApplyChangeset { .. }) =>
+            {
+                Some(&intent.call)
+            }
+            _ => None,
+        })
+}
+
 fn assert_background_primary_context(
     run_id: RunId,
     primary: AgentRunId,
     events: &[EventEnvelope],
-    requests: &[ProviderRequest],
-    identity: &ProviderIdentity,
+    provider: &TeamProvider,
 ) {
+    let expected_calls = provider.primary_tool_calls.lock().unwrap();
+    assert_eq!(
+        primary_tool_calls(run_id, primary, events).collect::<Vec<_>>(),
+        expected_calls.iter().collect::<Vec<_>>(),
+        "every primary model Tool request must match its committed intent"
+    );
+    let identity = &provider.identity;
+    let requests = provider.requests.lock().unwrap();
     let primary_requests = requests
         .iter()
         .filter(|request| request.agent_run_id == primary)
@@ -833,25 +873,8 @@ fn assert_background_primary_context(
             continue;
         }
         let context = request.input.tools.as_ref().expect("primary Tool context");
-        let latest_journal_call = events[..reservation_index]
-            .iter()
-            .rev()
-            .filter_map(|envelope| match &envelope.event {
-                Event::ToolStarted {
-                    run_id: event_run,
-                    agent_run_id,
-                    intent,
-                    ..
-                } if *event_run == run_id
-                    && *agent_run_id == primary
-                    && !intent.call.is_internal()
-                    && !matches!(&intent.call, ToolCall::ApplyChangeset { .. }) =>
-                {
-                    Some(&intent.call)
-                }
-                _ => None,
-            })
-            .next();
+        let latest_journal_call =
+            primary_tool_calls(run_id, primary, &events[..reservation_index]).next_back();
         let latest_context_call = context
             .steps
             .iter()
@@ -881,9 +904,7 @@ fn assert_background_primary_context(
             context_facts.provider_calls as usize >= reservations_before_dispatch,
             "primary context must include its committed Provider reservation"
         );
-        let cleared_results =
-            context.history_summary.is_some() || context.steps.iter().any(|step| step.cleared);
-        if cleared_results {
+        if context.history_summary.is_some() || context.steps.iter().any(|step| step.cleared) {
             assert_eq!(request.model, identity.model);
             assert_eq!(request.max_output_tokens, identity.limits.max_output_tokens);
             compacted_request = true;
@@ -1013,6 +1034,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         workspace: workspace.clone(),
         budget,
         requests: Default::default(),
+        primary_tool_calls: Default::default(),
         violations: Default::default(),
         ready,
         completed,
@@ -1226,13 +1248,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     assert_action_bounds(&events, false, false);
     let run = &view.runs[0];
     if case == "background" {
-        assert_background_primary_context(
-            run.id,
-            run.agents[0].id,
-            &events,
-            &provider.requests.lock().unwrap(),
-            &provider.identity,
-        );
+        assert_background_primary_context(run.id, run.agents[0].id, &events, &provider);
     }
     if case == "large_write" {
         let requests = provider.requests.lock().unwrap();
@@ -1800,6 +1816,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         workspace: workspace.clone(),
         budget: original.view.goals[0].budget,
         requests: Default::default(),
+        primary_tool_calls: Default::default(),
         violations: Default::default(),
         ready,
         completed,
