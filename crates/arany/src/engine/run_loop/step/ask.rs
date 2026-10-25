@@ -1,6 +1,6 @@
 use super::dispatch::UnguardedRefusal;
 use super::permission::RuleSave;
-use super::{Grant, RunLoop};
+use super::{Grant, ReviewProgress, RunLoop};
 use crate::engine::EngineError;
 use crate::engine::ledger::{Action, Admission};
 use crate::tools::permissions::{PermissionSource, TypedGitPrefix};
@@ -100,6 +100,76 @@ impl RunLoop<'_> {
                 .await
             }
         }
+    }
+
+    async fn resolve_ask(
+        &self,
+        intent: &EffectIntent,
+        chain: &[Resolver<'_>],
+        site: AskSite,
+    ) -> Result<Admission<Resolution>, EngineError> {
+        let initial_mode = self.terminal_mode();
+        let mut resolution = Resolution {
+            approved: false,
+            source: PermissionSource::UnavailableApproval,
+            active_time_exhausted: false,
+            save: None,
+            withdrawal: None,
+        };
+        for resolver in chain {
+            match resolver {
+                Resolver::AiReview { objective } => {
+                    let reviewed = self
+                        .resolve_review(objective, intent, &site, initial_mode)
+                        .await?;
+                    resolution.approved = reviewed.approved;
+                    resolution.source = reviewed.source;
+                    resolution.active_time_exhausted = reviewed.active_time_exhausted;
+                    match reviewed.progress {
+                        ReviewProgress::Continue => {}
+                        ReviewProgress::Finish => break,
+                        ReviewProgress::Exhausted => return Ok(Admission::Exhausted),
+                    }
+                }
+                Resolver::Human => match &site {
+                    AskSite::Delegated { active_deadline } => {
+                        let Some(approvals) = self.controls.approvals else {
+                            return Ok(Admission::Reserved(resolution));
+                        };
+                        let (reply, withdrawal) = self
+                            .delegated_human_reply(intent, active_deadline.as_ref(), approvals)
+                            .await?;
+                        resolution.withdrawal = withdrawal;
+                        resolution.approved = matches!(
+                            reply,
+                            ApprovalReply::AllowOnce
+                                | ApprovalReply::AllowForSession
+                                | ApprovalReply::AllowPrefixInFolder
+                        ) && !self.pause_requested()
+                            && !self.controls.cancellation.is_cancelled();
+                        resolution.source = if reply == ApprovalReply::Unavailable {
+                            PermissionSource::UnavailableApproval
+                        } else {
+                            PermissionSource::Human
+                        };
+                        resolution.active_time_exhausted =
+                            active_deadline.as_ref().is_some_and(|deadline| {
+                                deadline.reached()
+                                    && deadline.cause
+                                        == crate::engine::ledger::ActiveDeadlineCause::Goal
+                            });
+                    }
+                    AskSite::Primary(options) => {
+                        self.resolve_primary_human(intent, options, &mut resolution)
+                            .await?;
+                    }
+                },
+            }
+            if resolution.approved {
+                break;
+            }
+        }
+        Ok(Admission::Reserved(resolution))
     }
 
     pub(super) async fn approval_paused(&self) {
