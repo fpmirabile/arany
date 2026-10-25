@@ -250,6 +250,19 @@ fn tool_failure_stage(
         return Stage::OutcomeToolPath;
     }
     match call {
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } if !valid_relative(source, false) || !valid_relative(destination, false) => {
+            Stage::OutcomeToolPath
+        }
+        ToolCall::Delete {
+            expected_digest, ..
+        }
+        | ToolCall::Move {
+            expected_digest, ..
+        } if !valid_digest(expected_digest) => Stage::OutcomeToolDigest,
         ToolCall::Edit {
             expected_digest, ..
         }

@@ -139,16 +139,16 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("SessionRenamed", 6),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 10),
+    ("GoalPlanContractRecorded", 11),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 14),
+    ("AgentSpawned", 15),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 20),
+    ("ProviderCallRecorded", 21),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -166,14 +166,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 6),
-    ("HookStarted", 9),
-    ("HookFinished", 15),
-    ("ToolFinished", 26),
-    ("RunStarted", 22),
+    ("HookStarted", 10),
+    ("HookFinished", 16),
+    ("ToolFinished", 27),
+    ("RunStarted", 23),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 19),
+    ("ToolStarted", 20),
     ("ContextCompacted", 7),
 ];
 
@@ -1765,6 +1765,26 @@ pub(crate) fn provider_call_v19_payload(payload: &str) -> Option<String> {
 pub(crate) fn provider_call_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
     let canonical = provider_call_v19_payload(&value.to_string())?;
     serde_json::from_str(&canonical).ok()
+}
+
+pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<String> {
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
+        serialize(&parse::<T>(payload).ok()?).ok()
+    }
+    let text = match kind {
+        "ToolStarted" => again::<ToolStartedPayload>(payload),
+        "ToolFinished" => again::<ToolFinishedPayload>(payload),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
+        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
+        "RunStarted" => again::<RunStartedPayload>(payload),
+        "AgentSpawned" => again::<SpawnPayload>(payload),
+        _ => None,
+    }?;
+    let value = serde_json::from_str(&text).ok()?;
+    (!mentions(&value, &["delete", "move"], Some("delete")) && !mentions(&value, &[], Some("move")))
+        .then_some(text)
 }
 
 pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String> {

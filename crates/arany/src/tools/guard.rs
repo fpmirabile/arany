@@ -1208,7 +1208,7 @@ pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
             && !matches!(intent.call, ToolCall::Command { .. })
         {
             let before = action.transfer.decode(&action.input)?;
-            super::worker::validate_edit(&before, &image, &intent.call)?;
+            super::worker::validate_edit(&before, &image, &intent.call, &action.transfer.grant)?;
         }
         *action.output.lock().map_err(|_| ToolError::Operation)? = Some(bytes);
         if !read_capped(reader, 1).await?.is_empty() {
