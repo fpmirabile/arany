@@ -95,7 +95,7 @@ pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<
     };
     presets(&bytes)?;
     let config: Config = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
-    let provider = format!("custom:{name}");
+    let provider = ProviderKind::custom_profile(name);
     Ok(config
         .profiles
         .iter()
