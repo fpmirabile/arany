@@ -19,7 +19,7 @@ mod approval;
 mod input;
 
 use approval::{ApprovalPage, ApprovalUi, withdraw_abandoned_approval};
-use input::InputRoute;
+use input::{InputFailure, InputRoute};
 
 #[derive(Clone, Copy)]
 pub(super) struct ToolAccess<'a> {
@@ -451,11 +451,6 @@ enum Iteration {
     Redraw,
 }
 
-enum InputFailure {
-    Shutdown(String),
-    Return(String),
-}
-
 enum Completion {
     Finished(Result<RunSubmission, String>),
     Shutdown(String),
@@ -746,121 +741,6 @@ impl<'a> RunProgress<'a> {
                 .map_err(|_| "terminal rendering failed".to_owned())?;
         }
         Ok(())
-    }
-
-    async fn on_input(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: Result<TerminalInput, TerminalError>,
-        page: ApprovalPage,
-    ) -> Result<(), InputFailure> {
-        let input = match input {
-            Ok(input) => input,
-            Err(_) => return Err(InputFailure::Shutdown("terminal input failed".to_owned())),
-        };
-        ui.composer.observe_input(input);
-        if ui.terminal.agent_chat_open()
-            || self.approval_ui.pending.is_some()
-            || ui.terminal.help_open()
-        {
-            ui.composer.disarm_continuation();
-        }
-        if self.approval_ui.pending.is_some()
-            && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_))
-        {
-            return self.handle_approval(ui, input, page);
-        }
-        match self.route_help(ui, input)? {
-            InputRoute::Handled => return Ok(()),
-            InputRoute::Composer => {}
-        }
-        match self.route_agents(ui, input).await? {
-            InputRoute::Handled => return Ok(()),
-            InputRoute::Composer => {}
-        }
-        match self.route_chat(ui, input).await? {
-            InputRoute::Handled => return Ok(()),
-            InputRoute::Composer => {}
-        }
-        match self.route_history(ui, input).await? {
-            InputRoute::Handled => return Ok(()),
-            InputRoute::Composer => {}
-        }
-        let input = ui.composer.chat_input(input);
-        let input = active_escape(
-            input,
-            ui.composer.has_open_menu(),
-            ui.terminal.clipboard_loading(),
-            self.stop,
-        );
-        let notice = self.composer_input(ui, input).await?;
-        self.finish_input(ui, input, notice)
-    }
-
-    fn finish_input(
-        &mut self,
-        ui: &mut RunUi<'_>,
-        input: TerminalInput,
-        mut notice: Option<Feedback>,
-    ) -> Result<(), InputFailure> {
-        if !ui.terminal.is_linear()
-            && self
-                .offered
-                .as_deref()
-                .is_some_and(|text| ui.composer.text() != text || !ui.composer.images().is_empty())
-        {
-            self.offered = None;
-            notice = Some(if self.steering.withdraw_note().is_some() {
-                Feedback::Transient("Steering note withdrawn; draft retained".into())
-            } else {
-                // The Engine already took the note, so it is sent; the edited draft stays.
-                Feedback::History(STEERING_SENT.into())
-            });
-        }
-        if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
-            && self
-                .draw(ui, notice.as_ref().map(Feedback::notice))
-                .is_err()
-        {
-            return Err(InputFailure::Shutdown(
-                "terminal rendering failed".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn submit_input(&mut self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
-        if !ui.terminal.is_linear() && ui.composer.continue_line() {
-            self.draw(ui, None)
-                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".into()))?;
-            return Ok(None);
-        }
-        if ui.terminal.clipboard_loading() && !ui.terminal.is_linear() {
-            ui.terminal
-                .restore_draft_input(ui.composer.input_capacity())
-                .map_err(|_| InputFailure::Shutdown("terminal input failed".into()))?;
-            return Ok(Some(Feedback::Transient(
-                "Clipboard loading; press Enter after paste to submit".into(),
-            )));
-        }
-        if !ui.terminal.is_linear()
-            && ui.composer.apply(TerminalInput::Submit) == ComposerEdit::Changed
-        {
-            self.draw(ui, None)
-                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".into()))?;
-            return Ok(None);
-        }
-        if exits_after_settled_run(ui.composer, ui.view, self.starting_sequence) {
-            abandon_drafts_for_exit(ui.composer, &mut self.held, &self.steering);
-            self.offered = None;
-            ui.terminal
-                .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
-                .map_err(|_| InputFailure::Shutdown("terminal input failed".into()))?;
-            ui.terminal.defer_input(TerminalInput::EndOfInput);
-            self.exit_after_run = true;
-            return Ok(None);
-        }
-        self.active_submission(ui).await
     }
 
     fn offer_note(
