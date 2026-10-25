@@ -781,20 +781,16 @@ mod host_prefix_tests {
             HostPrefixDecision::Reuse
         );
         for terminal_mode in [None, Some(ApprovalMode::Request)] {
+            let facts = HostReuseFacts {
+                terminal_mode,
+                ..baseline
+            };
             assert_eq!(
-                decide_host_prefix(
-                    &HostReuseFacts {
-                        terminal_mode,
-                        ..baseline
-                    },
-                    Some(Decision::Allow),
-                    true,
-                    false,
-                ),
+                decide_host_prefix(&facts, Some(Decision::Allow), true, false),
                 HostPrefixDecision::Reuse
             );
             assert_eq!(
-                decide_host_prefix(&baseline, None, true, false),
+                decide_host_prefix(&facts, None, true, false),
                 HostPrefixDecision::NoReuse
             );
         }
