@@ -7796,7 +7796,16 @@ mod goal_replay_tests {
         assert!(rejected(&view, primary_call.clone()));
         let calls = view.goals[0].provider_calls;
         let mut exhausted = view.clone();
-        exhausted.goals[0].budget.max_provider_calls = Some(calls);
+        exhausted.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .budget
+            .max_provider_calls = Some(calls);
+        assert_eq!(
+            exhausted.goals[0].effective_budget().max_provider_calls,
+            Some(calls)
+        );
         assert!(rejected(&exhausted, child_call.clone()));
         apply(&mut view, child_call.clone()).expect("child continues during primary compaction");
         assert_eq!(view.goals[0].provider_calls, calls + 1);
