@@ -283,6 +283,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                         agent_run_id,
                         ..
                     }
+                    | Event::ToolProposed {
+                        run_id,
+                        agent_run_id,
+                        ..
+                    }
                     | Event::ToolStarted {
                         run_id,
                         agent_run_id,
@@ -430,6 +435,22 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         record.output_tokens = Some(1);
     }
     let mut reviewed = all.clone();
+    let Event::ToolStarted {
+        run_id,
+        agent_run_id,
+        intent,
+        active_ceiling_ms,
+        ..
+    } = &all[TOOL_STARTED]
+    else {
+        unreachable!()
+    };
+    reviewed[TOOL_STARTED] = Event::ToolProposed {
+        run_id: *run_id,
+        agent_run_id: *agent_run_id,
+        intent: intent.clone(),
+        active_ceiling_ms: *active_ceiling_ms,
+    };
     reviewed.splice(
         TOOL_FINISHED..TOOL_FINISHED,
         [
@@ -440,6 +461,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 active_ceiling_ms: 0,
             },
             review.clone(),
+            all[TOOL_STARTED].clone(),
         ],
     );
     let view = replay(reviewed.clone()).unwrap().unwrap();
@@ -485,7 +507,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 ));
             }
             3 => {
-                row.remove(NEXT_CALL_RECORDED + 2);
+                row.remove(NEXT_CALL_RECORDED + 3);
             }
             4 | 5 => {
                 if let Event::ProviderCallRecorded { record, .. } = &mut row[TOOL_FINISHED + 1] {

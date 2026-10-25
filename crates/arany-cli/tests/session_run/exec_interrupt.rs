@@ -164,6 +164,7 @@ fn interrupted_exec_leaves_its_goal_resumable(
 
 const APPROVAL_DEATH_WAIT: Duration = Duration::from_secs(20);
 const APPROVAL_DEATH_OUTPUT_BYTES: usize = 64 * 1024;
+const APPROVAL_DEATH_STACK_BYTES: usize = 8 * 1024 * 1024;
 const APPROVAL_DEATH_ROOT: &str = "ARANY_APPROVAL_DEATH_ROOT";
 
 #[test]
@@ -243,6 +244,7 @@ fn death_during_approval_leaves_no_started_effect_and_resume_reproposes() {
                 "--nocapture",
             ])
             .env_clear()
+            .env("RUST_MIN_STACK", APPROVAL_DEATH_STACK_BYTES.to_string())
             .env(APPROVAL_DEATH_ROOT, temp.path())
             .env(
                 "ARANY_TEST_ACCOUNT_ROOT",
@@ -269,17 +271,24 @@ fn death_during_approval_leaves_no_started_effect_and_resume_reproposes() {
         }
         lines
     });
-    let session = received
-        .recv_timeout(APPROVAL_DEATH_WAIT)
-        .expect("helper reached exactly one approval wait");
-    child.child().kill().unwrap();
+    let session = received.recv_timeout(APPROVAL_DEATH_WAIT);
+    if child.child().try_wait().expect("helper status").is_none() {
+        child.child().kill().expect("stop approval helper");
+    }
     let output = super::process::capture(
         child.child(),
         APPROVAL_DEATH_WAIT,
         APPROVAL_DEATH_OUTPUT_BYTES,
     );
-    assert!(!output.status.success());
     let lines = reader.join().unwrap();
+    let session = session.unwrap_or_else(|error| {
+        panic!(
+            "approval helper did not reach Ask: {error:?}; status={:?}; stdout={lines:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert!(!output.status.success());
     assert_eq!(
         lines
             .iter()
