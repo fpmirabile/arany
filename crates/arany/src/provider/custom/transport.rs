@@ -160,7 +160,8 @@ impl CustomTransport {
         request: &CompactionRequest,
         effort: Option<Effort>,
     ) -> Result<CompactionResponse, TransportError> {
-        if !(1..=1024).contains(&request.max_output_tokens) {
+        if !(1..=crate::session::MAX_COMPACTION_OUTPUT_TOKENS).contains(&request.max_output_tokens)
+        {
             return Err(TransportError::InvalidOutcome);
         }
         let body = match &self.protocol {

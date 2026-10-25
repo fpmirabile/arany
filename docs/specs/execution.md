@@ -350,6 +350,7 @@ Finished records its own rewind ID, closed `restored`, `conflict`, `denied`, `fa
 | Direct-Session projection cache | 128 MiB of serialized Event payload | not kept; the next append replays strictly |
 | Supervisor verdicts | 2 KiB each; at most 256 per Run; the 256th has `capped: true` | oversized payload rejected; after 256 evaluation continues without another verdict |
 | Event payload, default | 64 KiB | append refused |
+| `ContextCompacted` and `GoalContextCompacted` | 400 KiB, including JSON escaping; admits a 64 KiB summary containing worst-case escaped bytes; compaction admission reserves this additional Event headroom | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | 400 KiB | pre-admission `GoalInputTooLarge` ("objective plus includes too large"); no Event or Provider call |
 | `GoalFinished` | [Goal report bound](./goals.md#lifecycle-budgets-and-recovery) + [budget refusal bound](./goals.md#budget-refusal-feedback) + 512 bytes | append refused |

@@ -148,7 +148,12 @@ fn admit_in_transaction(
         * (super::MAX_EVENT_BYTES as i64
             + crate::provider::MAX_RATE_LIMIT_BYTES as i64
             + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
-        + observations * (super::MAX_TOOL_FINISHED_BYTES - super::MAX_EVENT_BYTES) as i64;
+        + observations * (super::MAX_TOOL_FINISHED_BYTES - super::MAX_EVENT_BYTES) as i64
+        + if kind == AdmissionKind::Compaction {
+            (super::MAX_COMPACTION_EVENT_BYTES - super::MAX_EVENT_BYTES) as i64
+        } else {
+            0
+        };
     let run_start_extra = if kind == AdmissionKind::RunStart {
         super::RUN_START_EXTRA_BYTES as i64
     } else {

@@ -74,6 +74,10 @@ enum CompactionCase {
     Interrupted,
 }
 
+fn compaction_summary() -> String {
+    "D".repeat(16 * 1024)
+}
+
 fn synthetic_server(
     listener: TcpListener,
     case: CompactionCase,
@@ -119,7 +123,7 @@ fn synthetic_server(
             match index {
                 0 | 3 | 4 => 4096,
                 1 | 2 => 128,
-                _ => 1024,
+                _ => 4096,
             }
         );
         let input: serde_json::Value = crate::semantic::input(&wire);
@@ -236,18 +240,14 @@ fn synthetic_server(
                 };
                 serde_json::json!(result)
             }
-            _ => serde_json::json!(r#"derived summary"#),
+            _ => serde_json::json!(compaction_summary()),
         };
         if index == 2 || index >= 5 {
-            assert_eq!(
-                text,
-                if index == 2 {
-                    "synthetic summary"
-                } else {
-                    "derived summary"
-                },
-                "plain-text compaction reply"
-            );
+            if index == 2 {
+                assert_eq!(text, "synthetic summary", "plain-text compaction reply");
+            } else {
+                assert_eq!(text, compaction_summary());
+            }
         }
         super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }
@@ -704,7 +704,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             1
         );
     }
-    assert!(!transcript.contains("derived summary"));
+    assert!(!transcript.contains(&compaction_summary()));
     assert!(!transcript.contains("test-key"));
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains('\x1b'), "linear output stays unstyled");
@@ -778,6 +778,14 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             ),
             CompactionCase::Interrupted => false,
         });
+        if matches!(case, CompactionCase::Success) {
+            let expected = compaction_summary();
+            assert!(matches!(
+                &compaction.record.status,
+                arany::CompactionStatus::Succeeded { summary, .. }
+                    if summary.as_bytes() == expected.as_bytes()
+            ));
+        }
     }
     if matches!(case, CompactionCase::ProviderFailure) {
         let manual = &view.compactions[1].record;

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v40";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v41";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -438,7 +438,7 @@ async fn probe<P: Provider>(
         Err(error) => return Err(provider_failure(journal, error).await),
     };
     if response.summary.trim().is_empty()
-        || response.summary.len() > 8 * 1024
+        || response.summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
         || response.response_id.as_deref() == Some(&direct_id)
         || response.response_id.as_deref() == Some(&delegate_id)
@@ -851,6 +851,8 @@ mod tests {
         WrongDelegation,
         DuplicateId,
         BadCompaction,
+        LargeCompaction,
+        OversizedCompaction,
     }
 
     struct ProbeFixture {
@@ -953,10 +955,13 @@ mod tests {
             assert_eq!(request.items.len(), 1);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompactionResponse {
-                summary: if matches!(self.case, ProbeCase::BadCompaction) {
-                    String::new()
-                } else {
-                    "safe summary".into()
+                summary: match self.case {
+                    ProbeCase::BadCompaction => String::new(),
+                    ProbeCase::LargeCompaction => "S".repeat(16 * 1024),
+                    ProbeCase::OversizedCompaction => {
+                        "S".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1)
+                    }
+                    _ => "safe summary".into(),
                 },
                 response_id: Some("compaction".into()),
                 usage: crate::provider::Usage {
@@ -978,6 +983,8 @@ mod tests {
             (ProbeCase::WrongDelegation, false, 2),
             (ProbeCase::DuplicateId, false, 2),
             (ProbeCase::BadCompaction, false, 3),
+            (ProbeCase::LargeCompaction, true, 3),
+            (ProbeCase::OversizedCompaction, false, 3),
         ] {
             let fixture = ProbeFixture {
                 case,

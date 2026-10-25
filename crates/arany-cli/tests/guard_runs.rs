@@ -426,7 +426,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
         assert_eq!(fourth.run.config.as_ref().unwrap().excluded_history_runs, 3);
         let compacted = engine.compact_session(&AdmittedProviders::single(provider.clone()), first.session_id, workspace.clone()).await.unwrap();
-        assert_eq!(compacted.compiler_version, 4);
+        assert_eq!(compacted.compiler_version, 5);
         for (id, objective) in [(first.session_id, maximal_objective.as_str()), (fork_id, "After fork")] {
             let mut next = request(&workspace, objective);
             next.session_id = Some(id);
@@ -478,7 +478,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert_eq!(compact.session_id, first.session_id);
             assert_eq!(compact.covered_run_id, fourth.run.id);
             assert_eq!(compact.model, "test-model");
-            assert_eq!(compact.max_output_tokens, 1024);
+            assert_eq!(compact.max_output_tokens, 4096);
             assert!(compact.previous_summary.is_none());
             assert_eq!(compact.items.len(), 4);
             let mut source_items = Vec::new();
@@ -782,7 +782,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 CompactionItem::Completed(turn) if turn.assistant == "Answer two"
             ));
             assert!(requests[0].previous_summary.is_none());
-            assert_eq!(requests[0].max_output_tokens, 1024);
+            assert_eq!(requests[0].max_output_tokens, 4096);
         }
         assert!(matches!(
             engine
@@ -1081,7 +1081,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                     })],
                 "seed compaction source"
             );
-            assert_eq!(compacts[0].max_output_tokens, 1024);
+            assert_eq!(compacts[0].max_output_tokens, 4096);
         });
         return;
     }
@@ -1348,7 +1348,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             assert_eq!(compacts[0].session_id, session_id);
             assert_eq!(compacts[0].covered_run_id, outcome.run.id);
             assert!(compacts[0].model == "test-model", "continued compaction model");
-            assert_eq!(compacts[0].max_output_tokens, 1024);
+            assert_eq!(compacts[0].max_output_tokens, 4096);
             assert_eq!(compacts[0].previous_summary.as_deref(), Some("Derived summary"));
             assert_eq!(compacts[0].items.len(), 1);
             assert!(matches!(&compacts[0].items[0], CompactionItem::Completed(turn) if turn.user == "Question" && turn.assistant == "A B C"));
