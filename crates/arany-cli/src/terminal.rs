@@ -119,7 +119,7 @@ impl Default for PointerSettings {
 }
 
 fn mouse_capture_enabled() -> bool {
-    !std::env::var_os("ARANY_DISABLE_MOUSE").is_some_and(|value| !value.is_empty() && value != "0")
+    !std::env::var_os("ARANY_DISABLE_MOUSE").is_some_and(|value| value != "0")
 }
 
 impl TerminalMode {
