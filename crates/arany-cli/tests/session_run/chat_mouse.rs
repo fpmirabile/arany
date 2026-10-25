@@ -416,9 +416,14 @@ fn kitty_hover_tracks_drag_leave_and_revalidates_composer_geometry() {
         !screen_has_preview(&chat.transcript),
         "picker clears preview frame"
     );
+    chat.wait_armed(before_picker, "armed quick-action picker");
     let before_close = chat.transcript.len();
     chat.send(b"\x1b");
-    chat.wait(before_close, has_image_chip, "picker closes");
+    chat.wait(
+        0,
+        |bytes| position(&bytes[before_close..], b"\x1b[?25h").is_some() && has_image_chip(bytes),
+        "picker closes",
+    );
     assert!(
         has_image_chip(&chat.transcript),
         "draft chip remains after picker"
@@ -568,18 +573,14 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
     );
     release_sender.send(()).expect("release Run response");
     chat.wait(
-        from_run,
-        |bytes| {
-            bytes
-                .windows(b"active answer".len())
-                .any(|part| part == b"active answer")
-        },
+        0,
+        |bytes| screen_text_position(bytes, "active answer").is_some(),
         "Run completes",
     );
     let clear = chat.send(b"\x03");
     chat.wait_for(clear, &[EMPTY_COMPOSER], "Run draft cleared");
 
-    let compact = chat.send(b"/compact\r");
+    chat.send(b"/compact\r");
     compact_ready
         .recv_timeout(Duration::from_secs(10))
         .expect("compaction provider request");
@@ -614,12 +615,8 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
         .expect("release compaction response");
     provider.join().expect("provider thread");
     chat.wait(
-        compact,
-        |bytes| {
-            bytes
-                .windows(b"Compaction saved".len())
-                .any(|part| part == b"Compaction saved")
-        },
+        0,
+        |bytes| screen_text_position(bytes, "Compaction saved").is_some(),
         "compaction completes",
     );
     let clear = chat.send(b"\x03");
