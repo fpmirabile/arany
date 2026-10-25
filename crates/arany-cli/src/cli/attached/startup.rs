@@ -132,7 +132,8 @@ fn select_roster(args: &mut AttachedArgs) -> Result<Option<SelectedRoster>, Stri
         let selected = super::super::provider::roster::load(&state_dir, &workspace, name)?;
         selected.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
         let primary = selected.primary();
-        args.provider = Some(ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?);
+        args.provider =
+            Some(ProviderArg::from_str(&primary.provider.profile()).map_err(str::to_owned)?);
         args.model = Some(primary.model.clone());
         args.effort = primary.effort;
         std::io::stderr()

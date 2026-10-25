@@ -7,8 +7,8 @@ use crate::cli::provider::routing::{MAX_ROLE_MODEL_BYTES, Route, RoutingDraft};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
 use arany::{
-    CustomProfile, Effort, MAX_PROVIDER_FALLBACKS, ProviderRole, ProviderSetupDisposition,
-    ProviderSetupTargetKind, SessionDefaults, StateRoot, StoreError,
+    CustomProfile, Effort, MAX_PROVIDER_FALLBACKS, ProviderKind, ProviderRecord, ProviderRole,
+    ProviderSetupDisposition, ProviderSetupTargetKind, SessionDefaults, StateRoot, StoreError,
 };
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -95,7 +95,7 @@ fn current_route(defaults: &SessionDefaults) -> Result<Option<Route>, SetupError
         return Ok(None);
     };
     let mut route = Route {
-        provider: provider.clone(),
+        provider: ProviderRecord::parse(provider).ok_or("invalid Provider")?,
         model: model.clone(),
         effort: defaults.effort,
         account_id: defaults.account_id,
@@ -298,12 +298,12 @@ async fn select_route(
                 .ok_or_else(|| "Select a primary with /model first".into());
         }
         b'2' | b'3' => Route {
-            provider: if source == b'2' {
+            provider: ProviderRecord::parse(if source == b'2' {
                 "openai"
             } else {
                 "anthropic"
-            }
-            .into(),
+            })
+            .expect("native Provider"),
             model: String::new(),
             effort: None,
             account_id: None,
@@ -315,7 +315,7 @@ async fn select_route(
             route
         }
         b'5' => Route {
-            provider: "chatgpt".into(),
+            provider: ProviderRecord::parse("chatgpt").expect("native Provider"),
             model: String::new(),
             effort: None,
             account_id: Some(chatgpt::selected_account_id().map_err(|error| error.to_string())?),
@@ -369,10 +369,15 @@ async fn edit_model_effort(
     let efforts = std::iter::once(None)
         .chain(Effort::ALL.into_iter().map(Some))
         .filter(|effort| {
-            if route.provider == "chatgpt" {
+            if route.provider.kind() == ProviderKind::ChatGpt {
                 effort.is_some()
             } else {
-                arany::resolve_native_effort_for_run(&route.provider, &route.model, *effort).is_ok()
+                arany::resolve_native_effort_for_run(
+                    &route.provider.profile(),
+                    &route.model,
+                    *effort,
+                )
+                .is_ok()
             }
         })
         .collect::<Vec<_>>();
@@ -443,7 +448,8 @@ async fn select_custom(
         return Ok(None);
     };
     Ok(Some(Route {
-        provider: format!("custom:{}", profile.name()),
+        provider: ProviderRecord::parse(&ProviderKind::custom_profile(profile.name()))
+            .ok_or("invalid custom Provider")?,
         model: profile.model().into(),
         effort,
         account_id: None,
@@ -485,9 +491,9 @@ fn tuple_label(route: &Route) -> String {
         .map_or_else(|| "environment".into(), |id| format!("account {id}"));
     format!(
         "{}/{} · {} · {source}",
-        escape_terminal(&route.provider),
+        escape_terminal(&route.provider.profile()),
         escape_terminal(&route.model),
-        arany::resolve_native_effort_for_run(&route.provider, &route.model, route.effort)
+        arany::resolve_native_effort_for_run(&route.provider.profile(), &route.model, route.effort)
             .ok()
             .or(route.effort)
             .map_or("default".into(), |effort| effort.to_string())
@@ -528,7 +534,7 @@ async fn manifest(
         }
         for (index, route) in chain.iter().enumerate() {
             text.push_str(&format!("  {}: {}\n", index + 1, tuple_label(route)));
-            if let Some(name) = route.provider.strip_prefix("custom:") {
+            if let Some(name) = ProviderKind::custom_name(&route.provider.profile()) {
                 if let Some(profile) = profiles.iter().find(|profile| profile.name() == name) {
                     text.push_str(&format!(
                         "    {} · Credential: {} — not checked by listing · {}\n",

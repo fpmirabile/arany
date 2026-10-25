@@ -128,7 +128,7 @@ pub(crate) async fn run(
         let primary = roster.primary();
         use std::str::FromStr;
         (
-            ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?,
+            ProviderArg::from_str(&primary.provider.profile()).map_err(str::to_owned)?,
             primary.model.clone(),
             primary.effort,
         )
