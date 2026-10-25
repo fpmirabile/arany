@@ -11,8 +11,12 @@ use arany::{SessionDefaults, create_session, set_session_defaults};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 #[cfg(any(debug_assertions, target_os = "linux"))]
 use rustix::process::{Signal, kill_process};
+#[cfg(debug_assertions)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixListener;
+#[cfg(debug_assertions)]
+use std::process::{ChildStdin, ChildStdout, Output};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -22,8 +26,15 @@ use std::{
 };
 use uuid::Uuid;
 
+const API_ACCOUNTS_PROMPT: &[u8] =
+    b"type a listed choice number or exact name (1-6); empty Enter selects 1\r\nInput:\r\n";
+
 #[path = "setup/offline_https.rs"]
 mod offline_https;
+
+#[cfg(debug_assertions)]
+#[path = "setup/checks.rs"]
+mod checks;
 
 #[cfg(debug_assertions)]
 const SETUP_SHELL: &str = "trap ':' INT; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; printf 'SCRIPT_INPUT_GATE\n'; IFS= read -r gate; [ \"$gate\" = go ] || exit 2; \"$ARANY_TEST_EXE\" --screen-reader --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
@@ -121,6 +132,290 @@ fn wait_for_after(
     }
 }
 
+fn wait_linear_page(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    (start, current): (usize, usize),
+) -> usize {
+    let marker = format!("Page {current}/");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(after) = String::from_utf8_lossy(&transcript[start..])
+            .split_once(&marker)
+            .and_then(|(_, rest)| rest.split_once("\r\n").map(|(line, _)| line))
+            && let Ok(total) = after
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<usize>()
+        {
+            assert!((current..=128).contains(&total), "bounded setup pages");
+            return total;
+        }
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "setup review page incomplete: {}",
+            tail(transcript)
+        );
+        thread::yield_now();
+    }
+}
+
+fn acknowledge_linear_pages(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    (start, next): (usize, &[u8]),
+) -> (usize, usize) {
+    let total = wait_linear_page(output, input, transcript, answered, (start, 1));
+    let mut next_at = transcript.len();
+    for current in 1..=total {
+        next_at = transcript.len();
+        input.write_all(b"\r").expect("acknowledge setup page");
+        if current < total {
+            assert_eq!(
+                wait_linear_page(output, input, transcript, answered, (next_at, current + 1)),
+                total
+            );
+        }
+    }
+    wait_for_after(output, input, transcript, answered, next_at, next);
+    if next != b"Page 1/" {
+        wait_for_after(output, input, transcript, answered, next_at, b"Input:\r\n");
+    }
+    (total, next_at)
+}
+
+#[cfg(debug_assertions)]
+struct SetupPty {
+    child: ChildGuard,
+    input: ChildStdin,
+    output: ChildStdout,
+    transcript: Vec<u8>,
+    answered: crate::session_picker::PtyResponses,
+    _product: ProductGuard,
+}
+
+#[cfg(debug_assertions)]
+fn start_setup_pty(temp: &tempfile::TempDir, workspace: &Path, state: &Path) -> SetupPty {
+    start_setup_pty_mode(temp, workspace, state, SetupPtyMode::Manager)
+}
+
+#[cfg(debug_assertions)]
+enum SetupPtyMode {
+    Manager,
+    Configured,
+    InlineManager,
+    Resumed(arany::SessionId),
+    ResumedInline(arany::SessionId),
+}
+
+#[cfg(debug_assertions)]
+fn start_setup_pty_mode(
+    temp: &tempfile::TempDir,
+    workspace: &Path,
+    state: &Path,
+    mode: SetupPtyMode,
+) -> SetupPty {
+    start_setup_pty_with_key(temp, workspace, state, mode, Some("test-key"))
+}
+
+#[cfg(debug_assertions)]
+fn start_setup_pty_with_key(
+    temp: &tempfile::TempDir,
+    workspace: &Path,
+    state: &Path,
+    mode: SetupPtyMode,
+    key: Option<&str>,
+) -> SetupPty {
+    let mut command = setup_pty_command(temp, workspace, state, &mode, key);
+    let mut child = ChildGuard::new(command.spawn().expect("setup process"));
+    let mut input = child.child().stdin.take().expect("setup input");
+    let mut output = child.child().stdout.take().expect("setup output");
+    let flags = fcntl_getfl(&output).expect("stdout flags");
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking output");
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::default();
+    if matches!(mode, SetupPtyMode::Configured) {
+        enter_conversation_setup(&mut output, &mut input, &mut transcript, &mut answered);
+    }
+    if matches!(mode, SetupPtyMode::InlineManager) {
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Provider setup",
+        );
+        let frame = transcript
+            .windows(b"Provider setup".len())
+            .position(|part| part == b"Provider setup")
+            .unwrap();
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            frame,
+            b"\x1b[?25l",
+        );
+    } else {
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"empty Enter selects 1. API accounts\r\nInput:\r\n",
+        );
+    }
+    let shell_pid = String::from_utf8_lossy(&transcript)
+        .lines()
+        .find_map(|line| line.trim_end_matches('\r').strip_prefix("SHELL_PID:"))
+        .expect("shell PID")
+        .parse::<u32>()
+        .expect("shell PID number");
+    let product = ProductGuard::new(product_child_of(shell_pid), state.to_owned());
+    SetupPty {
+        child,
+        input,
+        output,
+        transcript,
+        answered,
+        _product: product,
+    }
+}
+
+#[cfg(debug_assertions)]
+fn setup_pty_command(
+    temp: &tempfile::TempDir,
+    workspace: &Path,
+    state: &Path,
+    mode: &SetupPtyMode,
+    key: Option<&str>,
+) -> Command {
+    let arguments = match mode {
+        SetupPtyMode::Manager => "--screen-reader --setup".to_owned(),
+        SetupPtyMode::InlineManager => "--classic --no-color --setup".to_owned(),
+        SetupPtyMode::Configured => {
+            "--screen-reader --provider custom:local --model model-1 --collaboration single"
+                .to_owned()
+        }
+        SetupPtyMode::Resumed(id) => format!("--screen-reader --resume {id}"),
+        SetupPtyMode::ResumedInline(id) => format!("--classic --no-color --resume {id}"),
+    };
+    let shell = format!(
+        "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {arguments} --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+    );
+    let mut command = Command::new("/usr/bin/script");
+    command
+        .args(["-q", "-e", "-c", &shell, "/dev/null"])
+        .env_clear()
+        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE", state)
+        .env("ARANY_TEST_WORKSPACE", workspace)
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", temp.path().join("missing-bus").display()),
+        )
+        .env("SHELL", "/bin/sh")
+        .env(
+            "TERM",
+            if matches!(
+                mode,
+                SetupPtyMode::InlineManager | SetupPtyMode::ResumedInline(_)
+            ) {
+                "xterm-256color"
+            } else {
+                "dumb"
+            },
+        )
+        .env(
+            "ARANY_PROVIDER_UNSELECTED_KEY",
+            "unselected-credential-canary",
+        )
+        .current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(key) = key {
+        command.env("ARANY_PROVIDER_LOCAL_KEY", key);
+    }
+    command
+}
+
+#[cfg(debug_assertions)]
+fn enter_conversation_setup(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+) {
+    wait_for(output, input, transcript, answered, b"Input:\r\n");
+    let rename_at = transcript.len();
+    input
+        .write_all(b"/rename Setup retained title\r")
+        .expect("name unsaved conversation");
+    wait_for_after(
+        output,
+        input,
+        transcript,
+        answered,
+        rename_at,
+        b"Input:\r\n",
+    );
+    input
+        .write_all(b"/setup\r")
+        .expect("open conversation setup");
+}
+
+#[cfg(debug_assertions)]
+fn finish_setup_pty(mut pty: SetupPty) -> Output {
+    let result = wait_product(pty.child.take());
+    pump(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+    );
+    result
+}
+
+fn choose_native_account_setup(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+) {
+    wait_for(
+        output,
+        input,
+        transcript,
+        answered,
+        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+    );
+    input
+        .write_all(b"API accounts\r")
+        .expect("open API accounts");
+    acknowledge_linear_pages(
+        output,
+        input,
+        transcript,
+        answered,
+        (0, API_ACCOUNTS_PROMPT),
+    );
+    input
+        .write_all(b"Add or replace native API account\r")
+        .expect("add native API account");
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn bare_start_reuses_private_file_account_without_setup_or_run() {
@@ -181,7 +476,7 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
         "screen-reader mode uses no cursor query"
     );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
-    assert!(!text.contains("Choose access method"), "setup was reopened");
+    assert!(!text.contains("Provider setup"), "setup was reopened");
     assert!(
         !text.contains("synthetic-existing-key"),
         "key entered output"
@@ -312,7 +607,7 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
             b"Input:\r\n",
         );
         assert!(String::from_utf8_lossy(&transcript).contains(
-            "type a choice name: Cancel or API key or ChatGPT plan; empty Enter selects Cancel"
+            "type a choice name: 1. Cancel or 2. API key or 3. ChatGPT plan; empty Enter selects 1. Cancel"
         ));
         let choice_at = transcript.len();
         match choice {
@@ -414,6 +709,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
         let selected = prepare_selected_chatgpt_account(temp.path());
+        let other = Uuid::now_v7();
         if disconnected || other_saved {
             let account_root =
                 StateRoot::open_existing(&temp.path().join("account-root")).expect("account root");
@@ -430,7 +726,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                     .as_array_mut()
                     .expect("accounts")
                     .push(serde_json::json!({
-                        "id": Uuid::now_v7(),
+                        "id": other,
                         "host_id": "123e4567-e89b-42d3-a456-426614174000",
                         "client_id": "oaiapp_synthetic_other",
                         "subject": "synthetic-other-subject",
@@ -488,7 +784,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             &mut input,
             &mut transcript,
             &mut answered,
-            b"type a choice name: API key or ChatGPT plan",
+            b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
         );
         let text = String::from_utf8_lossy(&transcript);
         let shell_pid = text
@@ -499,16 +795,26 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             .expect("shell PID number");
         let product_pid = product_child_of(shell_pid);
         let _product = ProductGuard::new(product_pid, state.clone());
-        input.write_all(b"ChatGPT plan\r").expect("choose plan");
+        input.write_all(b"API accounts\r").expect("open accounts");
+        acknowledge_linear_pages(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            (0, API_ACCOUNTS_PROMPT),
+        );
+        input
+            .write_all(b"Manage ChatGPT account\r")
+            .expect("manage ChatGPT account");
         wait_for(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             if disconnected && !other_saved {
-                b"type a choice name: Reconnect or Connect new"
+                b"type a choice name: 1. Reconnect or 2. Connect new or 3. Inspect; empty Enter selects 1. Reconnect\r\nInput:\r\n"
             } else {
-                b"type a choice name: Use saved or Reconnect or Connect new"
+                b"type a choice name: 1. Use saved or 2. Reconnect or 3. Connect new or 4. Inspect; empty Enter selects 1. Use saved\r\nInput:\r\n"
             },
         );
         let chosen_at = transcript.len();
@@ -546,7 +852,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             assert!(!text.contains("Choose Accept to continue"));
             if disconnected {
                 assert!(text.contains("ChatGPT account disconnected"));
-                assert!(!text.contains("type a choice name: Use saved"));
+                assert!(!text.contains("type a choice name: 1. Use saved"));
             }
         } else if other_saved {
             assert!(text.contains("ChatGPT account disconnected"));
@@ -560,7 +866,9 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         assert!(!text.contains("new ChatGPT account was saved"));
         assert!(!text.contains("Waiting for ChatGPT"));
         assert!(!text.contains("Choose Accept to continue"));
-        if let Ok(root) = StateRoot::open_existing(&state) {
+        if other_saved {
+            assert_failed_chatgpt_selection(&state, &workspace, other);
+        } else if let Ok(root) = StateRoot::open_existing(&state) {
             let sessions = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("fixture runtime")
@@ -595,6 +903,66 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             disconnected
         );
     }
+}
+
+#[cfg(debug_assertions)]
+fn assert_failed_chatgpt_selection(state: &Path, workspace: &Path, target_id: Uuid) {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime")
+        .block_on(async {
+            let sessions = arany::list_sessions(
+                StateRoot::open_existing(state).expect("setup StateRoot"),
+                workspace.to_owned(),
+            )
+            .await
+            .expect("setup Session list");
+            assert_eq!(
+                sessions.len(),
+                1,
+                "confirmed selection materializes a Session"
+            );
+            let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+            let events = store.load_session(sessions[0].id).await.unwrap();
+            assert_eq!(
+                events.len(),
+                3,
+                "only Session start and the failed edit pair"
+            );
+            assert!(matches!(
+                events[0].event,
+                arany::Event::SessionStarted { .. }
+            ));
+            let operation_id = match &events[1].event {
+                arany::Event::ProviderSetupEditStarted {
+                    operation_id,
+                    target,
+                    expected_digest,
+                } => {
+                    assert_eq!(target.kind, arany::ProviderSetupTargetKind::ChatGptAccount);
+                    assert_eq!(target.identity, target_id.to_string());
+                    assert_eq!(*expected_digest, None);
+                    *operation_id
+                }
+                event => panic!("unexpected selection Event: {}", event.kind()),
+            };
+            assert!(matches!(
+                &events[2].event,
+                arany::Event::ProviderSetupEditFinished {
+                    operation_id: finished,
+                    disposition: arany::ProviderSetupDisposition::Failed,
+                    resulting_digest: None,
+                } if *finished == operation_id
+            ));
+            let view = SessionView::replay(sessions[0].id, &events)
+                .expect("strict replay")
+                .expect("setup Session");
+            assert_eq!(view.defaults, SessionDefaults::default());
+            assert!(view.runs.is_empty(), "failed selection creates no Run");
+            assert_eq!(view.pending_provider_setup_edit, None);
+            assert!(!view.provider_setup_uncertain);
+            store.close().await.expect("close setup Store");
+        });
 }
 
 #[cfg(debug_assertions)]
@@ -674,15 +1042,25 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: API key or ChatGPT plan",
+        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
-    input.write_all(b"ChatGPT plan\r").expect("select plan");
+    input.write_all(b"API accounts\r").expect("open accounts");
+    acknowledge_linear_pages(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (0, API_ACCOUNTS_PROMPT),
+    );
+    input
+        .write_all(b"Manage ChatGPT account\r")
+        .expect("manage ChatGPT account");
     wait_for(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: Use saved or Reconnect or Connect new",
+        b"type a choice name: 1. Use saved or 2. Reconnect or 3. Connect new or 4. Inspect; empty Enter selects 1. Use saved\r\nInput:\r\n",
     );
     input
         .write_all(b"Use saved\r")
@@ -831,7 +1209,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         "screen-reader startup omitted setup guidance"
     );
     assert!(
-        !String::from_utf8_lossy(&transcript).contains("Choose access method"),
+        !String::from_utf8_lossy(&transcript).contains("Provider setup"),
         "bare start opened setup"
     );
     let text_at = transcript.len();
@@ -852,7 +1230,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         &mut transcript,
         &mut answered,
         setup_at,
-        b"type a choice name: API key or ChatGPT plan",
+        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input.write_all(b"\x03").expect("cancel setup");
     wait_for(
@@ -951,7 +1329,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             &mut input,
             &mut transcript,
             &mut answered,
-            b"empty Enter selects API key\r\nInput:\r\n",
+            b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
         );
         let shell_pid = String::from_utf8_lossy(&transcript)
             .lines()
@@ -960,24 +1338,38 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             .parse::<u32>()
             .expect("shell PID number");
         let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
-        input.write_all(b"ChatGPT plan\r").expect("select plan");
+        input.write_all(b"API accounts\r").expect("open accounts");
+        acknowledge_linear_pages(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            (0, API_ACCOUNTS_PROMPT),
+        );
+        input
+            .write_all(b"Manage ChatGPT account\r")
+            .expect("manage ChatGPT account");
         wait_for(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"empty Enter selects Cancel\r\nInput:\r\n",
+            b"empty Enter selects 1. Cancel\r\nInput:\r\n",
         );
         if accept_file {
+            let warning_at = transcript.len();
             input
                 .write_all(b"Use private file\r")
                 .expect("select explicit fallback");
-            wait_for(
+            acknowledge_linear_pages(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
-                b"empty Enter selects Back\r\nInput:\r\n",
+                (
+                    warning_at,
+                    b"type a choice name: 1. Back or 2. Accept; empty Enter selects 1. Back\r\nInput:\r\n",
+                ),
             );
             input
                 .write_all(b"\r")
@@ -1088,15 +1480,8 @@ fn release_setup_uses_private_passwd_home_without_test_override() {
         b"SCRIPT_INPUT_GATE",
     );
     input.write_all(b"go\r").expect("start product");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"empty Enter selects API key\r\nInput:\r\n",
-    );
+    choose_native_account_setup(&mut output, &mut input, &mut transcript, &mut answered);
     let access_at = transcript.len();
-    input.write_all(b"API key\r").expect("select API key");
     wait_for_after(
         &mut output,
         &mut input,
@@ -1113,10 +1498,9 @@ fn release_setup_uses_private_passwd_home_without_test_override() {
         access_at,
         b"Input:\r\n",
     );
-    assert!(
-        String::from_utf8_lossy(&transcript[access_at..])
-            .contains("type a choice name: Cancel or Use private file; empty Enter selects Cancel")
-    );
+    assert!(String::from_utf8_lossy(&transcript[access_at..]).contains(
+        "type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel"
+    ));
     let cancel_at = transcript.len();
     input
         .write_all(b"\r")
@@ -1216,7 +1600,7 @@ fn release_bare_session(
             &mut input,
             &mut transcript,
             &mut answered,
-            b"empty Enter selects Cancel\r\nInput:\r\n",
+            b"empty Enter selects 1. Cancel\r\nInput:\r\n",
         );
         let choice_at = transcript.len();
         input.write_all(choice.as_bytes()).expect("choose access");
@@ -1259,7 +1643,7 @@ fn release_bare_session(
         "screen-reader startup queried the cursor"
     );
     let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
-    assert!(!text.contains("Choose access method"), "setup reopened");
+    assert!(!text.contains("Provider setup"), "setup reopened");
     if access_choice.is_some() {
         assert!(text.contains("Both saved; choose billing route"));
     }
@@ -1751,6 +2135,18 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         &mut input,
         &mut transcript,
         &mut answered,
+        b"Provider setup",
+    );
+    let root_frame = transcript
+        .windows(b"Provider setup".len())
+        .position(|part| part == b"Provider setup")
+        .unwrap();
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        root_frame,
         b"\x1b[?25l",
     );
     let text = String::from_utf8_lossy(&transcript);
@@ -1762,7 +2158,32 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
         .expect("shell PID number");
     let product_pid = product_child_of(shell_pid);
     let _product = ProductGuard::new(product_pid, state.clone());
-    input.write_all(b"\x1b[B\r").expect("select ChatGPT plan");
+    let accounts_at = transcript.len();
+    input.write_all(b"\r").expect("open API accounts");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        accounts_at,
+        b"API accounts",
+    );
+    let frame_start = transcript[accounts_at..]
+        .windows(b"API accounts".len())
+        .position(|part| part == b"API accounts")
+        .unwrap()
+        + accounts_at;
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        frame_start,
+        b"\x1b[?25l",
+    );
+    input
+        .write_all(b"\x1b[B\x1b[B\r")
+        .expect("select ChatGPT account manager");
     wait_for(
         &mut output,
         &mut input,
@@ -1827,6 +2248,479 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
             .to_owned()
     };
     assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn fresh_setup_root_saves_its_first_custom_route_without_provider_egress() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("Workspace");
+    let state = temp.path().join("state");
+    let mut pty = start_setup_pty(&temp, &workspace, &state);
+    let routes_at = pty.transcript.len();
+    pty.input.write_all(b"2\r").expect("open custom routes");
+    wait_for_after(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        routes_at,
+        b"Input:\r\n",
+    );
+    let saved_at = add_custom_route(&mut pty, b"1\r");
+    let (pages, _) = acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (saved_at, b"empty Enter selects 1. first-route"),
+    );
+    assert!(
+        pages > 1,
+        "save result exercises complete paged acknowledgment"
+    );
+    pty.input.write_all(b"3\r").expect("leave custom routes");
+    let result = finish_setup_pty(pty);
+    assert!(result.status.success(), "fresh custom setup failed");
+    let profile = std::fs::read_to_string(state.join("provider-profiles.json"))
+        .expect("first custom route record");
+    assert!(profile.contains("first-route"));
+    assert!(profile.contains("model-synthetic"));
+    assert!(!profile.contains("ARANY_PROVIDER_FIRST_ROUTE_KEY_VALUE"));
+    assert_setup_journal(&state, &workspace);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn configured_unsaved_conversation_survives_custom_save_and_back() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("Workspace");
+    let state = temp.path().join("state");
+    let provider = super::loopback::held_stream_provider(&state, "retained setup answer");
+    super::loopback::check_profile(&workspace, &state);
+    let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Configured);
+    assert_retained_setup_conversation(&state, &workspace, None);
+    let routes_at = pty.transcript.len();
+    pty.input.write_all(b"2\r").expect("open custom routes");
+    wait_setup_choices(&mut pty, routes_at);
+    let saved_at = add_custom_route(&mut pty, b"2\r");
+    wait_setup_choices(&mut pty, saved_at);
+    let back_at = pty.transcript.len();
+    pty.input
+        .write_all(b"Back\r")
+        .expect("return to conversation");
+    wait_for_after(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        back_at,
+        b"Setup closed\r\nInput:\r\n",
+    );
+    assert_retained_setup_conversation(&state, &workspace, Some(0));
+    submit_retained_setup_turn(&mut pty, &provider);
+    pty.input
+        .write_all(b"/exit\r")
+        .expect("exit configured conversation");
+    let result = finish_setup_pty(pty);
+    assert!(
+        result.status.success(),
+        "configured setup conversation failed"
+    );
+    provider.peer.join().expect("synthetic Provider assertions");
+    assert_retained_setup_conversation(&state, &workspace, Some(1));
+}
+
+#[cfg(debug_assertions)]
+fn submit_retained_setup_turn(pty: &mut SetupPty, provider: &super::loopback::HeldStream) {
+    let submitted_at = pty.transcript.len();
+    pty.input
+        .write_all(b"answer after setup\r")
+        .expect("submit configured turn");
+    provider
+        .streaming
+        .recv_timeout(Duration::from_secs(10))
+        .expect("configured Provider called");
+    provider
+        .release
+        .send(())
+        .expect("complete synthetic answer");
+    provider
+        .consumed
+        .recv_timeout(Duration::from_secs(10))
+        .expect("answer read");
+    wait_for_after(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        submitted_at,
+        b"Input:\r\n",
+    );
+    assert!(String::from_utf8_lossy(&pty.transcript).contains("retained setup answer"));
+}
+
+#[cfg(debug_assertions)]
+fn wait_setup_choices(pty: &mut SetupPty, mut cursor: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        pump(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+        );
+        let fresh = &pty.transcript[cursor..];
+        if fresh
+            .windows(b"Page 1/".len())
+            .any(|part| part == b"Page 1/")
+        {
+            let total = wait_linear_page(
+                &mut pty.output,
+                &mut pty.input,
+                &mut pty.transcript,
+                &mut pty.answered,
+                (cursor, 1),
+            );
+            for page in 1..=total {
+                cursor = pty.transcript.len();
+                pty.input.write_all(b"\r").expect("acknowledge setup page");
+                if page < total {
+                    assert_eq!(
+                        wait_linear_page(
+                            &mut pty.output,
+                            &mut pty.input,
+                            &mut pty.transcript,
+                            &mut pty.answered,
+                            (cursor, page + 1),
+                        ),
+                        total
+                    );
+                }
+            }
+        } else if fresh
+            .windows(b"Input:\r\n".len())
+            .any(|part| part == b"Input:\r\n")
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "setup choices deadline: {}",
+            tail(&pty.transcript)
+        );
+        thread::yield_now();
+    }
+}
+
+#[cfg(debug_assertions)]
+fn assert_retained_setup_conversation(state: &Path, workspace: &Path, runs: Option<usize>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let sessions = arany::list_sessions(
+                StateRoot::open_existing(state).unwrap(),
+                workspace.to_owned(),
+            )
+            .await
+            .unwrap();
+            let Some(runs) = runs else {
+                assert!(
+                    sessions.is_empty(),
+                    "configured renamed chat is still unsaved"
+                );
+                return;
+            };
+            assert_eq!(sessions.len(), 1);
+            let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+            let events = store.load_session(sessions[0].id).await.unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event.event,
+                        arany::Event::ProviderSetupEditFinished {
+                            disposition: arany::ProviderSetupDisposition::Applied,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            let view = store.load_view(sessions[0].id).await.unwrap().unwrap();
+            assert_eq!(view.title, "Setup retained title");
+            assert!(view.title_is_explicit);
+            assert_eq!(view.defaults.provider.as_deref(), Some("custom:local"));
+            assert_eq!(view.defaults.model.as_deref(), Some("model-1"));
+            assert_eq!(view.defaults.policy, arany::CollaborationPolicy::Single);
+            assert_eq!(view.runs.len(), runs);
+            if let Some(run) = view.runs.last() {
+                assert_eq!(run.status, arany::RunStatus::Finished);
+                assert_eq!(run.config.as_ref().unwrap().provider, "custom:local");
+            }
+            assert!(!view.provider_setup_blocks_continuation());
+            store.close().await.unwrap();
+        });
+}
+
+#[cfg(debug_assertions)]
+fn assert_setup_journal(state: &Path, workspace: &Path) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("journal runtime")
+        .block_on(async {
+            let sessions = arany::list_sessions(
+                StateRoot::open_existing(state).expect("setup StateRoot"),
+                workspace.to_owned(),
+            )
+            .await
+            .expect("reopen setup Session list");
+            assert_eq!(sessions.len(), 1);
+            let store = Store::open(StateRoot::open_existing(state).expect("setup StateRoot"))
+                .expect("reopen setup journal");
+            let events = store
+                .load_session(sessions[0].id)
+                .await
+                .expect("setup Events");
+            assert!(matches!(
+                events[0].event,
+                arany::Event::SessionStarted { .. }
+            ));
+            let operation_id = match &events[1].event {
+                arany::Event::ProviderSetupEditStarted {
+                    operation_id,
+                    target,
+                    ..
+                } => {
+                    assert_eq!(target.identity, "first-route");
+                    *operation_id
+                }
+                event => panic!("unexpected setup Event: {}", event.kind()),
+            };
+            assert!(matches!(
+                &events[2].event,
+                arany::Event::ProviderSetupEditFinished {
+                    operation_id: finished,
+                    disposition: arany::ProviderSetupDisposition::Applied,
+                    resulting_digest: Some(_),
+                } if *finished == operation_id
+            ));
+            let view = store
+                .load_view(sessions[0].id)
+                .await
+                .expect("reopened setup Session view")
+                .expect("setup Session");
+            assert_eq!(view.pending_provider_setup_edit, None);
+            assert!(!view.provider_setup_uncertain);
+            store.close().await.expect("close setup store");
+        });
+}
+
+#[cfg(debug_assertions)]
+fn add_custom_route(pty: &mut SetupPty, choice: &[u8]) -> usize {
+    let mut prompt_at = pty.transcript.len();
+    pty.input.write_all(choice).expect("add custom route");
+    wait_for(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        b"Custom route protocol",
+    );
+    wait_for_after(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        prompt_at,
+        b"Input:\r\n",
+    );
+    prompt_at = pty.transcript.len();
+    pty.input
+        .write_all(b"1\r")
+        .expect("select Responses protocol");
+    let fields = [
+        (b"Custom route name".as_slice(), b"first-route\r".as_slice()),
+        (
+            b"Custom route destination".as_slice(),
+            b"http://127.0.0.1:9000/v1/responses\r".as_slice(),
+        ),
+        (
+            b"Custom route model".as_slice(),
+            b"model-synthetic\r".as_slice(),
+        ),
+        (
+            b"Credential environment name".as_slice(),
+            b"ARANY_PROVIDER_FIRST_ROUTE_KEY\r".as_slice(),
+        ),
+    ];
+    for (prompt, value) in fields {
+        wait_for(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+            prompt,
+        );
+        wait_for_after(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+            prompt_at,
+            b"Input:\r\n",
+        );
+        prompt_at = pty.transcript.len();
+        pty.input
+            .write_all(value)
+            .expect("enter custom route field");
+    }
+    wait_for(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        b"Declared efforts",
+    );
+    wait_for_after(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        prompt_at,
+        b"Input:\r\n",
+    );
+    let warning_at = pty.transcript.len();
+    pty.input.write_all(b"\r").expect("keep default effort set");
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (
+            warning_at,
+            b"type a choice name: 1. Back or 2. Accept; empty Enter selects 1. Back\r\nInput:\r\n",
+        ),
+    );
+    let saved_at = pty.transcript.len();
+    pty.input
+        .write_all(b"2\r")
+        .expect("confirm route declaration");
+    saved_at
+}
+
+#[cfg(debug_assertions)]
+fn seed_long_custom_profiles(state: &Path) -> String {
+    StateRoot::admit(state).expect("custom route state");
+    let long_name = "z".repeat(arany::MAX_CUSTOM_PROFILE_NAME_BYTES);
+    let profile = |name: &str, model: &str, credential_env: &str| {
+        serde_json::json!({
+            "name": name,
+            "protocol": "openai-responses",
+            "endpoint": "https://api.example.com/v1/responses",
+            "model": model,
+            "credential_env": credential_env,
+            "outcome_encoding": "json_schema",
+            "privacy": "user_authorized",
+            "max_output_tokens": 4096,
+            "capability_evidence_version": 2,
+            "efforts": []
+        })
+    };
+    let document = serde_json::json!({
+        "version": 2,
+        "profiles": [
+            profile("first-route", "first-model", "ARANY_PROVIDER_FIRST_ROUTE_KEY"),
+            profile(&long_name, "second-model", "ARANY_PROVIDER_SECOND_ROUTE_KEY")
+        ]
+    });
+    let path = state.join("provider-profiles.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&document).expect("profile document"),
+    )
+    .expect("write profile document");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("private profiles");
+    long_name
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn linear_setup_selects_nonfirst_maximum_length_custom_route() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("Workspace");
+    let state = temp.path().join("state");
+    let long_name = seed_long_custom_profiles(&state);
+    let mut pty = start_setup_pty(&temp, &workspace, &state);
+    let routes_at = pty.transcript.len();
+    pty.input.write_all(b"2\r").expect("open custom routes");
+    let route_prompt =
+        b"type a listed choice number or exact name (1-4); empty Enter selects 1\r\nInput:\r\n";
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (routes_at, route_prompt),
+    );
+    pty.input
+        .write_all(b"2\r")
+        .expect("select second route by token");
+    wait_for(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        b"ARANY_PROVIDER_SECOND_ROUTE_KEY",
+    );
+    wait_for_after(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        routes_at,
+        b"empty Enter selects 1. Inspect\r\nInput:\r\n",
+    );
+    let inspect_at = pty.transcript.len();
+    pty.input.write_all(b"1\r").expect("inspect second route");
+    let (_, list_at) = acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (inspect_at, b"Page 1/"),
+    );
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (list_at, route_prompt),
+    );
+    wait_for(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        b"Model: second-model",
+    );
+    assert!(
+        String::from_utf8_lossy(&pty.transcript).contains(&long_name),
+        "selected route title did not preserve its maximum-length name"
+    );
+    pty.input.write_all(b"Back\r").expect("leave custom routes");
+    let result = finish_setup_pty(pty);
+    assert!(
+        result.status.success(),
+        "linear custom route selection failed"
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -1960,14 +2854,14 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             &mut transcript,
             &mut answered,
             quick_setup_at,
-            b"> API",
+            b"> API accounts",
         );
         let header_end = quick_setup_at
             + transcript[quick_setup_at..]
-                .windows(5)
-                .position(|part| part == b"> API")
+                .windows(b"> API accounts".len())
+                .position(|part| part == b"> API accounts")
                 .expect("selected setup row")
-            + 5;
+            + b"> API accounts".len();
         wait_for_after(
             &mut output,
             &mut input,
@@ -2007,7 +2901,7 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             &mut transcript,
             &mut answered,
             setup_at,
-            b"API key",
+            b"Provider setup",
         );
         wait_for_after(
             &mut output,
@@ -2018,24 +2912,28 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             b"\x1b[?25l",
         );
         let selected_at = transcript.len();
-        input.write_all(b"\x1b[B").expect("select ChatGPT plan row");
+        input
+            .write_all(b"\x1b[B")
+            .expect("select Custom routes row");
         wait_for_after(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             selected_at,
-            b"> ChatGPT plan",
+            b"> Custom routes",
         );
         let restored_at = transcript.len();
-        input.write_all(b"\x1b[A").expect("return to API key row");
+        input
+            .write_all(b"\x1b[A")
+            .expect("return to API accounts row");
         wait_for_after(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             restored_at,
-            b"> API key",
+            b"> API accounts",
         );
         let closed_at = transcript.len();
         input.write_all(b"\x1b").expect("close setup selector");
@@ -2556,7 +3454,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"Choose access method",
+        b"Provider setup",
     );
     wait_for(
         &mut output,
@@ -2586,10 +3484,20 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         "choices keep terminal echo"
     );
     let access_at = transcript.len();
-    assert!(String::from_utf8_lossy(&transcript).contains(
-        "Choose: ChatGPT plan uses your subscription; type a choice name: API key or ChatGPT plan; empty Enter selects API key\r\nInput:\r\n"
-    ));
-    input.write_all(b"API key\r").expect("API key choice");
+    assert!(String::from_utf8_lossy(&transcript).contains("1. API accounts or 2. Custom routes"));
+    input
+        .write_all(b"API accounts\r")
+        .expect("open API accounts");
+    acknowledge_linear_pages(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (access_at, API_ACCOUNTS_PROMPT),
+    );
+    input
+        .write_all(b"Add or replace native API account\r")
+        .expect("select native API account");
     wait_for_after(
         &mut output,
         &mut input,
@@ -2627,7 +3535,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         b"Input:\r\n",
     );
     assert!(String::from_utf8_lossy(&transcript[consent_at..]).contains(
-        "Choose: Only the selected Provider receives requests; type a choice name: OpenAI or Anthropic; empty Enter selects OpenAI\r\nInput:\r\n"
+        "Choose: Only the selected Provider receives requests; type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n"
     ));
     input
         .write_all(b"Anthropic\r")
@@ -2681,7 +3589,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: Key scoped to workspace or Choose API workspace",
+        b"type a choice name: 1. Key scoped to workspace or 2. Choose API workspace; empty Enter selects 1. Key scoped to workspace\r\nInput:\r\n",
     );
     assert_eq!(
         tty_settings(product_pid),
@@ -2832,24 +3740,32 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
                 .write_all(b"/setup\r")
                 .expect("setup in existing Session");
         }
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            setup_at,
-            b"Choose access method",
-        );
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            setup_at,
-            b"Input:\r\n",
-        );
         let access_at = transcript.len();
-        input.write_all(b"API key\r").expect("API key choice");
+        if attached {
+            choose_native_account_setup(&mut output, &mut input, &mut transcript, &mut answered);
+        } else {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                setup_at,
+                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+            );
+            input
+                .write_all(b"API accounts\r")
+                .expect("open API accounts");
+            acknowledge_linear_pages(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (access_at, API_ACCOUNTS_PROMPT),
+            );
+            input
+                .write_all(b"Add or replace native API account\r")
+                .expect("select native account");
+        }
         wait_for_after(
             &mut output,
             &mut input,

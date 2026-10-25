@@ -96,7 +96,7 @@ pub(super) fn write(slot: &str, record: &str) -> Result<(), CredentialError> {
 }
 
 pub(super) fn delete(slot: &str) -> Result<(), CredentialError> {
-    if !slot.starts_with("chatgpt-") || !valid_slot(slot) {
+    if (slot != DEFAULT_ACCOUNT && !slot.starts_with("chatgpt-")) || !valid_slot(slot) {
         return Err(CredentialError::InvalidAccount);
     }
     invoke("delete", slot, None).map(|_| ())
@@ -186,7 +186,11 @@ fn invoke_command(
         .stderr(Stdio::null());
     let mut child = OwnedChild(command.spawn().map_err(|_| CredentialError::Unavailable)?);
     let input = child.0.stdin.take();
-    let output = child.0.stdout.take().ok_or(CredentialError::Unavailable)?;
+    let output = child
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| unconfirmed_error(operation, CredentialError::Unavailable))?;
     let deadline = Instant::now() + duration;
     std::thread::scope(|scope| {
         let writer = record.map(|record| {
@@ -217,11 +221,7 @@ fn invoke_command(
                 }
                 Ok(None) => {
                     child.stop();
-                    return Err(match operation {
-                        "write" => CredentialError::WriteOutcomeUnknown,
-                        "delete" => CredentialError::DeleteOutcomeUnknown,
-                        _ => CredentialError::TimedOut,
-                    });
+                    return Err(CredentialError::TimedOut);
                 }
                 Err(_) => {
                     child.stop();
@@ -231,30 +231,56 @@ fn invoke_command(
         };
         let write_result = writer.map(|writer| writer.join());
         let output = reader.join().map_err(|_| CredentialError::Unavailable)??;
-        match status.code().and_then(|code| u8::try_from(code).ok()) {
-            Some(0) => {
-                if write_result.is_some_and(|result| !matches!(result, Ok(Ok(())))) {
-                    return Err(CredentialError::Unavailable);
-                }
-                if output.len() > limit {
-                    return Err(CredentialError::InvalidAccount);
-                }
-                if operation == "read" {
-                    Ok(Some(output))
-                } else if output.is_empty() {
-                    Ok((operation == "authorize").then(Vec::new))
-                } else {
-                    Err(CredentialError::Unavailable)
-                }
-            }
-            Some(EXIT_NOT_FOUND) if matches!(operation, "read" | "probe" | "authorize") => Ok(None),
-            Some(EXIT_LOCKED) => Err(CredentialError::Locked),
-            Some(EXIT_IDENTITY_MISMATCH) if operation == "authorize" => {
-                Err(CredentialError::InvalidAccount)
-            }
-            _ => Err(CredentialError::Unavailable),
-        }
+        helper_reply(
+            operation,
+            status,
+            output,
+            write_result.is_none_or(|result| matches!(result, Ok(Ok(())))),
+            limit,
+        )
     })
+    .map_err(|error| unconfirmed_error(operation, error))
+}
+
+fn unconfirmed_error(operation: &str, error: CredentialError) -> CredentialError {
+    match (operation, error) {
+        (_, CredentialError::Locked) => CredentialError::Locked,
+        ("write", _) => CredentialError::WriteOutcomeUnknown,
+        ("delete", _) => CredentialError::DeleteOutcomeUnknown,
+        (_, error) => error,
+    }
+}
+
+fn helper_reply(
+    operation: &str,
+    status: std::process::ExitStatus,
+    output: Vec<u8>,
+    write_complete: bool,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, CredentialError> {
+    match status.code().and_then(|code| u8::try_from(code).ok()) {
+        Some(0) => {
+            if !write_complete {
+                return Err(CredentialError::Unavailable);
+            }
+            if output.len() > limit {
+                return Err(CredentialError::InvalidAccount);
+            }
+            if operation == "read" {
+                Ok(Some(output))
+            } else if output.is_empty() {
+                Ok((operation == "authorize").then(Vec::new))
+            } else {
+                Err(CredentialError::Unavailable)
+            }
+        }
+        Some(EXIT_NOT_FOUND) if matches!(operation, "read" | "probe" | "authorize") => Ok(None),
+        Some(EXIT_LOCKED) if output.is_empty() => Err(CredentialError::Locked),
+        Some(EXIT_IDENTITY_MISMATCH) if operation == "authorize" => {
+            Err(CredentialError::InvalidAccount)
+        }
+        _ => Err(CredentialError::Unavailable),
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -266,10 +292,7 @@ mod tests {
     fn keyring_slots_are_bounded_and_do_not_accept_arbitrary_accounts() {
         assert_eq!(slot_record_limit(PROBE_SLOT), Some(0));
         assert!(write(PROBE_SLOT, "synthetic").is_err());
-        assert_eq!(
-            delete(DEFAULT_ACCOUNT),
-            Err(CredentialError::InvalidAccount)
-        );
+        assert_eq!(delete("other"), Err(CredentialError::InvalidAccount));
         let slot = format!("chatgpt-{}", "A".repeat(43));
         assert_eq!(slot_record_limit(&slot), Some(MAX_TOKEN_RECORD_BYTES));
         assert_eq!(slot_record_limit("chatgpt-A"), None);
@@ -299,6 +322,110 @@ mod tests {
                 valid_authorized_record(DEFAULT_ACCOUNT, &record, Some((id, provider.into()))),
                 accepted,
                 "native account identity boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn deletion_dispatches_only_admitted_slots_to_an_isolated_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const SCRIPT: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/dispatch\"\n";
+        const ROOT: &str = "ARANY_TEST_DELETE_ROOT";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let helper = root.join("helper");
+            assert_eq!(std::env::var_os("ARANY_TEST_EXE"), Some(helper.into()));
+            assert_eq!(
+                std::fs::read_to_string(root.join("helper")).unwrap(),
+                SCRIPT
+            );
+            assert_eq!(std::env::var_os("HOME"), Some(root.into()));
+            assert_eq!(delete(DEFAULT_ACCOUNT), Ok(()));
+            assert_eq!(delete(&format!("chatgpt-{}", "A".repeat(43))), Ok(()));
+            for slot in [
+                PROBE_SLOT.to_owned(),
+                "other".into(),
+                "chatgpt-A".into(),
+                format!("native-test-{}", Uuid::now_v7()),
+                format!("native-client-test-{}", Uuid::now_v7()),
+            ] {
+                assert_eq!(delete(&slot), Err(CredentialError::InvalidAccount));
+            }
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let helper = root.join("helper");
+        std::fs::write(&helper, SCRIPT).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let thread = std::thread::current();
+        let test = thread.name().unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env_clear()
+            .env(ROOT, &root)
+            .env("HOME", &root)
+            .env("ARANY_TEST_EXE", &helper)
+            .current_dir(&root);
+        let output = crate::test_process::file_output(&mut command, None);
+        assert!(output.status.success(), "isolated deletion protocol failed");
+        crate::test_process::assert_single_test_completed(&output.stdout, test);
+        assert_eq!(
+            std::fs::read_to_string(root.join("dispatch")).unwrap(),
+            format!(
+                "--internal-credential-helper\ndelete\n{DEFAULT_ACCOUNT}\n--internal-credential-helper\ndelete\nchatgpt-{}\n",
+                "A".repeat(43)
+            )
+        );
+    }
+
+    #[test]
+    fn unconfirmed_mutation_helpers_never_report_a_known_failure() {
+        for (operation, expected) in [
+            ("write", CredentialError::WriteOutcomeUnknown),
+            ("delete", CredentialError::DeleteOutcomeUnknown),
+        ] {
+            for script in [
+                "/bin/cat >/dev/null; kill -TERM $$",
+                "/bin/cat >/dev/null; exit 1",
+                "/bin/cat >/dev/null; printf unexpected",
+                "/bin/cat >/dev/null; printf unexpected; exit 3",
+            ] {
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", script]).env_clear().current_dir("/");
+                assert_eq!(
+                    invoke_command(
+                        command,
+                        operation,
+                        (operation == "write").then_some(b"synthetic-record".as_slice()),
+                        RecordKind::SavedAccount.limit(),
+                        DEADLINE,
+                        &AtomicBool::new(false),
+                    )
+                    .as_ref(),
+                    Err(&expected),
+                    "unconfirmed {operation} must stop continuation"
+                );
+            }
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "/bin/cat >/dev/null; exit 3"])
+                .env_clear()
+                .current_dir("/");
+            assert_eq!(
+                invoke_command(
+                    command,
+                    operation,
+                    None,
+                    RecordKind::SavedAccount.limit(),
+                    DEADLINE,
+                    &AtomicBool::new(false),
+                ),
+                Err(CredentialError::Locked),
+                "a valid locked-store acknowledgment is definitive"
             );
         }
     }
@@ -536,7 +663,7 @@ mod tests {
         );
         assert_eq!(
             CredentialError::WriteOutcomeUnknown.to_string(),
-            "OS credential store write timed out; the saved account may have changed. Check it before retrying"
+            "saved credential write could not be confirmed; the saved account may have changed. Inspect it before retrying"
         );
         assert_eq!(
             connection.read(&mut stage).expect("helper connection EOF"),
@@ -644,7 +771,7 @@ pub(super) fn main() -> ExitCode {
     ) || !valid_slot(slot)
         || (operation == "probe" && slot != PROBE_SLOT)
         || (operation != "probe" && slot == PROBE_SLOT)
-        || (operation == "delete" && !slot.starts_with("chatgpt-"))
+        || (operation == "delete" && slot != DEFAULT_ACCOUNT && !slot.starts_with("chatgpt-"))
         || admit_transport().is_err()
     {
         return ExitCode::FAILURE;

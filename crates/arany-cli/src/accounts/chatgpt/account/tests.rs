@@ -22,6 +22,272 @@ fn accepted(credentials: &VerifiedCredentials) -> ConsentReceipt {
         .unwrap()
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn disappearing_keyring_saves_block_new_and_existing_setup_sessions() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    const ROOT: &str = "ARANY_TEST_SAVE_ROOT";
+    const SCRIPT: &str = "#!/bin/sh\n/bin/cat > \"$HOME/accepted\"\nkill -TERM $$\n";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = PathBuf::from(root);
+        assert_eq!(
+            std::env::var_os("ARANY_TEST_EXE"),
+            Some(root.join("helper").into())
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("helper")).unwrap(),
+            SCRIPT
+        );
+        assert_eq!(std::env::var_os("HOME"), Some(root.clone().into()));
+        for existing in [false, true] {
+            assert_disappearing_keyring_save(&root, existing).await;
+            assert!(std::fs::metadata(root.join("accepted")).unwrap().len() > 0);
+        }
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let helper = root.join("helper");
+    std::fs::write(&helper, SCRIPT).unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let thread = std::thread::current();
+    let test = thread.name().unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env_clear()
+        .env(ROOT, &root)
+        .env("HOME", &root)
+        .env("ARANY_TEST_EXE", &helper)
+        .current_dir(&root);
+    let output = crate::test_process::file_output(&mut command, None);
+    assert!(output.status.success(), "isolated save lifecycle failed");
+    crate::test_process::assert_single_test_completed(&output.stdout, test);
+}
+
+#[cfg(unix)]
+async fn assert_disappearing_keyring_save(root: &Path, existing: bool) {
+    let workspace = root.join(if existing {
+        "existing-workspace"
+    } else {
+        "new-workspace"
+    });
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&root.join(if existing {
+        "existing-state"
+    } else {
+        "new-state"
+    }))
+    .unwrap();
+    let credentials = credentials("oaiapp_disappearing_helper", "synthetic-subject");
+    let consent = RiskPrompt::new(AccountStorage::Keyring)
+        .accept("Accept")
+        .unwrap()
+        .bind(&credentials)
+        .unwrap();
+    let selected = existing.then(|| {
+        save_keyring_at_with(
+            &state,
+            &workspace,
+            credentials.clone(),
+            consent.clone(),
+            None,
+            |_, _| Ok(()),
+        )
+        .unwrap()
+    });
+    crate::cli::attached::assert_uncertain_publication(
+        crate::cli::attached::SetupPublication::ChatGpt,
+        || {
+            let error =
+                save_keyring_at(&state, &workspace, credentials, consent, selected).unwrap_err();
+            assert!(matches!(
+                error,
+                AuthorizationError::CredentialStore(
+                    crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
+                )
+            ));
+            let index = AccountIndex::read(&state).unwrap();
+            assert_eq!(index.selected, selected);
+            if existing {
+                assert!(index.accounts[0].renewal_pending);
+            }
+            error
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chatgpt_partial_publication_faults_block_setup_continuation() {
+    enum Permission {
+        Enabled,
+        Disabled,
+    }
+    for (storage, permission) in [
+        (AccountStorage::Keyring, Permission::Enabled),
+        (AccountStorage::Keyring, Permission::Disabled),
+        (AccountStorage::PrivateFile, Permission::Enabled),
+        (AccountStorage::PrivateFile, Permission::Disabled),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let credentials = credentials("oaiapp_partial_save", "synthetic-subject");
+        let registration = serde_json::json!({
+            "schema": 1, "host_id": credentials.host_id,
+            "issued_client_id": credentials.client_id,
+        });
+        state
+            .record(RecordKind::ChatgptRegistration)
+            .replace(&serde_json::to_vec(&registration).unwrap())
+            .unwrap();
+        arany::FaultPlan::fail_record_publication(
+            state.path().to_owned(),
+            "chatgpt-registration.json",
+        );
+        crate::cli::attached::assert_uncertain_publication(
+            crate::cli::attached::SetupPublication::ChatGpt,
+            || {
+                let result = if matches!(permission, Permission::Disabled) {
+                    save_without_plan_permission_at(
+                        &state,
+                        &workspace,
+                        VerifiedIdentity {
+                            client_id: credentials.client_id.clone(),
+                            host_id: credentials.host_id,
+                            subject: credentials.subject.clone(),
+                        },
+                        storage,
+                        None,
+                        |_| panic!("new disabled account has no keyring item"),
+                    )
+                    .map(|outcome| outcome.id)
+                } else {
+                    let consent = RiskPrompt::new(storage)
+                        .accept("Accept")
+                        .unwrap()
+                        .bind(&credentials)
+                        .unwrap();
+                    match storage {
+                        AccountStorage::PrivateFile => {
+                            save_private_file_at(&state, &workspace, credentials, consent, None)
+                        }
+                        AccountStorage::Keyring => save_keyring_at_with(
+                            &state,
+                            &workspace,
+                            credentials,
+                            consent,
+                            None,
+                            |_, _| Ok(()),
+                        ),
+                    }
+                };
+                assert_eq!(AccountIndex::read(&state).unwrap().accounts.len(), 1);
+                let error = result.unwrap_err();
+                assert!(matches!(
+                    error,
+                    AuthorizationError::CredentialStore(
+                        crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
+                    )
+                ));
+                error
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_keyring_partial_save_blocks_setup_continuation() {
+    #[derive(Clone, Copy)]
+    enum Fault {
+        NewIndex,
+        RenewalIndex,
+        RenewalWrite,
+    }
+    for fault in [Fault::NewIndex, Fault::RenewalIndex, Fault::RenewalWrite] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let credentials = credentials("oaiapp_partial_keyring", "synthetic-subject");
+        let consent = RiskPrompt::new(AccountStorage::Keyring)
+            .accept("Accept")
+            .unwrap()
+            .bind(&credentials)
+            .unwrap();
+        let selected = if matches!(fault, Fault::NewIndex) {
+            None
+        } else {
+            Some(
+                save_keyring_at_with(
+                    &state,
+                    &workspace,
+                    credentials.clone(),
+                    consent.clone(),
+                    None,
+                    |_, _| Ok(()),
+                )
+                .unwrap(),
+            )
+        };
+        crate::cli::attached::assert_uncertain_publication(
+            crate::cli::attached::SetupPublication::ChatGpt,
+            || {
+                let error = save_keyring_at_with(
+                    &state,
+                    &workspace,
+                    credentials,
+                    consent,
+                    selected,
+                    |_, _| {
+                        if matches!(fault, Fault::RenewalWrite) {
+                            Err(AuthorizationError::Unavailable)
+                        } else {
+                            arany::FaultPlan::fail_record_publication(
+                                state.path().to_owned(),
+                                "chatgpt-accounts.json",
+                            );
+                            Ok(())
+                        }
+                    },
+                )
+                .unwrap_err();
+                let index = AccountIndex::read(&state).unwrap();
+                assert_eq!(index.accounts.len(), usize::from(selected.is_some()));
+                if let Some(entry) = index.accounts.first() {
+                    assert!(entry.renewal_pending);
+                }
+                error
+            },
+        )
+        .await;
+    }
+}
+
+#[test]
+fn chatgpt_index_publication_fault_retains_uncertainty() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let credentials = credentials("oaiapp_publication", "synthetic-subject");
+    let consent = accepted(&credentials);
+    arany::FaultPlan::fail_record_sync(state.path().to_owned(), "chatgpt-accounts.json");
+    assert!(matches!(
+        save_private_file_at(&state, &workspace, credentials, consent, None),
+        Err(AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
+        ))
+    ));
+    let reopened = StateRoot::open_existing(state.path()).unwrap();
+    assert_eq!(AccountIndex::read(&reopened).unwrap().accounts.len(), 1);
+}
+
 #[test]
 fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
     for confirmed in [true, false] {
@@ -125,7 +391,7 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
 }
 
 #[test]
-fn keyring_disconnection_blocks_use_even_when_deletion_fails() {
+fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -150,24 +416,36 @@ fn keyring_disconnection_blocks_use_even_when_deletion_fails() {
         credentials,
         consent,
     };
-    let outcome = sign_out_at_with(
+    let expected_index = state
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
+    let outcome = sign_out_target_at_with(
         &state,
         &workspace,
-        |client, subject, host| {
-            assert_eq!(client, token.credentials.client_id);
-            assert_eq!(subject, token.credentials.subject);
-            assert_eq!(host, token.credentials.host_id);
-            Ok(token.clone())
+        SignOutTarget {
+            account_id: Some(id),
+            expected_index: Some(&expected_index),
         },
-        |_| Ok(()),
-        |slot| {
-            assert_eq!(slot, keyring_slot("oaiapp_keyring_signout"));
-            Err(AuthorizationError::Unavailable)
+        SignOutActions {
+            read_keyring: |client: &str, subject: &str, host: Uuid| {
+                assert_eq!(client, token.credentials.client_id);
+                assert_eq!(subject, token.credentials.subject);
+                assert_eq!(host, token.credentials.host_id);
+                Ok(token.clone())
+            },
+            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+            delete_keyring: |slot: &str| {
+                assert_eq!(slot, keyring_slot("oaiapp_keyring_signout"));
+                Err(AuthorizationError::Unavailable)
+            },
         },
-    )
-    .unwrap();
-    assert!(outcome.remote_confirmed);
-    assert!(!outcome.local_cleared);
+    );
+    assert!(matches!(
+        outcome,
+        Err(AuthorizationError::SignOutStorageUncertain)
+    ));
     let index = AccountIndex::read(&state).unwrap();
     assert!(index.accounts[0].disconnected);
     assert!(index.model_checks.is_empty());
@@ -175,12 +453,20 @@ fn keyring_disconnection_blocks_use_even_when_deletion_fails() {
         load_selected_keyring_at(&state, id),
         Err(AuthorizationError::NoSelectedAccount)
     ));
-    let cleanup = sign_out_at_with(
+    let cleanup = sign_out_target_at_with(
         &state,
         &workspace,
-        |_, _, _| panic!("disconnected account must not load token"),
-        |_| panic!("disconnected account must not claim remote revocation"),
-        |_| Ok(()),
+        SignOutTarget {
+            account_id: Some(id),
+            expected_index: None,
+        },
+        SignOutActions {
+            read_keyring: |_: &str, _: &str, _: Uuid| {
+                panic!("disconnected account must not load token")
+            },
+            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+            delete_keyring: |_: &str| Ok(()),
+        },
     )
     .unwrap();
     assert!(!cleanup.remote_confirmed);
@@ -1367,6 +1653,60 @@ fn model_check_record_limit_fails_without_replacing_account() {
 }
 
 #[test]
+fn reuse_picker_excludes_every_unusable_nonselected_account() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut ids = Vec::new();
+    for client in ["oaiapp_first_picker", "oaiapp_selected_picker"] {
+        let credentials = credentials(client, "synthetic-subject");
+        let consent = RiskPrompt::new(AccountStorage::Keyring)
+            .accept("Accept")
+            .unwrap()
+            .bind(&credentials)
+            .unwrap();
+        ids.push(
+            save_keyring_at_with(
+                &state,
+                &workspace,
+                credentials,
+                consent,
+                None,
+                |_, _| Ok(()),
+            )
+            .unwrap(),
+        );
+    }
+    for (disconnected, signout_pending, renewal_pending, plan_permission_missing, usable) in [
+        (false, false, false, false, true),
+        (true, false, false, false, false),
+        (false, true, false, false, false),
+        (false, false, true, false, false),
+        (true, false, false, true, false),
+    ] {
+        let mut index = AccountIndex::read(&state).unwrap();
+        let entry = &mut index.accounts[0];
+        entry.disconnected = disconnected;
+        entry.signout_pending = signout_pending;
+        entry.renewal_pending = renewal_pending;
+        entry.plan_permission_missing = plan_permission_missing;
+        index.write(&state).unwrap();
+        assert_eq!(
+            saved_ids_at(&state).unwrap(),
+            (
+                ids[1],
+                if usable {
+                    vec![ids[1], ids[0]]
+                } else {
+                    vec![ids[1]]
+                }
+            )
+        );
+    }
+}
+
+#[test]
 fn saved_chatgpt_selection_requires_a_current_account_and_preserves_tokens() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -1437,6 +1777,130 @@ fn saved_chatgpt_selection_requires_a_current_account_and_preserves_tokens() {
             .refresh_token,
         second.refresh_token
     );
+}
+
+#[test]
+fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let first = credentials("oaiapp_first", "subject-one");
+    let first_id =
+        save_private_file_at(&state, &workspace, first.clone(), accepted(&first), None).unwrap();
+    let second = credentials("oaiapp_second", "subject-two");
+    let second_id =
+        save_private_file_at(&state, &workspace, second.clone(), accepted(&second), None).unwrap();
+    let snapshot = state
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        AccountIndex::read(&state).unwrap().selected,
+        Some(second_id)
+    );
+    let outcome = sign_out_target_at_with(
+        &state,
+        &workspace,
+        SignOutTarget {
+            account_id: Some(first_id),
+            expected_index: Some(&snapshot),
+        },
+        SignOutActions {
+            read_keyring: |_: &str, _: &str, _: Uuid| {
+                panic!("private account must not read keyring")
+            },
+            revoke: Some(|token: &VerifiedCredentials| {
+                assert_eq!(token.refresh_token, first.refresh_token);
+                Ok(())
+            }),
+            delete_keyring: |_: &str| panic!("private account must not delete keyring"),
+        },
+    )
+    .unwrap();
+    assert!(outcome.remote_confirmed && outcome.local_cleared);
+    let index = AccountIndex::read(&state).unwrap();
+    assert_eq!(index.selected, Some(second_id));
+    assert!(
+        index
+            .accounts
+            .iter()
+            .find(|entry| entry.id == first_id)
+            .unwrap()
+            .disconnected
+    );
+
+    let stale = state
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
+    let index = AccountIndex::read(&state).unwrap();
+    let changed_id = Uuid::now_v7();
+    let mut changed = index;
+    changed.selected = Some(changed_id);
+    changed.accounts[1].id = changed_id;
+    changed.write(&state).unwrap();
+    assert!(matches!(
+        sign_out_target_at_with(
+            &state,
+            &workspace,
+            SignOutTarget {
+                account_id: Some(second_id),
+                expected_index: Some(&stale),
+            },
+            SignOutActions {
+                read_keyring: |_: &str, _: &str, _: Uuid| {
+                    panic!("stale account must not read keyring")
+                },
+                revoke: Some(|_: &VerifiedCredentials| panic!("stale account must not revoke")),
+                delete_keyring: |_: &str| panic!("stale account must not delete keyring"),
+            },
+        ),
+        Err(AuthorizationError::SetupChanged)
+    ));
+}
+
+#[test]
+fn local_account_removal_disconnects_without_remote_revocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let account = credentials("oaiapp_local_remove", "local-remove-subject");
+    let id = save_private_file_at(
+        &state,
+        &workspace,
+        account.clone(),
+        accepted(&account),
+        None,
+    )
+    .unwrap();
+    let snapshot = state
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
+    let outcome = sign_out_target_at_with(
+        &state,
+        &workspace,
+        SignOutTarget {
+            account_id: Some(id),
+            expected_index: Some(&snapshot),
+        },
+        SignOutActions {
+            read_keyring: |_: &str, _: &str, _: Uuid| {
+                panic!("private account must not read keyring")
+            },
+            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+            delete_keyring: |_: &str| panic!("private account must not delete keyring"),
+        },
+    )
+    .unwrap();
+    assert!(!outcome.remote_confirmed);
+    assert!(outcome.local_cleared);
+    assert!(AccountIndex::read(&state).unwrap().accounts[0].disconnected);
 }
 
 #[test]

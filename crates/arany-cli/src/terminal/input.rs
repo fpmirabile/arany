@@ -258,6 +258,7 @@ enum LineEvent {
     Continued(Vec<u8>),
     Rejected,
     EndOfInput,
+    Resize,
 }
 
 #[cfg(unix)]
@@ -342,7 +343,7 @@ impl LineReader {
             .await
             .ok_or(TerminalError::InputClosed)?;
         let event = event.map_err(TerminalError::Io)?;
-        if observed < self.epoch && !matches!(event, LineEvent::EndOfInput) {
+        if observed < self.epoch && !matches!(event, LineEvent::EndOfInput | LineEvent::Resize) {
             return Ok(TerminalInput::LineRejected);
         }
         match event {
@@ -350,6 +351,7 @@ impl LineReader {
             LineEvent::Continued(bytes) => self.accept_segment(bytes, false),
             LineEvent::Rejected => Ok(TerminalInput::LineRejected),
             LineEvent::EndOfInput => Ok(TerminalInput::EndOfInput),
+            LineEvent::Resize => Ok(TerminalInput::Resize),
         }
     }
 
@@ -487,12 +489,23 @@ fn read_lines(
     let mut events = Events::with_capacity(4);
     let mut bytes = [0; 8194];
     let mut pending = None;
+    let mut resize_pending = false;
     let mut epoch = 0;
+    let mut geometry = crossterm::terminal::size().ok();
     // Keep paste framing across admission; a flushed terminator must fail closed.
     let mut decoder = LineDecoder::default();
     while !shutdown.load(Ordering::Acquire) {
         decoder.expire(Instant::now())?;
         admit_input(input, requests, &mut epoch, || pending = None)?;
+        let resized = crossterm::terminal::size().ok();
+        if resized != geometry {
+            geometry = resized;
+            if pending.is_some() {
+                resize_pending = true;
+            } else {
+                pending = Some((epoch, Ok(LineEvent::Resize)));
+            }
+        }
         if let Some(event) = pending.take() {
             match sender.try_send(event) {
                 Ok(()) => {}
@@ -503,6 +516,11 @@ fn read_lines(
                 }
                 Err(_) => return Ok(()),
             }
+        }
+        if resize_pending {
+            pending = Some((epoch, Ok(LineEvent::Resize)));
+            resize_pending = false;
+            continue;
         }
         match poll.poll(&mut events, Some(INPUT_POLL_INTERVAL)) {
             Ok(()) if events.is_empty() => continue,

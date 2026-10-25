@@ -48,7 +48,11 @@ pub use conversation::{
     WorkspaceGuidance,
 };
 pub use custom::{
-    CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,
+    CustomCheckStatus, CustomProfile, CustomProfileCheck, CustomProfileDraft, CustomProfileError,
+    CustomProtocol, CustomProvider, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
+    MAX_CUSTOM_PROFILE_EFFORTS_BYTES, MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
+    MAX_CUSTOM_PROFILE_MODEL_BYTES, MAX_CUSTOM_PROFILE_NAME_BYTES, MessagesAuth,
+    check_custom_profile, check_custom_profile_value_with_cancellation,
     check_custom_profile_with_cancellation,
 };
 pub(crate) use custom::{MAX_ADDRESSES, PROVIDER_PROFILES};

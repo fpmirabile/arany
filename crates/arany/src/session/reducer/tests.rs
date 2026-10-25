@@ -1,5 +1,7 @@
 use super::*;
-use crate::session::WorkspaceIdentity;
+use crate::session::{
+    ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind, WorkspaceIdentity,
+};
 
 mod goal_recovery_tests {
     use super::*;
@@ -134,6 +136,8 @@ mod goal_recovery_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 
@@ -3705,6 +3709,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 
@@ -4899,6 +4905,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         for path in ["unrelated", "src/main.rs"] {
             let mut after_rewind = view.clone();
@@ -5097,6 +5105,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         view.apply_committed(&EventEnvelope {
             sequence: 3,
@@ -8830,4 +8840,80 @@ mod goal_replay_tests {
             assert_eq!(last.status, CheckpointStatus::Captured);
         }
     }
+}
+
+#[test]
+fn setup_edit_replay_requires_matching_finish_and_blocks_uncertainty() {
+    let session_id = SessionId::new();
+    let operation_id = uuid::Uuid::now_v7();
+    let envelope = |sequence, event| EventEnvelope {
+        sequence,
+        session_id,
+        run_id: None,
+        agent_run_id: None,
+        event,
+        created_at_ms: 1,
+    };
+    let started = envelope(
+        1,
+        Event::SessionStarted {
+            title: "Setup".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+        },
+    );
+    let edit_started = envelope(
+        2,
+        Event::ProviderSetupEditStarted {
+            operation_id,
+            target: ProviderSetupTarget {
+                kind: ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            },
+            expected_digest: None,
+        },
+    );
+    let mut view = SessionView::replay_open(session_id, &[started.clone(), edit_started.clone()])
+        .expect("valid open setup edit")
+        .expect("Session view");
+    assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+    assert!(
+        view.apply_committed(&envelope(
+            3,
+            Event::ProviderSetupEditFinished {
+                operation_id: uuid::Uuid::now_v7(),
+                resulting_digest: None,
+                disposition: ProviderSetupDisposition::Applied,
+            },
+        ))
+        .is_err()
+    );
+    assert!(
+        view.apply_committed(&envelope(
+            3,
+            Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: None,
+                disposition: ProviderSetupDisposition::Uncertain,
+            },
+        ))
+        .is_ok()
+    );
+    assert!(view.provider_setup_uncertain);
+    assert!(
+        view.apply_committed(&envelope(
+            4,
+            Event::SessionDefaultChanged {
+                defaults: SessionDefaults::default(),
+            },
+        ))
+        .is_err()
+    );
+
+    let recovered = SessionView::replay(session_id, &[started, edit_started])
+        .expect("incomplete edit remains replayable")
+        .expect("recovered Session");
+    assert_eq!(recovered.pending_provider_setup_edit, Some(operation_id));
 }

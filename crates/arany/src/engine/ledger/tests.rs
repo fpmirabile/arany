@@ -124,6 +124,8 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
         runs: Vec::new(),
         compactions: Vec::new(),
         goals: vec![goal_view(goal_id, budget)],
+        pending_provider_setup_edit: None,
+        provider_setup_uncertain: false,
     };
     GoalLedger::new(view, Some(goal_id))
 }

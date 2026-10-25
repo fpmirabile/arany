@@ -1,6 +1,45 @@
 use super::*;
 
 impl Event {
+    pub(super) fn validate_setup_edit(&self) -> Result<(), ReplayError> {
+        match self {
+            Self::ProviderSetupEditStarted {
+                operation_id,
+                target,
+                ..
+            } if operation_id.get_version() == Some(uuid::Version::SortRand)
+                && target.identity.len() <= 128
+                && match target.kind {
+                    super::ProviderSetupTargetKind::NativeAccount => {
+                        target.identity == "native" || valid_setup_identity(&target.identity)
+                    }
+                    super::ProviderSetupTargetKind::ChatGptAccount => {
+                        target.identity == "new-chatgpt-account"
+                            || target.identity == "chatgpt-setup"
+                            || valid_setup_identity(&target.identity)
+                    }
+                    super::ProviderSetupTargetKind::CustomProfile => {
+                        crate::validate::valid_name(&target.identity)
+                    }
+                    super::ProviderSetupTargetKind::ModelPreferences => target.identity == "models",
+                } =>
+            {
+                Ok(())
+            }
+            Self::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest,
+                disposition,
+            } if operation_id.get_version() == Some(uuid::Version::SortRand)
+                && (*disposition != super::ProviderSetupDisposition::Applied
+                    || resulting_digest.is_some()) =>
+            {
+                Ok(())
+            }
+            _ => Err(ReplayError::InvalidPayload),
+        }
+    }
+
     pub(super) fn validate_session(&self) -> Result<(), ReplayError> {
         match self {
             Self::SupervisorVerdictRecorded { verdict, .. } => {
@@ -73,4 +112,8 @@ impl Event {
             _ => Err(ReplayError::InvalidPayload),
         }
     }
+}
+
+fn valid_setup_identity(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| id.get_version() == Some(uuid::Version::SortRand))
 }

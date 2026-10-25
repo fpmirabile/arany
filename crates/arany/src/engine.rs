@@ -131,6 +131,10 @@ pub enum EngineError {
     GuardUnavailable,
     #[error("Session is not idle")]
     SessionNotIdle,
+    #[error(
+        "Provider setup outcome is incomplete or uncertain; inspect history and start a new Session"
+    )]
+    ProviderSetupBlocked,
     #[error("Session has no committed Run boundary to fork")]
     ForkNotAtRunBoundary,
     #[error("conversation rewind exceeds the eight-link or Event limit; start a new Session")]
@@ -1272,6 +1276,9 @@ impl Engine {
             .load_view(source_session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         lock.keep();
         let _ancestors = self.lock_lineage(&view).await?;
         let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
@@ -1853,6 +1860,9 @@ impl Engine {
             None => Vec::new(),
         };
         if let Some(view) = &history {
+            if view.provider_setup_blocks_continuation() {
+                return Err(EngineError::ProviderSetupBlocked);
+            }
             ensure_session_workspace(view, workspace_identity)?;
         }
         if entry == GoalEntry::Resume

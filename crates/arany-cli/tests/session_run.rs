@@ -898,6 +898,8 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     last_sequence: 0,
                     lineage: None,
                     goals: Vec::new(),
+                    pending_provider_setup_edit: None,
+                    provider_setup_uncertain: false,
                     runs: Vec::new(),
                     compactions: Vec::new(),
                 };

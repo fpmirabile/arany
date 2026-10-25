@@ -104,6 +104,9 @@ async fn append_idle_event(
             .load_view(session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         session_lock.keep();
         if view
             .runs
@@ -137,6 +140,9 @@ pub async fn resume_session(
             .load_view(session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         session_lock.keep();
         let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
         ensure_session_workspace(&view, identity)?;
@@ -258,6 +264,9 @@ pub(super) async fn fork_with_store(
         .load_view(source_session_id)
         .await?
         .ok_or(EngineError::MissingSession)?;
+    if source.provider_setup_blocks_continuation() {
+        return Err(EngineError::ProviderSetupBlocked);
+    }
     source_lock.keep();
     let identity = WorkspaceInputs::admit_identity(workspace, state)?;
     ensure_session_workspace(&source, identity)?;

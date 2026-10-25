@@ -25,12 +25,16 @@ const REFRESH: &str = "synthetic-chatgpt-refresh-token";
 const CLIENT: &str = "oaiapp_synthetic_offline";
 const UNFINISHED_HOST: &str = "2e664d00-3f9a-40c3-adeb-c6447313a871";
 const OTHER_PENDING_CLIENT: &str = "oaiapp_other_unfinished";
-const SHELL: &str = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --setup --state-dir /root/state-chatgpt --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
-const ENABLE_PLAN_SHELL: &str = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --setup --state-dir /root/state-enabled --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
+const SHELL: &str = "stty rows 8 cols 16; printf 'SHELL_PID:%s\nTTY_PATH:%s\n' \"$$\" \"$(tty)\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --setup --state-dir /root/state-chatgpt --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
+const ENABLE_PLAN_SHELL: &str = "stty rows 8 cols 16; printf 'SHELL_PID:%s\nTTY_PATH:%s\n' \"$$\" \"$(tty)\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --setup --state-dir /root/state-enabled --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
 const SIGNED_OUT_SHELL: &str = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --state-dir /root/state-after-logout --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
 
 #[path = "chatgpt/checked_turn.rs"]
 mod checked_turn;
+
+#[cfg(debug_assertions)]
+#[path = "chatgpt/inspection.rs"]
+mod inspection;
 
 fn der_value<'a>(cursor: &mut &'a [u8], tag: u8) -> &'a [u8] {
     assert_eq!(cursor[0], tag);
@@ -380,6 +384,47 @@ fn wait_for_stage(
     }
 }
 
+fn advance_setup_warning_pages(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    (start, resize_confirmation): (usize, bool),
+) {
+    let confirmation = b"empty Enter selects 1. Back\r\nInput:\r\n";
+    acknowledge_linear_pages(output, input, transcript, answered, (start, confirmation));
+    if resize_confirmation {
+        let text = String::from_utf8_lossy(transcript);
+        let tty_path = text
+            .lines()
+            .find_map(|line| line.trim_end_matches('\r').strip_prefix("TTY_PATH:"))
+            .expect("terminal path");
+        let tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tty_path)
+            .expect("open setup terminal");
+        let resized_at = transcript.len();
+        rustix::termios::tcsetwinsize(
+            &tty,
+            rustix::termios::Winsize {
+                ws_row: 12,
+                ws_col: 40,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+        )
+        .expect("resize setup terminal");
+        acknowledge_linear_pages(
+            output,
+            input,
+            transcript,
+            answered,
+            (resized_at, confirmation),
+        );
+    }
+}
+
 fn callback(url: &url::Url, returning: bool, registration_retry: bool) {
     assert!(!returning || !registration_retry);
     assert_eq!(
@@ -535,10 +580,22 @@ fn isolated_stage(checked_turn: bool) {
             &mut transcript,
             &mut answered,
             0,
-            b"type a choice name: API key or ChatGPT plan",
+            b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
             None,
         );
-        input.write_all(b"ChatGPT plan\r").expect("select plan");
+        let accounts_at = transcript.len();
+        input.write_all(b"API accounts\r").expect("open accounts");
+        acknowledge_linear_pages(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            (accounts_at, API_ACCOUNTS_PROMPT),
+        );
+        input
+            .write_all(b"Manage ChatGPT account\r")
+            .expect("manage ChatGPT account");
+        let warning_at;
         if returning {
             wait_for_stage(
                 &mut output,
@@ -546,9 +603,10 @@ fn isolated_stage(checked_turn: bool) {
                 &mut transcript,
                 &mut answered,
                 0,
-                b"type a choice name: Enable plan or Connect new",
+                b"type a choice name: 1. Enable plan or 2. Connect new or 3. Inspect; empty Enter selects 1. Enable plan\r\nInput:\r\n",
                 None,
             );
+            warning_at = transcript.len();
             input
                 .write_all(b"Enable plan\r")
                 .expect("enable plan explicitly");
@@ -559,25 +617,24 @@ fn isolated_stage(checked_turn: bool) {
                 &mut transcript,
                 &mut answered,
                 0,
-                b"type a choice name: Cancel or Use private file",
+                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
                 None,
             );
             assert!(
                 String::from_utf8_lossy(&transcript)
                     .contains("Password store unavailable. Unencrypted file")
             );
+            warning_at = transcript.len();
             input
                 .write_all(b"Use private file\r")
                 .expect("select file storage");
         }
-        wait_for_stage(
+        advance_setup_warning_pages(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            0,
-            b"empty Enter selects Back\r\nInput:\r\n",
-            None,
+            (warning_at, !permission_recovery && !unfinished && pass == 0),
         );
         input
             .write_all(b"Accept\r")
@@ -590,7 +647,7 @@ fn isolated_stage(checked_turn: bool) {
                 &mut transcript,
                 &mut answered,
                 resume_at,
-                b"type a choice name: Back or Resume; empty Enter selects Back\r\nInput:\r\n",
+                b"type a choice name: 1. Back or 2. Resume; empty Enter selects 1. Back\r\nInput:\r\n",
                 None,
             );
             assert!(!Path::new("/root/browser-url").exists());
@@ -630,7 +687,7 @@ fn isolated_stage(checked_turn: bool) {
                         .unwrap()
                         .is_none()
                 );
-                assert!(!Path::new("/root/state-chatgpt").exists());
+                setup_session("/root/state-chatgpt");
                 assert!(!Path::new("/root/browser-url").exists());
                 assert!(!catalog_started.load(Ordering::SeqCst));
                 return;
@@ -689,6 +746,7 @@ fn isolated_stage(checked_turn: bool) {
         sender
             .send((token, jwks, redirect_uri))
             .expect("issuer fixture handoff");
+        let configured_at = transcript.len();
         callback(&authorization, returning, unfinished);
         previous_authorization = Some(authorization);
         signed_tokens.push(signed.clone());
@@ -698,8 +756,17 @@ fn isolated_stage(checked_turn: bool) {
                 &mut input,
                 &mut transcript,
                 &mut answered,
-                0,
+                configured_at,
                 b"Verified ChatGPT sign-in saved; plan usage is disabled",
+                Some(&signed),
+            );
+            wait_for_stage(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                configured_at,
+                b"Input:\r\n",
                 Some(&signed),
             );
             let submit_at = transcript.len();
@@ -725,7 +792,7 @@ fn isolated_stage(checked_turn: bool) {
                 &mut input,
                 &mut transcript,
                 &mut answered,
-                0,
+                configured_at,
                 b"ChatGPT ready:",
                 Some(&signed),
             );
@@ -734,7 +801,7 @@ fn isolated_stage(checked_turn: bool) {
                 &mut input,
                 &mut transcript,
                 &mut answered,
-                0,
+                configured_at,
                 b"Input:\r\n",
                 Some(&signed),
             );
@@ -748,7 +815,7 @@ fn isolated_stage(checked_turn: bool) {
                     .windows(b"Plan-consuming check".len())
                     .any(|part| part == b"Plan-consuming check")
             );
-            unsaved(state);
+            setup_session(state);
             assert!(String::from_utf8_lossy(&transcript).contains("Model: gpt-6.1-sol\r\n"));
             if checked_turn {
                 checked_turn::accept_check_and_run(
@@ -896,7 +963,7 @@ fn isolated_stage(checked_turn: bool) {
             assert_eq!(view.defaults.model.as_deref(), Some("gpt-6.1-sol"));
             assert_eq!(view.defaults.effort, Some(arany::Effort::Medium));
         } else {
-            unsaved(state);
+            setup_session(state);
             assert!(text.contains("Provider: chatgpt\r\n"));
             assert!(text.contains(if permission_disabled {
                 "Model: unset\r\n"
@@ -963,7 +1030,7 @@ fn isolated_stage(checked_turn: bool) {
                 }
             }
             let reopened = run_pty(SIGNED_OUT_SHELL, &[], None);
-            assert!(!String::from_utf8_lossy(&reopened).contains("Choose access method"));
+            assert!(!String::from_utf8_lossy(&reopened).contains("Provider setup"));
             for secret in [ACCESS, REFRESH, signed.as_str()] {
                 assert!(
                     !reopened
@@ -990,7 +1057,7 @@ fn isolated_stage(checked_turn: bool) {
             continue;
         }
         let second_output = run_pty(BARE_SHELL, &[], None);
-        assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
+        assert!(!String::from_utf8_lossy(&second_output).contains("Provider setup"));
         for secret in [ACCESS, REFRESH, signed.as_str()] {
             assert!(
                 !second_output

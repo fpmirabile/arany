@@ -18,6 +18,7 @@ pub(crate) struct NativeEvidenceRecord {
 
 pub(crate) enum EvidenceOp {
     LoadProvider(String),
+    ClearProvider(String),
     #[cfg(test)]
     ClearNative([u8; 32]),
     LoadNative([u8; 32]),

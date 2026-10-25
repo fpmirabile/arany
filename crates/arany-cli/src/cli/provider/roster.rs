@@ -85,6 +85,24 @@ pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
     accepts: |bytes| presets(bytes).is_ok(),
 };
 
+pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<bool, String> {
+    let state = StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable")?;
+    let Some(bytes) = state
+        .read_current(&PROVIDER_ROSTER)
+        .map_err(|_| "Provider roster unavailable or unsafe")?
+    else {
+        return Ok(false);
+    };
+    let provider = format!("custom:{name}");
+    Ok(presets(&bytes)?.iter().any(|roster| {
+        roster
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.routes)
+            .any(|route| route.provider == provider)
+    }))
+}
+
 fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
     if !valid_profile_name(selected) {
         return Err(INVALID.into());

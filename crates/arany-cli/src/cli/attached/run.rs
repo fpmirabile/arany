@@ -2240,26 +2240,30 @@ mod tests {
                 let dialogue: &[StartupInput] = match case {
                     Case::InvalidChatgpt | Case::InvalidRegistration => &[
                         Reply("/setup\n"),
-                        Reply("ChatGPT plan\n"),
+                        Reply("API accounts\n"),
+                        Reply("Manage ChatGPT account\n"),
                         Reply("\n"),
                         Reply("/exit\n"),
                     ],
                     Case::InvalidChatgptReset => &[
                         Reply("/setup\n"),
-                        Reply("ChatGPT plan\n"),
+                        Reply("API accounts\n"),
+                        Reply("Manage ChatGPT account\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
                         Reply("/exit\n"),
                     ],
                     Case::InvalidNative => &[
                         Reply("/setup\n"),
-                        Reply("API key\n"),
+                        Reply("API accounts\n"),
+                        Reply("Add or replace native API account\n"),
                         Reply("\n"),
                         Reply("/exit\n"),
                     ],
                     Case::InvalidNativeReset => &[
                         Reply("/setup\n"),
-                        Reply("API key\n"),
+                        Reply("API accounts\n"),
+                        Reply("Add or replace native API account\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
                         Reply("/exit\n"),
@@ -2271,9 +2275,11 @@ mod tests {
                         Interrupt,
                         Reply("/exit\n"),
                     ],
-                    Case::InitialSetupFailure | Case::InvalidHistorySetup => {
-                        &[Reply("ChatGPT plan\n"), Reply("/exit\n")]
-                    }
+                    Case::InitialSetupFailure | Case::InvalidHistorySetup => &[
+                        Reply("API accounts\n"),
+                        Reply("Manage ChatGPT account\n"),
+                        Reply("/exit\n"),
+                    ],
                     Case::InvalidHistorySetupQuit => &[Interrupt],
                     Case::CorruptHistory => &[
                         Reply("Reset history\n"),
@@ -2359,6 +2365,14 @@ mod tests {
                         }
                         let fresh =
                             String::from_utf8_lossy(&bytes[answered_bytes..]).replace("\r\n", "\n");
+                        if fresh
+                            .split_once("Choose: Page ")
+                            .is_some_and(|(_, page)| page.contains('\n'))
+                        {
+                            input.write_all(b"\n").unwrap();
+                            answered_bytes = bytes.len();
+                            return;
+                        }
                         if fresh.contains("Input:\n")
                             && let Some(action) = inputs.next()
                         {
@@ -2463,7 +2477,7 @@ mod tests {
                         "history case {case}: {}",
                         crate::presentation::escape_terminal(&transcript)
                     );
-                    assert!(transcript.contains("empty Enter selects Retry"));
+                    assert!(transcript.contains("empty Enter selects 1. Retry"));
                     if case == Case::UnsafeHistory {
                         assert!(!transcript.contains("Reset history"));
                         assert!(transcript.contains("unsafe or inaccessible"));
@@ -2471,7 +2485,7 @@ mod tests {
                         assert!(transcript.contains("Reset deletes all conversations"));
                         assert!(transcript.contains("Reset history"));
                         assert!(transcript.contains("This cannot be undone."));
-                        assert!(transcript.contains("empty Enter selects Back"));
+                        assert!(transcript.contains("empty Enter selects 1. Back"));
                     }
                     let calls = std::fs::read_to_string(marker).unwrap_or_default();
                     assert_eq!(
@@ -2489,7 +2503,8 @@ mod tests {
                         assert!(transcript.contains("Setup could not be completed"));
                     } else {
                         assert!(
-                            transcript.contains("empty Enter selects Back"),
+                            transcript.contains("1. Back")
+                                && transcript.contains("empty Enter selects 1"),
                             "reset must initially decline"
                         );
                         assert!(
@@ -2497,7 +2512,18 @@ mod tests {
                             "reset choice must not be clipped"
                         );
                         if !case.name().starts_with("invalid_preferences") {
-                            assert!(transcript.contains("no remote sign-out"));
+                            let reviewed = transcript
+                                .lines()
+                                .filter_map(|line| {
+                                    line.strip_prefix("Choose: Page ")?
+                                        .split_once("\\u{000a}")
+                                        .map(|(_, content)| content)
+                                })
+                                .collect::<String>();
+                            assert!(
+                                transcript.contains("no remote sign-out")
+                                    || reviewed.contains("no remote sign-out")
+                            );
                         }
                     }
                     let expected = usize::from(matches!(
@@ -2599,6 +2625,7 @@ mod tests {
                     &workspace,
                     account,
                     crate::accounts::credentials::AccountStorage::PrivateFile,
+                    None,
                 )
                 .await
                 .unwrap();

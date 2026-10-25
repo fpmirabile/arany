@@ -410,6 +410,15 @@ fn run_pty_with_gate(
     let mut answered = crate::session_picker::PtyResponses::default();
     let mut after_answer = 0;
     for &(needle, answer) in answers {
+        if needle == API_ACCOUNTS_PROMPT {
+            acknowledge_linear_pages(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (after_answer, needle),
+            );
+        }
         let stage_at = wait_for_sanitized(
             &mut output,
             &mut input,
@@ -529,6 +538,17 @@ fn session(state: &str) -> SessionView {
     })
 }
 
+fn setup_session(state: &str) {
+    let view = session(state);
+    assert!(view.runs.is_empty(), "setup creates no Run");
+    assert!(
+        view.last_sequence >= 3,
+        "confirmed setup has a journaled edit"
+    );
+    assert_eq!(view.pending_provider_setup_edit, None);
+    assert!(!view.provider_setup_uncertain);
+}
+
 fn unsaved(state: &str) {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -542,7 +562,7 @@ fn unsaved(state: &str) {
             .expect("Workspace Sessions");
             assert!(
                 sessions.is_empty(),
-                "setup and startup must not save an empty conversation"
+                "unconfirmed setup and bare startup create no Session"
             );
         });
 }
@@ -569,12 +589,19 @@ fn isolated_stage() {
     let first_output = run_pty(
         SETUP_SHELL,
         &[
-            (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
-                b"type a choice name: Cancel or Use private file",
+                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"API accounts\r",
+            ),
+            (
+                API_ACCOUNTS_PROMPT,
+                b"Add or replace native API account\r",
+            ),
+            (
+                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
                 b"Use private file\r",
             ),
-            (b"type a choice name: OpenAI or Anthropic", b"OpenAI\r"),
+            (b"type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n", b"OpenAI\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
         ],
         None,
@@ -612,11 +639,11 @@ fn isolated_stage() {
     let metadata = std::fs::metadata(account_root.path().join("account-credentials.json"))
         .expect("account file metadata");
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    unsaved("/root/state-one");
+    setup_session("/root/state-one");
     assert!(setup_text.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
 
     let second_output = run_pty(BARE_SHELL, &[], None);
-    assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
+    assert!(!String::from_utf8_lossy(&second_output).contains("Provider setup"));
     unsaved("/root/state-two");
     assert!(
         String::from_utf8_lossy(&second_output).contains("Provider: openai\r\nModel: gpt-5.4\r\n")
@@ -762,12 +789,19 @@ fn isolated_stage() {
         EMPTY_CATALOG_SHELL,
         &[
             (b"Input:\r\n", b"/setup\r"),
-            (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
-                b"type a choice name: Cancel or Use private file",
+                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"API accounts\r",
+            ),
+            (
+                API_ACCOUNTS_PROMPT,
+                b"Add or replace native API account\r",
+            ),
+            (
+                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
                 b"Use private file\r",
             ),
-            (b"type a choice name: OpenAI or Anthropic", b"OpenAI\r"),
+            (b"type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n", b"OpenAI\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
         ],
         Some(b"Notice: Error: selected account has no visible models; use /setup to retry"),

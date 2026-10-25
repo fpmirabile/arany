@@ -2,23 +2,37 @@ use crate::accounts::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
 };
 use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
+use crate::presentation::{escape_terminal, format_duration};
 use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalError, TerminalInput};
 use arany::RecordKind;
 use arany::{
-    CollaborationPolicy, Effort, HistoryRecovery, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
-    MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, ProviderKind, SessionDefaults,
-    StateRoot, Store, StoreError, list_native_models_with_credentials, validate_native_api_key,
+    CollaborationPolicy, CustomCheckStatus, CustomProfile, CustomProfileDraft, CustomProfileError,
+    CustomProtocol, Effort, Event, HistoryRecovery, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
+    MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES, MAX_CUSTOM_PROFILE_EFFORTS_BYTES,
+    MAX_CUSTOM_PROFILE_ENDPOINT_BYTES, MAX_CUSTOM_PROFILE_MODEL_BYTES,
+    MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_NATIVE_API_KEY_BYTES, MessagesAuth, ModelEntry,
+    NativeApiCredentials, ProviderKind, ProviderSetupDisposition, ProviderSetupTarget,
+    ProviderSetupTargetKind, RunCancellation, SessionDefaults, SessionId, StateRoot, Store,
+    StoreError, create_session, list_native_models_with_credentials, validate_native_api_key,
 };
+use sha2::{Digest, Sha256};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const AUTHORIZE_TITLE: &str = "Authorize saved access";
 const AUTHORIZE_PROMPT: &str =
     "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits";
+const SETUP_MESSAGE_PAGE_CHARS: usize = 36;
+const MAX_SETUP_CHOICE_INPUT_BYTES: usize = 64;
+
+#[cfg(all(test, unix, debug_assertions))]
+#[path = "../../../tests/session_run/setup/removal.rs"]
+mod removal;
 
 pub(super) enum SetupError {
     Recoverable(String),
     Presentation(String),
+    Uncertain(String),
     Shutdown(ShutdownSignal),
 }
 
@@ -45,7 +59,9 @@ impl From<TerminalError> for SetupError {
 impl From<SetupError> for String {
     fn from(error: SetupError) -> Self {
         match error {
-            SetupError::Recoverable(message) | SetupError::Presentation(message) => message,
+            SetupError::Recoverable(message)
+            | SetupError::Presentation(message)
+            | SetupError::Uncertain(message) => message,
             SetupError::Shutdown(signal) => format!("terminated by {}", signal.name()),
         }
     }
@@ -62,6 +78,10 @@ pub(super) enum SetupSelection {
         notice: Option<String>,
         catalog: Vec<ModelEntry>,
     },
+    Custom {
+        defaults: SessionDefaults,
+        notice: String,
+    },
 }
 
 pub(super) enum SavedDefaults {
@@ -69,6 +89,114 @@ pub(super) enum SavedDefaults {
     Cancelled,
     Selected(SessionDefaults),
     AccessChecked(SessionDefaults),
+}
+
+pub(super) struct SetupJournal {
+    state_dir: PathBuf,
+    workspace: PathBuf,
+    session_id: Option<SessionId>,
+    conversation: Option<arany::SessionView>,
+}
+
+impl SetupJournal {
+    pub(super) fn new(state_dir: &Path, workspace: &Path, session_id: Option<SessionId>) -> Self {
+        Self {
+            state_dir: state_dir.to_owned(),
+            workspace: workspace.to_owned(),
+            session_id,
+            conversation: None,
+        }
+    }
+
+    pub(super) fn for_conversation(
+        state_dir: &Path,
+        workspace: &Path,
+        view: &arany::SessionView,
+    ) -> Self {
+        let mut journal = Self::new(
+            state_dir,
+            workspace,
+            (view.created_sequence != 0).then_some(view.id),
+        );
+        if journal.session_id.is_none() {
+            journal.conversation = Some(view.clone());
+        }
+        journal
+    }
+
+    pub(super) fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
+    async fn start(
+        &mut self,
+        kind: ProviderSetupTargetKind,
+        identity: String,
+        expected_digest: Option<[u8; 32]>,
+    ) -> Result<uuid::Uuid, SetupError> {
+        if self.session_id.is_none() {
+            self.session_id = Some(if let Some(view) = &self.conversation {
+                super::materialize_conversation(&self.state_dir, &self.workspace, view)
+                    .await?
+                    .id
+            } else {
+                let root = StateRoot::admit(&self.state_dir)
+                    .map_err(|_| "state directory unavailable or unsafe")?;
+                create_session(root, self.workspace.clone(), None)
+                    .await
+                    .map_err(|error| error.to_string())?
+            });
+        }
+        let operation_id = uuid::Uuid::now_v7();
+        let store = Store::open(
+            StateRoot::open_existing(&self.state_dir)
+                .map_err(|_| "state directory unavailable or unsafe")?,
+        )
+        .map_err(|_| "state store unavailable")?;
+        let result = store
+            .append(
+                self.session_id.expect("setup Session was materialized"),
+                Event::ProviderSetupEditStarted {
+                    operation_id,
+                    target: ProviderSetupTarget { kind, identity },
+                    expected_digest,
+                },
+            )
+            .await;
+        let close = store.close().await;
+        result.map_err(|_| {
+            SetupError::Presentation("could not journal Provider setup edit".into())
+        })?;
+        close.map_err(|_| SetupError::Presentation("could not close setup journal".into()))?;
+        Ok(operation_id)
+    }
+
+    async fn finish(
+        &self,
+        operation_id: uuid::Uuid,
+        resulting_digest: Option<[u8; 32]>,
+        disposition: ProviderSetupDisposition,
+    ) -> Result<(), SetupError> {
+        let store = Store::open(
+            StateRoot::open_existing(&self.state_dir)
+                .map_err(|_| "state directory unavailable or unsafe")?,
+        )
+        .map_err(|_| SetupError::Presentation("setup journal unavailable".into()))?;
+        let result = store
+            .append(
+                self.session_id.expect("setup edit has a Session"),
+                Event::ProviderSetupEditFinished {
+                    operation_id,
+                    resulting_digest,
+                    disposition,
+                },
+            )
+            .await;
+        let close = store.close().await;
+        result
+            .map_err(|_| SetupError::Presentation("could not settle Provider setup edit".into()))?;
+        close.map_err(|_| SetupError::Presentation("could not close setup journal".into()))
+    }
 }
 
 enum ChatGptSetupAccount {
@@ -415,124 +543,1307 @@ async fn inspect_or_file() -> Result<credentials::InspectedAccount, CredentialEr
 
 pub(super) async fn resolve(
     terminal: &mut AttachedTerminal,
+    state_dir: &Path,
     workspace: &Path,
+    journal: &mut SetupJournal,
 ) -> Result<Option<SetupSelection>, SetupError> {
     if super::models::preferences_need_reset(workspace)?
-        && !reset_saved_setup(terminal, workspace, credentials::SetupData::Models).await?
+        && !reset_saved_setup(terminal, workspace, credentials::SetupData::Models, journal).await?
     {
         return Ok(None);
     }
     let Some(access) = choose(
         terminal,
         1,
-        "Choose access method",
-        "ChatGPT plan uses your subscription",
-        &[(b'1', "API key"), (b'2', "ChatGPT plan")],
+        "Provider setup",
+        "Add or manage access and custom routes",
+        &[(b'1', "API accounts"), (b'2', "Custom routes")],
     )
     .await?
     else {
         return Ok(None);
     };
-    if access == b'2' {
-        chatgpt_setup(terminal, workspace).await
+    match access {
+        b'1' => accounts_setup(terminal, workspace, journal).await,
+        b'2' => custom_routes_setup(terminal, state_dir, journal).await,
+        _ => Err("invalid Provider setup choice".into()),
+    }
+}
+
+async fn accounts_setup(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<Option<SetupSelection>, SetupError> {
+    loop {
+        let Some(action) = choose(
+            terminal,
+            1,
+            "API accounts",
+            "Credentials belong to this OS user",
+            &[
+                (b'1', "Add or replace native API account"),
+                (b'2', "Select saved native API account"),
+                (b'3', "Manage ChatGPT account"),
+                (b'4', "Inspect saved native API account"),
+                (b'5', "Remove saved access"),
+                (b'6', "Back"),
+            ],
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        match action {
+            b'1' => return native_setup(terminal, workspace, journal).await,
+            b'2' => return select_native_account(terminal).await,
+            b'3' => return chatgpt_setup(terminal, workspace, journal).await,
+            b'4' => inspect_native_account(terminal).await?,
+            b'5' => remove_saved_access(terminal, workspace, journal).await?,
+            b'6' => return Ok(None),
+            _ => return Err("invalid account action".into()),
+        }
+    }
+}
+
+async fn inspect_native_account(terminal: &mut AttachedTerminal) -> Result<(), SetupError> {
+    let inspected = credentials::inspect()
+        .await
+        .map_err(|error| SetupError::from(error.to_string()))?;
+    let Some(account) = inspected.account else {
+        await_setup_ack(terminal, "Native API account", "No saved account").await?;
+        return Ok(());
+    };
+    let details = format!(
+        "Provider: {}\nModel: {}\nEffort: {}\nStorage: {}\nCredential: stored; hidden",
+        escape_terminal(&account.provider),
+        escape_terminal(&account.model),
+        account
+            .effort
+            .map_or("default".to_owned(), |effort| effort.to_string()),
+        match inspected.storage {
+            AccountStorage::Keyring => "OS password store",
+            AccountStorage::PrivateFile => "private file",
+        },
+    );
+    await_setup_ack(terminal, "Native API account", &details).await?;
+    Ok(())
+}
+
+async fn select_native_account(
+    terminal: &mut AttachedTerminal,
+) -> Result<Option<SetupSelection>, SetupError> {
+    let inspected = credentials::inspect()
+        .await
+        .map_err(|error| SetupError::from(error.to_string()))?;
+    let Some(account) = inspected.account else {
+        await_setup_ack(terminal, "Native API account", "No saved account to select").await?;
+        return Ok(None);
+    };
+    if inspected.storage == AccountStorage::PrivateFile
+        && choose(
+            terminal,
+            1,
+            "Use private file?",
+            "NOT encrypted; same-user apps read key",
+            &[(b'2', "Cancel"), (b'1', "Use private file")],
+        )
+        .await?
+            != Some(b'1')
+    {
+        return Ok(None);
+    }
+    let credentials = credentials::load_selected(account.id, &account.provider)
+        .await
+        .map_err(|error| SetupError::from(error.to_string()))?;
+    let Some(catalog) = load_catalog(terminal, &account.provider, &credentials).await? else {
+        return Ok(None);
+    };
+    let notice = format!(
+        "{} ready: {} · use /model to change.",
+        account.provider, account.model
+    );
+    Ok(Some(SetupSelection::Native {
+        defaults: defaults(&account),
+        notice,
+        catalog,
+    }))
+}
+
+async fn remove_saved_access(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<(), SetupError> {
+    let Some(kind) = choose(
+        terminal,
+        1,
+        "Remove saved access",
+        "Local removal does not revoke a remote token",
+        &[(b'1', "Native API account"), (b'2', "ChatGPT account")],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    match kind {
+        b'1' => remove_native_saved_access(terminal, workspace, journal).await?,
+        b'2' => remove_chatgpt_saved_access(terminal, workspace, journal).await?,
+        _ => return Err("invalid account removal choice".into()),
+    }
+    Ok(())
+}
+
+async fn remove_native_saved_access(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<(), SetupError> {
+    let removal =
+        credentials::NativeRemoval::prepare(workspace).map_err(|error| error.to_string())?;
+    let Some(removal) = removal else {
+        terminal.draw_setup(1, "Native API account", "No saved account", 0, None)?;
+        return Ok(());
+    };
+    if review_warning(
+        terminal,
+        "Remove native API account?",
+        "Delete Arany's saved API credential and model preferences. This does not revoke the Provider's credential remotely.",
+        "Remove local API access?",
+    )
+    .await?
+    {
+        let operation = journal
+            .start(
+                ProviderSetupTargetKind::NativeAccount,
+                "native".into(),
+                None,
+            )
+            .await?;
+        settle_native_removal(journal, operation, removal.apply(workspace)).await?;
+        await_setup_ack(
+            terminal,
+            "Native API account",
+            "Removed locally; the Provider credential remains active",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn settle_native_removal(
+    journal: &SetupJournal,
+    operation: uuid::Uuid,
+    result: Result<(), CredentialError>,
+) -> Result<(), SetupError> {
+    match result {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest([]).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await
+        }
+        Err(error) => {
+            let disposition = if matches!(
+                error,
+                CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown
+            ) {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            Err(native_removal_error(error))
+        }
+    }
+}
+
+async fn remove_chatgpt_saved_access(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<(), SetupError> {
+    let (selected, ids, expected_index) = match chatgpt::saved_account_index(workspace) {
+        Ok(accounts) => accounts,
+        Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
+            terminal.draw_setup(1, "ChatGPT account", "No saved account", 0, None)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.to_string().into()),
+    };
+    let Some(account) =
+        choose_saved_chatgpt_id(terminal, Some(selected), &ids, "Select ChatGPT account").await?
+    else {
+        return Ok(());
+    };
+    if !review_warning(
+        terminal,
+        "Remove ChatGPT access?",
+        &format!("Clear local ChatGPT account {account}. No request is sent to the Provider, and remote access is unchanged."),
+        "Remove local ChatGPT access?",
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    let operation = journal
+        .start(
+            ProviderSetupTargetKind::ChatGptAccount,
+            account.to_string(),
+            None,
+        )
+        .await?;
+    let outcome = match chatgpt::remove_account_locally(
+        workspace.to_owned(),
+        account,
+        expected_index,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let disposition = if chatgpt_edit_is_uncertain(&error) {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            return Err(chatgpt_removal_error(error));
+        }
+    };
+    journal
+        .finish(
+            operation,
+            outcome.local_cleared.then(|| Sha256::digest([]).into()),
+            if outcome.local_cleared {
+                ProviderSetupDisposition::Applied
+            } else {
+                ProviderSetupDisposition::Uncertain
+            },
+        )
+        .await?;
+    let notice = if outcome.local_cleared {
+        "ChatGPT disconnected locally; remote access remains active"
     } else {
-        native_setup(terminal, workspace).await
+        "ChatGPT credential cleanup is uncertain; inspect saved access before retrying"
+    };
+    await_setup_ack(terminal, "ChatGPT account", notice).await?;
+    if !outcome.local_cleared {
+        return Err(SetupError::Presentation(
+            "ChatGPT account cleanup is uncertain; restart setup and inspect saved access before continuing".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn chatgpt_removal_error(error: chatgpt::AuthorizationError) -> SetupError {
+    match error {
+        error if chatgpt_edit_is_uncertain(&error) => SetupError::Presentation(
+            "ChatGPT account cleanup is uncertain; restart setup and inspect saved access before continuing.".into(),
+        ),
+        error => SetupError::Recoverable(error.to_string()),
+    }
+}
+
+fn native_removal_error(error: CredentialError) -> SetupError {
+    match error {
+        CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown => {
+            SetupError::Presentation(
+                "Native account removal is uncertain; restart setup and inspect saved access before continuing."
+                    .into(),
+            )
+        }
+        _ => SetupError::Recoverable(error.to_string()),
+    }
+}
+
+async fn choose_saved_chatgpt_id(
+    terminal: &mut AttachedTerminal,
+    selected: Option<uuid::Uuid>,
+    ids: &[uuid::Uuid],
+    title: &str,
+) -> Result<Option<uuid::Uuid>, SetupError> {
+    let choices: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                u8::try_from(index + 1).unwrap_or(u8::MAX),
+                selected.map_or_else(
+                    || id.to_string(),
+                    |selected| chatgpt_account_label(*id, selected),
+                ),
+            )
+        })
+        .collect();
+    let rendered: Vec<_> = choices
+        .iter()
+        .map(|(value, label)| (*value, label.as_str()))
+        .collect();
+    let choice = choose(
+        terminal,
+        1,
+        title,
+        "Account IDs only; no token access",
+        &rendered,
+    )
+    .await?;
+    Ok(choice.and_then(|choice| {
+        choices
+            .iter()
+            .find(|(value, _)| *value == choice)
+            .map(|(index, _)| ids[usize::from(*index - 1)])
+    }))
+}
+
+fn chatgpt_account_label(id: uuid::Uuid, selected: uuid::Uuid) -> String {
+    format!("{id}{}", if id == selected { " · selected" } else { "" })
+}
+
+async fn custom_routes_setup(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+    journal: &mut SetupJournal,
+) -> Result<Option<SetupSelection>, SetupError> {
+    loop {
+        let state = StateRoot::open_existing(state_dir)
+            .or_else(|_| StateRoot::admit(state_dir))
+            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        let (expected, profiles) =
+            CustomProfile::load_all_with_snapshot(&state).map_err(|error| error.to_string())?;
+        let statuses = CustomProfile::check_statuses(&state, &profiles)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut context = CustomRouteContext {
+            state_dir,
+            state: &state,
+            expected: expected.as_deref(),
+            profiles: &profiles,
+            journal,
+        };
+        match custom_route_selection(terminal, &profiles, &statuses).await? {
+            None => return Ok(None),
+            Some(choice) => {
+                match apply_custom_route_choice(terminal, &mut context, &statuses, choice).await? {
+                    CustomRouteResult::Continue => {}
+                    CustomRouteResult::Leave => return Ok(None),
+                    CustomRouteResult::Select(selection) => return Ok(Some(selection)),
+                }
+            }
+        }
+    }
+}
+
+enum CustomRouteResult {
+    Continue,
+    Leave,
+    Select(SetupSelection),
+}
+
+struct CustomRouteContext<'a> {
+    state_dir: &'a Path,
+    state: &'a StateRoot,
+    expected: Option<&'a [u8]>,
+    profiles: &'a [CustomProfile],
+    journal: &'a mut SetupJournal,
+}
+
+async fn custom_route_selection(
+    terminal: &mut AttachedTerminal,
+    profiles: &[CustomProfile],
+    statuses: &[(String, CustomCheckStatus)],
+) -> Result<Option<u8>, SetupError> {
+    let choices = custom_profile_choices(profiles, statuses);
+    let rendered = choices
+        .iter()
+        .map(|(value, label)| (*value, label.as_str()))
+        .collect::<Vec<_>>();
+    choose(
+        terminal,
+        1,
+        "Custom routes",
+        "Declarations are saved privately; Select and Check are separate actions",
+        &rendered,
+    )
+    .await
+}
+
+async fn apply_custom_route_choice(
+    terminal: &mut AttachedTerminal,
+    context: &mut CustomRouteContext<'_>,
+    statuses: &[(String, CustomCheckStatus)],
+    choice: u8,
+) -> Result<CustomRouteResult, SetupError> {
+    if choice == b'a' {
+        add_custom_route(terminal, context).await?;
+        return Ok(CustomRouteResult::Continue);
+    }
+    if choice == b'b' {
+        return Ok(CustomRouteResult::Leave);
+    }
+    let index = usize::from(choice.saturating_sub(1));
+    let profile = context
+        .profiles
+        .get(index)
+        .ok_or_else(|| SetupError::Recoverable("invalid custom route selection".into()))?;
+    let Some(action) = custom_route_action(terminal, profile).await? else {
+        return Ok(CustomRouteResult::Continue);
+    };
+    match action {
+        b'1' => {
+            let status = statuses
+                .iter()
+                .find(|(name, _)| name == profile.name())
+                .map(|(_, status)| *status);
+            inspect_custom_route(terminal, profile, status).await?;
+        }
+        b'2' => return Ok(CustomRouteResult::Select(select_custom_profile(profile))),
+        b'3' => {
+            if check_custom_route(terminal, context.state, profile).await? {
+                return Ok(CustomRouteResult::Leave);
+            }
+        }
+        b'4' => edit_custom_route(terminal, context, index, profile).await?,
+        b'5' => remove_custom_route(terminal, context, index, profile).await?,
+        b'6' => {}
+        _ => return Err("invalid custom route action".into()),
+    }
+    Ok(CustomRouteResult::Continue)
+}
+
+async fn custom_route_action(
+    terminal: &mut AttachedTerminal,
+    profile: &CustomProfile,
+) -> Result<Option<u8>, SetupError> {
+    choose(
+        terminal,
+        1,
+        &format!("Custom route {}", escape_terminal(profile.name())),
+        &format!(
+            "Credential: {} — not checked by listing",
+            escape_terminal(profile.credential_env())
+        ),
+        &[
+            (b'1', "Inspect"),
+            (b'2', "Select"),
+            (b'3', "Check"),
+            (b'4', "Edit"),
+            (b'5', "Remove"),
+            (b'6', "Back"),
+        ],
+    )
+    .await
+}
+
+fn select_custom_profile(profile: &CustomProfile) -> SetupSelection {
+    let effort = profile
+        .efforts()
+        .iter()
+        .copied()
+        .find(|effort| *effort == Effort::Low);
+    SetupSelection::Custom {
+        defaults: SessionDefaults {
+            provider: Some(format!("custom:{}", profile.name())),
+            model: Some(profile.model().to_owned()),
+            effort,
+            account_id: None,
+            policy: CollaborationPolicy::default(),
+        },
+        notice: "Custom route selected; the next Run rechecks exact admission".into(),
+    }
+}
+
+async fn edit_custom_route(
+    terminal: &mut AttachedTerminal,
+    context: &mut CustomRouteContext<'_>,
+    index: usize,
+    profile: &CustomProfile,
+) -> Result<(), SetupError> {
+    let Some(draft) = custom_profile_form(terminal, Some(&profile.draft())).await? else {
+        return Ok(());
+    };
+    if draft.name != profile.name() {
+        await_setup_ack(terminal, "Edit custom route", "Route names cannot change in place; add the new route, then remove the old one after updating references").await?;
+        return Ok(());
+    }
+    let mut drafts = context
+        .profiles
+        .iter()
+        .map(CustomProfile::draft)
+        .collect::<Vec<_>>();
+    drafts[index] = draft.clone();
+    CustomProfile::validate_drafts(&drafts)
+        .map_err(|_| SetupError::Recoverable("custom route fields are invalid".into()))?;
+    let summary = format!(
+        "Name: {}\nDestination: {}\nModel: {}\nChanging this declaration clears its check evidence.",
+        escape_terminal(&draft.name),
+        escape_terminal(&draft.endpoint),
+        escape_terminal(&draft.model),
+    );
+    if review_warning(
+        terminal,
+        "Save custom route?",
+        &summary,
+        "Save this declaration?",
+    )
+    .await?
+    {
+        write_custom_profiles(context, &drafts, &draft.name).await?;
+        await_setup_ack(terminal, "Custom route", "Saved; check it again before use").await?;
+    }
+    Ok(())
+}
+
+async fn remove_custom_route(
+    terminal: &mut AttachedTerminal,
+    context: &mut CustomRouteContext<'_>,
+    index: usize,
+    profile: &CustomProfile,
+) -> Result<(), SetupError> {
+    if custom_route_references(context.state_dir, profile.name())? {
+        await_setup_ack(terminal, "Remove custom route", "This route is referenced by local routing or roster configuration; update those records first").await?;
+        return Ok(());
+    }
+    let summary = format!(
+        "Remove {} from this State directory. Its environment variable is unchanged; its check evidence will be cleared.",
+        escape_terminal(profile.name()),
+    );
+    if review_warning(
+        terminal,
+        "Remove custom route?",
+        &summary,
+        "Remove this route?",
+    )
+    .await?
+    {
+        let mut drafts = context
+            .profiles
+            .iter()
+            .map(CustomProfile::draft)
+            .collect::<Vec<_>>();
+        drafts.remove(index);
+        write_custom_profiles(context, &drafts, profile.name()).await?;
+        await_setup_ack(terminal, "Custom route", "Removed").await?;
+    }
+    Ok(())
+}
+
+async fn add_custom_route(
+    terminal: &mut AttachedTerminal,
+    context: &mut CustomRouteContext<'_>,
+) -> Result<(), SetupError> {
+    let Some(draft) = custom_profile_form(terminal, None).await? else {
+        return Ok(());
+    };
+    if context
+        .profiles
+        .iter()
+        .any(|profile| profile.name() == draft.name)
+    {
+        await_setup_ack(
+            terminal,
+            "Custom route",
+            "A route with that name already exists",
+        )
+        .await?;
+        return Ok(());
+    }
+    let mut drafts = context
+        .profiles
+        .iter()
+        .map(CustomProfile::draft)
+        .collect::<Vec<_>>();
+    drafts.push(draft.clone());
+    CustomProfile::validate_drafts(&drafts)
+        .map_err(|_| SetupError::Recoverable("custom route fields are invalid".into()))?;
+    let summary = format!(
+        "Name: {}\nDestination: {}\nModel: {}\nCredential reference: {}\nSaving does not call the Provider or verify credentials.",
+        escape_terminal(&draft.name),
+        escape_terminal(&draft.endpoint),
+        escape_terminal(&draft.model),
+        escape_terminal(&draft.credential_env),
+    );
+    if review_warning(
+        terminal,
+        "Save custom route?",
+        &summary,
+        "Save this declaration?",
+    )
+    .await?
+    {
+        write_custom_profiles(context, &drafts, &draft.name).await?;
+        await_setup_ack(
+            terminal,
+            "Custom route",
+            "Saved; run Check before using this route",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn custom_write_error(error: CustomProfileError) -> SetupError {
+    if matches!(&error, CustomProfileError::PublicationUncertain) {
+        SetupError::Presentation(
+            "Custom route publication is uncertain. Inspect saved routes before continuing; no retry was attempted."
+                .into(),
+        )
+    } else {
+        SetupError::Recoverable(error.to_string())
+    }
+}
+
+async fn write_custom_profiles(
+    context: &mut CustomRouteContext<'_>,
+    drafts: &[CustomProfileDraft],
+    identity: &str,
+) -> Result<(), SetupError> {
+    let operation = context
+        .journal
+        .start(
+            ProviderSetupTargetKind::CustomProfile,
+            identity.to_owned(),
+            context.expected.map(|bytes| Sha256::digest(bytes).into()),
+        )
+        .await?;
+    match CustomProfile::write_profiles(context.state, context.expected, drafts).await {
+        Ok(bytes) => {
+            context
+                .journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest(bytes).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await
+        }
+        Err(error) => {
+            let disposition = if matches!(error, CustomProfileError::PublicationUncertain) {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            context.journal.finish(operation, None, disposition).await?;
+            Err(custom_write_error(error))
+        }
+    }
+}
+
+fn custom_profile_choices(
+    profiles: &[CustomProfile],
+    statuses: &[(String, CustomCheckStatus)],
+) -> Vec<(u8, String)> {
+    let mut choices: Vec<_> = profiles
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| {
+            let status = statuses
+                .iter()
+                .find(|(name, _)| name == profile.name())
+                .map_or("unchecked".to_owned(), |(_, status)| match status {
+                    CustomCheckStatus::Unchecked => "unchecked".into(),
+                    CustomCheckStatus::Stale => "stale".into(),
+                    CustomCheckStatus::VerifiedUntil(expires) => {
+                        let now = i64::try_from(arany::now_ms()).unwrap_or(i64::MAX);
+                        let remaining = expires.saturating_sub(now);
+                        format!(
+                            "verified; {} left",
+                            format_duration(remaining.max(0) as u64)
+                        )
+                    }
+                });
+            (
+                u8::try_from(index + 1).unwrap_or(u8::MAX),
+                format!("{} · {status}", escape_terminal(profile.name())),
+            )
+        })
+        .collect();
+    choices.push((b'a', "Add custom route".into()));
+    choices.push((b'b', "Back".into()));
+    choices
+}
+
+async fn inspect_custom_route(
+    terminal: &mut AttachedTerminal,
+    profile: &CustomProfile,
+    status: Option<CustomCheckStatus>,
+) -> Result<(), SetupError> {
+    let status = match status.unwrap_or(CustomCheckStatus::Unchecked) {
+        CustomCheckStatus::Unchecked => "not checked".to_owned(),
+        CustomCheckStatus::Stale => "stale; check again".to_owned(),
+        CustomCheckStatus::VerifiedUntil(expires) => format!("verified until {expires}"),
+    };
+    let details = format!(
+        "Protocol: {}\nDestination: {}\nModel: {}\nCredential: {} — not checked by listing\nCheck: {status}",
+        match profile.endpoint().contains("/v1/messages") {
+            true => "Anthropic Messages",
+            false => "OpenAI Responses",
+        },
+        escape_terminal(&profile.check_destination()),
+        escape_terminal(profile.model()),
+        escape_terminal(profile.credential_env()),
+    );
+    terminal.draw_setup(1, "Custom route", &details, 0, None)?;
+    await_setup_ack(terminal, "Custom route", &details).await?;
+    Ok(())
+}
+
+async fn check_custom_route(
+    terminal: &mut AttachedTerminal,
+    state: &StateRoot,
+    profile: &CustomProfile,
+) -> Result<bool, SetupError> {
+    let (calls, duration) = profile.check_limits();
+    let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    if !review_warning(
+        terminal,
+        "Check custom route?",
+        &format!(
+            "Destination: {}\nModel: {}\nAt most {calls} synthetic calls in {}; the Provider may bill for them. No chat or Workspace content is sent.",
+            escape_terminal(&profile.check_destination()),
+            escape_terminal(profile.model()),
+            format_duration(duration_ms),
+        ),
+        "Authorize this conformance check?",
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    let report = await_custom_check(terminal, state, profile).await?;
+    let (status, uncertain) = custom_check_status(report, profile);
+    await_setup_ack(terminal, "Custom route check", &status).await?;
+    Ok(uncertain)
+}
+
+async fn await_custom_check(
+    terminal: &mut AttachedTerminal,
+    state: &StateRoot,
+    profile: &CustomProfile,
+) -> Result<Result<arany::CustomProfileCheck, CustomProfileError>, SetupError> {
+    terminal.draw_setup(
+        1,
+        "Checking custom route",
+        "Contacting the exact destination with synthetic data",
+        0,
+        None,
+    )?;
+    let cancellation = RunCancellation::new();
+    let check = arany::check_custom_profile_value_with_cancellation(
+        StateRoot::open_existing(state.path())
+            .map_err(|_| "state directory unavailable or unsafe")?,
+        profile.clone(),
+        cancellation.clone(),
+    );
+    tokio::pin!(check);
+    let report = loop {
+        tokio::select! {
+            result = &mut check => break result,
+            input = terminal.next_input() => match input {
+                Ok(TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput) => {
+                    cancellation.cancel();
+                    break check.await;
+                }
+                Ok(TerminalInput::Shutdown(signal)) => {
+                    cancellation.cancel();
+                    let _ = check.await;
+                    return Err(SetupError::Shutdown(signal));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    cancellation.cancel();
+                    let _ = check.await;
+                    return Err(SetupError::Presentation(error.to_string()));
+                }
+            }
+        }
+    };
+    Ok(report)
+}
+
+fn custom_check_status(
+    report: Result<arany::CustomProfileCheck, CustomProfileError>,
+    profile: &CustomProfile,
+) -> (String, bool) {
+    let uncertain = matches!(
+        &report,
+        Err(CustomProfileError::Check { receipt, .. })
+            if receipt.disposition.is_none_or(|value| value == arany::CheckDisposition::Uncertain)
+    ) || matches!(
+        &report,
+        Err(CustomProfileError::Journal(error)) if error.receipt.is_some()
+    );
+    let status = match report {
+        Ok(report) => format!(
+            "Check: {}\nDisposition: {}\nStatus: verified until {}",
+            report.view().id,
+            report.view().replay_disposition(),
+            report.expires_at_ms(),
+        ),
+        Err(CustomProfileError::Check { source, receipt }) => {
+            let reason = if matches!(*source, CustomProfileError::CredentialNotSet) {
+                format!(
+                    "Credential: {} — not set\nExport it in the launching shell, then restart Arany",
+                    escape_terminal(profile.credential_env())
+                )
+            } else {
+                format!(
+                    "Check could not be completed: {}",
+                    safe_custom_check_error(&source)
+                )
+            };
+            format!(
+                "{reason}\nCheck: {}\nDisposition: {}",
+                receipt.id,
+                receipt
+                    .disposition
+                    .map_or("unconfirmed".into(), |value| value.to_string())
+            )
+        }
+        Err(error) => format!("Check unavailable: {}", safe_custom_check_error(&error)),
+    };
+    (status, uncertain)
+}
+
+async fn await_setup_ack(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    message: &str,
+) -> Result<bool, SetupError> {
+    let pages = setup_message_pages(message);
+    let mut page = 0usize;
+    let mut notice = None;
+    loop {
+        let text = format!("Page {}/{}\n{}", page + 1, pages.len(), pages[page]);
+        terminal.draw_setup(0, title, &text, 0, notice.take())?;
+        match terminal.next_input().await? {
+            TerminalInput::Submit if page + 1 < pages.len() => page += 1,
+            TerminalInput::Down | TerminalInput::PageDown if page + 1 < pages.len() => page += 1,
+            TerminalInput::Up | TerminalInput::PageUp => page = page.saturating_sub(1),
+            TerminalInput::Submit => return Ok(true),
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                return Ok(false);
+            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            TerminalInput::Resize => {
+                page = 0;
+                notice = Some("Terminal resized; reread all pages");
+            }
+            _ => {}
+        }
+    }
+}
+
+fn setup_message_pages(message: &str) -> Vec<String> {
+    let pages: Vec<_> = message
+        .lines()
+        .flat_map(|line| {
+            let chars: Vec<_> = line.chars().collect();
+            if chars.is_empty() {
+                return vec![String::new()];
+            }
+            chars
+                .chunks(SETUP_MESSAGE_PAGE_CHARS)
+                .map(|chunk| chunk.iter().collect())
+                .collect()
+        })
+        .collect();
+    if pages.is_empty() {
+        vec![String::new()]
+    } else {
+        pages
+    }
+}
+
+fn safe_custom_check_error(error: &CustomProfileError) -> &'static str {
+    match error {
+        CustomProfileError::CredentialNotSet => "selected credential is not set",
+        CustomProfileError::CredentialUnavailable => {
+            "selected credential is unavailable or invalid"
+        }
+        CustomProfileError::CheckBusy => "another Provider check is active",
+        CustomProfileError::PublicationUncertain => {
+            "record publication is uncertain; inspect the saved route before continuing"
+        }
+        CustomProfileError::Changed => {
+            "route changed during the operation; inspect it before continuing"
+        }
+        CustomProfileError::ConformanceFailed => "synthetic conformance failed",
+        CustomProfileError::Journal(_) | CustomProfileError::EvidenceUnavailable => {
+            "check result could not be confirmed"
+        }
+        _ => "destination or route was refused",
+    }
+}
+
+fn custom_route_references(state_dir: &Path, name: &str) -> Result<bool, SetupError> {
+    Ok(
+        crate::cli::provider::routing::references_custom_profile(state_dir, name)
+            .map_err(|error| error.to_string())?
+            || crate::cli::provider::roster::references_custom_profile(state_dir, name)
+                .map_err(|error| error.to_string())?,
+    )
+}
+
+async fn custom_profile_form(
+    terminal: &mut AttachedTerminal,
+    initial: Option<&CustomProfileDraft>,
+) -> Result<Option<CustomProfileDraft>, SetupError> {
+    let Some(protocol) = choose_custom_protocol(terminal, initial).await? else {
+        return Ok(None);
+    };
+    let Some((name, endpoint, model, credential_env)) =
+        read_custom_profile_fields(terminal, protocol, initial).await?
+    else {
+        return Ok(None);
+    };
+    let Some(efforts) = read_custom_efforts(terminal, initial).await? else {
+        return Ok(None);
+    };
+    let messages_auth = if protocol == CustomProtocol::AnthropicMessages {
+        let Some(choice) = choose_focused(
+            terminal,
+            1,
+            "Messages authentication",
+            "Choose the one declared credential header",
+            &[(b'1', "Bearer"), (b'2', "x-api-key")],
+            initial.map(|draft| match draft.messages_auth {
+                MessagesAuth::Bearer => b'1',
+                MessagesAuth::ApiKey => b'2',
+            }),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        if choice == b'1' {
+            MessagesAuth::Bearer
+        } else {
+            MessagesAuth::ApiKey
+        }
+    } else {
+        MessagesAuth::ApiKey
+    };
+    Ok(Some(CustomProfileDraft {
+        name,
+        protocol,
+        endpoint,
+        model,
+        credential_env,
+        messages_auth,
+        efforts,
+    }))
+}
+
+async fn choose_custom_protocol(
+    terminal: &mut AttachedTerminal,
+    initial: Option<&CustomProfileDraft>,
+) -> Result<Option<CustomProtocol>, SetupError> {
+    let selected = choose_focused(
+        terminal,
+        1,
+        "Custom route protocol",
+        "Choose one closed request format",
+        &[(b'1', "OpenAI Responses"), (b'2', "Anthropic Messages")],
+        initial.map(|draft| match draft.protocol {
+            CustomProtocol::OpenaiResponses => b'1',
+            CustomProtocol::AnthropicMessages => b'2',
+        }),
+    )
+    .await?;
+    Ok(selected.map(|choice| {
+        if choice == b'1' {
+            CustomProtocol::OpenaiResponses
+        } else {
+            CustomProtocol::AnthropicMessages
+        }
+    }))
+}
+
+async fn read_custom_profile_fields(
+    terminal: &mut AttachedTerminal,
+    protocol: CustomProtocol,
+    initial: Option<&CustomProfileDraft>,
+) -> Result<Option<(String, String, String, String)>, SetupError> {
+    let Some(name) = read_setup_value(
+        terminal,
+        "Custom route name",
+        &format!("Route name; at most {MAX_CUSTOM_PROFILE_NAME_BYTES} bytes"),
+        initial.map_or("", |draft| &draft.name),
+        MAX_CUSTOM_PROFILE_NAME_BYTES,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let endpoint_prompt = if protocol == CustomProtocol::OpenaiResponses {
+        "Exact canonical /responses URL; HTTPS, or loopback HTTP for local fixtures"
+    } else {
+        "Canonical HTTPS base URL, or loopback HTTP; Arany adds /v1/messages"
+    };
+    let Some(endpoint) = read_setup_value(
+        terminal,
+        "Custom route destination",
+        endpoint_prompt,
+        initial.map_or("", |draft| &draft.endpoint),
+        MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(model) = read_setup_value(
+        terminal,
+        "Custom route model",
+        &format!("Model identifier; at most {MAX_CUSTOM_PROFILE_MODEL_BYTES} bytes"),
+        initial.map_or("", |draft| &draft.model),
+        MAX_CUSTOM_PROFILE_MODEL_BYTES,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(credential_env) = read_setup_value(
+        terminal,
+        "Credential environment name",
+        &format!(
+            "Credential reference only; at most {MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES} bytes"
+        ),
+        initial.map_or("", |draft| &draft.credential_env),
+        MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((name, endpoint, model, credential_env)))
+}
+
+async fn read_custom_efforts(
+    terminal: &mut AttachedTerminal,
+    initial: Option<&CustomProfileDraft>,
+) -> Result<Option<Vec<Effort>>, SetupError> {
+    let initial = initial.map_or_else(String::new, |draft| {
+        draft
+            .efforts
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+    let Some(value) = read_optional_setup_value(
+        terminal,
+        "Declared efforts",
+        "Comma-separated effort names, or empty for no effort override",
+        &initial,
+        MAX_CUSTOM_PROFILE_EFFORTS_BYTES,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    parse_efforts(&value)
+        .map(Some)
+        .ok_or_else(|| SetupError::Recoverable("invalid declared effort list".into()))
+}
+
+fn parse_efforts(value: &str) -> Option<Vec<Effort>> {
+    if value.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let requested: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<Effort>)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if requested.len() > Effort::ALL.len() {
+        return None;
+    }
+    let efforts: Vec<_> = Effort::ALL
+        .iter()
+        .copied()
+        .filter(|effort| requested.contains(effort))
+        .collect();
+    (efforts.len() == requested.len()).then_some(efforts)
+}
+
+async fn read_setup_value(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+    initial: &str,
+    limit: usize,
+) -> Result<Option<String>, SetupError> {
+    read_setup_value_inner(
+        terminal,
+        SetupValueInput {
+            title,
+            instruction,
+            initial,
+            limit,
+            allow_empty: false,
+        },
+    )
+    .await
+}
+
+async fn read_optional_setup_value(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+    initial: &str,
+    limit: usize,
+) -> Result<Option<String>, SetupError> {
+    read_setup_value_inner(
+        terminal,
+        SetupValueInput {
+            title,
+            instruction,
+            initial,
+            limit,
+            allow_empty: true,
+        },
+    )
+    .await
+}
+
+struct SetupValueInput<'a> {
+    title: &'a str,
+    instruction: &'a str,
+    initial: &'a str,
+    limit: usize,
+    allow_empty: bool,
+}
+
+async fn read_setup_value_inner(
+    terminal: &mut AttachedTerminal,
+    input: SetupValueInput<'_>,
+) -> Result<Option<String>, SetupError> {
+    let SetupValueInput {
+        title,
+        instruction,
+        initial,
+        limit,
+        allow_empty,
+    } = input;
+    if !initial.is_empty()
+        && !initial.starts_with("re-enter ")
+        && !await_setup_ack(
+            terminal,
+            title,
+            &format!(
+                "Current value: {initial}\nEnter a replacement; empty Enter {}.",
+                if allow_empty { "clears it" } else { "keeps it" }
+            ),
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    let mut composer = Composer::default();
+    let prompt = if allow_empty {
+        format!("{instruction}; empty Enter clears this field")
+    } else if !initial.is_empty() && !initial.starts_with("re-enter ") {
+        format!("{instruction}; Enter replaces it, empty Enter keeps it")
+    } else {
+        instruction.to_owned()
+    };
+    let mut notice = None::<&str>;
+    loop {
+        terminal.draw_setup_text_input(title, &prompt, &composer, notice.take())?;
+        let input = terminal.next_input().await?;
+        match input {
+            TerminalInput::Character(character) if !character.is_control() => {
+                composer.apply(TerminalInput::Character(character));
+            }
+            TerminalInput::Paste => match terminal.take_paste() {
+                Ok(text)
+                    if !text.chars().any(char::is_control)
+                        && composer.text().len().saturating_add(text.len()) <= limit =>
+                {
+                    composer
+                        .insert_paste(&text)
+                        .map_err(|_| "setup field is too long")?;
+                }
+                _ => notice = Some("Field paste is invalid or over the size limit"),
+            },
+            TerminalInput::Submit if !composer.text().trim().is_empty() => {
+                let value = composer.text().trim().to_owned();
+                if value.len() <= limit && !value.chars().any(char::is_control) {
+                    return Ok(Some(value));
+                }
+                notice = Some("Field is invalid or over the size limit");
+            }
+            TerminalInput::Submit if allow_empty => return Ok(Some(String::new())),
+            TerminalInput::Submit if !initial.is_empty() => return Ok(Some(initial.to_owned())),
+            TerminalInput::Submit => notice = Some("This field cannot be empty"),
+            TerminalInput::Backspace
+            | TerminalInput::Left
+            | TerminalInput::Right
+            | TerminalInput::Delete => {
+                composer.apply(input);
+            }
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                terminal.discard_draft_input();
+                return Ok(None);
+            }
+            TerminalInput::Suspend => terminal.suspend_and_resume(
+                crate::terminal::MAX_DRAFT_BYTES.saturating_sub(composer.text().len()),
+            )?,
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            _ => {}
+        }
     }
 }
 
 async fn chatgpt_setup(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
+    journal: &mut SetupJournal,
 ) -> Result<Option<SetupSelection>, SetupError> {
     match chatgpt::registration::validate_saved_setup(workspace) {
         Ok(()) => {}
         Err(chatgpt::AuthorizationError::InvalidSavedState) => {
-            if !reset_saved_setup(terminal, workspace, credentials::SetupData::ChatGpt).await? {
+            if !reset_saved_setup(
+                terminal,
+                workspace,
+                credentials::SetupData::ChatGpt,
+                journal,
+            )
+            .await?
+            {
                 return Ok(None);
             }
         }
         Err(error) => return Err(error.to_string().into()),
     }
-    let account = match chatgpt::selected_registration() {
-        Ok((saved, true)) => match choose(
-            terminal,
-            2,
-            "ChatGPT account",
-            "Reuse, reconnect, or add",
-            &[
-                (b'1', "Use saved"),
-                (b'2', "Reconnect"),
-                (b'3', "Connect new"),
-            ],
-        )
-        .await?
-        {
-            Some(b'1') => choose_saved_chatgpt(terminal, workspace, saved).await?,
-            Some(b'2') => {
+    let account = loop {
+        let (saved, connected) = match chatgpt::selected_registration() {
+            Ok(saved) => saved,
+            Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
+                break connect_chatgpt(terminal, workspace, journal).await?;
+            }
+            Err(error) => return Err(error.to_string().into()),
+        };
+        match chatgpt_account_action(terminal, saved, connected).await? {
+            Some(ChatGptAccountAction::Inspect) => inspect_chatgpt_account(terminal).await?,
+            Some(ChatGptAccountAction::UseSaved) => {
+                break choose_saved_chatgpt(terminal, workspace, saved, journal).await?;
+            }
+            Some(ChatGptAccountAction::Reconnect) => {
                 let target = chatgpt::selected_reauthorization_target(saved)
                     .map_err(|error| error.to_string())?;
-                reconnect_chatgpt(terminal, workspace, target).await?
+                break reconnect_chatgpt(terminal, workspace, target, journal).await?;
             }
-            Some(b'3') => connect_chatgpt(terminal, workspace).await?,
-            None => None,
-            Some(_) => return Err("invalid ChatGPT account choice".into()),
-        },
-        Ok((saved, false)) => {
-            let target = chatgpt::selected_reauthorization_target(saved)
-                .map_err(|error| error.to_string())?;
-            let permission_missing = target.plan_permission_missing;
-            let reconnect_label = if permission_missing {
-                "Enable plan"
-            } else {
-                "Reconnect"
-            };
-            let (_, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
-            let other_saved = ids.len() > 1;
-            let reconnect_choice = if other_saved { b'2' } else { b'1' };
-            let new_choice = if other_saved { b'3' } else { b'2' };
-            let choices = if other_saved {
-                &[
-                    (b'1', "Use saved"),
-                    (b'2', reconnect_label),
-                    (b'3', "Connect new"),
-                ][..]
-            } else {
-                &[(b'1', reconnect_label), (b'2', "Connect new")][..]
-            };
-            match choose(
-                terminal,
-                2,
-                if permission_missing {
-                    "ChatGPT plan disabled"
-                } else {
-                    "ChatGPT account disconnected"
-                },
-                if permission_missing {
-                    "Enable plan or choose another account"
-                } else {
-                    "Reconnect or add"
-                },
-                choices,
-            )
-            .await?
-            {
-                Some(b'1') if other_saved => {
-                    choose_saved_chatgpt(terminal, workspace, saved).await?
-                }
-                Some(choice) if choice == reconnect_choice => {
-                    reconnect_chatgpt(terminal, workspace, target).await?
-                }
-                Some(choice) if choice == new_choice => {
-                    connect_chatgpt(terminal, workspace).await?
-                }
-                None => None,
-                Some(_) => return Err("invalid ChatGPT account choice".into()),
+            Some(ChatGptAccountAction::ConnectNew) => {
+                break connect_chatgpt(terminal, workspace, journal).await?;
             }
+            None => break None,
         }
-        Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
-            connect_chatgpt(terminal, workspace).await?
-        }
-        Err(error) => return Err(error.to_string().into()),
     };
     let Some(account) = account else {
         return Ok(None);
@@ -545,20 +1856,128 @@ async fn chatgpt_setup(
     Ok(selection)
 }
 
+enum ChatGptAccountAction {
+    UseSaved,
+    Reconnect,
+    ConnectNew,
+    Inspect,
+}
+
+async fn chatgpt_account_action(
+    terminal: &mut AttachedTerminal,
+    saved: uuid::Uuid,
+    connected: bool,
+) -> Result<Option<ChatGptAccountAction>, SetupError> {
+    let (title, instruction, reconnect_label, other_saved) = if connected {
+        (
+            "ChatGPT account",
+            "Reuse, reconnect, inspect, or add",
+            "Reconnect",
+            true,
+        )
+    } else {
+        let (_, accounts) = chatgpt::account_inspections().map_err(|error| error.to_string())?;
+        let permission_missing = accounts
+            .iter()
+            .find(|account| account.id == saved)
+            .is_some_and(|account| account.access == chatgpt::AccountAccess::PlanDisabled);
+        let (_, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
+        if permission_missing {
+            (
+                "ChatGPT plan disabled",
+                "Inspect, enable plan or choose another account",
+                "Enable plan",
+                ids.len() > 1,
+            )
+        } else {
+            (
+                "ChatGPT account disconnected",
+                "Inspect, reconnect or add",
+                "Reconnect",
+                ids.len() > 1,
+            )
+        }
+    };
+    let mut choices = Vec::new();
+    if other_saved {
+        choices.push((b'1', "Use saved"));
+    }
+    choices.extend([
+        (b'2', reconnect_label),
+        (b'3', "Connect new"),
+        (b'4', "Inspect"),
+    ]);
+    Ok(
+        match choose(terminal, 2, title, instruction, &choices).await? {
+            Some(b'1') => Some(ChatGptAccountAction::UseSaved),
+            Some(b'2') => Some(ChatGptAccountAction::Reconnect),
+            Some(b'3') => Some(ChatGptAccountAction::ConnectNew),
+            Some(b'4') => Some(ChatGptAccountAction::Inspect),
+            None => None,
+            Some(_) => return Err("invalid ChatGPT account choice".into()),
+        },
+    )
+}
+
+async fn inspect_chatgpt_account(terminal: &mut AttachedTerminal) -> Result<(), SetupError> {
+    let (selected, accounts) = chatgpt::account_inspections().map_err(|error| error.to_string())?;
+    if accounts.is_empty() {
+        await_setup_ack(terminal, "ChatGPT account", "No saved account").await?;
+        return Ok(());
+    }
+    let ids = accounts
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let Some(id) =
+        choose_saved_chatgpt_id(terminal, selected, &ids, "Inspect ChatGPT account").await?
+    else {
+        return Ok(());
+    };
+    let account = accounts
+        .iter()
+        .find(|account| account.id == id)
+        .ok_or("saved ChatGPT account unavailable")?;
+    let backend = match account.storage {
+        AccountStorage::Keyring => "OS password store",
+        AccountStorage::PrivateFile => "private file (not encrypted)",
+    };
+    let access = match account.access {
+        chatgpt::AccountAccess::Connected => "connected; saved metadata only, not checked",
+        chatgpt::AccountAccess::Disconnected => "unavailable; disconnected",
+        chatgpt::AccountAccess::PlanDisabled => "unavailable; plan permission disabled",
+        chatgpt::AccountAccess::RenewalPending => "unavailable; renewal incomplete or uncertain",
+        chatgpt::AccountAccess::SignOutPending => "unavailable; sign-out incomplete or uncertain",
+    };
+    await_setup_ack(terminal, "ChatGPT account details", &format!(
+        "Provider: ChatGPT\nAccount: {}\nBackend: {backend}\nBilling: ChatGPT plan; no API-key billing\nAccess: {access}", account.id,
+    )).await?;
+    Ok(())
+}
+
 async fn native_setup(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
+    journal: &mut SetupJournal,
 ) -> Result<Option<SetupSelection>, SetupError> {
     let inspected = match inspect_or_file().await {
         Ok(inspected) => inspected,
         Err(CredentialError::InvalidAccount) => {
-            if !reset_saved_setup(terminal, workspace, credentials::SetupData::Native).await? {
+            if !reset_saved_setup(terminal, workspace, credentials::SetupData::Native, journal)
+                .await?
+            {
                 return Ok(None);
             }
             inspect_or_file().await.map_err(|error| error.to_string())?
         }
         Err(error) => return Err(error.to_string().into()),
     };
+    let expected = inspected
+        .account
+        .as_ref()
+        .map(SavedAccount::snapshot_digest)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let storage = inspected.storage;
     if storage == AccountStorage::PrivateFile
         && choose(
@@ -653,9 +2072,21 @@ async fn native_setup(
         0,
         None,
     )?;
-    credentials::save(workspace, account, storage)
-        .await
-        .map_err(|error| error.to_string())?;
+    let account_id = account.id;
+    let operation = journal
+        .start(
+            ProviderSetupTargetKind::NativeAccount,
+            account_id.to_string(),
+            expected,
+        )
+        .await?;
+    settle_native_save(
+        journal,
+        operation,
+        account_id,
+        credentials::save(workspace, account, storage, expected).await,
+    )
+    .await?;
     Ok(Some(SetupSelection::Native {
         defaults,
         notice,
@@ -663,10 +2094,49 @@ async fn native_setup(
     }))
 }
 
+async fn settle_native_save(
+    journal: &SetupJournal,
+    operation: uuid::Uuid,
+    account_id: uuid::Uuid,
+    result: Result<(), CredentialError>,
+) -> Result<(), SetupError> {
+    match result {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest(account_id.as_bytes()).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await?;
+        }
+        Err(error) => {
+            let uncertain = matches!(
+                &error,
+                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
+            );
+            let disposition = if uncertain {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            if uncertain {
+                return Err(SetupError::Presentation(
+                    "Native account storage is uncertain; restart setup and inspect saved access before continuing".into(),
+                ));
+            }
+            return Err(error.to_string().into());
+        }
+    }
+    Ok(())
+}
+
 async fn reset_saved_setup(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     data: credentials::SetupData,
+    journal: &mut SetupJournal,
 ) -> Result<bool, SetupError> {
     let reset =
         credentials::SetupReset::prepare(workspace, data).map_err(|error| error.to_string())?;
@@ -696,11 +2166,51 @@ async fn reset_saved_setup(
     {
         return Ok(false);
     }
-    reset.apply(workspace).map_err(|error| {
-        SetupError::from(format!(
-            "{error}; reset may be incomplete; reopen /setup to check it"
-        ))
-    })?;
+    let (kind, identity) = match data {
+        credentials::SetupData::Native => {
+            (ProviderSetupTargetKind::NativeAccount, "native".to_owned())
+        }
+        credentials::SetupData::ChatGpt => (
+            ProviderSetupTargetKind::ChatGptAccount,
+            "chatgpt-setup".to_owned(),
+        ),
+        credentials::SetupData::Models => (
+            ProviderSetupTargetKind::ModelPreferences,
+            "models".to_owned(),
+        ),
+    };
+    let operation = journal.start(kind, identity, None).await?;
+    match reset.apply(workspace) {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest([]).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await?;
+        }
+        Err(error) => {
+            let uncertain = matches!(
+                &error,
+                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
+            );
+            let disposition = if uncertain {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            if uncertain {
+                return Err(SetupError::Presentation(
+                    "Saved setup reset is uncertain; restart and inspect saved access before continuing".into(),
+                ));
+            }
+            return Err(SetupError::from(format!(
+                "{error}; reset may be incomplete; reopen /setup to check it"
+            )));
+        }
+    }
     Ok(true)
 }
 
@@ -708,6 +2218,7 @@ async fn choose_saved_chatgpt(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     expected_selected: uuid::Uuid,
+    journal: &mut SetupJournal,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
     let (selected, ids) = chatgpt::saved_account_ids().map_err(|error| error.to_string())?;
     if selected != expected_selected {
@@ -727,9 +2238,7 @@ async fn choose_saved_chatgpt(
         if target == selected {
             return Ok(Some(ChatGptSetupAccount::Existing(selected)));
         }
-        chatgpt::select_saved_account(workspace.to_path_buf(), selected, target)
-            .await
-            .map_err(|error| error.to_string())?;
+        select_chatgpt_account(workspace, selected, target, journal).await?;
         return Ok(Some(ChatGptSetupAccount::Switched(target)));
     }
     let labels = ids
@@ -772,15 +2281,55 @@ async fn choose_saved_chatgpt(
     if target == selected {
         return Ok(Some(ChatGptSetupAccount::Existing(selected)));
     }
-    chatgpt::select_saved_account(workspace.to_path_buf(), selected, target)
-        .await
-        .map_err(|error| error.to_string())?;
+    select_chatgpt_account(workspace, selected, target, journal).await?;
     Ok(Some(ChatGptSetupAccount::Switched(target)))
+}
+
+async fn select_chatgpt_account(
+    workspace: &Path,
+    selected: uuid::Uuid,
+    target: uuid::Uuid,
+    journal: &mut SetupJournal,
+) -> Result<(), SetupError> {
+    let operation = journal
+        .start(
+            ProviderSetupTargetKind::ChatGptAccount,
+            target.to_string(),
+            None,
+        )
+        .await?;
+    match chatgpt::select_saved_account(workspace.to_path_buf(), selected, target).await {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest(target.as_bytes()).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await
+        }
+        Err(error) => {
+            let uncertain = chatgpt_edit_is_uncertain(&error);
+            let disposition = if uncertain {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            if uncertain {
+                return Err(SetupError::Presentation(
+                    "ChatGPT account selection is uncertain; restart setup and inspect saved access before continuing".into(),
+                ));
+            }
+            Err(error.to_string().into())
+        }
+    }
 }
 
 async fn connect_chatgpt(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
+    journal: &mut SetupJournal,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
     terminal.draw_setup(
         0,
@@ -805,20 +2354,21 @@ async fn connect_chatgpt(
         };
         AccountStorage::PrivateFile
     };
-    authorize_chatgpt(terminal, workspace, storage, None).await
+    authorize_chatgpt(terminal, workspace, storage, None, journal).await
 }
 
 async fn reconnect_chatgpt(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     target: chatgpt::ReauthorizationTarget,
+    journal: &mut SetupJournal,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
     if target.storage == AccountStorage::Keyring
         && !chatgpt_keyring_available(credentials::probe_keyring().await)?
     {
         return Err("Saved ChatGPT keyring is unavailable. Unlock your desktop password store and retry Reconnect; or choose Connect new, then Use private file (not encrypted)".into());
     }
-    authorize_chatgpt(terminal, workspace, target.storage, Some(target)).await
+    authorize_chatgpt(terminal, workspace, target.storage, Some(target), journal).await
 }
 
 async fn authorize_chatgpt(
@@ -826,12 +2376,59 @@ async fn authorize_chatgpt(
     workspace: &Path,
     storage: AccountStorage,
     target: Option<chatgpt::ReauthorizationTarget>,
+    journal: &mut SetupJournal,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
     let Some(acknowledgment) = review_chatgpt_risk(terminal, storage).await? else {
         return Ok(None);
     };
-    let registration =
-        Registration::open_or_create(workspace).map_err(|error| error.to_string())?;
+    let operation = journal
+        .start(
+            ProviderSetupTargetKind::ChatGptAccount,
+            target.as_ref().map_or_else(
+                || "new-chatgpt-account".to_owned(),
+                |selected| selected.id.to_string(),
+            ),
+            None,
+        )
+        .await?;
+    let result = complete_chatgpt_authorization(terminal, workspace, target, acknowledgment).await;
+    settle_chatgpt_authorization(journal, operation, result).await
+}
+
+async fn settle_chatgpt_authorization(
+    journal: &SetupJournal,
+    operation: uuid::Uuid,
+    result: Result<Option<ChatGptSetupAccount>, SetupError>,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    let (digest, disposition) = match &result {
+        Ok(Some(ChatGptSetupAccount::PermissionDisabled {
+            local_cleared: false,
+            ..
+        }))
+        | Err(SetupError::Uncertain(_)) => (None, ProviderSetupDisposition::Uncertain),
+        Ok(Some(account)) => (
+            Some(Sha256::digest(account.id().as_bytes()).into()),
+            ProviderSetupDisposition::Applied,
+        ),
+        Ok(None) | Err(SetupError::Shutdown(_)) => (None, ProviderSetupDisposition::Cancelled),
+        Err(_) => (None, ProviderSetupDisposition::Failed),
+    };
+    journal.finish(operation, digest, disposition).await?;
+    if disposition == ProviderSetupDisposition::Uncertain {
+        return Err(SetupError::Uncertain(
+            "ChatGPT account storage is uncertain; inspect saved access before continuing".into(),
+        ));
+    }
+    result
+}
+
+async fn begin_chatgpt_authorization(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    target: Option<&chatgpt::ReauthorizationTarget>,
+    acknowledgment: RiskAcknowledgment,
+) -> Result<Option<(CallbackListener, chatgpt::AuthorizationAttempt)>, SetupError> {
+    let registration = Registration::open_or_create(workspace).map_err(chatgpt_setup_error)?;
     if target
         .as_ref()
         .is_some_and(|selected| selected.host_id != registration.host_id())
@@ -854,17 +2451,31 @@ async fn authorize_chatgpt(
     }
     let listener = CallbackListener::bind(acknowledgment)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(chatgpt_setup_error)?;
     let attempt = match &target {
         Some(selected) => chatgpt::AuthorizationAttempt::for_existing(selected, listener.port()),
         None => registration.authorization_attempt(listener.port()),
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(chatgpt_setup_error)?;
     chatgpt::open_authorization_url(&attempt.authorization_url())
         .await
         .map_err(|_| {
-            "Could not open the system browser; no ChatGPT account was changed".to_owned()
+            SetupError::from("Could not open the system browser; no ChatGPT account was changed")
         })?;
+    Ok(Some((listener, attempt)))
+}
+
+async fn complete_chatgpt_authorization(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    target: Option<chatgpt::ReauthorizationTarget>,
+    acknowledgment: RiskAcknowledgment,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    let Some((listener, attempt)) =
+        begin_chatgpt_authorization(terminal, workspace, target.as_ref(), acknowledgment).await?
+    else {
+        return Ok(None);
+    };
     let Some((exchange, acknowledgment)) = await_chatgpt_step(
         terminal,
         "Waiting for ChatGPT",
@@ -896,38 +2507,70 @@ async fn authorize_chatgpt(
         0,
         None,
     )?;
-    let expected = target.as_ref().map(|selected| selected.id);
+    save_chatgpt_authorization(
+        workspace,
+        target.as_ref().map(|selected| selected.id),
+        credentials,
+        acknowledgment,
+    )
+    .await
+    .map(Some)
+}
+
+async fn save_chatgpt_authorization(
+    workspace: &Path,
+    expected: Option<uuid::Uuid>,
+    credentials: chatgpt::VerifiedSignIn,
+    acknowledgment: RiskAcknowledgment,
+) -> Result<ChatGptSetupAccount, SetupError> {
     match credentials {
-        chatgpt::VerifiedSignIn::PlanEnabled(credentials) => {
-            let id = chatgpt::save_verified(
-                workspace.to_path_buf(),
-                credentials,
-                acknowledgment,
-                expected,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            Ok(Some(if expected.is_some() {
+        chatgpt::VerifiedSignIn::PlanEnabled(credentials) => chatgpt::save_verified(
+            workspace.to_path_buf(),
+            credentials,
+            acknowledgment,
+            expected,
+        )
+        .await
+        .map(|id| {
+            if expected.is_some() {
                 ChatGptSetupAccount::Reauthorized(id)
             } else {
                 ChatGptSetupAccount::Connected(id)
-            }))
-        }
-        chatgpt::VerifiedSignIn::PlanDisabled(identity) => {
-            let outcome = chatgpt::save_without_plan_permission(
-                workspace.to_path_buf(),
-                identity,
-                acknowledgment,
-                expected,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            Ok(Some(ChatGptSetupAccount::PermissionDisabled {
-                id: outcome.id,
-                local_cleared: outcome.local_cleared,
-            }))
-        }
+            }
+        }),
+        chatgpt::VerifiedSignIn::PlanDisabled(identity) => chatgpt::save_without_plan_permission(
+            workspace.to_path_buf(),
+            identity,
+            acknowledgment,
+            expected,
+        )
+        .await
+        .map(|outcome| ChatGptSetupAccount::PermissionDisabled {
+            id: outcome.id,
+            local_cleared: outcome.local_cleared,
+        }),
     }
+    .map_err(chatgpt_setup_error)
+}
+
+fn chatgpt_setup_error(error: chatgpt::AuthorizationError) -> SetupError {
+    if chatgpt_edit_is_uncertain(&error) {
+        SetupError::Uncertain(error.to_string())
+    } else {
+        SetupError::from(error.to_string())
+    }
+}
+
+fn chatgpt_edit_is_uncertain(error: &chatgpt::AuthorizationError) -> bool {
+    matches!(
+        error,
+        chatgpt::AuthorizationError::SignOutStorageUncertain
+            | chatgpt::AuthorizationError::RefreshCleanupUncertain
+            | chatgpt::AuthorizationError::RenewalStorageUncertain
+            | chatgpt::AuthorizationError::CredentialStore(
+                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
+            )
+    )
 }
 
 fn chatgpt_keyring_available(probe: Result<(), CredentialError>) -> Result<bool, String> {
@@ -1049,16 +2692,7 @@ pub(super) async fn review_warning(
     instruction: &str,
 ) -> Result<bool, SetupError> {
     if terminal.is_linear() {
-        terminal.draw_setup_warning(title, warning, 0, false, None)?;
-        return Ok(choose(
-            terminal,
-            2,
-            title,
-            instruction,
-            &[(b'1', "Back"), (b'2', "Accept")],
-        )
-        .await?
-            == Some(b'2'));
+        return review_linear_warning(terminal, title, warning, instruction).await;
     }
     let mut page = 0usize;
     let mut accept_selected = false;
@@ -1121,6 +2755,108 @@ pub(super) async fn review_warning(
     }
 }
 
+async fn review_linear_warning(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    warning: &str,
+    instruction: &str,
+) -> Result<bool, SetupError> {
+    let pages = setup_message_pages(warning);
+    let mut page = 0usize;
+    let mut notice = None;
+    loop {
+        let text = format!("Page {}/{}\n{}", page + 1, pages.len(), pages[page]);
+        terminal.draw_setup(0, title, &text, 0, notice.take())?;
+        match terminal.next_input().await? {
+            TerminalInput::Submit if page + 1 < pages.len() => page += 1,
+            TerminalInput::Down | TerminalInput::PageDown if page + 1 < pages.len() => page += 1,
+            TerminalInput::Submit => {
+                if let Some(accepted) =
+                    review_linear_confirmation(terminal, title, instruction).await?
+                {
+                    return Ok(accepted);
+                }
+                page = 0;
+            }
+            TerminalInput::Up | TerminalInput::PageUp => page = page.saturating_sub(1),
+            TerminalInput::Character(_) => {
+                notice = Some("Read every page before accepting");
+            }
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                terminal.discard_draft_input();
+                return Ok(false);
+            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            TerminalInput::Resize => {
+                page = 0;
+                notice = Some("Resize: reread");
+            }
+            TerminalInput::Suspend => {
+                terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
+                page = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn review_linear_confirmation(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+) -> Result<Option<bool>, SetupError> {
+    let choices = [(b'1', "Back"), (b'2', "Accept")];
+    let linear_choices = linear_rendered_choices(&choices);
+    let rendered = linear_choices
+        .iter()
+        .map(|(value, label)| (*value, label.as_str()))
+        .collect::<Vec<_>>();
+    let mut input = String::new();
+    let mut rejected = 0u16;
+    loop {
+        terminal.draw_setup_choices(2, title, instruction, &rendered, 0, None)?;
+        match terminal.next_input().await? {
+            TerminalInput::Submit => {
+                let accepted = if rejected == 0 && input.trim().is_empty() {
+                    Some(choices[0].0)
+                } else if rejected == 0 {
+                    linear_choice_value(input.trim(), &choices)
+                } else {
+                    None
+                };
+                terminal.discard_draft_input();
+                return Ok(Some(accepted == Some(b'2')));
+            }
+            TerminalInput::Character(character) => {
+                append_linear_choice_character(&mut input, &mut rejected, character);
+            }
+            TerminalInput::Backspace => {
+                if rejected > 0 {
+                    rejected -= 1;
+                } else {
+                    input.pop();
+                }
+            }
+            TerminalInput::LineRejected | TerminalInput::LineContinued => {
+                input.clear();
+                rejected = 0;
+                terminal.discard_draft_input();
+            }
+            TerminalInput::Resize => return Ok(None),
+            TerminalInput::Suspend => {
+                terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
+                return Ok(None);
+            }
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                terminal.discard_draft_input();
+                return Ok(Some(false));
+            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            _ => {}
+        }
+    }
+}
+
 async fn await_chatgpt_step<T>(
     terminal: &mut AttachedTerminal,
     title: &str,
@@ -1130,7 +2866,7 @@ async fn await_chatgpt_step<T>(
     await_operation(terminal, title, instruction, operation)
         .await?
         .transpose()
-        .map_err(|error| error.to_string().into())
+        .map_err(chatgpt_setup_error)
 }
 
 pub(super) async fn await_operation<T>(
@@ -1199,6 +2935,23 @@ pub(super) async fn choose_focused(
     choices: &[(u8, &str)],
     current: Option<u8>,
 ) -> Result<Option<u8>, SetupError> {
+    if terminal.is_linear() {
+        let linear_choices = linear_rendered_choices(choices);
+        let rendered = linear_choices
+            .iter()
+            .map(|(value, label)| (*value, label.as_str()))
+            .collect::<Vec<_>>();
+        let listing = linear_choices
+            .iter()
+            .map(|(_, label)| label.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if crate::terminal::setup_choices_need_paging(instruction, &rendered)
+            && !await_setup_ack(terminal, title, &format!("{instruction}\n{listing}")).await?
+        {
+            return Ok(None);
+        }
+    }
     choose_display(terminal, step, title, instruction, choices, current).await
 }
 
@@ -1210,28 +2963,48 @@ async fn choose_display(
     choices: &[(u8, &str)],
     current: Option<u8>,
 ) -> Result<Option<u8>, SetupError> {
-    let mut selected = choices
+    let selected = choices
         .iter()
         .position(|(value, _)| Some(*value) == current)
         .unwrap_or(0);
+    if terminal.is_linear() {
+        choose_linear(terminal, step, title, instruction, choices, selected).await
+    } else {
+        choose_inline(terminal, step, title, instruction, choices, selected).await
+    }
+}
+
+async fn choose_linear(
+    terminal: &mut AttachedTerminal,
+    step: u8,
+    title: &str,
+    instruction: &str,
+    choices: &[(u8, &str)],
+    mut selected: usize,
+) -> Result<Option<u8>, SetupError> {
+    let linear_choices = linear_rendered_choices(choices);
+    let linear_rendered = linear_choices
+        .iter()
+        .map(|(value, label)| (*value, label.as_str()))
+        .collect::<Vec<_>>();
     let mut input = String::new();
     let mut rejected = 0u16;
     let mut notice = None::<&str>;
     loop {
-        terminal.draw_setup_choices(step, title, instruction, choices, selected, notice.take())?;
+        terminal.draw_setup_choices(
+            step,
+            title,
+            instruction,
+            &linear_rendered,
+            selected,
+            notice.take(),
+        )?;
         match terminal.next_input().await? {
-            TerminalInput::Character(character) if terminal.is_linear() => {
-                if rejected == 0
-                    && (character.is_ascii_graphic() || character == ' ')
-                    && input.len() < 64
-                {
-                    input.push(character);
-                } else {
-                    rejected = rejected.saturating_add(1);
+            TerminalInput::Character(character) => {
+                if !append_linear_choice_character(&mut input, &mut rejected, character) {
                     notice = Some("Invalid choice input; use Backspace to correct");
                 }
             }
-            TerminalInput::Character(_) => notice = Some("Use Up/Down and Enter to select"),
             TerminalInput::Backspace => {
                 if rejected > 0 {
                     rejected -= 1;
@@ -1246,15 +3019,13 @@ async fn choose_display(
             TerminalInput::Home => selected = 0,
             TerminalInput::End => selected = choices.len() - 1,
             TerminalInput::Submit => {
-                if !terminal.is_linear() || (rejected == 0 && input.trim().is_empty()) {
+                if rejected == 0 && input.trim().is_empty() {
                     return Ok(Some(choices[selected].0));
                 }
                 if rejected == 0
-                    && let Some((value, _)) = choices
-                        .iter()
-                        .find(|(_, label)| label.eq_ignore_ascii_case(input.trim()))
+                    && let Some(value) = linear_choice_value(input.trim(), choices)
                 {
-                    return Ok(Some(*value));
+                    return Ok(Some(value));
                 }
                 terminal.discard_draft_input();
                 input.clear();
@@ -1274,6 +3045,72 @@ async fn choose_display(
                 return Ok(None);
             }
             TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            _ => {}
+        }
+    }
+}
+
+fn append_linear_choice_character(input: &mut String, rejected: &mut u16, character: char) -> bool {
+    if *rejected == 0
+        && (character.is_ascii_graphic() || character == ' ')
+        && input.len() < MAX_SETUP_CHOICE_INPUT_BYTES
+    {
+        input.push(character);
+        true
+    } else {
+        *rejected = rejected.saturating_add(1);
+        false
+    }
+}
+
+fn linear_rendered_choices(choices: &[(u8, &str)]) -> Vec<(u8, String)> {
+    choices
+        .iter()
+        .enumerate()
+        .map(|(index, (value, label))| (*value, format!("{}. {label}", index.saturating_add(1))))
+        .collect()
+}
+
+fn linear_choice_value(input: &str, choices: &[(u8, &str)]) -> Option<u8> {
+    if let Ok(index) = input.parse::<usize>()
+        && let Some((value, _)) = index.checked_sub(1).and_then(|index| choices.get(index))
+    {
+        return Some(*value);
+    }
+    choices
+        .iter()
+        .find(|(_, label)| label.eq_ignore_ascii_case(input))
+        .map(|(value, _)| *value)
+}
+
+async fn choose_inline(
+    terminal: &mut AttachedTerminal,
+    step: u8,
+    title: &str,
+    instruction: &str,
+    choices: &[(u8, &str)],
+    mut selected: usize,
+) -> Result<Option<u8>, SetupError> {
+    let mut notice = None::<&str>;
+    loop {
+        terminal.draw_setup_choices(step, title, instruction, choices, selected, notice.take())?;
+        match terminal.next_input().await? {
+            TerminalInput::Character(_) => notice = Some("Use Up/Down and Enter to select"),
+            TerminalInput::Up => selected = selected.saturating_sub(1),
+            TerminalInput::Down | TerminalInput::Tab => {
+                selected = (selected + 1).min(choices.len() - 1);
+            }
+            TerminalInput::Home => selected = 0,
+            TerminalInput::End => selected = choices.len() - 1,
+            TerminalInput::Submit => return Ok(Some(choices[selected].0)),
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                terminal.discard_draft_input();
+                return Ok(None);
+            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            TerminalInput::Suspend => {
+                terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
+            }
             _ => {}
         }
     }
@@ -1469,8 +3306,191 @@ async fn load_catalog(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    pub(crate) enum SetupPublication {
+        NativeSave,
+        NativeRemoval,
+        ChatGpt,
+    }
+
+    pub(crate) async fn assert_uncertain_publication(
+        publication: SetupPublication,
+        publish: impl FnOnce() -> chatgpt::AuthorizationError,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let path = temp.path().join("state");
+        let mut journal = SetupJournal::new(&path, &workspace, None);
+        let target = match publication {
+            SetupPublication::NativeSave | SetupPublication::NativeRemoval => {
+                ProviderSetupTargetKind::NativeAccount
+            }
+            SetupPublication::ChatGpt => ProviderSetupTargetKind::ChatGptAccount,
+        };
+        let identity = if target == ProviderSetupTargetKind::NativeAccount {
+            "native"
+        } else {
+            "new-chatgpt-account"
+        };
+        let operation = journal
+            .start(target, identity.into(), None)
+            .await
+            .unwrap_or_else(|_| panic!("setup intent"));
+        let error = publish();
+        if target == ProviderSetupTargetKind::NativeAccount {
+            let chatgpt::AuthorizationError::CredentialStore(error) = error else {
+                panic!("native credential failure required");
+            };
+            let result = match publication {
+                SetupPublication::NativeSave => {
+                    settle_native_save(&journal, operation, uuid::Uuid::now_v7(), Err(error)).await
+                }
+                SetupPublication::NativeRemoval => {
+                    settle_native_removal(&journal, operation, Err(error)).await
+                }
+                SetupPublication::ChatGpt => unreachable!("native target"),
+            };
+            assert!(result.is_err());
+        } else {
+            let result =
+                settle_chatgpt_authorization(&journal, operation, Err(chatgpt_setup_error(error)))
+                    .await;
+            assert!(matches!(result, Err(SetupError::Uncertain(_))));
+        }
+        let id = journal.session_id().unwrap();
+        let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
+        let events = store.load_session(id).await.unwrap();
+        assert!(matches!(&events.last().unwrap().event,
+            Event::ProviderSetupEditFinished {
+                operation_id, disposition: ProviderSetupDisposition::Uncertain, ..
+            } if *operation_id == operation));
+        let view = store.load_view(id).await.unwrap().unwrap();
+        assert!(view.provider_setup_blocks_continuation());
+        assert!(view.pending_provider_setup_edit.is_none());
+        store.close().await.unwrap();
+        assert!(
+            arany::resume_session(
+                StateRoot::open_existing(&path).unwrap(),
+                workspace.clone(),
+                id,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            arany::set_session_defaults(
+                StateRoot::open_existing(&path).unwrap(),
+                workspace,
+                id,
+                SessionDefaults::default(),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_exits_settle_and_reopen_without_pending_edits() {
+        for (result, disposition) in [
+            (
+                Err(SetupError::from("system browser launch failed")),
+                ProviderSetupDisposition::Failed,
+            ),
+            (Ok(None), ProviderSetupDisposition::Cancelled),
+            (
+                Err(chatgpt_setup_error(
+                    chatgpt::AuthorizationError::CredentialStore(
+                        CredentialError::WriteOutcomeUnknown,
+                    ),
+                )),
+                ProviderSetupDisposition::Uncertain,
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let path = temp.path().join("state");
+            let mut journal = SetupJournal::new(&path, &workspace, None);
+            let operation = journal
+                .start(
+                    ProviderSetupTargetKind::ChatGptAccount,
+                    "new-chatgpt-account".into(),
+                    None,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("setup intent"));
+            let _result = settle_chatgpt_authorization(&journal, operation, result).await;
+            let id = journal.session_id().unwrap();
+            let admissions = arany::test_support::admissions::recorded(id);
+            assert!(matches!(
+                admissions.as_slice(),
+                [(
+                    1,
+                    2,
+                    arany::test_support::admissions::AdmissionKind::Operation
+                )]
+            ));
+            let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
+            let events = store.load_session(id).await.unwrap();
+            assert!(matches!(&events.last().unwrap().event,
+                Event::ProviderSetupEditFinished { operation_id, disposition: actual, .. }
+                    if *operation_id == operation && *actual == disposition));
+            let view = store.load_view(id).await.unwrap().unwrap();
+            assert_eq!(view.pending_provider_setup_edit, None);
+            assert_eq!(
+                view.provider_setup_uncertain,
+                disposition == ProviderSetupDisposition::Uncertain
+            );
+            store.close().await.unwrap();
+            let resumed = arany::resume_session(
+                StateRoot::open_existing(&path).unwrap(),
+                workspace.clone(),
+                id,
+            )
+            .await;
+            assert_eq!(
+                resumed.is_err(),
+                disposition == ProviderSetupDisposition::Uncertain
+            );
+            let continuation = arany::set_session_defaults(
+                StateRoot::open_existing(&path).unwrap(),
+                workspace,
+                id,
+                SessionDefaults::default(),
+            )
+            .await;
+            assert_eq!(
+                continuation.is_err(),
+                disposition == ProviderSetupDisposition::Uncertain
+            );
+        }
+    }
+
+    #[test]
+    fn setup_pages_show_complete_content_at_bounded_width() {
+        let message = format!("Destination: {}\nDisposition: Uncertain", "x".repeat(160));
+        let pages = setup_message_pages(&message);
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.chars().count() <= SETUP_MESSAGE_PAGE_CHARS)
+        );
+        assert_eq!(pages.concat(), message.replace('\n', ""));
+    }
+
+    #[test]
+    fn chatgpt_accounts_with_colliding_prefixes_have_distinct_labels() {
+        let first = uuid::Uuid::parse_str("019ad2a1-0000-7000-8000-000000000001").unwrap();
+        let second = uuid::Uuid::parse_str("019ad2a1-0000-7000-8000-000000000002").unwrap();
+        assert_ne!(
+            chatgpt_account_label(first, first),
+            chatgpt_account_label(second, first)
+        );
+        assert!(chatgpt_account_label(second, first).contains(&second.to_string()));
+    }
 
     #[test]
     fn saved_account_defaults_pin_only_the_selected_account() {
@@ -1542,6 +3562,16 @@ mod tests {
             assert!(native_catalog_default(provider, &[]).is_none());
         }
         assert!(native_catalog_default("custom:local", &[]).is_none());
+    }
+
+    #[test]
+    fn empty_efforts_create_and_clear_the_no_override_state() {
+        assert_eq!(parse_efforts(""), Some(Vec::new()));
+        assert_eq!(
+            parse_efforts("low,high"),
+            Some(vec![Effort::Low, Effort::High])
+        );
+        assert_eq!(parse_efforts("unknown"), None);
     }
 
     #[test]

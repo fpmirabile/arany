@@ -132,11 +132,13 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
     ("SessionRenamed", 6),
+    ("ProviderSetupEditStarted", 1),
+    ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
     ("GoalPlanContractRecorded", 10),
@@ -251,6 +253,16 @@ pub enum Event {
     },
     SessionRenamed {
         title: String,
+    },
+    ProviderSetupEditStarted {
+        operation_id: uuid::Uuid,
+        target: ProviderSetupTarget,
+        expected_digest: Option<[u8; 32]>,
+    },
+    ProviderSetupEditFinished {
+        operation_id: uuid::Uuid,
+        resulting_digest: Option<[u8; 32]>,
+        disposition: ProviderSetupDisposition,
     },
     GoalStarted {
         goal_id: GoalId,
@@ -456,6 +468,29 @@ pub enum Event {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSetupTarget {
+    pub kind: ProviderSetupTargetKind,
+    pub identity: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ProviderSetupTargetKind {
+    NativeAccount,
+    ChatGptAccount,
+    CustomProfile,
+    ModelPreferences,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ProviderSetupDisposition {
+    Applied,
+    Failed,
+    Cancelled,
+    Uncertain,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventEnvelope {
     pub sequence: u64,
@@ -653,6 +688,22 @@ struct RunStartedPayload {
     #[serde(deserialize_with = "Option::deserialize")]
     active_deadline_ms: Option<u64>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderSetupEditStartedPayload {
+    operation_id: uuid::Uuid,
+    target: ProviderSetupTarget,
+    #[serde(deserialize_with = "Option::deserialize")]
+    expected_digest: Option<[u8; 32]>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderSetupEditFinishedPayload {
+    operation_id: uuid::Uuid,
+    #[serde(deserialize_with = "Option::deserialize")]
+    resulting_digest: Option<[u8; 32]>,
+    disposition: ProviderSetupDisposition,
+}
 
 impl Event {
     pub(crate) fn finished_payload_size(summary: &str, result: &str) -> Result<usize, ReplayError> {
@@ -678,6 +729,8 @@ impl Event {
             Self::SessionForked { .. } => "SessionForked",
             Self::ContextCompacted { .. } => "ContextCompacted",
             Self::SessionRenamed { .. } => "SessionRenamed",
+            Self::ProviderSetupEditStarted { .. } => "ProviderSetupEditStarted",
+            Self::ProviderSetupEditFinished { .. } => "ProviderSetupEditFinished",
             Self::GoalStarted { .. } => "GoalStarted",
             Self::GoalRunLinked { .. } => "GoalRunLinked",
             Self::GoalResumed { .. } => "GoalResumed",
@@ -725,6 +778,8 @@ impl Event {
             | Self::SessionForked { .. }
             | Self::ContextCompacted { .. }
             | Self::SessionRenamed { .. }
+            | Self::ProviderSetupEditStarted { .. }
+            | Self::ProviderSetupEditFinished { .. }
             | Self::GoalStarted { .. }
             | Self::GoalResumed { .. }
             | Self::GoalFinished { .. } => (None, None),
@@ -871,6 +926,24 @@ impl Event {
             }),
             Self::SessionRenamed { title } => serialize(&TitlePayload {
                 title: title.clone(),
+            }),
+            Self::ProviderSetupEditStarted {
+                operation_id,
+                target,
+                expected_digest,
+            } => serialize(&ProviderSetupEditStartedPayload {
+                operation_id: *operation_id,
+                target: target.clone(),
+                expected_digest: *expected_digest,
+            }),
+            Self::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest,
+                disposition,
+            } => serialize(&ProviderSetupEditFinishedPayload {
+                operation_id: *operation_id,
+                resulting_digest: *resulting_digest,
+                disposition: *disposition,
             }),
             Self::SessionDefaultChanged { defaults } => serialize(defaults),
             Self::SessionForked {
@@ -1183,6 +1256,22 @@ impl Event {
             "SessionRenamed" if run_id.is_none() && agent_run_id.is_none() => {
                 Self::SessionRenamed {
                     title: parse::<TitlePayload>(payload)?.title,
+                }
+            }
+            "ProviderSetupEditStarted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: ProviderSetupEditStartedPayload = parse(payload)?;
+                Self::ProviderSetupEditStarted {
+                    operation_id: data.operation_id,
+                    target: data.target,
+                    expected_digest: data.expected_digest,
+                }
+            }
+            "ProviderSetupEditFinished" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: ProviderSetupEditFinishedPayload = parse(payload)?;
+                Self::ProviderSetupEditFinished {
+                    operation_id: data.operation_id,
+                    resulting_digest: data.resulting_digest,
+                    disposition: data.disposition,
                 }
             }
             "GoalStarted" if run_id.is_none() && agent_run_id.is_none() => {

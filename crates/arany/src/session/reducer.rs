@@ -951,9 +951,15 @@ pub struct SessionView {
     pub runs: Vec<RunView>,
     pub compactions: Vec<CompactionView>,
     pub goals: Vec<GoalView>,
+    pub pending_provider_setup_edit: Option<uuid::Uuid>,
+    pub provider_setup_uncertain: bool,
 }
 
 impl SessionView {
+    pub fn provider_setup_blocks_continuation(&self) -> bool {
+        self.pending_provider_setup_edit.is_some() || self.provider_setup_uncertain
+    }
+
     pub fn conversation_title(&self) -> String {
         if self.title_is_explicit {
             self.title.clone()
@@ -1045,6 +1051,8 @@ impl SessionView {
                         runs: Vec::new(),
                         compactions: Vec::new(),
                         goals: Vec::new(),
+                        pending_provider_setup_edit: None,
+                        provider_setup_uncertain: false,
                     });
                     view.as_mut()
                         .expect("created Session")
@@ -1086,6 +1094,8 @@ impl SessionView {
                         compactions: inherited
                             .map_or_else(Vec::new, |inherited| inherited.compactions.clone()),
                         goals: Vec::new(),
+                        pending_provider_setup_edit: None,
+                        provider_setup_uncertain: false,
                     });
                     view.as_mut()
                         .expect("created Session")
@@ -1139,6 +1149,21 @@ impl SessionView {
         }
         let prior = envelope.sequence;
         let current = self;
+        match current.pending_provider_setup_edit {
+            Some(operation_id)
+                if !matches!(
+                    envelope.event,
+                    Event::ProviderSetupEditFinished { operation_id: finished, .. }
+                        if finished == operation_id
+                ) =>
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            None if current.provider_setup_uncertain => {
+                return Err(ReplayError::InvalidTransition);
+            }
+            _ => {}
+        }
         rewind::before_event(current, &envelope.event);
         if current
             .runs
@@ -1200,6 +1225,34 @@ impl SessionView {
             Event::SessionRenamed { .. }
             | Event::SessionDefaultChanged { .. }
             | Event::ContextCompacted { .. } => session::apply(current, &envelope.event, prior)?,
+            Event::ProviderSetupEditStarted { operation_id, .. } => {
+                if current.pending_provider_setup_edit.is_some()
+                    || current.provider_setup_uncertain
+                    || current
+                        .runs
+                        .last()
+                        .is_some_and(|run| run.status == RunStatus::Active)
+                    || current
+                        .goals
+                        .iter()
+                        .any(|goal| goal.status == GoalStatus::Running)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                current.pending_provider_setup_edit = Some(*operation_id);
+            }
+            Event::ProviderSetupEditFinished {
+                operation_id,
+                disposition,
+                ..
+            } => {
+                if current.pending_provider_setup_edit != Some(*operation_id) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                current.pending_provider_setup_edit = None;
+                current.provider_setup_uncertain =
+                    *disposition == super::ProviderSetupDisposition::Uncertain;
+            }
             Event::GoalStarted { .. }
             | Event::GoalRunLinked { .. }
             | Event::GoalResumed { .. }

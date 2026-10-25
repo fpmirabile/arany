@@ -637,7 +637,7 @@ impl AttachedSession {
                     configure_account(
                         &mut self.terminal,
                         &mut self.admission,
-                        self.session_id,
+                        &mut self.session_id,
                         &mut self.view,
                         &mut self.composer,
                     )

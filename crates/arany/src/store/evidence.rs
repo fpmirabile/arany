@@ -23,6 +23,13 @@ pub(super) fn apply(
         EvidenceOp::LoadProvider(name) => {
             Ok(load(connection, &name)?.map(EvidenceRecord::Provider))
         }
+        EvidenceOp::ClearProvider(name) => {
+            if _read_only {
+                return Err(StoreError::ReadOnly);
+            }
+            clear(connection, &name)?;
+            Ok(None)
+        }
         EvidenceOp::LoadNative(fingerprint) => {
             Ok(load_native(connection, &fingerprint)?.map(EvidenceRecord::Native))
         }

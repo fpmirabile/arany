@@ -65,6 +65,15 @@ pub(crate) fn record_sync(state: &std::path::Path, record: &str) -> Result<(), S
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Result<(), StoreError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if FaultPlan::record_publication_fails(state, record) {
+        return Err(StoreError::Io(io::Error::other("record publication fault")));
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     FaultPlan::commit_marker(token)?;
@@ -284,6 +293,7 @@ mod injection {
             oneshot::Receiver<()>,
         ),
         RecordSync(std::path::PathBuf, &'static str),
+        RecordPublication(std::path::PathBuf, &'static str),
         GoalAppend(SessionId, Admits),
         GoalAcknowledgment(
             SessionId,
@@ -472,6 +482,15 @@ mod injection {
         pub(crate) fn record_sync_fails(state: &std::path::Path, record: &str) -> bool {
             take(|fault| matches!(fault, Fault::RecordSync(path, name) if path == state && *name == record))
             .is_some()
+        }
+
+        pub fn fail_record_publication(state: std::path::PathBuf, record: &'static str) {
+            plan().push(Fault::RecordPublication(state, record));
+        }
+
+        pub(crate) fn record_publication_fails(state: &std::path::Path, record: &str) -> bool {
+            take(|fault| matches!(fault, Fault::RecordPublication(path, name) if path == state && *name == record))
+                .is_some()
         }
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {
