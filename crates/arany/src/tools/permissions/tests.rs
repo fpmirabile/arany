@@ -2576,6 +2576,7 @@ fn host_prefix_scope_normalizes_lexical_paths_without_admitting_directory_aliase
     std::fs::create_dir_all(workspace.join("child")).unwrap();
     let alias = root.join("alias");
     std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    assert!(crate::tools::workspace_identity(&workspace).is_ok());
     assert!(crate::tools::workspace_identity(&alias).is_err());
     assert!(crate::tools::workspace_identity(&workspace.join("child/..")).is_err());
 }

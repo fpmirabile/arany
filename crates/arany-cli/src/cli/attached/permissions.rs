@@ -265,17 +265,20 @@ pub(super) async fn manage_host_rules(
     view: &arany::SessionView,
 ) -> Result<HostRuleEditOutcome, SetupError> {
     let mut notice = "Host rules authorize every eligible suffix in this folder and exact cwd. They apply next Run. This is not confinement.".to_owned();
+    let mut saved = false;
     loop {
         let Ok(state) = StateRoot::open_existing(state_dir) else {
-            return Ok(HostRuleEditOutcome::Confirmed(
-                "Error: state unavailable; host rules unchanged".into(),
-            ));
+            return Ok(HostRuleEditOutcome::Confirmed(host_rule_reload_failure(
+                "state unavailable",
+                saved,
+            )));
         };
         let settings = match PermissionSettings::load(&state, workspace) {
             Ok(settings) => settings,
             Err(error) => {
-                return Ok(HostRuleEditOutcome::Confirmed(format!(
-                    "Error: {error}; host rules unchanged"
+                return Ok(HostRuleEditOutcome::Confirmed(host_rule_reload_failure(
+                    &error.to_string(),
+                    saved,
                 )));
             }
         };
@@ -338,11 +341,23 @@ pub(super) async fn manage_host_rules(
         };
         let Some(edit) = edit else { continue };
         match settings.save_host_edit(&state, workspace, edit) {
-            Ok(_) => notice = "Host rules saved; they apply next Run.".into(),
+            Ok(_) => {
+                saved = true;
+                notice = "Host rules saved; they apply next Run.".into();
+            }
             Err(SettingsError::NotConfirmed) => return Ok(HostRuleEditOutcome::Uncertain),
             Err(error) => notice = format!("Error: {error}; nothing dispatched."),
         }
     }
+}
+
+fn host_rule_reload_failure(reason: &str, saved: bool) -> String {
+    let status = if saved {
+        "earlier host rule edits were saved; reopen /permissions to verify their current state"
+    } else {
+        "host rules unchanged"
+    };
+    format!("Error: {reason}; {status}")
 }
 
 async fn add_host_edit(
@@ -808,6 +823,22 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 #[cfg(test)]
 mod tests {
     use super::{parse_linear_selection, toggle_profile};
+
+    #[test]
+    fn host_rule_reload_failures_report_prior_saves_without_claiming_current_state() {
+        for reason in ["state unavailable", "permission settings are invalid"] {
+            assert_eq!(
+                super::host_rule_reload_failure(reason, false),
+                format!("Error: {reason}; host rules unchanged")
+            );
+            assert_eq!(
+                super::host_rule_reload_failure(reason, true),
+                format!(
+                    "Error: {reason}; earlier host rule edits were saved; reopen /permissions to verify their current state"
+                )
+            );
+        }
+    }
 
     fn host_candidate(value: &str, cwd: &str) -> arany::ToolView {
         let pin = serde_json::from_value(serde_json::json!({
