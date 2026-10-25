@@ -1511,6 +1511,7 @@ fn multi_call_replay_pairs_every_result_on_api_routes() {
                     .filter(|item| item["type"] == "tool_result")
                     .collect()
             };
+            assert_eq!(paired.len(), results.len());
             for (index, (item, result)) in paired.iter().zip(&results).enumerate() {
                 assert_eq!(
                     item[if adapter == "openai" {
@@ -1522,6 +1523,13 @@ fn multi_call_replay_pairs_every_result_on_api_routes() {
                 );
                 if refused {
                     assert_eq!(result["error"]["offending_index"], 2);
+                    assert!(result.get("max_calls").is_none());
+                    assert!(
+                        result["error"]["remediation"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Send exactly 1 Tool call")
+                    );
                 }
             }
         }

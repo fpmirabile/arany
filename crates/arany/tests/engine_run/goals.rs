@@ -9428,6 +9428,14 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
                 .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
                 .collect();
             assert_eq!(reservations.len(), 4);
+            assert!(
+                arany::test_support::admissions::recorded(outcome.session_id)
+                    .iter()
+                    .all(|(count, _, _)| {
+                        *count < starts[0] as usize || *count >= starts[3] as usize
+                    }),
+                "initial intents commit without a second admission boundary"
+            );
             for (index, reservation) in reservations.iter().enumerate() {
                 assert!(starts[3] < reservation.sequence && reservation.sequence < finishes[index]);
                 if index > 0 {

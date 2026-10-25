@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
 
+pub(super) const MAX_NARROWINGS_PER_STEP: usize = 1;
+pub(super) const NARROWING_EVENTS: usize = 3;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ActiveDeadlineCause {
     Delegation,
@@ -215,9 +218,9 @@ impl Action {
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
-            Self::ToolStep { calls } => {
-                calls.saturating_mul(Self::Tool.max_events().saturating_add(1))
-            }
+            Self::ToolStep { calls } => calls
+                .saturating_mul(Self::Tool.max_events().saturating_add(1))
+                .saturating_add(MAX_NARROWINGS_PER_STEP.saturating_mul(NARROWING_EVENTS)),
             Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
@@ -327,7 +330,11 @@ impl Action {
         match self {
             // A command can need a separate integration observation, so reserve two observations per Tool step.
             Self::Tool | Self::Review | Self::Worker { .. } => 2,
-            Self::ToolStep { calls } => calls.saturating_mul(Self::Tool.tool_observations()),
+            Self::ToolStep { calls } => calls
+                .saturating_mul(Self::Tool.tool_observations())
+                .saturating_add(
+                    MAX_NARROWINGS_PER_STEP.saturating_mul(Self::Tool.tool_observations()),
+                ),
             Self::Child {
                 in_flight,
                 research: true,

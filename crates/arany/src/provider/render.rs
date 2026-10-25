@@ -332,7 +332,6 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
             if step.requests.len() > 1 {
                 output["call_index"] = json!(index);
                 output["error"]["offending_index"] = json!(step.refusal_index);
-                output["max_calls"] = json!(crate::session::MAX_STEP_TOOL_CALLS);
             }
             if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
                 return Err(ProviderError::Rejected);
@@ -393,7 +392,8 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
     use crate::session::ProposalRefusalCause::*;
     let arguments = format!(
-        "Send 1 to {} Tool calls matching the offered schemas and bounds, with distinct call IDs.",
+        "Send exactly {} Tool call matching the offered schemas and bounds. The Engine step bound is {} calls.",
+        super::decode::STEP_TOOL_CALLS,
         crate::session::MAX_STEP_TOOL_CALLS
     );
     let remediation = match refusal.cause {

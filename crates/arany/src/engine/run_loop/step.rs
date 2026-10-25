@@ -2,7 +2,7 @@ use super::children::ChildWork;
 use super::stop::{StepEnd, StopCause};
 use super::{ActivePause, ActiveSegment, RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::hints::HintPublisher;
-use crate::engine::ledger::{ActiveDeadlineCause, Admission};
+use crate::engine::ledger::{ActiveDeadlineCause, Admission, MAX_NARROWINGS_PER_STEP};
 use crate::engine::{EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{ProviderRequest, ProviderTurn};
 use crate::session::Event;
@@ -105,8 +105,6 @@ impl Grant<'_> {
         }
     }
 }
-
-const MAX_NARROWINGS_PER_STEP: usize = 1;
 
 #[derive(Debug, Eq, PartialEq)]
 enum ReviewProgress {
@@ -288,18 +286,8 @@ impl RunLoop<'_> {
             Err(cause) => return Ok(StepEnd::Stopped(cause)),
         };
         for intent in &intents {
-            if let Err(refusal) = self
-                .start_intent(
-                    &grant,
-                    runtime,
-                    intent,
-                    &intent.call,
-                    matches!(grant, Grant::Primary { .. }),
-                )
-                .await?
-            {
-                return Ok(StepEnd::Stopped(refusal.into()));
-            }
+            self.commit_intent(&grant, runtime, intent, &intent.call)
+                .await?;
         }
         let mut end = StepEnd::Continue;
         for intent in intents {
@@ -473,9 +461,7 @@ impl RunLoop<'_> {
             ToolObservation {
                 intent,
                 disposition: ToolDisposition::Denied,
-                output:
-                    "not_dispatched: step stopped before this call; no operation was dispatched"
-                        .into(),
+                output: crate::tools::types::UNDISPATCHED_STEP_OUTPUT.into(),
                 attestation: None,
                 cache_update: CacheUpdate::NotApplicable,
                 approval_cause: None,

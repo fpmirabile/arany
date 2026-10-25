@@ -1516,6 +1516,8 @@ impl ToolStep {
     }
 }
 
+pub(crate) const UNDISPATCHED_STEP_OUTPUT: &str =
+    "not_dispatched: step stopped before this call; no operation was dispatched";
 pub(crate) const MAX_TOOL_REFUSAL_BYTES: usize = 2048;
 const RESULT_ENVELOPE_BYTES: usize = 128;
 

@@ -7,7 +7,9 @@ use super::{
     ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD,
     TOOL_CLEANUP_OVERHEAD, timeout_limit_cause,
 };
-use crate::engine::ledger::{Action, ActiveDeadlineCause, Admission, duration_ms};
+use crate::engine::ledger::{
+    Action, ActiveDeadlineCause, Admission, NARROWING_EVENTS, duration_ms,
+};
 use crate::engine::{EngineError, RunCancellation};
 use crate::session::Event;
 use crate::store::AdmissionKind;
@@ -208,7 +210,7 @@ impl RunLoop<'_> {
                         .saturating_add(self.ledger().verdicts(Action::Tool))
                         .saturating_add(self.ledger().drain_headroom())
                         .saturating_add(2 * (hook_events + narrowing))
-                        .saturating_add(if narrowing > 0 { 3 } else { 0 }),
+                        .saturating_add(if narrowing > 0 { NARROWING_EVENTS } else { 0 }),
                     Action::Tool
                         .tool_observations()
                         .saturating_add(hook_events + narrowing),
@@ -507,13 +509,26 @@ impl RunLoop<'_> {
         narrowable: bool,
     ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
+        let (hook_events, _, _) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
             .admit_tool(grant, runtime, intent, permission, hook_events, narrowable)
             .await?
         {
             return Ok(Err(refusal));
         }
+        self.commit_intent(grant, runtime, intent, post_call)
+            .await?;
+        Ok(Ok(()))
+    }
+
+    pub(super) async fn commit_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        post_call: &ToolCall,
+    ) -> Result<(), EngineError> {
+        let (_, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
         let agent_run_id = intent.agent_run_id;
         // A researcher's Tool runs inside its delegation's reservation.
         let action_ms = match grant {
@@ -537,7 +552,7 @@ impl RunLoop<'_> {
                 .ok_or(EngineError::CoordinatorFailed)?
                 .note_intent(intent);
         }
-        Ok(Ok(()))
+        Ok(())
     }
 
     pub(super) async fn dispatch_intent(
