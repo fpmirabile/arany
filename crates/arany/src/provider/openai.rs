@@ -9,6 +9,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 mod limits;
+mod responses;
 mod subscription;
 pub(crate) mod wire;
 pub use subscription::ChatGptProvider;
@@ -269,7 +270,7 @@ pub(crate) async fn read_streamed_reply(
     preview: Option<super::ResponsePreview>,
     max_output_tokens: u32,
 ) -> Result<Vec<u8>, ProviderError> {
-    subscription::read_completed_response(response, key, model, preview, max_output_tokens).await
+    responses::read_completed_response(response, key, model, preview, max_output_tokens).await
 }
 
 #[cfg(test)]
