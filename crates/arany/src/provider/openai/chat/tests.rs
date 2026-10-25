@@ -147,12 +147,13 @@ fn answer_decoder_requires_one_exactly_metered_choice() {
     for (index, mutate) in mutations.into_iter().enumerate() {
         let mut rejected = answer_reply();
         mutate(&mut rejected);
-        let error = decode(&rejected).unwrap_err();
-        if index == 0 {
-            assert!(matches!(error, ProviderError::InvalidResponseContract));
-        } else {
-            assert!(error.failure_reason().is_some());
-        }
+        assert!(
+            matches!(
+                decode(&rejected).unwrap_err(),
+                ProviderError::InvalidResponseContract
+            ),
+            "mutation {index}"
+        );
     }
 }
 

@@ -1,7 +1,7 @@
-use crate::provider::conversation::{Block, Conversation, Role};
+use crate::provider::conversation::{Block, Conversation, Message, Role};
 use crate::provider::decode::{function_outcome, review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
-use crate::provider::tool_specs::{ToolSpec, outcome_specs};
+use crate::provider::tool_specs::{ToolSpec, name_of, outcome_specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, ProviderError,
     ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn, ProviderWireProvenance,
@@ -77,50 +77,62 @@ fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
     for message in &conversation.messages {
         match message.role {
             Role::Assistant => {
-                let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
-                    return Err(ProviderError::Rejected);
-                };
-                let items = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
-                let [item] = items.as_slice() else {
-                    return Err(ProviderError::Rejected);
-                };
-                if let Some(calls) = item["tool_calls"].as_array() {
-                    unanswered.extend(calls.iter().filter_map(|call| {
-                        (call.pointer("/function/name").and_then(Value::as_str)
-                            == Some("arany_delegate"))
-                        .then(|| call["id"].as_str().map(str::to_owned))
-                        .flatten()
-                    }));
-                }
-                output.push(item.clone());
+                let (item, calls) = assistant_item(message)?;
+                unanswered.extend(calls);
+                output.push(item);
             }
-            Role::User => {
-                for id in std::mem::take(&mut unanswered) {
-                    if !message
-                        .blocks
-                        .iter()
-                        .any(|block| matches!(block, Block::ToolResult { id: result, .. } if result.as_str() == id))
-                    {
-                        output.push(json!({"role":"tool", "tool_call_id":id, "content":"Arany recorded this call; its result follows in a later message."}));
-                    }
-                }
-                for block in &message.blocks {
-                    match block {
-                        Block::Text(text) => output.push(json!({"role":"user", "content":text})),
-                        Block::ToolResult {
-                            id, output: value, ..
-                        } => output.push(json!({
-                            "role":"tool", "tool_call_id":id.as_str(), "content":value.to_string()
-                        })),
-                        Block::Image { .. } | Block::AssistantTurn(_) => {
-                            return Err(ProviderError::Rejected);
-                        }
-                    }
-                }
-            }
+            Role::User => push_user_blocks(&mut output, message, &mut unanswered)?,
         }
     }
     Ok(output)
+}
+
+fn assistant_item(message: &Message) -> Result<(Value, Vec<String>), ProviderError> {
+    let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
+        return Err(ProviderError::Rejected);
+    };
+    let items = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
+    let [item] = items.as_slice() else {
+        return Err(ProviderError::Rejected);
+    };
+    let delegate = name_of("delegate");
+    let mut unanswered = Vec::new();
+    if let Some(calls) = item["tool_calls"].as_array() {
+        unanswered.extend(calls.iter().filter_map(|call| {
+            (call.pointer("/function/name").and_then(Value::as_str) == Some(delegate.as_str()))
+                .then(|| call["id"].as_str().map(str::to_owned))
+                .flatten()
+        }));
+    }
+    Ok((item.clone(), unanswered))
+}
+
+fn push_user_blocks(
+    output: &mut Vec<Value>,
+    message: &Message,
+    unanswered: &mut Vec<String>,
+) -> Result<(), ProviderError> {
+    for id in std::mem::take(unanswered) {
+        if !message.blocks.iter().any(
+            |block| matches!(block, Block::ToolResult { id: result, .. } if result.as_str() == id),
+        ) {
+            output.push(json!({"role":"tool", "tool_call_id":id, "content":"Arany recorded this call; its result follows in a later message."}));
+        }
+    }
+    for block in &message.blocks {
+        match block {
+            Block::Text(text) => output.push(json!({"role":"user", "content":text})),
+            Block::ToolResult {
+                id, output: value, ..
+            } => output.push(json!({
+                "role":"tool", "tool_call_id":id.as_str(), "content":value.to_string()
+            })),
+            Block::Image { .. } | Block::AssistantTurn(_) => {
+                return Err(ProviderError::Rejected);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn function_json(spec: ToolSpec) -> Value {
