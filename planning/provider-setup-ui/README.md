@@ -2,13 +2,13 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: repository owner; product request dated 2026-10-22; implementation defaults attributed below
-- Last updated: `2026-10-22`
+- Last updated: `2026-10-24`
 - Research gate: passed; current contracts, implementation and primary peer sources are linked below.
-- Plan gate: passed; no material open question remains. Implementation has not started.
+- Plan gate: passed; implementation is underway with S1 still open.
 - Dependency: the [shared durable Provider checker](../../docs/specs/execution.md#standalone-provider-checks) is available for S1.
-- Next action: implement S1 on its own branch/PR; this documentation change authorizes no implementation or publication.
+- Next action: complete S1 in its scoped worktree.
 
 ## Outcome and scope
 

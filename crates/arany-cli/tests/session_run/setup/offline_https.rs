@@ -1,5 +1,6 @@
 use super::*;
 use crate::process::BoundedOutput;
+use base64::engine::general_purpose::STANDARD;
 use std::{net::TcpStream, os::unix::fs::PermissionsExt, process::Child};
 
 const STAGE: &str = "ARANY_TEST_OFFLINE_HTTPS_SETUP_STAGE";
@@ -410,6 +411,15 @@ fn run_pty_with_gate(
     let mut answered = crate::session_picker::PtyResponses::default();
     let mut after_answer = 0;
     for &(needle, answer) in answers {
+        if needle == API_ACCOUNTS_PROMPT {
+            acknowledge_linear_pages(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (after_answer, needle),
+            );
+        }
         let stage_at = wait_for_sanitized(
             &mut output,
             &mut input,
@@ -420,7 +430,8 @@ fn run_pty_with_gate(
         );
         let catalog_busy = needle == b"Notice: Loading model catalog; Ctrl+C cancels"
             || needle.ends_with(b"catalog loading; Ctrl+C cancels")
-            || needle.ends_with(b"draft unchanged; catalog loading");
+            || needle.ends_with(b"draft unchanged; catalog loading")
+            || needle.starts_with(b"Image 1: PNG");
         if needle != b"Choose number, n next, p previous, or q close:"
             && needle != b"Choose number, exact ID, n next, p previous, or q close:"
             && !catalog_busy
@@ -529,6 +540,17 @@ fn session(state: &str) -> SessionView {
     })
 }
 
+fn setup_session(state: &str) {
+    let view = session(state);
+    assert!(view.runs.is_empty(), "setup creates no Run");
+    assert!(
+        view.last_sequence >= 3,
+        "confirmed setup has a journaled edit"
+    );
+    assert_eq!(view.pending_provider_setup_edit, None);
+    assert!(!view.provider_setup_uncertain);
+}
+
 fn unsaved(state: &str) {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -542,7 +564,7 @@ fn unsaved(state: &str) {
             .expect("Workspace Sessions");
             assert!(
                 sessions.is_empty(),
-                "setup and startup must not save an empty conversation"
+                "unconfirmed setup and bare startup create no Session"
             );
         });
 }
@@ -569,12 +591,19 @@ fn isolated_stage() {
     let first_output = run_pty(
         SETUP_SHELL,
         &[
-            (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
-                b"type a choice name: Cancel or Use private file",
+                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"API accounts\r",
+            ),
+            (
+                API_ACCOUNTS_PROMPT,
+                b"Add or replace native API account\r",
+            ),
+            (
+                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
                 b"Use private file\r",
             ),
-            (b"type a choice name: OpenAI or Anthropic", b"OpenAI\r"),
+            (b"type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n", b"OpenAI\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
         ],
         None,
@@ -612,11 +641,11 @@ fn isolated_stage() {
     let metadata = std::fs::metadata(account_root.path().join("account-credentials.json"))
         .expect("account file metadata");
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    unsaved("/root/state-one");
+    setup_session("/root/state-one");
     assert!(setup_text.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
 
     let second_output = run_pty(BARE_SHELL, &[], None);
-    assert!(!String::from_utf8_lossy(&second_output).contains("Choose access method"));
+    assert!(!String::from_utf8_lossy(&second_output).contains("Provider setup"));
     unsaved("/root/state-two");
     assert!(
         String::from_utf8_lossy(&second_output).contains("Provider: openai\r\nModel: gpt-5.4\r\n")
@@ -762,12 +791,19 @@ fn isolated_stage() {
         EMPTY_CATALOG_SHELL,
         &[
             (b"Input:\r\n", b"/setup\r"),
-            (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
-                b"type a choice name: Cancel or Use private file",
+                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"API accounts\r",
+            ),
+            (
+                API_ACCOUNTS_PROMPT,
+                b"Add or replace native API account\r",
+            ),
+            (
+                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
                 b"Use private file\r",
             ),
-            (b"type a choice name: OpenAI or Anthropic", b"OpenAI\r"),
+            (b"type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n", b"OpenAI\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
         ],
         Some(b"Notice: Error: selected account has no visible models; use /setup to retry"),
@@ -817,6 +853,14 @@ fn isolated_stage() {
             ),
             (
                 b"Notice: Draft: 13 characters; catalog loading; Ctrl+C cancels",
+                b"\x1b[200~photo.png\x1b[201~",
+            ),
+            (
+                b"Image 1: PNG 1x1, 69 B",
+                b"\x1b[200~ notes\nphoto.png\x1b[201~",
+            ),
+            (
+                b"Image 1: PNG 1x1, 69 B",
                 b"\x01\x04",
             ),
             (
@@ -824,7 +868,7 @@ fn isolated_stage() {
                 b"!\x04",
             ),
             (
-                b"Notice: Draft: 14 characters; catalog loading; Ctrl+C cancels",
+                b"Notice: Draft: 30 characters; catalog loading; Ctrl+C cancels",
                 b"\x03",
             ),
             (b"Notice: Model catalog cancelled", b"\x04"),
@@ -865,9 +909,17 @@ fn isolated_stage() {
         1
     );
     assert_eq!(
-        text.matches("Notice: Draft: 14 characters; catalog loading; Ctrl+C cancels\r\n")
+        text.matches("Notice: Draft: 30 characters; catalog loading; Ctrl+C cancels\r\n")
             .count(),
         1
+    );
+    assert!(
+        text.contains("Draft (not sent):\r\n  catalog draft\r\n  Image 1: PNG 1x1, 69 B\r\n"),
+        "retained draft does not contain the pasted image beside its existing text"
+    );
+    assert!(
+        text.contains("Draft (not sent):\r\n  catalog draft notes\r\n  photo.png\r\n  Image 1: PNG 1x1, 69 B\r\n"),
+        "multiline text ending in a PNG filename was not retained beside the image"
     );
     assert!(!text.contains("Notice: Catalog loading; draft retained; Ctrl+C cancels"));
     unsaved("/root/state-six");
@@ -900,6 +952,12 @@ fn release_private_file_setup_reuses_saved_account() {
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
         .expect("owner-only home");
     std::fs::create_dir(home.join("workspace")).expect("Workspace");
+    let image = arany::test_support::test_image();
+    std::fs::write(
+        home.join("workspace/photo.png"),
+        base64::Engine::decode(&STANDARD, image.base64()).expect("test PNG bytes"),
+    )
+    .expect("Workspace PNG");
     fixture(&fixture_dir);
     let hosts = temp.path().join("hosts");
     std::fs::write(&hosts, b"127.0.0.1 api.openai.com api.anthropic.com\n")

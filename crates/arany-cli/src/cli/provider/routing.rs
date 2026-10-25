@@ -103,6 +103,27 @@ pub(crate) const PROVIDER_ROUTING: RecordFormat = RecordFormat {
     accepts: |bytes| parse(bytes).is_ok(),
 };
 
+pub(crate) fn references_custom_profile(
+    state_dir: &Path,
+    name: &str,
+) -> Result<bool, RoutingError> {
+    let state = StateRoot::open_existing(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
+    let Some(bytes) = state
+        .read_current(&PROVIDER_ROUTING)
+        .map_err(|_| RoutingError::RoutingUnavailable)?
+    else {
+        return Ok(false);
+    };
+    let config = parse(&bytes)?;
+    Ok(config
+        .providers
+        .values()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|route| route.provider == format!("custom:{name}")))
+}
+
 fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {
     let config: RoutingConfig =
         serde_json::from_slice(bytes).map_err(|_| RoutingError::InvalidConfiguration)?;

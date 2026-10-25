@@ -65,6 +65,15 @@ pub(crate) fn record_sync(state: &std::path::Path, record: &str) -> Result<(), S
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Result<(), StoreError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if FaultPlan::record_publication_fails(state, record) {
+        return Err(StoreError::Io(io::Error::other("record publication fault")));
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     FaultPlan::commit_marker(token)?;
@@ -136,6 +145,15 @@ pub(crate) async fn retry_backoff(session: SessionId, delay: Duration) {
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn autonomous_continuation(session: SessionId) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((entered, release)) = FaultPlan::autonomous_continuation_gate(session) {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_result(
     intent: uuid::Uuid,
     result: Result<ToolObservation, ToolError>,
@@ -151,6 +169,12 @@ pub(crate) fn guard_result(
 pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     #[cfg(any(test, feature = "test-support"))]
     FaultPlan::guard_cache_report_gate(observation).await;
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn guard_dispatched(intent: &crate::tools::EffectIntent) {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::guard_dispatched(&intent.call);
 }
 
 pub(crate) struct CandidateSync {
@@ -275,15 +299,18 @@ mod injection {
             oneshot::Receiver<()>,
         ),
         Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
+        AutonomousContinuation(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         CheckpointStall(SessionId),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
+        GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
         GuardCacheReport(
             uuid::Uuid,
             oneshot::Sender<crate::tools::ToolObservation>,
             oneshot::Receiver<()>,
         ),
         RecordSync(std::path::PathBuf, &'static str),
+        RecordPublication(std::path::PathBuf, &'static str),
         GoalAppend(SessionId, Admits),
         GoalAcknowledgment(
             SessionId,
@@ -373,6 +400,32 @@ mod injection {
         ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
             match take(|fault| matches!(fault, Fault::Checkpoint(id, ..) if *id == session)) {
                 Some(Fault::Checkpoint(_, entered, release)) => Some((entered, release)),
+                _ => None,
+            }
+        }
+
+        pub fn gate_autonomous_continuation(
+            session_id: SessionId,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait_entered) = oneshot::channel();
+            let (release, wait_release) = oneshot::channel();
+            plan().push(Fault::AutonomousContinuation(
+                session_id,
+                entered,
+                wait_release,
+            ));
+            (wait_entered, release)
+        }
+
+        pub(crate) fn autonomous_continuation_gate(
+            session_id: SessionId,
+        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::AutonomousContinuation(id, ..) if *id == session_id),
+            ) {
+                Some(Fault::AutonomousContinuation(_, entered, release)) => {
+                    Some((entered, release))
+                }
                 _ => None,
             }
         }
@@ -474,8 +527,31 @@ mod injection {
             .is_some()
         }
 
+        pub fn fail_record_publication(state: std::path::PathBuf, record: &'static str) {
+            plan().push(Fault::RecordPublication(state, record));
+        }
+
+        pub(crate) fn record_publication_fails(state: &std::path::Path, record: &str) -> bool {
+            take(|fault| matches!(fault, Fault::RecordPublication(path, name) if path == state && *name == record))
+                .is_some()
+        }
+
         pub fn lose_guard_receipt(intent: uuid::Uuid) {
             plan().push(Fault::GuardReceipt(intent));
+        }
+
+        pub fn observe_guard_dispatch(call: crate::tools::ToolCall) -> oneshot::Receiver<()> {
+            let (entered, wait) = oneshot::channel();
+            plan().push(Fault::GuardDispatch(call, entered));
+            wait
+        }
+
+        pub(crate) fn guard_dispatched(call: &crate::tools::ToolCall) {
+            if let Some(Fault::GuardDispatch(_, entered)) = take(
+                |fault| matches!(fault, Fault::GuardDispatch(candidate, _) if candidate == call),
+            ) {
+                let _ = entered.send(());
+            }
         }
 
         pub fn gate_guard_cache_report(

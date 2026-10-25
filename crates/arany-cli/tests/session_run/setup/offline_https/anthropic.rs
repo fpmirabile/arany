@@ -200,15 +200,22 @@ pub(super) fn stage() {
     let setup_output = run_pty(
         &SETUP_SHELL.replace("state-one", "state-scoped"),
         &[
-            (b"type a choice name: API key or ChatGPT plan", b"API key\r"),
             (
-                b"type a choice name: Cancel or Use private file",
+                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"API accounts\r",
+            ),
+            (
+                API_ACCOUNTS_PROMPT,
+                b"Add or replace native API account\r",
+            ),
+            (
+                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
                 b"Use private file\r",
             ),
-            (b"type a choice name: OpenAI or Anthropic", b"Anthropic\r"),
+            (b"type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n", b"Anthropic\r"),
             (b"Setup: Enter API key", b"synthetic-offline-api-key\r"),
             (
-                b"type a choice name: Key scoped to workspace or Choose API workspace",
+                b"type a choice name: 1. Key scoped to workspace or 2. Choose API workspace; empty Enter selects 1. Key scoped to workspace\r\nInput:\r\n",
                 b"Choose API workspace\r",
             ),
             (b"Setup: API workspace ID", b"wrkspc_Selected123\r"),

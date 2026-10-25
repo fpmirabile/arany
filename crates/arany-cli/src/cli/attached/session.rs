@@ -331,7 +331,11 @@ impl AttachedSession {
             }
             TerminalInput::ClipboardPaste => self.clipboard_paste(),
             TerminalInput::Paste => {
-                if let Err(error) = self.terminal.paste_into(&mut self.composer) {
+                if let Err(error) = self.terminal.paste_into_admitted_workspace(
+                    &mut self.composer,
+                    &self.admission.workspace,
+                    self.admission.workspace_identity,
+                ) {
                     self.ui.notice = Some(Feedback::History(format!(
                         "Error: {error}; draft unchanged"
                     )));
@@ -638,7 +642,7 @@ impl AttachedSession {
                     configure_account(
                         &mut self.terminal,
                         &mut self.admission,
-                        self.session_id,
+                        &mut self.session_id,
                         &mut self.view,
                         &mut self.composer,
                     )
@@ -654,7 +658,7 @@ impl AttachedSession {
             InteractiveCommand::Storage => {
                 crate::cli::storage::attached(
                     &mut self.terminal,
-                    self.admission.workspace.clone(),
+                    (&self.admission.workspace, self.admission.workspace_identity),
                     self.admission.state_dir.clone(),
                     &self.view,
                     &mut self.composer,

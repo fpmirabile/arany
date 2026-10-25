@@ -227,7 +227,11 @@ impl RunProgress<'_> {
                 Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
                 Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
             }),
-            TerminalInput::Paste => match ui.terminal.paste_into(ui.composer) {
+            TerminalInput::Paste => match ui.terminal.paste_into_admitted_workspace(
+                ui.composer,
+                &self.admission.workspace,
+                self.admission.workspace_identity,
+            ) {
                 Err(error) => Some(Feedback::History(format!(
                     "Error: {error}; draft unchanged"
                 ))),

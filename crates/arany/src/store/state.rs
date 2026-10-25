@@ -1,4 +1,4 @@
-use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StoreError};
+use super::{DATABASE_FILE, MAX_DATABASE_BYTES, RecordFormat, StoreError};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
@@ -198,6 +198,28 @@ impl RecordKind {
 pub struct Record<'a> {
     root: &'a StateRoot,
     kind: RecordKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderRecordTarget {
+    Profiles,
+    Routing,
+    Roster,
+}
+
+impl ProviderRecordTarget {
+    const fn kind(self) -> RecordKind {
+        match self {
+            Self::Profiles => RecordKind::ProviderProfiles,
+            Self::Routing => RecordKind::ProviderRouting,
+            Self::Roster => RecordKind::ProviderRoster,
+        }
+    }
+}
+
+pub enum ProviderRecordEdit<'a> {
+    Replace(&'a [u8]),
+    Remove,
 }
 
 impl Record<'_> {
@@ -423,6 +445,35 @@ impl StateRoot {
         Record { root: self, kind }
     }
 
+    pub fn edit_provider_record(
+        &self,
+        target: ProviderRecordTarget,
+        expected: Option<&[u8]>,
+        edit: ProviderRecordEdit<'_>,
+        format: &RecordFormat,
+    ) -> Result<(), StoreError> {
+        let kind = target.kind();
+        if format.kind != kind {
+            return Err(StoreError::ReadOnly);
+        }
+        let record = self.record(kind);
+        let (name, pending, limit, _) = kind.spec();
+        self.with_record_upgrade_lock(|| {
+            if record.read()?.as_deref() != expected {
+                return Err(StoreError::RecordChanged);
+            }
+            match edit {
+                ProviderRecordEdit::Replace(bytes) => {
+                    if !format.accepts_current(bytes) || bytes.is_empty() || bytes.len() > limit {
+                        return Err(StoreError::InvalidHistory);
+                    }
+                    self.replace_private_record(name, pending, bytes, limit)
+                }
+                ProviderRecordEdit::Remove => self.remove_private_record(name, pending, limit),
+            }
+        })
+    }
+
     fn remove_private_record(
         &self,
         name: &str,
@@ -431,6 +482,7 @@ impl StateRoot {
     ) -> Result<(), StoreError> {
         #[cfg(unix)]
         {
+            crate::fault::record_publication(&self.path, name)?;
             let record = self.open_private_record(name, limit)?;
             let staged = self.open_private_record(pending, limit)?;
             if staged.is_some() {
@@ -511,6 +563,7 @@ impl StateRoot {
                 return Err(StoreError::StorageFull);
             }
             self.read_private_record(name, limit)?;
+            crate::fault::record_publication(&self.path, name)?;
             let mut existing = OpenOptions::new();
             existing.read(true).write(true);
             existing.follow(FollowSymlinks::No);
@@ -887,6 +940,35 @@ mod tests {
                 .extension()
                 .is_none_or(|e| e != "pending")
         }));
+    }
+
+    #[test]
+    fn typed_provider_edit_rechecks_snapshot_and_keeps_ordinary_writes_read_only() {
+        let temp = tempfile::tempdir().expect("test root");
+        let state = StateRoot::admit(&temp.path().join("state")).expect("private state");
+        let empty = br#"{"version":2,"profiles":[]}"#;
+        let format = &crate::provider::PROVIDER_PROFILES;
+        state
+            .edit_provider_record(
+                ProviderRecordTarget::Profiles,
+                None,
+                ProviderRecordEdit::Replace(empty),
+                format,
+            )
+            .expect("write validated provider profiles");
+        assert!(matches!(
+            state.edit_provider_record(
+                ProviderRecordTarget::Profiles,
+                None,
+                ProviderRecordEdit::Remove,
+                format,
+            ),
+            Err(StoreError::RecordChanged)
+        ));
+        assert_eq!(
+            state.record(RecordKind::ProviderProfiles).read().unwrap(),
+            Some(empty.to_vec())
+        );
     }
 
     #[test]

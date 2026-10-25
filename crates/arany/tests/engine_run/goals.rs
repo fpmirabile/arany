@@ -678,7 +678,7 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
             },
             wire_provenance: None,
         }))
-        .chain((0..8).map(|_| good_compaction()))
+        .chain((1..READS).map(|_| good_compaction()))
         .collect(),
     );
     let requests = Arc::clone(&provider.requests);
@@ -2555,6 +2555,74 @@ async fn interrupted_autonomous_goal(
     (outcome.session_id, outcome.goal_id)
 }
 
+async fn run_autonomous_with_setup_refusal(
+    engine: &Engine,
+    provider: &Arc<ScriptedProvider>,
+    workspace: &Path,
+    state: &Path,
+) -> arany::RunOutcome {
+    let session = engine
+        .create_session(workspace.to_owned(), None)
+        .await
+        .unwrap();
+    let (entered, release) = arany::FaultPlan::gate_autonomous_continuation(session);
+    let mut input = autonomous_input(workspace);
+    input.session_id = Some(session);
+    input.title = None;
+    let run = run_with(
+        engine,
+        provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    );
+    tokio::pin!(run);
+    const CONTINUATION_DEADLINE: Duration = Duration::from_secs(10);
+    tokio::time::timeout(CONTINUATION_DEADLINE, async {
+        tokio::select! {
+            result = &mut run => panic!("autonomous Goal missed its continuation gate: {result:?}"),
+            reached = entered => reached.expect("first autonomous Run settled"),
+        }
+        assert_setup_refused_between_autonomous_runs(state, workspace, session).await;
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        release.send(()).expect("continue autonomous Goal");
+        run.await.expect("autonomous Goal")
+    })
+    .await
+    .expect("autonomous continuation deadline")
+}
+
+async fn assert_setup_refused_between_autonomous_runs(
+    state: &Path,
+    workspace: &Path,
+    session: arany::SessionId,
+) {
+    let store = Store::open(StateRoot::open_existing(state).unwrap()).unwrap();
+    let before = store.load_session(session).await.unwrap();
+    let view = store.load_open_view(session).await.unwrap().unwrap();
+    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Running);
+    assert!(matches!(
+        arany::start_provider_setup_edit(
+            StateRoot::open_existing(state).unwrap(),
+            workspace.to_owned(),
+            session,
+            arany::ProviderSetupTarget {
+                kind: arany::ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            },
+            None,
+        )
+        .await,
+        Err(EngineError::SessionBusy)
+    ));
+    assert_eq!(store.load_session(session).await.unwrap(), before);
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -2571,17 +2639,8 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let outcome = run_with(
-        &engine,
-        &provider,
-        autonomous_input(&workspace),
-        RunControls {
-            tools: ToolGrant::Configured,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("autonomous Goal");
+    let outcome =
+        run_autonomous_with_setup_refusal(&engine, &provider, &workspace, &state_path).await;
     assert_eq!(outcome.run.status, RunStatus::Finished);
     {
         let calls = requests.lock().expect("Provider requests");
@@ -2595,6 +2654,13 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
             "the next Run takes the pinned objective and no new text"
         );
     }
+    resume_session(
+        StateRoot::open_existing(&state_path).unwrap(),
+        workspace.clone(),
+        outcome.session_id,
+    )
+    .await
+    .expect("completed autonomous submission releases its Session lease");
     engine.close().await.expect("engine shutdown");
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
@@ -7538,6 +7604,72 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
 }
 
 #[tokio::test]
+async fn cancellation_after_clearing_refuses_compaction_before_reservation() {
+    const GATE_TIMEOUT: Duration = Duration::from_secs(180);
+    let _deadline = engine_support::deadline("cancelled compaction admission", GATE_TIMEOUT);
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = paged_read_workspace(temp.path());
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let session = engine
+        .create_session(workspace.clone(), None)
+        .await
+        .unwrap();
+    let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+        matches!(event, Event::ToolResultsCleared { .. })
+    });
+    let provider = Arc::new(
+        ScriptedProvider::new(paged_read_outcomes()).with_compactions(vec![Ok(
+            CompactionResponse {
+                summary: "Earlier pages remain recorded in the journal.".into(),
+                response_id: None,
+                usage: arany::Usage::default(),
+                wire_provenance: None,
+            },
+        )]),
+    );
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.session_id = Some(session);
+    input.title = None;
+    input.include_paths.clear();
+    let cancellation = RunCancellation::new();
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        cancellation: cancellation.clone(),
+        ..Default::default()
+    };
+    let watcher = async move {
+        let observed = tokio::time::timeout(GATE_TIMEOUT, entered)
+            .await
+            .is_ok_and(|result| result.is_ok());
+        cancellation.cancel();
+        let _ = release.send(());
+        observed
+    };
+    let (outcome, reached) = tokio::join!(run_with(&engine, &provider, input, controls), watcher);
+    assert!(reached, "clearing reaches its committed acknowledgment");
+    let outcome = outcome.expect("cancelled Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, session).await;
+    assert_eq!(view.runs[0].status, RunStatus::Cancelled);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Interrupted);
+    assert!(view.goals[0].budget_refusal.is_none());
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
+    let calls = provider.requests.lock().unwrap().len();
+    assert!(calls > 0 && calls <= READS);
+    assert_eq!(view.goals[0].provider_calls, u32::try_from(calls).unwrap());
+    assert_eq!(view.runs[0].tools.len(), calls);
+    assert!(!events.iter().any(|envelope| matches!(
+        envelope.event,
+        Event::GoalCompactionCallReserved { .. }
+            | Event::GoalContextCompacted { .. }
+            | Event::GoalFinished { .. }
+            | Event::MessageCommitted { .. }
+    )));
+}
+
+#[tokio::test]
 async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
@@ -7871,6 +8003,80 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             events
                 .iter()
                 .any(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn supervisor_failed_or_unknown_verdict_append_stops_without_another_call() {
+    for committed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "stable");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let gate = if committed {
+            Some(arany::FaultPlan::gate_goal_append_acknowledgment(
+                session,
+                |event| matches!(event, Event::SupervisorVerdictRecorded { .. }),
+            ))
+        } else {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::SupervisorVerdictRecorded { .. })
+            });
+            None
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..4).map(|_| crate::tool_outcome(facts_read())).collect(),
+        ));
+        let mut input = request(&workspace, "Inspect repeatedly");
+        input.include_paths.clear();
+        input.session_id = Some(session);
+        input.title = None;
+        {
+            let pending = run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(pending);
+            if let Some((entered, release)) = gate {
+                tokio::select! {
+                    result = &mut pending => panic!("Run ended before verdict acknowledgment: {:?}", result.map(|r| r.run.status)),
+                    entered = entered => entered.expect("verdict committed"),
+                }
+                assert_eq!(provider.requests.lock().unwrap().len(), 3);
+                drop(release);
+            }
+            assert!(matches!(
+                pending.await,
+                Err(EngineError::Store(arany::StoreError::Closed))
+            ));
+        }
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, session).await;
+        assert_action_bounds(&events, false, false);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        let last = events.last().unwrap();
+        assert_eq!(
+            matches!(last.event, Event::SupervisorVerdictRecorded { .. }),
+            committed
+        );
+        assert_eq!(matches!(last.event, Event::ToolFinished { .. }), !committed);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
+                .count(),
+            usize::from(committed)
         );
     }
 }
@@ -8354,6 +8560,67 @@ fn clearings(events: &[arany::EventEnvelope]) -> Vec<(usize, u32)> {
 }
 
 #[tokio::test]
+async fn anthropic_evidence_refreshes_between_runs_and_replays_each_window() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts\n");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            finish_with("Checked the facts"),
+            finish_with("Checked the facts again"),
+        ])
+        .with_profile("anthropic", "claude-sonnet-5")
+        .with_context_window_snapshots(vec![Some(100_000), None]),
+    );
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut first_input = request(&workspace, "Check the facts");
+    first_input.include_paths.clear();
+    let first = run_with(&engine, &provider, first_input, RunControls::default())
+        .await
+        .expect("Anthropic context window admitted");
+    assert_eq!(first.run.status, RunStatus::Finished);
+    let mut second_input = request(&workspace, "Check the facts again");
+    second_input.include_paths.clear();
+    let second = run_with(&engine, &provider, second_input, RunControls::default())
+        .await
+        .expect("Anthropic context window revalidated");
+    assert_eq!(second.run.status, RunStatus::Finished);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests[0].input.context_window_tokens, Some(100_000));
+        assert_eq!(requests[1].input.context_window_tokens, None);
+    }
+    engine.close().await.expect("engine shutdown");
+
+    let (first_events, first_view) = replayed(&state_path, first.session_id).await;
+    let (second_events, second_view) = replayed(&state_path, second.session_id).await;
+    assert_eq!(
+        first_view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .context_window_tokens,
+        Some(100_000)
+    );
+    assert_eq!(
+        second_view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .context_window_tokens,
+        None
+    );
+    assert!(first_events.iter().any(|event| matches!(
+        &event.event,
+        Event::RunStarted { config, .. } if config.context_window_tokens == Some(100_000)
+    )));
+    assert!(second_events.iter().any(|event| matches!(
+        &event.event,
+        Event::RunStarted { config, .. } if config.context_window_tokens.is_none()
+    )));
+}
+
+#[tokio::test]
 async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_before_the_next_call() {
     let default = window_run(None, 8, &[(7, 244_800)]).await;
     let pressure = window_run(Some(272_000), 8, &[(7, 244_800)]).await;
@@ -8504,11 +8771,11 @@ async fn each_pressured_report_maintains_context_once() {
 
 #[tokio::test]
 async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
-    for (window, line_repeats) in [
-        (None, 96),
-        (Some(32_768), 96),
-        (Some(272_000), 96),
-        (Some(32_768), 24),
+    for (window, line_repeats, compaction_expected) in [
+        (None, 96, true),
+        (Some(32_768), 96, true),
+        (Some(272_000), 96, false),
+        (Some(32_768), 24, false),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(
@@ -8534,7 +8801,6 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
                     .session_id,
             );
         }
-        let compaction_expected = window == Some(32_768) && line_repeats == 96;
         let mut provider = ScriptedProvider::new(vec![
             crate::tool_outcome(facts_read()),
             crate::tool_outcome(arany::ToolCall::Search {
@@ -8617,7 +8883,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         assert_eq!(
             provider.compact_requests.lock().expect("compactions").len(),
             usize::from(compaction_expected),
-            "only the large read in the small window needs compaction"
+            "crowded default and small windows compact the large read"
         );
         assert!(
             provider
@@ -8693,10 +8959,10 @@ async fn primary_fallback_chain_pins_its_smallest_window_or_none() {
 #[tokio::test]
 async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let temp = tempfile::tempdir().expect("temporary root");
-    let page = format!("{}\n", "x".repeat(99)).repeat(130);
+    let page = format!("{}\n", "x".repeat(99)).repeat(125);
     let workspace = facts_workspace(temp.path(), &page);
     for name in ["big1.txt", "big2.txt"] {
-        std::fs::write(workspace.join(name), "b".repeat(68 * 1024)).expect("include");
+        std::fs::write(workspace.join(name), "b".repeat(47 * 1024)).expect("include");
     }
     let state_path = temp.path().join("state");
     let command = arany::ToolCall::Command {
@@ -8743,7 +9009,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         .as_ref()
         .unwrap()
         .max_context_bytes;
-    assert!((228 * 1024..=232 * 1024).contains(&allowance));
+    assert!((270 * 1024..=274 * 1024).contains(&allowance));
     assert_eq!(run.tools.len(), 5);
     assert_eq!(run.tools[4].intent.call, command);
     assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
@@ -8767,8 +9033,8 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let mut uncleared = context.clone();
     uncleared.steps[0].cleared = false;
     let used = arany::test_support::tool_context_bytes(&uncleared);
-    assert!((52 * 1024..=64 * 1024).contains(&used));
-    let reserve = 64 * 1024 + 96 * 1024 + 512 + 16 * 1024 + 128 * 6 + 512;
+    assert!((48 * 1024..=60 * 1024).contains(&used));
+    let reserve = arany::test_support::tool_continuation_reserve(requests[4].max_output_tokens, 0);
     let margin = 2 * 1024;
     assert!(used + reserve > allowance as usize + margin);
     assert!(
@@ -8813,6 +9079,56 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     assert!(events[..reservation].iter().all(|event| !matches!(
         &event.event, Event::ToolStarted { intent, .. } if intent.call == command
     )));
+}
+
+#[tokio::test]
+async fn near_full_context_refuses_command_before_dispatch() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "original");
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(32 * 1024)).expect("instructions");
+    for name in ["big1.txt", "big2.txt"] {
+        std::fs::write(workspace.join(name), "b".repeat(127 * 1024)).expect("include");
+    }
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
+    let command = arany::ToolCall::Command {
+        program: "unconfigured".into(),
+        args: Vec::new(),
+        cwd: "".into(),
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(command)]));
+    let mut input = request(&workspace, &"x".repeat(60 * 1024));
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("context refusal");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert!(run.tools.is_empty(), "no command intent was dispatched");
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolStarted { .. } | Event::ToolFinished { .. }
+    )));
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("unchanged file"),
+        "original"
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
 }
 
 #[tokio::test]
@@ -8923,7 +9239,7 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
             std::fs::write(directory.join("SKILL.md"), &body).expect("Skill body");
             bodies.push(body);
         }
-        std::fs::write(workspace.join("AGENTS.md"), "Guidance. ".repeat(6000)).expect("guidance");
+        std::fs::write(workspace.join("AGENTS.md"), "Guidance. ".repeat(1200)).expect("guidance");
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).expect("state");
         let config = state_path.join("tools.json");
@@ -9017,6 +9333,20 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
         assert!(initial.steps.is_empty());
         assert!(provider.responses.lock().expect("responses").is_empty());
         if compact {
+            let allowance = run
+                .config
+                .as_ref()
+                .expect("config")
+                .tool_policy
+                .as_ref()
+                .expect("Tool policy")
+                .max_context_bytes;
+            let reserve =
+                arany::test_support::tool_continuation_reserve(requests[0].max_output_tokens, 0);
+            assert!(
+                reserve <= allowance as usize,
+                "the compaction fixture must avoid the half-allowance fallback"
+            );
             assert!(
                 !provider
                     .compact_requests

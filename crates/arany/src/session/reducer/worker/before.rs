@@ -255,7 +255,35 @@ pub(super) fn tool_started(
     Ok(())
 }
 
-pub(super) fn tool_finished(
+fn command_data_reference(
+    view: &SessionView,
+    run: &RunView,
+    observation: &crate::tools::ToolObservation,
+    data: &WorkerDataRef,
+) -> Result<(), ReplayError> {
+    if data.seal_sequence <= view.last_sequence {
+        if run.workers.sealed(data)?.tool != observation.intent.id {
+            return Err(ReplayError::InvalidTransition);
+        }
+    } else {
+        let w = worker(run, observation.intent.agent_run_id)?;
+        let used: u64 = run
+            .workers
+            .data
+            .iter()
+            .filter(|d| d.reference.assignment_id == observation.intent.agent_run_id)
+            .map(|d| u64::from(d.reference.bytes))
+            .sum();
+        if data.first_sequence <= view.last_sequence + 1
+            || used + u64::from(data.bytes) > u64::from(w.pins.data_bytes)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    Ok(())
+}
+
+fn command_finished(
     view: &SessionView,
     run: &RunView,
     agent_run_id: &AgentRunId,
@@ -272,21 +300,11 @@ pub(super) fn tool_finished(
         if let Some(result) = WorkerCommandResult::parse(&o.output) {
             if let PrivateCapture::Sealed { data } = result.private_capture {
                 let w = worker(run, *agent_run_id)?;
-                let used: u64 = run
-                    .workers
-                    .data
-                    .iter()
-                    .filter(|d| d.reference.assignment_id == *agent_run_id)
-                    .map(|d| u64::from(d.reference.bytes))
-                    .sum();
+                command_data_reference(view, run, o, &data)?;
                 if w.revision >= 16
-                    || used + u64::from(data.bytes) > u64::from(w.pins.data_bytes)
                     || o.disposition != ToolDisposition::Succeeded
                     || !o.attested_for(&o.intent)
                     || data.assignment_id != *agent_run_id
-                    || data.first_sequence <= view.last_sequence + 1
-                    || data.seal_sequence <= data.first_sequence
-                    || run.workers.data.iter().any(|d| d.reference == data)
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
@@ -295,6 +313,16 @@ pub(super) fn tool_finished(
             return Err(ReplayError::InvalidTransition);
         }
     }
+    Ok(())
+}
+
+pub(super) fn tool_finished(
+    view: &SessionView,
+    run: &RunView,
+    agent_run_id: &AgentRunId,
+    o: &crate::tools::ToolObservation,
+) -> Result<(), ReplayError> {
+    command_finished(view, run, agent_run_id, o)?;
     if let Some(Attestation::WorkerData { data, .. }) = &o.attestation {
         let sealed = run.workers.sealed(data)?;
         if sealed.tool != o.intent.id
@@ -377,7 +405,7 @@ pub(super) fn check(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    if (run.workers.pending.is_some() || pending_command_capture(run).is_some())
+    if (run.workers.pending.is_some() || run.workers.capture.is_some())
         && (starts_team_work(event) || matches!(event, Event::HookStarted { .. }))
     {
         return Err(ReplayError::InvalidTransition);

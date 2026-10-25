@@ -223,6 +223,7 @@ pub(super) async fn restore_saved_models(
             .iter()
             .map(|id| ModelEntry {
                 id: id.clone(),
+                context_window_tokens: None,
                 runnable: resolve_native_effort(&source.profile, id, None).is_ok(),
                 efforts: Effort::ALL
                     .into_iter()
@@ -549,6 +550,7 @@ async fn load_catalog_inner(
                 rows.into_iter()
                     .map(|row| ModelEntry {
                         id: row.slug,
+                        context_window_tokens: None,
                         runnable: false,
                         efforts: Vec::new(),
                     })
@@ -608,7 +610,11 @@ async fn load_while_owned(
                         terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Paste => {
-                        let notice = match terminal.paste_into(composer) {
+                        let notice = match terminal.paste_into_admitted_workspace(
+                            composer,
+                            &admission.workspace,
+                            admission.workspace_identity,
+                        ) {
                             Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
                             Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
                         };

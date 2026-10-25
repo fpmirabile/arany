@@ -34,13 +34,14 @@ pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, ProviderCheckLock,
     SessionRunLock, WorkspaceRunLock, archive_size_with_limit,
 };
-pub use state::{Record, RecordKind, StateRoot};
+pub use state::{ProviderRecordEdit, ProviderRecordTarget, Record, RecordKind, StateRoot};
 #[cfg(target_os = "macos")]
 pub(crate) use state::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
 pub(crate) use state::{capture_archive_with_limit, restore_archive_with_limit};
 
 const DATABASE_FILE: &str = "events.sqlite3";
+const PROVIDER_SETUP_EDIT_EVENT_SLOTS: usize = 2;
 pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
 // JSON escaping writes at most six bytes (`\u00XX`) per objective byte.
 const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_BYTES;
@@ -126,6 +127,8 @@ pub enum StoreError {
     Closed,
     #[error("store is read-only")]
     ReadOnly,
+    #[error("Provider record changed since it was inspected")]
+    RecordChanged,
     #[error("record replacement may have taken effect; its directory sync failed")]
     ReplaceUnconfirmed,
     #[error("state filesystem operation failed")]
@@ -614,6 +617,15 @@ impl Store {
         session_id: SessionId,
         event: Event,
     ) -> Result<EventEnvelope, StoreError> {
+        if matches!(&event, Event::ProviderSetupEditStarted { .. }) {
+            self.admit(
+                session_id,
+                PROVIDER_SETUP_EDIT_EVENT_SLOTS,
+                0,
+                AdmissionKind::Operation,
+            )
+            .await?;
+        }
         self.call(|reply| Request::Append {
             session_id,
             event: Box::new(event),
@@ -641,6 +653,11 @@ impl Store {
             Some(EvidenceRecord::Provider(record)) => Ok(Some(record)),
             Some(EvidenceRecord::Native(_)) => Err(StoreError::InvalidHistory),
         }
+    }
+
+    pub(crate) async fn clear_provider_evidence(&mut self, name: String) -> Result<(), StoreError> {
+        self.evidence(EvidenceOp::ClearProvider(name)).await?;
+        Ok(())
     }
 
     #[cfg(test)]

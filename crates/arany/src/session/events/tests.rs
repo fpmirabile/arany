@@ -1050,7 +1050,7 @@ mod account_default_tests {
             ("chatgpt", Some(32_767), 64 * 1024, false),
             ("chatgpt-like", Some(272_000), 64 * 1024, false),
             ("openai", Some(272_000), 64 * 1024, false),
-            ("anthropic", Some(272_000), 64 * 1024, false),
+            ("anthropic", Some(272_000), 64 * 1024, true),
         ] {
             let mut pinned = if provider == "chatgpt" {
                 config.clone()
@@ -1081,10 +1081,14 @@ mod account_default_tests {
                 evidence_digest: [1; 32],
                 capability_evidence_version: 2,
             });
+        let mut anthropic = ordinary.identity().unwrap();
+        anthropic.profile = "anthropic".into();
+        anthropic.model = "claude-sonnet-5".into();
         for (fallback, window_valid) in [
             (fallback, true),
             (ordinary.identity().unwrap(), false),
             (custom, false),
+            (anthropic, true),
         ] {
             let mut pinned = config.clone();
             pinned.providers = Some(crate::provider::Providers::all(vec![
@@ -2335,6 +2339,99 @@ mod payload_version_tests {
             unbounded.payload().is_err(),
             "a deadline beyond the Goal maximum"
         );
+    }
+
+    #[test]
+    fn provider_setup_applied_requires_a_resulting_digest() {
+        let operation_id = uuid::Uuid::now_v7();
+        let invalid = Event::ProviderSetupEditFinished {
+            operation_id,
+            resulting_digest: None,
+            disposition: ProviderSetupDisposition::Applied,
+        };
+        assert!(invalid.payload().is_err());
+        let payload = format!(
+            r#"{{"operation_id":"{operation_id}","resulting_digest":null,"disposition":"Applied"}}"#
+        );
+        assert!(Event::decode(invalid.kind(), 1, &payload, None, None).is_err());
+    }
+
+    #[test]
+    fn provider_setup_current_payloads_require_explicit_nullable_digests() {
+        let operation_id = uuid::Uuid::now_v7();
+        let started = Event::ProviderSetupEditStarted {
+            operation_id,
+            target: ProviderSetupTarget {
+                kind: ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            },
+            expected_digest: None,
+        };
+        let mut cases = vec![(started, "expected_digest")];
+        for disposition in [
+            ProviderSetupDisposition::Failed,
+            ProviderSetupDisposition::Cancelled,
+            ProviderSetupDisposition::Uncertain,
+        ] {
+            cases.push((
+                Event::ProviderSetupEditFinished {
+                    operation_id,
+                    resulting_digest: None,
+                    disposition,
+                },
+                "resulting_digest",
+            ));
+        }
+        for (event, field) in cases {
+            let payload = event.payload().unwrap();
+            assert_eq!(
+                Event::decode(event.kind(), 1, &payload, None, None).unwrap(),
+                event
+            );
+            let mut document: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert!(document[field].is_null());
+            document.as_object_mut().unwrap().remove(field);
+            let omitted = serde_json::to_string(&document).unwrap();
+            assert!(
+                Event::decode(event.kind(), 1, &omitted, None, None).is_err(),
+                "{field} must be present"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_setup_events_use_registered_current_payloads() {
+        let events = [
+            Event::ProviderSetupEditStarted {
+                operation_id: uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001")
+                    .expect("operation ID"),
+                target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::CustomProfile,
+                    identity: "example-route".into(),
+                },
+                expected_digest: None,
+            },
+            Event::ProviderSetupEditFinished {
+                operation_id: uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001")
+                    .expect("operation ID"),
+                resulting_digest: Some([1; 32]),
+                disposition: ProviderSetupDisposition::Applied,
+            },
+        ];
+        let fixtures = [
+            r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#,
+            r#"{"operation_id":"01900000-0000-7000-8000-000000000001","resulting_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"disposition":"Applied"}"#,
+        ];
+        for (event, fixture) in events.into_iter().zip(fixtures) {
+            let payload = event.payload().expect("setup payload");
+            let version = payload_version(event.kind()).expect("registered setup kind");
+            assert_eq!(version, 1);
+            assert_eq!(payload, fixture);
+            assert_eq!(
+                Event::decode(event.kind(), version, &payload, None, None).expect("decode"),
+                event
+            );
+        }
     }
 }
 

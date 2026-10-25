@@ -554,6 +554,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::RewindTooLarge => "RewindTooLarge",
         EngineError::GuardUnavailable => "GuardUnavailable",
         EngineError::SessionNotIdle => "SessionNotIdle",
+        EngineError::ProviderSetupBlocked => "ProviderSetupBlocked",
         EngineError::ForkNotAtRunBoundary => "ForkNotAtRunBoundary",
         EngineError::ConversationRewindLimit => "ConversationRewindLimit",
         EngineError::WorkspaceMismatch => "WorkspaceMismatch",

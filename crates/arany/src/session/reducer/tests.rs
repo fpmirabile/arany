@@ -1,5 +1,7 @@
 use super::*;
-use crate::session::WorkspaceIdentity;
+use crate::session::{
+    ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind, WorkspaceIdentity,
+};
 
 mod goal_recovery_tests {
     use super::*;
@@ -134,6 +136,8 @@ mod goal_recovery_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 
@@ -157,6 +161,44 @@ mod goal_recovery_tests {
         // Resume keeps refusing a Tool that stopped the Run, such as a cancelled one.
         let cancelled = pending_plan_view(Some(ToolDisposition::Cancelled));
         assert!(!cancelled.goals[0].can_resume(&cancelled));
+    }
+
+    #[test]
+    fn setup_recovery_preserves_unknown_tool_outcomes() {
+        for disposition in [None, Some(ToolDisposition::Uncertain)] {
+            let mut view = pending_plan_view(disposition);
+            view.runs[0].status = RunStatus::Active;
+            view.goals[0].status = GoalStatus::Running;
+            view.goals[0].active_run = Some(view.runs[0].id);
+            let operation_id = uuid::Uuid::now_v7();
+            view.apply_committed(&EventEnvelope {
+                sequence: view.last_sequence + 1,
+                session_id: view.id,
+                run_id: None,
+                agent_run_id: None,
+                event: Event::ProviderSetupEditStarted {
+                    operation_id,
+                    target: ProviderSetupTarget {
+                        kind: ProviderSetupTargetKind::CustomProfile,
+                        identity: "example-route".into(),
+                    },
+                    expected_digest: None,
+                },
+                created_at_ms: 1,
+            })
+            .unwrap();
+            assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+            assert_eq!(view.goals[0].status, GoalStatus::Interrupted);
+            assert!(!view.goals[0].can_resume(&view));
+            assert_eq!(
+                view.runs[0].tools[0]
+                    .observation
+                    .as_ref()
+                    .map(|value| value.disposition),
+                disposition
+            );
+        }
     }
 
     #[test]
@@ -481,6 +523,114 @@ mod goal_replay_tests {
                 active_ms: 0,
             },
         ]
+    }
+
+    async fn seed_setup_crash_prefix(
+        root: &crate::StateRoot,
+        workspace: &std::path::Path,
+        prefix: usize,
+    ) -> SessionId {
+        let identity =
+            crate::session::input::WorkspaceInputs::admit_identity(workspace, root).unwrap();
+        let session = SessionId::new();
+        let goal = GoalId::new();
+        let mut config = config(CollaborationPolicy::Single, false);
+        config.workspace_device = identity.device;
+        config.workspace_inode = identity.inode;
+        let mut facts = vec![goal_started(goal, GoalBudget::default())];
+        facts.extend(
+            start_run(goal, RunId::new(), AgentRunId::new(), config)
+                .into_iter()
+                .take(prefix),
+        );
+        let mut events = session_with(session, facts);
+        for envelope in &mut events {
+            match &mut envelope.event {
+                Event::SessionStarted {
+                    workspace_identity, ..
+                }
+                | Event::GoalStarted {
+                    workspace_identity, ..
+                } => *workspace_identity = identity,
+                _ => {}
+            }
+        }
+        let store = crate::Store::open(root.try_clone().unwrap()).unwrap();
+        for envelope in &events {
+            store.append(session, envelope.event.clone()).await.unwrap();
+        }
+        store.close().await.unwrap();
+        session
+    }
+
+    #[tokio::test]
+    async fn setup_edit_recovers_crash_prefixes_under_the_session_lock() {
+        for prefix in 0..=4 {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let root = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+            let session = seed_setup_crash_prefix(&root, &workspace, prefix).await;
+            let target = ProviderSetupTarget {
+                kind: ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            };
+            let mut lock = root.lock_session(session).unwrap();
+            lock.keep();
+            assert!(matches!(
+                crate::start_provider_setup_edit(
+                    root.try_clone().unwrap(),
+                    workspace.clone(),
+                    session,
+                    target.clone(),
+                    None
+                )
+                .await,
+                Err(crate::EngineError::SessionBusy)
+            ));
+            drop(lock);
+            let operation_id = crate::start_provider_setup_edit(
+                root.try_clone().unwrap(),
+                workspace,
+                session,
+                target,
+                None,
+            )
+            .await
+            .unwrap();
+            let store = crate::Store::open(root).unwrap();
+            let view = store.load_view(session).await.unwrap().unwrap();
+            assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+            assert_eq!(view.goals[0].status, GoalStatus::Interrupted);
+            assert_eq!(view.goals[0].active_run, None);
+            assert!(
+                view.runs
+                    .iter()
+                    .all(|run| run.status == RunStatus::Interrupted)
+            );
+            assert_eq!(view.defaults, SessionDefaults::default());
+            store
+                .append(
+                    session,
+                    Event::ProviderSetupEditFinished {
+                        operation_id,
+                        resulting_digest: Some([1; 32]),
+                        disposition: ProviderSetupDisposition::Applied,
+                    },
+                )
+                .await
+                .unwrap();
+            let events = store.load_session(session).await.unwrap();
+            let open = SessionView::replay_open(session, &events).unwrap().unwrap();
+            assert_eq!(open.goals[0].status, GoalStatus::Interrupted);
+            assert!(
+                open.runs
+                    .iter()
+                    .all(|run| run.status == RunStatus::Interrupted)
+            );
+            assert_eq!(open.pending_provider_setup_edit, None);
+            store.close().await.unwrap();
+        }
     }
 
     #[test]
@@ -3425,6 +3575,74 @@ mod goal_replay_tests {
         assert!(SessionView::replay_open(session_id, &journal(session_id, resumed)).is_err());
     }
 
+    fn assert_setup_recovery_with_open_lifecycle_hook(
+        session_id: SessionId,
+        goal_id: GoalId,
+        prefix: &[Event],
+    ) {
+        for disposition in [
+            ProviderSetupDisposition::Applied,
+            ProviderSetupDisposition::Failed,
+            ProviderSetupDisposition::Cancelled,
+            ProviderSetupDisposition::Uncertain,
+        ] {
+            let operation_id = uuid::Uuid::now_v7();
+            let mut events = prefix.to_vec();
+            events.push(Event::ProviderSetupEditStarted {
+                operation_id,
+                target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::CustomProfile,
+                    identity: "example-route".into(),
+                },
+                expected_digest: None,
+            });
+            let pending =
+                SessionView::replay_open(session_id, &journal(session_id, events.clone()))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(pending.pending_provider_setup_edit, Some(operation_id));
+            events.push(Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: (disposition == ProviderSetupDisposition::Applied)
+                    .then_some([1; 32]),
+                disposition,
+            });
+            let journal = journal(session_id, events);
+            let mut view = SessionView::replay_open(session_id, &journal)
+                .expect("setup outcome after an unfinished lifecycle hook")
+                .unwrap();
+            assert_eq!(view.pending_provider_setup_edit, None);
+            assert_eq!(
+                view.provider_setup_uncertain,
+                disposition == ProviderSetupDisposition::Uncertain
+            );
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+            assert!(view.runs[0].lifecycle_hooks[0].outcome.is_none());
+            assert_eq!(view.goal(goal_id).unwrap().status, GoalStatus::Interrupted);
+            assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+            let recovered = SessionView::replay(session_id, &journal).unwrap().unwrap();
+            assert_eq!(recovered.pending_provider_setup_edit, None);
+            assert_eq!(
+                recovered.provider_setup_uncertain,
+                view.provider_setup_uncertain
+            );
+            let renamed = view.apply_committed(&EventEnvelope {
+                sequence: view.last_sequence + 1,
+                session_id,
+                run_id: None,
+                agent_run_id: None,
+                event: Event::SessionRenamed {
+                    title: "Renamed".into(),
+                },
+                created_at_ms: 1,
+            });
+            assert_eq!(
+                renamed.is_ok(),
+                disposition != ProviderSetupDisposition::Uncertain
+            );
+        }
+    }
+
     #[test]
     fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
         use crate::tools::permissions::{HookEvent, HookInvocation, stop_subject};
@@ -3487,6 +3705,7 @@ mod goal_replay_tests {
         assert_eq!(view.runs[0].status, RunStatus::Interrupted);
         assert!(!view.runs[0].hooks_settled());
         assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+        assert_setup_recovery_with_open_lifecycle_hook(session_id, goal_id, &events);
 
         let next_goal = GoalId::new();
         events.push(goal_started(next_goal, GoalBudget::default()));
@@ -3705,6 +3924,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         }
     }
 
@@ -4028,7 +4249,6 @@ mod goal_replay_tests {
                 .unwrap(),
             view
         );
-        assert!(evaluator.pending_event().is_none());
         supervisor_corpus_labels(view, envelopes, goal);
     }
 
@@ -4131,8 +4351,18 @@ mod goal_replay_tests {
         evaluator: &mut SupervisorState,
     ) {
         let (run, actor) = (view.runs[0].id, view.runs[0].primary().unwrap().id);
-        evaluator.after(view, envelopes.last().unwrap());
-        let pending = evaluator.pending_event();
+        let pending = match evaluator.decide_verdict(view, envelopes.last().unwrap()) {
+            crate::supervisor::SupervisorDecision::Continue => None,
+            crate::supervisor::SupervisorDecision::Record {
+                run_id,
+                agent_run_id,
+                verdict,
+            } => Some(Event::SupervisorVerdictRecorded {
+                run_id,
+                agent_run_id,
+                verdict,
+            }),
+        };
 
         if i == 0 {
             let mut forged = view.clone();
@@ -4150,7 +4380,10 @@ mod goal_replay_tests {
         }
         if let Some(verdict) = pending {
             append_record(view, envelopes, verdict.clone());
-            evaluator.after(view, envelopes.last().unwrap());
+            assert_eq!(
+                evaluator.decide_verdict(view, envelopes.last().unwrap()),
+                crate::supervisor::SupervisorDecision::Continue
+            );
             let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
             assert_eq!(*recorded_actor, actor);
             assert!(
@@ -4795,6 +5028,8 @@ mod goal_replay_tests {
                 changeset: Default::default(),
             })
             .unwrap()
+        } else if matches!(intent.call, ToolCall::GhPrList { .. }) {
+            String::from_utf8(content.to_vec()).unwrap()
         } else {
             serde_json::json!({ "sha256": crate::validate::hex_digest(content) }).to_string()
         };
@@ -4947,6 +5182,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         for path in ["unrelated", "src/main.rs"] {
             let mut after_rewind = view.clone();
@@ -5145,6 +5382,8 @@ mod goal_replay_tests {
                 budget_refusal: None,
                 run_start_usage: Default::default(),
             }],
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         view.apply_committed(&EventEnvelope {
             sequence: 3,
@@ -7067,6 +7306,346 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn host_pr_list_accepts_only_a_pinned_typed_rule_or_human_verdict() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let mut intent = child_intent(
+            run,
+            agent,
+            ToolCall::GhPrList {
+                repository: "github.com/o/r".into(),
+                state: crate::tools::types::DEFAULT_PR_STATE,
+                base: None,
+                head: None,
+                limit: crate::tools::types::DEFAULT_PR_LIMIT,
+            },
+        );
+        intent.host = Some(crate::tools::types::HostIntent {
+            source_oid: "gh-pr-list-v1".into(),
+            refspec: "fixed-list".into(),
+        });
+        intent.limits.network = crate::tools::types::NetworkGrant::Host;
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        assert_host_pr_list_forbidden_verdicts(&view, &intent);
+        let typed = verdict_event(
+            &intent,
+            Some(PermissionMode::Plan),
+            Decision::Allow,
+            PermissionSource::TypedPrefixRule,
+            PermissionSource::TypedPrefixRule,
+            true,
+        );
+        apply(&mut view, typed).unwrap();
+        let mut observation = observation_for(
+            intent.clone(),
+            br#"{"pull_requests":[],"possibly_more":false,"truncated":false}"#,
+        );
+        observation.attestation = Some(crate::tools::Attestation::Host(
+            crate::tools::UnguardedReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: "a".repeat(64),
+                pid: 1,
+                exit_code: Some(0),
+                descendants_confirmed_stopped: true,
+            },
+        ));
+        let finish = Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        apply(&mut view, finish).expect("typed host read is committed");
+    }
+
+    fn assert_host_pr_list_forbidden_verdicts(view: &SessionView, intent: &EffectIntent) {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        for (mode, decision, basis, source) in [
+            (
+                Some(PermissionMode::Plan),
+                Decision::Allow,
+                PermissionSource::Rule,
+                PermissionSource::Rule,
+            ),
+            (
+                Some(PermissionMode::Plan),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::AiReview,
+            ),
+            (
+                Some(PermissionMode::Plan),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::SessionApproval,
+            ),
+            (
+                Some(PermissionMode::DontAsk),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+            ),
+            (
+                None,
+                Decision::Allow,
+                PermissionSource::TypedPrefixRule,
+                PermissionSource::TypedPrefixRule,
+            ),
+        ] {
+            assert!(
+                rejected(
+                    view,
+                    verdict_event(intent, mode, decision, basis, source, true)
+                ),
+                "{source:?} in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_pr_list_accepts_a_human_plan_verdict_through_tool_completion() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let mut intent = child_intent(
+            run,
+            agent,
+            ToolCall::GhPrList {
+                repository: "github.com/o/r".into(),
+                state: crate::tools::types::DEFAULT_PR_STATE,
+                base: None,
+                head: None,
+                limit: crate::tools::types::DEFAULT_PR_LIMIT,
+            },
+        );
+        intent.host = Some(crate::tools::types::HostIntent {
+            source_oid: "gh-pr-list-v1".into(),
+            refspec: "fixed-list".into(),
+        });
+        intent.limits.network = crate::tools::types::NetworkGrant::Host;
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        apply(
+            &mut view,
+            verdict_event(
+                &intent,
+                Some(PermissionMode::Plan),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            ),
+        )
+        .expect("human Plan approval is accepted for a host read");
+        let mut observation = observation_for(
+            intent.clone(),
+            b"host: GitHub pull request list exceeded a capture limit.",
+        );
+        observation.disposition = ToolDisposition::Failed;
+        observation.attestation = Some(crate::tools::Attestation::Host(
+            crate::tools::UnguardedReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: "a".repeat(64),
+                pid: 1,
+                exit_code: None,
+                descendants_confirmed_stopped: true,
+            },
+        ));
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation,
+            },
+        )
+        .expect("human-approved host read is committed");
+    }
+
+    #[test]
+    fn narrowed_host_pr_list_result_replays_within_its_pinned_budget() {
+        let mut fixture = crate::session::host_protocol_fixture();
+        let budget = 700;
+        let intent = fixture
+            .events
+            .iter_mut()
+            .find_map(|event| match event {
+                Event::ToolStarted { intent, .. }
+                    if matches!(intent.call, ToolCall::GitPush { .. }) =>
+                {
+                    intent.call = ToolCall::GhPrList {
+                        repository: "github.com/o/r".into(),
+                        state: crate::tools::types::DEFAULT_PR_STATE,
+                        base: None,
+                        head: None,
+                        limit: 3,
+                    };
+                    intent.host = Some(crate::tools::types::HostIntent {
+                        source_oid: "gh-pr-list-v1".into(),
+                        refspec: "fixed-list".into(),
+                    });
+                    intent.limits.network = crate::tools::types::NetworkGrant::Host;
+                    intent.limits.result_bytes = budget;
+                    Some(intent.clone())
+                }
+                _ => None,
+            })
+            .expect("pending host read");
+        for event in &mut fixture.events {
+            if let Event::ToolPermissionDecided { verdict, .. } = event {
+                verdict.intent_digest = intent.digest();
+            }
+        }
+        let output = serde_json::json!({
+            "pull_requests": [{
+                "number": 17,
+                "title": "Review patch",
+                "url": "https://github.com/o/r/pull/17",
+                "author": "octocat",
+                "state": "OPEN",
+                "draft": false,
+                "base": "main",
+                "base_oid": "base-sha",
+                "head": "topic",
+                "head_oid": "head-sha",
+                "review_decision": "APPROVED",
+                "updated_at": "2026-10-25T12:00:00Z",
+                "truncated_fields": []
+            }],
+            "possibly_more": true,
+            "truncated": true
+        })
+        .to_string();
+        assert!(output.len() <= budget as usize);
+        let observation = ToolObservation {
+            enforcement_cause: None,
+            limit_cause: None,
+            attestation: Some(crate::tools::Attestation::Host(
+                crate::tools::UnguardedReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    executable_sha256: "a".repeat(64),
+                    pid: 1,
+                    exit_code: Some(0),
+                    descendants_confirmed_stopped: true,
+                },
+            )),
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: output.clone(),
+            approval_cause: None,
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+        };
+        assert!(observation.valid());
+        fixture.events.push(Event::ToolFinished {
+            checkpoint: None,
+            run_id: fixture.run,
+            agent_run_id: fixture.primary,
+            observation,
+        });
+        let view = SessionView::replay_open(fixture.session, &fixture.envelopes())
+            .expect("narrowed Tool result replays")
+            .expect("fixture Session");
+        assert_eq!(
+            view.runs[0]
+                .tools
+                .last()
+                .unwrap()
+                .observation
+                .as_ref()
+                .unwrap()
+                .output,
+            output
+        );
+    }
+
+    #[test]
+    fn minimum_budget_host_pr_list_preparation_refusal_finishes_and_replays() {
+        let mut fixture = crate::session::host_protocol_fixture();
+        let budget = 128;
+        let intent = fixture
+            .events
+            .iter_mut()
+            .find_map(|event| match event {
+                Event::ToolStarted { intent, .. }
+                    if matches!(intent.call, ToolCall::GitPush { .. }) =>
+                {
+                    intent.call = ToolCall::GhPrList {
+                        repository: "github.com/o/r".into(),
+                        state: crate::tools::types::DEFAULT_PR_STATE,
+                        base: None,
+                        head: None,
+                        limit: crate::tools::types::DEFAULT_PR_LIMIT,
+                    };
+                    intent.host = Some(crate::tools::types::HostIntent {
+                        source_oid: "gh-pr-list-v1".into(),
+                        refspec: "fixed-list".into(),
+                    });
+                    intent.limits.network = crate::tools::types::NetworkGrant::Host;
+                    intent.limits.result_bytes = budget;
+                    Some(intent.clone())
+                }
+                _ => None,
+            })
+            .expect("pending host read");
+        for event in &mut fixture.events {
+            if let Event::ToolPermissionDecided { verdict, .. } = event {
+                verdict.intent_digest = intent.digest();
+            }
+        }
+        let observation = ToolObservation {
+            intent,
+            disposition: ToolDisposition::Denied,
+            output: "host: refused; nothing dispatched.".into(),
+            attestation: None,
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+            enforcement_cause: None,
+            limit_cause: None,
+            approval_cause: None,
+        };
+        assert!(observation.valid());
+        fixture.events.push(Event::ToolFinished {
+            checkpoint: None,
+            run_id: fixture.run,
+            agent_run_id: fixture.primary,
+            observation,
+        });
+        let view = SessionView::replay_open(fixture.session, &fixture.envelopes())
+            .expect("minimum-budget refusal replays")
+            .expect("fixture Session");
+        let result = view.runs[0]
+            .tools
+            .last()
+            .unwrap()
+            .observation
+            .as_ref()
+            .unwrap();
+        assert_eq!(result.disposition, ToolDisposition::Denied);
+        assert_eq!(result.output, "host: refused; nothing dispatched.");
+    }
+
+    #[test]
     fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
         use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
         let commit = ToolCall::GitCommit {
@@ -7751,6 +8330,132 @@ mod goal_replay_tests {
                     reason: crate::session::events::CompactionFailure::ProviderUnavailable,
                 },
             },
+        }
+    }
+
+    fn background_primary_tool_session() -> (SessionView, GoalId, RunId, AgentRunId, AgentRunId) {
+        let fixture = super::super::worker_tests::background_fixture();
+        let mut view = SessionView::replay_open(fixture.session, &fixture.envelopes())
+            .unwrap()
+            .unwrap();
+        let (goal, run, primary, child) =
+            (fixture.goal, fixture.run, fixture.primary, fixture.child);
+        let read = read_intent(run, primary, "src/lib.rs");
+        apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
+        apply(
+            &mut view,
+            Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: primary,
+                record: ProviderCallRecord {
+                    requested_tools: 1,
+                    ..record(
+                        AgentPhase::RootSynthesis,
+                        ProviderCallDisposition::ToolRequested,
+                        Some(0),
+                    )
+                },
+            },
+        )
+        .unwrap();
+        apply(&mut view, tool_started(run, primary, &read)).unwrap();
+        apply(&mut view, tool_finished(run, primary, &read, b"one")).unwrap();
+        (view, goal, run, primary, child)
+    }
+
+    #[test]
+    fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
+        let (mut view, goal, run, primary, child) = background_primary_tool_session();
+        apply(
+            &mut view,
+            Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            },
+        )
+        .unwrap();
+        let primary_call = reserve_child_call(goal, run, primary);
+        let child_call = reserve_child_call(goal, run, child);
+        assert!(rejected(&view, primary_call.clone()));
+        let calls = view.goals[0].provider_calls;
+        let mut exhausted = view.clone();
+        exhausted.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .budget
+            .max_provider_calls = Some(calls);
+        assert_eq!(
+            exhausted.goals[0].effective_budget().max_provider_calls,
+            Some(calls)
+        );
+        assert!(rejected(&exhausted, child_call.clone()));
+        apply(&mut view, child_call.clone()).expect("child continues during primary compaction");
+        assert_eq!(view.goals[0].provider_calls, calls + 1);
+        assert_eq!(view.goals[0].compaction_call_reserved, Some(run));
+        assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+        assert!(rejected(&view, child_call));
+        let count = u32::try_from(view.runs[0].tools.len()).unwrap();
+        let compacted = covering_compaction(&view, goal, run, count);
+        apply(&mut view, compacted).expect("primary compaction settles independently");
+        assert_eq!(view.goals[0].compaction_call_reserved, None);
+        assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::Finished),
+        )
+        .expect("child call settles independently");
+        assert!(view.goals[0].unobserved_provider_calls.is_empty());
+        apply(&mut view, primary_call).expect("primary resumes after its compaction");
+        assert_eq!(view.goals[0].unobserved_provider_calls, [primary]);
+    }
+
+    #[test]
+    fn primary_compaction_accepts_only_continuable_worker_deferrals() {
+        use crate::provider::ProviderFailureReason;
+
+        for reason in [
+            Some(ProviderFailureReason::WorkerAnswerDeferred),
+            Some(ProviderFailureReason::WorkerDelegateRefused),
+            Some(ProviderFailureReason::WorkerToolRefused),
+            None,
+        ] {
+            let (mut view, goal, run, primary, child) = background_primary_tool_session();
+            apply(&mut view, reserve_child_call(goal, run, child)).unwrap();
+            apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
+            let mut deferred = record(
+                AgentPhase::RootSynthesis,
+                ProviderCallDisposition::InvalidResponse,
+                Some(0),
+            );
+            deferred.failure_reason = reason;
+            apply(
+                &mut view,
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: deferred,
+                },
+            )
+            .unwrap();
+            let reservation = Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            };
+            assert_eq!(
+                apply(&mut view, reservation).is_ok(),
+                reason.is_some(),
+                "{reason:?}"
+            );
+            if reason.is_some() {
+                let count = u32::try_from(view.runs[0].tools.len()).unwrap();
+                let compacted = covering_compaction(&view, goal, run, count);
+                apply(&mut view, compacted).expect("compaction settles after a worker deferral");
+                assert_eq!(view.goals[0].compaction_call_reserved, None);
+                assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+            }
         }
     }
 
@@ -8875,4 +9580,80 @@ mod goal_replay_tests {
             assert_eq!(last.status, CheckpointStatus::Captured);
         }
     }
+}
+
+#[test]
+fn setup_edit_replay_requires_matching_finish_and_blocks_uncertainty() {
+    let session_id = SessionId::new();
+    let operation_id = uuid::Uuid::now_v7();
+    let envelope = |sequence, event| EventEnvelope {
+        sequence,
+        session_id,
+        run_id: None,
+        agent_run_id: None,
+        event,
+        created_at_ms: 1,
+    };
+    let started = envelope(
+        1,
+        Event::SessionStarted {
+            title: "Setup".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+        },
+    );
+    let edit_started = envelope(
+        2,
+        Event::ProviderSetupEditStarted {
+            operation_id,
+            target: ProviderSetupTarget {
+                kind: ProviderSetupTargetKind::CustomProfile,
+                identity: "example-route".into(),
+            },
+            expected_digest: None,
+        },
+    );
+    let mut view = SessionView::replay_open(session_id, &[started.clone(), edit_started.clone()])
+        .expect("valid open setup edit")
+        .expect("Session view");
+    assert_eq!(view.pending_provider_setup_edit, Some(operation_id));
+    assert!(
+        view.apply_committed(&envelope(
+            3,
+            Event::ProviderSetupEditFinished {
+                operation_id: uuid::Uuid::now_v7(),
+                resulting_digest: Some([1; 32]),
+                disposition: ProviderSetupDisposition::Applied,
+            },
+        ))
+        .is_err()
+    );
+    assert!(
+        view.apply_committed(&envelope(
+            3,
+            Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: None,
+                disposition: ProviderSetupDisposition::Uncertain,
+            },
+        ))
+        .is_ok()
+    );
+    assert!(view.provider_setup_uncertain);
+    assert!(
+        view.apply_committed(&envelope(
+            4,
+            Event::SessionDefaultChanged {
+                defaults: SessionDefaults::default(),
+            },
+        ))
+        .is_err()
+    );
+
+    let recovered = SessionView::replay(session_id, &[started, edit_started])
+        .expect("incomplete edit remains replayable")
+        .expect("recovered Session");
+    assert_eq!(recovered.pending_provider_setup_edit, Some(operation_id));
 }

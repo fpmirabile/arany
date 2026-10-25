@@ -487,6 +487,7 @@ impl RunLoop<'_> {
             | ToolCall::GitSwitch { .. }
             | ToolCall::GitPush { .. }
             | ToolCall::GhPrCreate { .. }
+            | ToolCall::GhPrList { .. }
             | ToolCall::Glob { .. } => 0,
         })
     }
@@ -509,15 +510,7 @@ impl RunLoop<'_> {
         purpose: WorkerDataPurpose,
         bytes: &[u8],
     ) -> Result<WorkerDataRef, EngineError> {
-        let mut data = self.worker_data_ref(
-            intent,
-            purpose,
-            bytes,
-            self.sequence()?
-                .checked_add(1)
-                .ok_or(EngineError::InvalidHistory)?,
-        )?;
-        data.assignment_id = assignment_id;
+        let mut first_sequence = None;
         for (ordinal, chunk) in bytes.chunks(WORKER_CHUNK_BYTES).enumerate() {
             self.append(Event::WorkerDataChunk {
                 run_id: self.run_id,
@@ -533,7 +526,15 @@ impl RunLoop<'_> {
                 },
             })
             .await?;
+            first_sequence.get_or_insert(self.sequence()?);
         }
+        let mut data = self.worker_data_ref(
+            intent,
+            purpose,
+            bytes,
+            first_sequence.ok_or(EngineError::InvalidHistory)?,
+        )?;
+        data.assignment_id = assignment_id;
         self.append(Event::WorkerDataSealed {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
@@ -566,26 +567,6 @@ impl RunLoop<'_> {
             bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::InvalidHistory)?,
             sha256: crate::validate::digest(bytes),
         })
-    }
-
-    pub(super) async fn seal_worker_command(
-        &self,
-        intent: &EffectIntent,
-        candidate: &crate::tools::worker::Candidate,
-        expected: &WorkerDataRef,
-    ) -> Result<(), EngineError> {
-        let actual = self
-            .seal_worker_data(
-                intent,
-                intent.agent_run_id,
-                WorkerDataPurpose::Mutation,
-                &candidate.data,
-            )
-            .await?;
-        if &actual != expected {
-            return Err(EngineError::InvalidHistory);
-        }
-        Ok(())
     }
 
     pub(super) async fn capture_worker_base(
@@ -752,29 +733,6 @@ impl RunLoop<'_> {
         drop(slot);
         let data = match data {
             Some(data) => data,
-            None if command => {
-                let mut data = self.worker_data_ref(
-                    &intent,
-                    purpose,
-                    &candidate.data,
-                    self.sequence()?
-                        .checked_add(2)
-                        .ok_or(EngineError::InvalidHistory)?,
-                )?;
-                let observation = candidate.observation(&data)?;
-                let verdict = self.ledger().tool_verdict_follows(&observation)?;
-                if verdict {
-                    data.first_sequence = data
-                        .first_sequence
-                        .checked_add(1)
-                        .ok_or(EngineError::InvalidHistory)?;
-                    data.seal_sequence = data
-                        .seal_sequence
-                        .checked_add(1)
-                        .ok_or(EngineError::InvalidHistory)?;
-                }
-                data
-            }
             None => {
                 self.seal_worker_data(&intent, intent.agent_run_id, purpose, &candidate.data)
                     .await?

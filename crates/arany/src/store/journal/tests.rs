@@ -61,6 +61,147 @@ fn append_refuses_event_past_replay_limit() {
     assert_eq!(count, MAX_SESSION_EVENTS as i64);
 }
 
+async fn setup_store_with_remaining_slots(
+    root: &StateRoot,
+    remaining: usize,
+) -> (crate::Store, SessionId) {
+    let store = crate::Store::open(root.try_clone().unwrap()).unwrap();
+    let session = SessionId::new();
+    store
+        .append(
+            session,
+            Event::SessionStarted {
+                title: "Capacity".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 1,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let mut connection = open_connection(root, false).unwrap();
+    let rename = Event::SessionRenamed {
+        title: "Capacity".into(),
+    };
+    let payload = rename.payload().unwrap();
+    let transaction = connection.transaction().unwrap();
+    {
+        let mut insert = transaction.prepare(
+            "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+        ).unwrap();
+        for sequence in 2..=MAX_SESSION_EVENTS - remaining {
+            insert
+                .execute(params![
+                    sequence as i64,
+                    session.to_string(),
+                    rename.kind(),
+                    rename.version(),
+                    payload
+                ])
+                .unwrap();
+        }
+    }
+    transaction.commit().unwrap();
+    drop(connection);
+    (
+        crate::Store::open(root.try_clone().unwrap()).unwrap(),
+        session,
+    )
+}
+
+async fn publish_setup_profile(
+    store: &crate::Store,
+    root: &StateRoot,
+    session: SessionId,
+    draft: crate::CustomProfileDraft,
+) -> Result<EventEnvelope, StoreError> {
+    use crate::{ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind};
+    use sha2::{Digest, Sha256};
+    let operation_id = uuid::Uuid::now_v7();
+    store
+        .append(
+            session,
+            Event::ProviderSetupEditStarted {
+                operation_id,
+                target: ProviderSetupTarget {
+                    kind: ProviderSetupTargetKind::CustomProfile,
+                    identity: draft.name.clone(),
+                },
+                expected_digest: None,
+            },
+        )
+        .await?;
+    let bytes = crate::CustomProfile::write_profiles(root, None, &[draft])
+        .await
+        .unwrap();
+    store
+        .append(
+            session,
+            Event::ProviderSetupEditFinished {
+                operation_id,
+                resulting_digest: Some(Sha256::digest(bytes).into()),
+                disposition: ProviderSetupDisposition::Applied,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn provider_setup_admission_refuses_publication_when_only_one_event_fits() {
+    use crate::{CustomProfile, CustomProfileDraft, CustomProtocol, MessagesAuth, RecordKind};
+
+    for remaining in 1..=super::super::PROVIDER_SETUP_EDIT_EVENT_SLOTS {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let (store, session) = setup_store_with_remaining_slots(&root, remaining).await;
+        let draft = CustomProfileDraft {
+            name: "example-route".into(),
+            protocol: CustomProtocol::OpenaiResponses,
+            endpoint: "https://api.example.com/v1/responses".into(),
+            model: "model-synthetic".into(),
+            credential_env: "ARANY_PROVIDER_EXAMPLE_KEY".into(),
+            messages_auth: MessagesAuth::Bearer,
+            efforts: Vec::new(),
+        };
+        CustomProfile::validate_drafts(std::slice::from_ref(&draft)).unwrap();
+        let result = publish_setup_profile(&store, &root, session, draft).await;
+        let applied = remaining == super::super::PROVIDER_SETUP_EDIT_EVENT_SLOTS;
+        if applied {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(StoreError::ReplayLimit)));
+        }
+        store.close().await.unwrap();
+        assert_eq!(
+            root.record(RecordKind::ProviderProfiles)
+                .read()
+                .unwrap()
+                .is_some(),
+            applied
+        );
+        let reopened = crate::Store::open_read_only(root.try_clone().unwrap()).unwrap();
+        let events = reopened.load_session(session).await.unwrap();
+        assert_eq!(
+            events.len(),
+            MAX_SESSION_EVENTS - if applied { 0 } else { remaining }
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::ProviderSetupEditStarted { .. }))
+                .count(),
+            usize::from(applied)
+        );
+        let view = reopened.load_view(session).await.unwrap().unwrap();
+        assert_eq!(view.pending_provider_setup_edit, None);
+        assert!(!view.provider_setup_uncertain);
+        reopened.close().await.unwrap();
+    }
+}
+
 fn hot_history(path: &std::path::Path) -> (Connection, Option<HotSession>, SessionId) {
     let mut connection = Connection::open(path).expect("file-backed store");
     connection
@@ -1786,6 +1927,8 @@ async fn a_new_native_attempt_invalidates_prior_credentials_for_the_same_target(
         fingerprint: [7; 32],
         checked_at_ms: now,
         expires_at_ms: now + 60_000,
+
+        context_window_tokens: None,
     };
     store.record_native_evidence(record.clone()).await.unwrap();
     let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();

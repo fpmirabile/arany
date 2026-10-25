@@ -23,6 +23,13 @@ pub(super) fn apply(
         EvidenceOp::LoadProvider(name) => {
             Ok(load(connection, &name)?.map(EvidenceRecord::Provider))
         }
+        EvidenceOp::ClearProvider(name) => {
+            if _read_only {
+                return Err(StoreError::ReadOnly);
+            }
+            clear(connection, &name)?;
+            Ok(None)
+        }
         EvidenceOp::LoadNative(fingerprint) => {
             Ok(load_native(connection, &fingerprint)?.map(EvidenceRecord::Native))
         }
@@ -184,16 +191,18 @@ pub(super) fn record_native(
         return Err(StoreError::StorageFull);
     }
     transaction.execute(
-        "INSERT INTO native_provider_evidence (fingerprint, checked_at_ms, expires_at_ms, check_id)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO native_provider_evidence (fingerprint, checked_at_ms, expires_at_ms, context_window_tokens, check_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(fingerprint) DO UPDATE SET
              checked_at_ms = excluded.checked_at_ms,
              expires_at_ms = excluded.expires_at_ms,
+             context_window_tokens = excluded.context_window_tokens,
              check_id = excluded.check_id",
         params![
             record.fingerprint.as_slice(),
             record.checked_at_ms,
             record.expires_at_ms,
+            record.context_window_tokens,
             check_id.to_string()
         ],
     )?;
@@ -204,19 +213,20 @@ fn load_native(
     connection: &Connection,
     fingerprint: &[u8; 32],
 ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-    let raw: Option<(i64, i64, String)> = connection
+    let raw: Option<(i64, i64, Option<u32>, String)> = connection
         .query_row(
-            "SELECT checked_at_ms, expires_at_ms, check_id
+            "SELECT checked_at_ms, expires_at_ms, context_window_tokens, check_id
              FROM native_provider_evidence WHERE fingerprint = ?1",
             [fingerprint.as_slice()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    let Some((checked_at_ms, expires_at_ms, check_id)) = raw else {
+    let Some((checked_at_ms, expires_at_ms, context_window_tokens, check_id)) = raw else {
         return Ok(None);
     };
     let record = NativeEvidenceRecord {
         fingerprint: *fingerprint,
+        context_window_tokens,
         checked_at_ms,
         expires_at_ms,
     };
@@ -241,6 +251,12 @@ fn validate_native(record: &NativeEvidenceRecord) -> Result<(), StoreError> {
         || record.expires_at_ms <= record.checked_at_ms
         || record.expires_at_ms - record.checked_at_ms > MAX_EVIDENCE_AGE_MS
     {
+        return Err(StoreError::InvalidHistory);
+    }
+    if record.context_window_tokens.is_some_and(|tokens| {
+        !(crate::provider::MIN_CONTEXT_WINDOW_TOKENS..=crate::provider::MAX_CONTEXT_WINDOW_TOKENS)
+            .contains(&tokens)
+    }) {
         return Err(StoreError::InvalidHistory);
     }
     Ok(())
@@ -289,6 +305,7 @@ mod tests {
         let now = now_ms().expect("clock");
         let record = NativeEvidenceRecord {
             fingerprint: [1; 32],
+            context_window_tokens: Some(200_000),
             checked_at_ms: now,
             expires_at_ms: now + 60_000,
         };
@@ -338,6 +355,7 @@ mod tests {
         let now = now_ms().expect("clock");
         let record = NativeEvidenceRecord {
             fingerprint: [3; 32],
+            context_window_tokens: None,
             checked_at_ms: now,
             expires_at_ms: now + 60_000,
         };
@@ -347,6 +365,14 @@ mod tests {
         };
         assert!(matches!(
             store.record_native_evidence(invalid).await,
+            Err(StoreError::InvalidHistory)
+        ));
+        let invalid_window = NativeEvidenceRecord {
+            context_window_tokens: Some(crate::provider::MAX_CONTEXT_WINDOW_TOKENS + 1),
+            ..record.clone()
+        };
+        assert!(matches!(
+            store.record_native_evidence(invalid_window).await,
             Err(StoreError::InvalidHistory)
         ));
         store
@@ -405,6 +431,7 @@ mod tests {
             store
                 .record_native_evidence(NativeEvidenceRecord {
                     fingerprint,
+                    context_window_tokens: None,
                     checked_at_ms: now,
                     expires_at_ms: now + 60_000,
                 })
@@ -413,6 +440,7 @@ mod tests {
         }
         let extra = NativeEvidenceRecord {
             fingerprint: [9; 32],
+            context_window_tokens: None,
             checked_at_ms: now,
             expires_at_ms: now + 60_000,
         };

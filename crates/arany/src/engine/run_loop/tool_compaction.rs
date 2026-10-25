@@ -71,6 +71,7 @@ fn context_decision(
     limit: usize,
     reserve: usize,
     window_pressure: bool,
+    boundaries: &[Option<usize>],
 ) -> ContextDecision {
     let len = context.rendered_len();
     if !window_pressure
@@ -80,7 +81,7 @@ fn context_decision(
         return ContextDecision::Ready;
     }
     let mut covered = 0;
-    let mut prefix_steps = 0;
+    let mut clear = None;
     let mut before = 0;
     let mut after = 0;
     let clearable = context
@@ -92,7 +93,6 @@ fn context_decision(
             break;
         }
         covered += step.observations.len();
-        prefix_steps = index + 1;
         if !step.cleared {
             for (index, observation) in step.observations.iter().enumerate() {
                 // Clearing receipts count recorded results, excluding catalog-derived hints.
@@ -105,16 +105,45 @@ fn context_decision(
             }
         }
         newly_cleared |= !step.cleared && !step.observations.is_empty();
-    }
-    if newly_cleared {
-        ContextDecision::Clear {
-            prefix_steps,
-            covered,
-            bytes: before.saturating_sub(after),
+        if newly_cleared && boundaries.get(covered - 1).is_some_and(Option::is_some) {
+            clear = Some(ContextDecision::Clear {
+                prefix_steps: index + 1,
+                covered,
+                bytes: before.saturating_sub(after),
+            });
         }
-    } else {
-        ContextDecision::Summarize
     }
+    clear.unwrap_or(ContextDecision::Summarize)
+}
+
+fn compaction_candidates(
+    context: &crate::tools::ToolContext,
+    boundaries: &[Option<usize>],
+    last_attempted: u32,
+) -> Vec<(usize, usize)> {
+    // A covered prefix ends on a step boundary; the newest results stay uncompacted when possible.
+    let total_observations = context.observation_count();
+    let mut step_boundaries = Vec::new();
+    let mut observed = 0;
+    for (index, step) in context.steps.iter().enumerate() {
+        observed += step.observations.len();
+        if !step.observations.is_empty() {
+            step_boundaries.push((index + 1, observed));
+        }
+    }
+    step_boundaries
+        .iter()
+        .rev()
+        .filter(|(_, count)| {
+            *count < total_observations
+                && boundaries[*count - 1].is_some_and(|end| end > last_attempted as usize)
+        })
+        .chain(step_boundaries.iter().rev().filter(|(_, count)| {
+            *count == total_observations
+                && boundaries[*count - 1].is_some_and(|end| end > last_attempted as usize)
+        }))
+        .copied()
+        .collect()
 }
 
 struct CompactionWindow {
@@ -199,6 +228,9 @@ impl RunLoop<'_> {
             Ok(Err(SizingRefusal::ActiveTime)) => {
                 return Ok(PrimaryContext::Stop(StopCause::Budget));
             }
+            Ok(Err(SizingRefusal::Cancelled)) => {
+                return Ok(PrimaryContext::Stop(StopCause::Cancelled));
+            }
             Ok(Err(SizingRefusal::ContextFull)) => {
                 return Ok(PrimaryContext::Stop(StopCause::ContextFull));
             }
@@ -266,7 +298,17 @@ impl RunLoop<'_> {
             .as_ref()
             .ok_or(EngineError::InvalidRequest)?;
         let pressure = self.unhandled_window_pressure()?;
-        let decision = context_decision(context, context_limit, reserve, pressure.is_some());
+        let (_, boundaries) = self.tool_context_boundaries()?;
+        if boundaries.len() != context.observation_count() {
+            return Err(EngineError::InvalidHistory);
+        }
+        let decision = context_decision(
+            context,
+            context_limit,
+            reserve,
+            pressure.is_some(),
+            &boundaries,
+        );
         if let Some(sequence) = pressure {
             self.window_pressure_handled
                 .store(sequence, std::sync::atomic::Ordering::Relaxed);
@@ -338,6 +380,9 @@ impl RunLoop<'_> {
     ) -> Result<Result<(), SizingRefusal>, EngineError> {
         let ledger = self.ledger();
         let reservation = ledger.reserve(Action::Compaction, self.primary_id).await?;
+        if self.controls.cancellation.is_cancelled() {
+            return Ok(Err(SizingRefusal::Cancelled));
+        }
         let Admission::Reserved(reservation) = reservation else {
             return Ok(Ok(()));
         };
@@ -448,6 +493,23 @@ impl RunLoop<'_> {
         })
     }
 
+    fn tool_context_boundaries(&self) -> Result<(u32, Vec<Option<usize>>), EngineError> {
+        self.ledger().view(|view| {
+            let run = view
+                .runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .ok_or(EngineError::InvalidHistory)?;
+            Ok::<_, EngineError>((
+                run.tool_compaction_covered_count.max(
+                    u32::try_from(run.initial_tool_count())
+                        .map_err(|_| EngineError::InvalidHistory)?,
+                ),
+                run.tool_step_boundaries(),
+            ))
+        })?
+    }
+
     async fn select_compaction_window(
         &self,
         request: &ProviderRequest,
@@ -461,22 +523,7 @@ impl RunLoop<'_> {
             return Ok(None);
         }
         let events = self.journal.store().load_session(self.session_id).await?;
-        let (previously_covered, boundaries) = self.ledger().view(|view| {
-            let run = view
-                .runs
-                .iter()
-                .find(|run| run.id == self.run_id)
-                .ok_or(EngineError::InvalidHistory)?;
-            Ok::<_, EngineError>((
-                run.tool_compaction_covered_count.max(
-                    u32::try_from(run.initial_tool_count())
-                        .map_err(|_| EngineError::InvalidHistory)?,
-                ),
-                run.live_tool_records()
-                    .map(|(index, _)| index + 1)
-                    .collect::<Vec<_>>(),
-            ))
-        })??;
+        let (previously_covered, boundaries) = self.tool_context_boundaries()?;
         if boundaries.len() != total_observations {
             return Err(EngineError::InvalidHistory);
         }
@@ -494,26 +541,7 @@ impl RunLoop<'_> {
             })
             .next_back()
             .unwrap_or(previously_covered);
-        // A covered prefix ends on a step boundary; the newest results stay uncompacted when possible.
-        let mut step_boundaries = Vec::new();
-        let mut observed = 0;
-        for (index, step) in context.steps.iter().enumerate() {
-            observed += step.observations.len();
-            if !step.observations.is_empty() {
-                step_boundaries.push((index + 1, observed));
-            }
-        }
-        let candidates: Vec<_> = step_boundaries
-            .iter()
-            .rev()
-            .filter(|(_, count)| {
-                *count < total_observations && boundaries[*count - 1] > last_attempted as usize
-            })
-            .chain(step_boundaries.iter().rev().filter(|(_, count)| {
-                *count == total_observations && boundaries[*count - 1] > last_attempted as usize
-            }))
-            .copied()
-            .collect();
+        let candidates = compaction_candidates(context, &boundaries, last_attempted);
         let plan_contract = self.ledger().plan_contract()?;
         let budget = self.ledger().effective_budget()?;
         let mut selected = None;
@@ -543,7 +571,8 @@ impl RunLoop<'_> {
             return Ok(None);
         };
         let covered_tool_count =
-            u32::try_from(boundaries[prefix_count - 1]).map_err(|_| EngineError::InvalidHistory)?;
+            u32::try_from(boundaries[prefix_count - 1].ok_or(EngineError::InvalidHistory)?)
+                .map_err(|_| EngineError::InvalidHistory)?;
         let covered_sequence = self.ledger().view(|view| {
             view.runs
                 .iter()
@@ -747,7 +776,7 @@ mod tests {
         let cleared = crate::tools::types::cleared_model_result(&observed)
             .to_string()
             .len();
-        let mut context = tool_context(serde_json::json!({"git": {}}));
+        let mut context = tool_context(crate::provider::test_support::catalog());
         context.steps = vec![
             ToolStep {
                 refusal: None,
@@ -767,7 +796,10 @@ mod tests {
             context.model_result(&context.steps[0], 0)["hint"],
             crate::tools::catalog::COMMAND_GIT_HINT.concat()
         );
-        let ContextDecision::Clear { bytes, .. } = context_decision(&context, 1, 0, false) else {
+        let boundaries: Vec<_> = (1..=context.observation_count()).map(Some).collect();
+        let ContextDecision::Clear { bytes, .. } =
+            context_decision(&context, 1, 0, false, &boundaries)
+        else {
             panic!("clear the oldest whole step");
         };
         assert_eq!(bytes, recorded - cleared);
@@ -828,6 +860,7 @@ mod tests {
             (vec![1, 1, 1], usize::MAX, 0, true, "summarize"),
             (vec![1, 1, 1, 1], usize::MAX, usize::MAX, false, "clear"),
             (vec![1, 1, 1, 1], 1, 0, false, "clear"),
+            (vec![1, 1, 1, 1, 1], 1, 0, false, "clear"),
             (vec![2, 2], 1, 0, false, "summarize"),
             (vec![1, 1, 1], 1, 0, false, "summarize"),
         ] {
@@ -857,7 +890,8 @@ mod tests {
                         .collect(),
                 });
             }
-            match context_decision(&context, limit, reserve, pressure) {
+            let boundaries: Vec<_> = (1..=context.observation_count()).map(Some).collect();
+            match context_decision(&context, limit, reserve, pressure, &boundaries) {
                 ContextDecision::Ready => assert_eq!(expected, "ready"),
                 ContextDecision::Summarize => assert_eq!(expected, "summarize"),
                 ContextDecision::Clear {
@@ -867,13 +901,29 @@ mod tests {
                 } => {
                     assert_eq!(expected, "clear");
                     assert_eq!(context.observation_count() - covered, RETAINED_TOOL_RESULTS);
+                    let mut blocked = boundaries.clone();
+                    blocked[covered - 1] = None;
+                    let candidates = compaction_candidates(&context, &blocked, 0);
+                    assert!(!candidates.iter().any(|(_, count)| *count == covered));
+                    assert_eq!(
+                        candidates.last().map(|(_, count)| *count),
+                        Some(context.observation_count())
+                    );
+                    assert!(compaction_candidates(&context, &boundaries, u32::MAX).is_empty());
+                    match context_decision(&context, limit, reserve, pressure, &blocked) {
+                        ContextDecision::Clear {
+                            covered: earlier, ..
+                        } => assert!(earlier < covered),
+                        ContextDecision::Summarize => assert_eq!(covered, 1),
+                        ContextDecision::Ready => panic!("pressure still requires maintenance"),
+                    }
                     let before = context.rendered_len();
                     for step in &mut context.steps[..prefix_steps] {
                         step.cleared = true;
                     }
                     assert_eq!(before - context.rendered_len(), bytes);
                     assert!(matches!(
-                        context_decision(&context, 1, 0, false),
+                        context_decision(&context, 1, 0, false, &boundaries),
                         ContextDecision::Summarize
                     ));
                 }

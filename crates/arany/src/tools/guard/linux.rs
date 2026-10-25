@@ -6,7 +6,8 @@ use super::{
 use crate::tools::Cancellation;
 use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
-    ToolCall, ToolLimits, ToolObservation, ToolResourceClass,
+    MAX_CHANGESET_SERIALIZED_BYTES, MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES, ToolCall, ToolLimits,
+    ToolObservation, ToolResourceClass,
 };
 use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{ToolError, ToolRuntime};
@@ -75,6 +76,8 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
+    bytes.extend_from_slice(&(MAX_CHANGESET_SERIALIZED_BYTES as u64).to_le_bytes());
+    bytes.extend_from_slice(&(MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(&(HARDENED_THREADS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(STATUS_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(super::TASK_BYTES_CAP as u64).to_le_bytes());
@@ -1100,6 +1103,7 @@ pub(super) async fn execute_inner(
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
+        crate::fault::guard_dispatched(intent);
         let report_deadline = if primary_command(intent) {
             capture_phase(&mut unit, intent, &mut stdin, &mut stdout, deadline).await?
         } else {

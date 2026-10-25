@@ -286,6 +286,7 @@ impl RunLoop<'_> {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(Err(refusal.into()))
             }
+            Err(refusal @ SizingRefusal::Cancelled) => Ok(Err(refusal.into())),
             Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
         }
     }
@@ -603,10 +604,6 @@ impl RunLoop<'_> {
         .await?;
         self.commit_approval_withdrawal(intent_id)?;
         if let Some((candidate, data)) = candidate {
-            if matches!(answer.observation.intent.call, ToolCall::Command { .. }) {
-                self.seal_worker_command(&answer.observation.intent, &candidate, &data)
-                    .await?;
-            }
             self.worker
                 .lock()
                 .await

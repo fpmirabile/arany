@@ -126,6 +126,91 @@ fn scripted() -> Arc<ScriptedProvider> {
     )
 }
 
+#[tokio::test]
+async fn setup_edits_block_loaded_thread_prompts_without_events_or_provider_calls() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let server = tokio::spawn(server::run_with_threads(
+        engine(&state),
+        state.clone(),
+        inbound,
+        outbound,
+        threads::Threads::with_provider(provider.clone()),
+    ));
+    input.send(initialize()).await.unwrap();
+    assert!(next(&mut output).await.get("result").is_some());
+    input.send(thread_start(&workspace)).await.unwrap();
+    let thread: arany::SessionId =
+        serde_json::from_value(next(&mut output).await["result"]["thread"]["id"].clone()).unwrap();
+    let started = next(&mut output).await;
+    assert_eq!(started["method"], "thread/started");
+    assert_eq!(started["params"]["thread"]["id"], thread.to_string());
+    let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+    for uncertain in [false, true] {
+        arany::test_support::record_setup_edit_state(&store, thread, uncertain).await;
+        let events = store.load_session(thread).await.unwrap();
+        assert_setup_blocked_requests(&input, &mut output, thread, &workspace).await;
+        assert_eq!(store.load_session(thread).await.unwrap(), events);
+    }
+    assert_eq!(
+        arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
+    store.close().await.unwrap();
+    input.send(ClientMessage::Eof).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+async fn assert_setup_blocked_requests(
+    input: &mpsc::Sender<ClientMessage>,
+    output: &mut mpsc::Receiver<Message>,
+    thread: arany::SessionId,
+    workspace: &std::path::Path,
+) {
+    for (id, method, params) in [
+        (
+            3,
+            "turn/start",
+            json!({"threadId":thread,"input":[{"type":"text","text":"Must not disclose"}]}),
+        ),
+        (
+            4,
+            "turn/start",
+            json!({"threadId":thread,"input":[{"type":"text","text":"Must not disclose"}],"goal":{"autonomous":true}}),
+        ),
+        (
+            5,
+            "goal/resume",
+            json!({"threadId":thread,"goalId":uuid::Uuid::now_v7()}),
+        ),
+        (
+            6,
+            "thread/resume",
+            json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4"}),
+        ),
+    ] {
+        input.send(request(id, method, params)).await.unwrap();
+        let response = next(output).await;
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"]["data"]["reason"], "providerSetupBlocked");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 #[cfg_attr(not(arany_ci), ignore)]
@@ -504,11 +589,15 @@ async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
         next(&mut output).await;
         let mut runs = Vec::new();
         for prompt in ["First prompt", "Second prompt"] {
+            let mut content = vec![json!({"type":"text","text":prompt})];
+            if prompt == "First prompt" {
+                content.push(json!({"type":"image","mediaType":"image/png","data":arany::test_support::test_image().base64()}));
+            }
             input
                 .send(request(
                     3,
                     "turn/start",
-                    json!({"threadId":thread,"input":[{"type":"text","text":prompt}]}),
+                    json!({"threadId":thread,"input":content}),
                 ))
                 .await
                 .unwrap();
@@ -573,6 +662,7 @@ async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
         input.send(request(11,"thread/rewind",json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"conversation"}))).await.unwrap();
         let restored = next(&mut output).await["result"].clone();
         assert_eq!(restored["rewind"]["outcome"], "restored");
+        assert_eq!(restored["conversation"]["imagesOmitted"], false);
         assert_eq!(next(&mut output).await["method"], "thread/started");
         let (after, _) = closed_view(&state, source).await;
         assert_eq!(after, before);
@@ -690,6 +780,11 @@ async fn rewind_preview_tokens_bind_thread_head_survive_time_and_fork_once() {
         assert!(first.get("thread").is_none());
         assert_eq!(first["conversation"]["threadId"], Value::Null);
         assert_eq!(first["conversation"]["prompt"], "First prompt");
+        assert_eq!(first["conversation"]["imagesOmitted"], true);
+        assert_eq!(
+            first["notices"],
+            json!(["Images were not copied; attach them again"])
+        );
         input.send(ClientMessage::Eof).await.unwrap();
     };
     let (result, ()) = tokio::join!(

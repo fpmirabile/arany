@@ -1628,7 +1628,7 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
                     }
                 }
                 if !stopped
-                    && text.contains("Setup: Choose access method\n")
+                    && text.contains("Setup: Provider setup\n")
                     && text.ends_with("Input:\n")
                 {
                     assert_eq!(

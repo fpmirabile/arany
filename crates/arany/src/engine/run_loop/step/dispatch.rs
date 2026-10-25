@@ -219,6 +219,7 @@ pub(super) struct DispatchFacts<'a> {
     pub(super) timeout_limit: Option<(u32, u32)>,
     pub(super) human_only_unavailable: bool,
     pub(super) host: bool,
+    pub(super) typed_host_read: bool,
     pub(super) host_unpinned: bool,
     pub(super) unguarded: Option<Unguarded>,
     pub(super) goal_allows: bool,
@@ -403,7 +404,16 @@ fn host_gate(
     approved: bool,
     source: PermissionSource,
 ) -> (bool, PermissionSource) {
-    if facts.host && (source != PermissionSource::Human || after.approval.is_none()) {
+    let typed_read_allow = facts.typed_host_read
+        && facts.site == DispatchSite::Primary
+        && facts.permission.decision == Decision::Allow
+        && facts.permission.basis == PermissionSource::TypedPrefixRule
+        && source == PermissionSource::TypedPrefixRule
+        && after.approval.is_none();
+    if facts.host
+        && !typed_read_allow
+        && (source != PermissionSource::Human || after.approval.is_none())
+    {
         (false, PermissionSource::UnavailableApproval)
     } else {
         (approved, source)
@@ -870,6 +880,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq)]
     enum Fact {
         Host,
+        TypedHostRead,
         HostUnpinned,
         Timeout,
         HumanOnly,
@@ -920,6 +931,7 @@ mod tests {
             hooks,
             timeout_limit: has(Fact::Timeout).then_some((9_000, 5_000)),
             host: has(Fact::Host) || has(Fact::HostUnpinned),
+            typed_host_read: has(Fact::TypedHostRead),
             host_unpinned: has(Fact::HostUnpinned),
             human_only_unavailable: has(Fact::HumanOnly),
             unguarded: gate.map(|gate| Unguarded { gate }),
@@ -979,6 +991,39 @@ mod tests {
                 source == Some(PermissionSource::Human)
             );
         }
+    }
+
+    #[test]
+    fn primary_typed_host_read_rule_authorizes_dispatch_without_human_channel() {
+        let permission = allow(PermissionSource::TypedPrefixRule);
+        let hooks = HookFold::none();
+        let (_, allowed) = decide(
+            DispatchSite::Primary,
+            permission,
+            &hooks,
+            &[Fact::Host, Fact::TypedHostRead, Fact::InProcess],
+            None,
+        );
+        assert!(allowed.outcome.is_ok());
+        assert_eq!(allowed.source, PermissionSource::TypedPrefixRule);
+
+        let (_, untyped) = decide(
+            DispatchSite::Primary,
+            permission,
+            &hooks,
+            &[Fact::Host, Fact::InProcess],
+            None,
+        );
+        assert!(untyped.outcome.is_err());
+
+        let (_, child) = decide(
+            DispatchSite::Researcher,
+            permission,
+            &hooks,
+            &[Fact::Host, Fact::TypedHostRead, Fact::InProcess],
+            None,
+        );
+        assert!(child.outcome.is_err());
     }
 
     #[test]

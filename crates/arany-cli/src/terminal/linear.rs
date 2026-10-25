@@ -1205,6 +1205,8 @@ mod tests {
             runs: Vec::new(),
             compactions: Vec::new(),
             goals: Vec::new(),
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
         };
         let mut linear = LinearState::new("screen-reader");
         let mut output = Vec::new();
@@ -1690,6 +1692,7 @@ mod tests {
                 } else {
                     format!("model-{index}")
                 },
+                context_window_tokens: None,
                 runnable: index == 1,
                 efforts: if index == 1 {
                     vec![arany::Effort::Low]

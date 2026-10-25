@@ -18,6 +18,7 @@ pub struct AnthropicProvider {
     effort: Effort,
     key: String,
     workspace_id: Option<String>,
+    evidence_root: Option<crate::store::StateRoot>,
 }
 
 impl AnthropicProvider {
@@ -95,6 +96,23 @@ impl AnthropicProvider {
         Ok(provider)
     }
 
+    pub fn from_credentials_with_evidence(
+        root: crate::store::StateRoot,
+        model: String,
+        selected_effort: Option<Effort>,
+        credentials: NativeApiCredentials,
+        saved_api_account_id: Option<Uuid>,
+    ) -> Result<Self, ProviderError> {
+        let mut provider = Self::from_credentials_with_effort(
+            model,
+            selected_effort,
+            credentials,
+            saved_api_account_id,
+        )?;
+        provider.evidence_root = Some(root);
+        Ok(provider)
+    }
+
     /// Admits one previously checked native model/effort before Workspace input.
     pub async fn from_checked_api_key_with_effort(
         root: crate::store::StateRoot,
@@ -127,7 +145,7 @@ impl AnthropicProvider {
         saved_api_account_id: Option<Uuid>,
     ) -> Result<Self, ProviderError> {
         super::native_check::verify_credentials_for_run(
-            root,
+            root.try_clone().map_err(|_| ProviderError::Unavailable)?,
             "anthropic",
             &model,
             effort,
@@ -136,6 +154,7 @@ impl AnthropicProvider {
         )
         .await?;
         let mut provider = Self::with_resolved_effort(model, effort, credentials)?;
+        provider.evidence_root = Some(root);
         provider.identity.provenance = Provenance::Native {
             saved_api_account_id,
         };
@@ -173,15 +192,25 @@ impl AnthropicProvider {
             effort,
             key: credentials.key,
             workspace_id: credentials.anthropic_workspace_id,
+            evidence_root: None,
         })
     }
 
+    #[cfg(test)]
     fn request(&self, request: Value) -> Result<reqwest::RequestBuilder, ProviderError> {
+        self.request_with_limit(request, super::MAX_PROVIDER_REQUEST_BYTES)
+    }
+
+    fn request_with_limit(
+        &self,
+        request: Value,
+        max_request_bytes: usize,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let request = native::json_request(
             &self.client,
             ANTHROPIC_ENDPOINT,
             &self.key,
-            wire::encode_request(&request)?,
+            wire::encode_request_within(&request, max_request_bytes)?,
         )
         .header("anthropic-version", "2023-06-01");
         Ok(match self.workspace_id.as_deref() {
@@ -190,19 +219,27 @@ impl AnthropicProvider {
         })
     }
 
-    async fn send(&self, request: Value) -> Result<wire::MessageReply, ProviderError> {
-        let mut response = self.request(request)?.send().await.map_err(|error| {
-            let stage = if error.is_timeout() {
-                crate::diagnostics::SubscriptionFailureStage::Deadline
-            } else {
-                crate::diagnostics::SubscriptionFailureStage::RequestTransport
-            };
-            crate::diagnostics::messages_failure(
-                stage,
-                crate::diagnostics::StreamCounts::default(),
-            );
-            super::send_failure(&error)
-        })?;
+    async fn send_with_limit(
+        &self,
+        request: Value,
+        max_request_bytes: usize,
+    ) -> Result<wire::MessageReply, ProviderError> {
+        let mut response = self
+            .request_with_limit(request, max_request_bytes)?
+            .send()
+            .await
+            .map_err(|error| {
+                let stage = if error.is_timeout() {
+                    crate::diagnostics::SubscriptionFailureStage::Deadline
+                } else {
+                    crate::diagnostics::SubscriptionFailureStage::RequestTransport
+                };
+                crate::diagnostics::messages_failure(
+                    stage,
+                    crate::diagnostics::StreamCounts::default(),
+                );
+                super::send_failure(&error)
+            })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             crate::diagnostics::messages_failure(
@@ -345,11 +382,32 @@ impl Provider for AnthropicProvider {
         &self.identity
     }
 
+    async fn context_window_tokens_for_run(&self) -> Option<u32> {
+        let root = self.evidence_root.as_ref()?;
+        let credentials =
+            NativeApiCredentials::new("anthropic", self.key.clone(), self.workspace_id.clone())
+                .ok()?;
+        super::native_check::context_window_for_run(
+            root,
+            "anthropic",
+            &self.identity.model,
+            self.effort,
+            &credentials,
+            self.identity.saved_api_account_id(),
+        )
+        .await
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let body = wire::run_body(&request, &conversation, self.effort)?;
-        let response = self.send(body).await?;
+        let response = self
+            .send_with_limit(
+                body,
+                super::request_ceiling(request.input.context_window_tokens),
+            )
+            .await?;
         self.decode_run_with_counts(&response.bytes, &request, &conversation, response.counts)
     }
 
@@ -363,7 +421,10 @@ impl Provider for AnthropicProvider {
         let mut body = wire::run_body(&request, &conversation, self.effort)?;
         body["stream"] = Value::Bool(true);
         let mut response = self
-            .request(body)?
+            .request_with_limit(
+                body,
+                super::request_ceiling(request.input.context_window_tokens),
+            )?
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .send()
             .await
@@ -410,7 +471,10 @@ impl Provider for AnthropicProvider {
             return Err(ProviderError::Rejected);
         }
         let response = self
-            .send(wire::compaction_body(&request, self.effort))
+            .send_with_limit(
+                wire::compaction_body(&request, self.effort),
+                super::MAX_PROVIDER_REQUEST_BYTES,
+            )
             .await?;
         self.decode_compaction_with_counts(
             &response.bytes,

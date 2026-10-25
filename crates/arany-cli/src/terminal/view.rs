@@ -956,7 +956,7 @@ pub(super) fn draw_setup_choices_frame(
 
 pub(super) fn setup_warning_height(warning: &str, width: u16) -> u16 {
     u16::try_from(
-        wrap_ascii_setup_warning(warning, usize::from(width.clamp(1, 72)))
+        wrap_setup_warning(warning, usize::from(width.clamp(1, 72)))
             .len()
             .saturating_add(5),
     )
@@ -990,7 +990,7 @@ pub(super) fn draw_setup_warning_frame(
         height,
     );
     let body_height = height - 5;
-    let lines = wrap_ascii_setup_warning(warning, usize::from(width));
+    let lines = wrap_setup_warning(warning, usize::from(width));
     let pages = lines.len().div_ceil(usize::from(body_height));
     let page = page.min(pages - 1);
     let has_more = page + 1 < pages;
@@ -1059,28 +1059,9 @@ pub(super) fn draw_setup_warning_frame(
     has_more
 }
 
-fn wrap_ascii_setup_warning(warning: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in warning.split_ascii_whitespace() {
-        for chunk in word.as_bytes().chunks(width) {
-            let chunk = std::str::from_utf8(chunk).expect("compiled ASCII consent warning");
-            if !current.is_empty() && current.len() + 1 + chunk.len() > width {
-                lines.push(std::mem::take(&mut current));
-            }
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(chunk);
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+fn wrap_setup_warning(warning: &str, width: usize) -> Vec<String> {
+    let normalized = warning.split_whitespace().collect::<Vec<_>>().join(" ");
+    wrap_cells(&normalized, width, 0)
 }
 
 #[cfg(test)]
@@ -1672,23 +1653,46 @@ fn draw_composer(
     } else {
         String::new()
     };
+    let mut compact_image_chip = !composer.images().is_empty() && composer_area.width < 28;
     if !composer.images().is_empty() {
-        position = if composer_area.width >= 40 {
-            format!(
-                " · {} image{}{}",
-                composer.images().len(),
-                if composer.images().len() == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-                position
-            )
+        let labels = (0..composer.images().len())
+            .map(|index| {
+                format!(
+                    "{}[Image #{}]",
+                    if composer.selected_image() == Some(index) {
+                        ">"
+                    } else {
+                        ""
+                    },
+                    index + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let all_chips = format!(" · {labels}{position}");
+        compact_image_chip |= UnicodeWidthStr::width(all_chips.as_str())
+            > usize::from(composer_area.width).saturating_sub(12);
+        if compact_image_chip {
+            let chip = match (composer.selected_image(), composer.images().len()) {
+                (Some(index), _) => format!(" >[Image #{}]", index + 1),
+                (None, 1) => " [Image #1]".to_owned(),
+                (None, count) => format!(" [{count} images]"),
+            };
+            position = if UnicodeWidthStr::width(chip.as_str())
+                + UnicodeWidthStr::width(position.as_str())
+                <= usize::from(composer_area.width)
+            {
+                format!("{chip}{position}")
+            } else {
+                chip
+            };
         } else {
-            format!(" {}img{}", composer.images().len(), position)
-        };
+            position = all_chips;
+        }
     }
-    let title = if 2 + "Ask Arany".len() + position.len() <= usize::from(composer_area.width) {
+    let title = if compact_image_chip {
+        ""
+    } else if 2 + "Ask Arany".len() + position.len() <= usize::from(composer_area.width) {
         "Ask Arany"
     } else {
         "Draft"
@@ -1737,7 +1741,14 @@ fn draw_composer(
         );
         let command = model.draft_action != DraftAction::Retain
             && matches!(composer.submission(), Ok(Submission::Command { .. }));
-        let hint = if composer.selected_paste().is_some() {
+        let hint = if composer.selected_image().is_some() {
+            let image_hint = " ←/→ select · Del/Backspace remove ";
+            if usize::from(composer_area.width) >= UnicodeWidthStr::width(image_hint) {
+                image_hint
+            } else {
+                " Del remove "
+            }
+        } else if composer.selected_paste().is_some() {
             if composer_area.width >= 28 {
                 " Tab: inspect · Del: remove "
             } else {

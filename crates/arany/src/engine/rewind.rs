@@ -22,7 +22,7 @@ pub struct ConversationRewind {
     pub session_id: Option<SessionId>,
     pub defaults: SessionDefaults,
     pub prompt: Option<String>,
-    pub images_omitted: bool,
+    pub images: Vec<crate::ImageAttachment>,
 }
 
 #[derive(Debug)]
@@ -185,6 +185,9 @@ impl Engine {
         view: &SessionView,
         before_run: RunId,
     ) -> Result<PreparedConversation, EngineError> {
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         if view.runs.last().is_some_and(|run| {
             matches!(
                 run.status,
@@ -224,7 +227,7 @@ impl Engine {
                 session_id: None,
                 defaults: view.defaults.clone(),
                 prompt: Some(selected.objective.clone()),
-                images_omitted: !selected.images.is_empty(),
+                images: selected.images.clone(),
             },
         })
     }
@@ -542,6 +545,9 @@ impl Engine {
         request: RewindRequest,
         view: &SessionView,
     ) -> Result<Prepared, EngineError> {
+        if view.provider_setup_blocks_continuation() {
+            return Err(EngineError::ProviderSetupBlocked);
+        }
         if !view.rewinds.checkpoints.contains(&request.target) {
             return Err(EngineError::InvalidRequest);
         }

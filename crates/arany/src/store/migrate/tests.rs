@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 59] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -190,6 +190,42 @@ const EVENT_FIXTURES: [EventFixture<'static>; 59] = [
         REWIND_STARTED_V1,
         REWIND_STARTED_V2,
     ),
+    (
+        "ToolStarted",
+        20,
+        include_str!("toolstarted-without-expiry.json"),
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        27,
+        include_str!("toolfinished-without-expiry.json"),
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "HookStarted",
+        10,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        16,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        11,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        21,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
 ];
 const GOAL_STARTED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_STARTED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","include_paths":null,"workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
@@ -258,6 +294,17 @@ fn provider_call_v19_identity_migration_preserves_bytes_and_rejects_new_reason()
     );
     assert!((step.canonical)(&forged).is_none());
     assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    let list_step = REGISTRY
+        .event_step("ProviderCallRecorded", 21)
+        .expect("PR-list migration follows file removal");
+    assert_eq!(
+        (list_step.canonical)(&forged).as_deref(),
+        Some(forged.as_str())
+    );
+    assert_eq!(
+        (list_step.transform)(serde_json::from_str(&forged).unwrap()),
+        Some(serde_json::from_str(&forged).unwrap())
+    );
 }
 
 #[test]
@@ -1510,6 +1557,23 @@ fn schema_of(sql: &str) -> Vec<[String; 4]> {
     schema_objects(&connection).unwrap()
 }
 
+fn assert_decodes_after_migration(kind: &str, from: i64, value: &Value) {
+    let payload = value.to_string();
+    let payload = REGISTRY
+        .upgrade_payload(kind, from, &payload)
+        .unwrap()
+        .unwrap_or(payload);
+    let (run, agent) = intent_scope(value).unwrap();
+    Event::decode(
+        kind,
+        payload_version(kind).unwrap(),
+        &payload,
+        Some(run),
+        Some(agent),
+    )
+    .unwrap();
+}
+
 #[test]
 fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() {
     for (kind, version, expiring, input, expected) in [
@@ -1539,15 +1603,7 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
         );
         let migrated = (step.transform)(without_expiry).unwrap();
         assert_eq!(migrated, serde_json::from_str::<Value>(expected).unwrap());
-        let (run, agent) = intent_scope(&migrated).unwrap();
-        Event::decode(
-            kind,
-            payload_version(kind).unwrap(),
-            &migrated.to_string(),
-            Some(run),
-            Some(agent),
-        )
-        .unwrap();
+        assert_decodes_after_migration(kind, version + 1, &migrated);
         let observation = if kind == "HookFinished" {
             &migrated["observation"]
         } else {
@@ -1675,15 +1731,7 @@ fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceil
             if shape == "asymmetric" {
                 assert_eq!(result.stdout.split_once("]…\n").unwrap().1, "suffix");
             }
-            let (run, agent) = intent_scope(&migrated).unwrap();
-            Event::decode(
-                kind,
-                payload_version(kind).unwrap(),
-                &migrated.to_string(),
-                Some(run),
-                Some(agent),
-            )
-            .unwrap();
+            assert_decodes_after_migration(kind, version + 1, &migrated);
         }
     }
 }
@@ -1842,7 +1890,7 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         [
             "SessionRenamed 6 -> 7 has no step and fixture",
             "SyntheticKind declares no migration floor",
-            "schema 6 -> 7 has no step and fixture",
+            "schema 7 -> 8 has no step and fixture",
         ]
     );
 }
@@ -2396,6 +2444,54 @@ fn diagnostic_schema_upgrade_preserves_sessions_and_discards_unproven_evidence()
     }
 }
 
+#[test]
+fn anthropic_window_schema_upgrade_discards_old_evidence() {
+    let bounds = format!(
+        "BETWEEN {} AND {}",
+        crate::provider::MIN_CONTEXT_WINDOW_TOKENS,
+        crate::provider::MAX_CONTEXT_WINDOW_TOKENS,
+    );
+    assert!(SCHEMA_SQL.contains(&bounds));
+    assert!(include_str!("schema_v7.sql").contains(&bounds));
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE native_provider_evidence;
+        CREATE TABLE native_provider_evidence (
+            fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+            checked_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            check_id TEXT NOT NULL
+        ) STRICT;
+        PRAGMA user_version=6;",
+        )
+        .unwrap();
+    assert!(exact_schema(&connection, &REGISTRY.schema, 6).unwrap());
+    connection
+        .execute(
+            "INSERT INTO native_provider_evidence VALUES (?1, 1, 2, '00000000-0000-7000-8000-000000000000')",
+            [[2_u8; 32].as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(root.archive_incompatible_history().unwrap().is_none());
+    let upgraded = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    assert!(exact_schema(&upgraded, &REGISTRY.schema, SCHEMA_VERSION).unwrap());
+    assert_eq!(
+        upgraded
+            .query_row("SELECT COUNT(*) FROM native_provider_evidence", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    drop(upgraded);
+    replays(&root, &sessions);
+}
+
 fn restore_pre_check_schema(connection: &Connection, source_version: i64) {
     connection.execute_batch("DROP TABLE provider_check_events; DROP TABLE provider_evidence; DROP TABLE native_provider_evidence;").unwrap();
     for statement in include_str!("schema_v5.sql").split(';').map(str::trim) {
@@ -2593,6 +2689,34 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
     let removal = REGISTRY.event_step("ToolStarted", 19).unwrap();
     assert!((removal.canonical)(&migrated.to_string()).is_some());
     assert_eq!((removal.transform)(migrated.clone()), Some(migrated));
+    let list_step = REGISTRY.event_step("ToolStarted", 20).unwrap();
+    let no_expiry = include_str!("toolstarted-without-expiry.json");
+    assert_eq!((list_step.canonical)(no_expiry).as_deref(), Some(no_expiry));
+    assert_eq!(
+        (list_step.transform)(serde_json::from_str(no_expiry).unwrap()),
+        Some(serde_json::from_str(no_expiry).unwrap())
+    );
+    let mut list = source_for_tool_started();
+    list["intent"]["call"] = serde_json::json!({
+        "operation":"gh_pr_list",
+        "repository":"github.com/o/r",
+        "state":"open",
+        "base":null,
+        "head":null,
+        "limit":30
+    });
+    list["intent"]["host"] = serde_json::json!({
+        "source_oid":"gh-pr-list-v1",
+        "refspec":"fixed-list"
+    });
+    list["intent"]["limits"]["network"] = serde_json::json!("host");
+    assert!((list_step.canonical)(&list.to_string()).is_none());
+    assert!((list_step.transform)(list).is_none());
+}
+
+fn source_for_tool_started() -> Value {
+    serde_json::from_str(include_str!("toolstarted-without-expiry.json"))
+        .expect("expiry-free ToolStarted fixture")
 }
 
 #[test]
@@ -2608,7 +2732,10 @@ fn file_removal_identity_steps_reject_new_calls_and_capabilities_in_old_payloads
         started["intent"]["call"] = call;
         let step = REGISTRY.event_step("ToolStarted", 19).unwrap();
         assert!((step.canonical)(&started.to_string()).is_none());
-        assert!((step.transform)(started).is_none());
+        assert!((step.transform)(started.clone()).is_none());
+        let list_step = REGISTRY.event_step("ToolStarted", 20).unwrap();
+        assert!((list_step.canonical)(&started.to_string()).is_some());
+        assert_eq!((list_step.transform)(started.clone()), Some(started));
         let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
         run["config"]["worker_policy"] = serde_json::json!({
             "parent_grant":{"read_paths":["src"],"write_paths":["src"],"tools":[operation],"skills":[],"mcp_servers":[],"commands":[],"permission_mode":null},

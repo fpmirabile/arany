@@ -952,6 +952,18 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
         }
     }
 }
+
+#[test]
+fn setup_warning_wraps_unicode_without_splitting_utf8() {
+    let warning = format!("{}éclair", "a".repeat(15));
+    let lines = wrap_setup_warning(&warning, 16);
+    assert_eq!(lines.concat(), warning);
+    assert!(
+        lines
+            .iter()
+            .all(|line| UnicodeWidthStr::width(line.as_str()) <= 16)
+    );
+}
 #[test]
 fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
     let model = PresentationModel {
@@ -1702,6 +1714,27 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         assert_eq!(composer.text(), "line0\nline1\nline2\nline3\nline4\nline5");
     }
 
+    composer.apply(TerminalInput::End);
+    for _ in 0..arany::MAX_MESSAGE_IMAGES {
+        composer
+            .attach_image(arany::test_support::test_image())
+            .unwrap();
+    }
+    for width in [16, 28, 32, 40, 80] {
+        for color in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                .unwrap();
+            let heading = buffer_row(terminal.backend().buffer(), 1);
+            assert!(heading.contains(">[Image #4]"), "{width}: {heading}");
+            assert!(
+                heading.contains(if width >= 40 { "rows 3-6/6" } else { "6/6" }),
+                "{width}: {heading}"
+            );
+        }
+    }
+
     composer.clear();
     for _ in 0..8 * 1024 {
         assert_eq!(
@@ -1872,6 +1905,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         "openai",
         &[ModelEntry {
             id: "gpt-5.4".into(),
+            context_window_tokens: None,
             runnable: true,
             efforts: vec![Effort::Medium],
         }],
@@ -1894,6 +1928,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         "openai",
         &[ModelEntry {
             id: "gpt-[alpha]".into(),
+            context_window_tokens: None,
             runnable: true,
             efforts: vec![Effort::Medium],
         }],
@@ -2146,6 +2181,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
             profile,
             &[ModelEntry {
                 id: "pending-model".into(),
+                context_window_tokens: None,
                 runnable: false,
                 efforts: vec![],
             }],
@@ -2244,7 +2280,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         empty_chat: true,
         agent_switch: false,
     };
-    for width in [16, 40, 80] {
+    for width in [16, 28, 32, 34, 35, 40, 80] {
         for color in [true, false] {
             for action in [DraftAction::Submit, DraftAction::Retain] {
                 let mut model = model.clone();
@@ -2259,9 +2295,11 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                     .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
                     .unwrap();
                 let cursor_before = terminal.backend_mut().get_cursor_position().unwrap();
-                composer
-                    .attach_image(arany::test_support::test_image())
-                    .unwrap();
+                for _ in 0..4 {
+                    composer
+                        .attach_image(arany::test_support::test_image())
+                        .unwrap();
+                }
                 terminal
                     .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
                     .unwrap();
@@ -2272,17 +2310,53 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                 );
                 assert_eq!(composer.text(), text);
                 assert_eq!(composer.cursor_byte_offset(), caret);
-                let buffer = terminal.backend().buffer();
-                let rows = (0..8).map(|y| buffer_row(buffer, y)).collect::<Vec<_>>();
-                assert!(
-                    rows[3].contains(if width < 40 { "1img" } else { "1 image" }),
-                    "{width}: {rows:?}"
+                let rows = (0..8)
+                    .map(|y| buffer_row(terminal.backend().buffer(), y))
+                    .collect::<Vec<_>>();
+                assert!(rows[3].contains(">[Image #4]"), "{width}: {rows:?}");
+                assert_eq!(
+                    rows[6].trim_matches('─'),
+                    if width >= 35 {
+                        " ←/→ select · Del/Backspace remove "
+                    } else {
+                        " Del remove "
+                    },
+                    "{width}: image selection footer"
                 );
                 assert!(rows[4].contains("alpha") && rows[5].contains('中'));
                 assert!(!rows.iter().any(|row| row.contains("iVBOR")));
+                assert_eq!(composer.apply(TerminalInput::Left), ComposerEdit::Changed);
+                terminal
+                    .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                    .unwrap();
+                let rows = (0..8)
+                    .map(|y| buffer_row(terminal.backend().buffer(), y))
+                    .collect::<Vec<_>>();
+                assert!(rows[3].contains(">[Image #3]"), "{width}: {rows:?}");
+                assert_eq!(
+                    composer.apply(TerminalInput::Character('!')),
+                    ComposerEdit::Changed
+                );
+                terminal
+                    .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                    .unwrap();
+                let heading = buffer_row(terminal.backend().buffer(), 3);
+                assert!(!heading.contains('>'), "{width}: {heading}");
+                if width < 80 {
+                    assert!(heading.contains("[4 images]"), "{width}: {heading}");
+                } else {
+                    for index in 1..=composer.images().len() {
+                        assert!(
+                            heading.contains(&format!("[Image #{index}]")),
+                            "{width}: {heading}"
+                        );
+                    }
+                }
                 if !color {
                     assert!(
-                        buffer
+                        terminal
+                            .backend()
+                            .buffer()
                             .content()
                             .iter()
                             .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
@@ -2902,6 +2976,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
             } else {
                 format!("same-long-prefix-model-{index}")
             },
+            context_window_tokens: None,
             runnable: index == 1,
             efforts: Vec::new(),
         })
@@ -3040,6 +3115,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
 fn inline_custom_model_catalog_shows_declared_efforts() {
     let items = vec![ModelEntry {
         id: "same-long-prefix-model-alpha".into(),
+        context_window_tokens: None,
         runnable: true,
         efforts: vec![Effort::Low, Effort::High],
     }];

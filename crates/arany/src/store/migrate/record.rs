@@ -32,6 +32,10 @@ pub const RECORD_FORMATS: [&RecordFormat; 4] = [
 ];
 
 impl RecordFormat {
+    pub fn accepts_current(&self, record: &[u8]) -> bool {
+        (self.accepts)(record)
+    }
+
     pub fn step(&self, from: u64) -> Option<&RecordStep> {
         self.steps.iter().find(|step| step.from == from)
     }

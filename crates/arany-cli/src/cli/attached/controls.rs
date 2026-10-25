@@ -1477,6 +1477,8 @@ mod tests {
             last_sequence: 1,
             lineage: None,
             goals: Vec::new(),
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
             runs: Vec::new(),
             compactions: Vec::new(),
         };
@@ -2099,6 +2101,8 @@ mod tests {
             last_sequence: 1,
             lineage: None,
             goals: Vec::new(),
+            pending_provider_setup_edit: None,
+            provider_setup_uncertain: false,
             runs: Vec::new(),
             compactions: Vec::new(),
         };
@@ -2195,6 +2199,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -2435,6 +2443,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -2476,6 +2488,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,
@@ -2518,6 +2534,10 @@ mod tests {
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
             workspace,
+            workspace_identity: arany::WorkspaceIdentity {
+                device: 0,
+                inode: 0,
+            },
             include_paths: Vec::new(),
             tools: false,
             workspace_permissions: None,

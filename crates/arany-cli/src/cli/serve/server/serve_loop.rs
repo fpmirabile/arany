@@ -494,6 +494,9 @@ impl ServerLoop {
             .ok_or_else(|| Fault::state(Reason::ThreadNotLoaded))?;
         let (objective, images) = input.parts()?;
         let view = threads::load_view(&self.state, input.thread_id).await?;
+        if view.provider_setup_blocks_continuation() {
+            return Err(Fault::engine(EngineError::ProviderSetupBlocked));
+        }
         let goal = input.goal(loaded, &view)?;
         let submitted_goal = goal.id;
         let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
