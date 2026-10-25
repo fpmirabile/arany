@@ -808,7 +808,7 @@ mod account_default_tests {
             agent_definitions: None,
             roster: None,
             providers: None,
-            provider: "openai".into(),
+            provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
             model: "gpt-5.4".into(),
             effort: None,
             custom_profile_provenance: None,
@@ -842,7 +842,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -850,6 +850,32 @@ mod account_default_tests {
         else {
             unreachable!()
         };
+        for provider in [
+            serde_json::json!("openai"),
+            serde_json::json!({"kind":"unknown","custom_name":null}),
+            serde_json::json!({"kind":"openai"}),
+            serde_json::json!({"kind":"openai","custom_name":"local"}),
+            serde_json::json!({"kind":"custom","custom_name":null}),
+            serde_json::json!({"kind":"custom","custom_name":""}),
+            serde_json::json!({"kind":"custom","custom_name":"Upper"}),
+            serde_json::json!({"kind":"custom","custom_name":"bad/name"}),
+            serde_json::json!({"kind":"custom","custom_name":"a".repeat(crate::provider::MAX_CUSTOM_PROFILE_NAME_BYTES + 1)}),
+            serde_json::json!({"kind":"openai","custom_name":null,"extra":true}),
+        ] {
+            assert!(serde_json::from_value::<crate::ProviderRecord>(provider.clone()).is_err());
+            let mut payload = serde_json::json!({"config":ordinary,"active_deadline_ms":null});
+            payload["config"]["provider"] = provider;
+            assert!(
+                Event::decode(
+                    "RunStarted",
+                    payload_version("RunStarted").unwrap(),
+                    &payload.to_string(),
+                    Some(RunId::new()),
+                    None
+                )
+                .is_err()
+            );
+        }
         let mut roster_config = ordinary.clone();
         let mut roster = crate::provider::RosterSnapshot {
             preset: "coding".into(),
@@ -991,12 +1017,13 @@ mod account_default_tests {
             Err(ReplayError::InvalidPayload)
         ));
         config.saved_api_account_id = Some(Uuid::now_v7());
-        config.provider = "scripted".into();
+        config.provider = crate::ProviderRecord::parse("custom:local").unwrap();
         assert!(matches!(
             config.validate(),
             Err(ReplayError::InvalidPayload)
         ));
         config.saved_api_account_id = None;
+        config.provider = ordinary.provider.clone();
         assert!(config.validate().is_ok());
         let decoded: RunConfig =
             serde_json::from_value(serde_json::to_value(&config).expect("current JSON"))
@@ -1008,7 +1035,7 @@ mod account_default_tests {
             crate::provider::OutputTokenBound::ProviderEnforced
         );
 
-        config.provider = "chatgpt".into();
+        config.provider = crate::ProviderRecord::parse("chatgpt").unwrap();
         config.model = "visible-model".into();
         config.effort = Some(crate::provider::Effort::High);
         config.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
@@ -1041,14 +1068,13 @@ mod account_default_tests {
         config.provider_concurrency = 1;
         assert!(config.validate().is_ok());
         for (provider, window, budget, valid) in [
-            ("chatgpt-like", None, 376 * 1024, true),
-            ("chatgpt-like", None, 376 * 1024 + 1, false),
+            ("openai", None, 376 * 1024, true),
+            ("openai", None, 376 * 1024 + 1, false),
             ("chatgpt", Some(272_000), 734_400, true),
             ("chatgpt", Some(272_000), 734_401, false),
             ("chatgpt", Some(2_000_000), 1024 * 1024, true),
             ("chatgpt", Some(2_000_001), 64 * 1024, false),
             ("chatgpt", Some(32_767), 64 * 1024, false),
-            ("chatgpt-like", Some(272_000), 64 * 1024, false),
             ("openai", Some(272_000), 64 * 1024, false),
             ("anthropic", Some(272_000), 64 * 1024, true),
         ] {
@@ -1057,7 +1083,7 @@ mod account_default_tests {
             } else {
                 ordinary.clone()
             };
-            pinned.provider = provider.into();
+            pinned.provider = crate::ProviderRecord::parse(provider).unwrap();
             pinned.context_window_tokens = window;
             pinned.context_usage = Some(ContextUsage {
                 used_bytes: 0,
@@ -2086,7 +2112,7 @@ mod payload_version_tests {
             agent_definitions: None,
             roster: None,
             providers: None,
-            provider: "openai".into(),
+            provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
             model: "gpt-5.4".into(),
             effort: None,
             custom_profile_provenance: None,

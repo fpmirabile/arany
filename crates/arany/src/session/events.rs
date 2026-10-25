@@ -171,7 +171,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("HookStarted", 11),
     ("HookFinished", 17),
     ("ToolFinished", 28),
-    ("RunStarted", 23),
+    ("RunStarted", 24),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
@@ -1745,13 +1745,19 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
         !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if call.is_unguarded())
     }
     match kind {
-        "RunStarted" => again::<RunStartedPayload>(payload, |data| {
-            data.config.tool_policy.as_ref().is_none_or(|policy| {
-                policy.host_epoch.is_none()
-                    && policy.host_prefixes.is_empty()
-                    && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
-            })
-        }),
+        "RunStarted" => {
+            let data = parse_string_run_provider(payload)?;
+            data.config
+                .tool_policy
+                .as_ref()
+                .is_none_or(|policy| {
+                    policy.host_epoch.is_none()
+                        && policy.host_prefixes.is_empty()
+                        && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
+                })
+                .then(|| string_run_provider_text(&data))
+                .flatten()
+        }
         "ToolStarted" => expiring_again::<ToolStartedPayload>(kind, payload, |data| {
             intent_allowed(&data.intent.clone().into())
         }),
@@ -1899,7 +1905,7 @@ pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<Stri
         "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
         "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
-        "RunStarted" => again::<RunStartedPayload>(payload),
+        "RunStarted" => run_started_v23_payload(payload),
         "AgentSpawned" => again::<SpawnPayload>(payload),
         _ => None,
     }?;
@@ -1910,7 +1916,7 @@ pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<Stri
 
 pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String> {
     let text = if kind == "RunStarted" {
-        serialize(&parse::<RunStartedPayload>(payload).ok()?).ok()?
+        run_started_v23_payload(payload)?
     } else {
         before_operations(kind, payload, &["multiedit"], Some("multiedit"))?
     };
@@ -2034,7 +2040,7 @@ pub(crate) fn goal_finished_v7_payload(payload: &str) -> Option<String> {
 // Version 19's hashed text: the current text without the null user digest.
 pub(crate) fn run_started_v19_payload(payload: &str) -> Option<String> {
     let value = run_started_v19_to_v20(serde_json::from_str(payload).ok()?)?;
-    let text = serialize(&parse::<RunStartedPayload>(&value.to_string()).ok()?).ok()?;
+    let text = run_started_v23_payload(&value.to_string())?;
     (text.matches(USER_DIGEST_FIELD).count() == 1).then(|| text.replacen(USER_DIGEST_FIELD, "", 1))
 }
 
@@ -2184,6 +2190,36 @@ pub(crate) fn pre_role_routing_payload(kind: &str, payload: &str) -> Option<Stri
         | ProviderSetupTargetKind::CustomProfile
         | ProviderSetupTargetKind::ModelPreferences => serialize(&data).ok(),
     }
+}
+
+// Migration-only decoding; live Events accept only the tagged Provider record.
+pub(crate) fn run_started_v23_to_v24(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let provider = value.get_mut("config")?.get_mut("provider")?;
+    let record = crate::provider::ProviderRecord::parse(provider.as_str()?)?;
+    *provider = serde_json::to_value(record).ok()?;
+    Some(value)
+}
+
+fn parse_string_run_provider(payload: &str) -> Option<RunStartedPayload> {
+    let limit = crate::store::MAX_EVENT_BYTES;
+    let value =
+        crate::validate::parse_json_bounded(payload.as_bytes(), limit, limit, limit).ok()?;
+    let value = run_started_v23_to_v24(value)?;
+    parse(&value.to_string()).ok()
+}
+
+fn string_run_provider_text(data: &RunStartedPayload) -> Option<String> {
+    let text = serialize(data).ok()?;
+    let tagged = format!("\"provider\":{}", serialize(&data.config.provider).ok()?);
+    let original = format!(
+        "\"provider\":{}",
+        serialize(&data.config.provider.profile()).ok()?
+    );
+    (text.matches(&tagged).count() == 1).then(|| text.replacen(&tagged, &original, 1))
+}
+
+pub(crate) fn run_started_v23_payload(payload: &str) -> Option<String> {
+    string_run_provider_text(&parse_string_run_provider(payload)?)
 }
 
 pub(crate) fn pre_roster_setup_payload(kind: &str, payload: &str) -> Option<String> {

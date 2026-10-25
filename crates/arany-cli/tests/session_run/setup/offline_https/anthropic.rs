@@ -336,7 +336,7 @@ pub(super) fn stage() {
         assert_eq!(run.objective, OBJECTIVE);
         assert_eq!(run.assistant_message.as_deref(), Some("scoped answer"));
         let config = run.config.as_ref().expect("pinned configuration");
-        assert_eq!(config.provider, "anthropic");
+        assert_eq!(config.provider.profile(), "anthropic");
         assert_eq!(config.model, model);
         assert_eq!(
             config.effort,

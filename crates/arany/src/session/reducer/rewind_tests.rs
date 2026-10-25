@@ -703,7 +703,7 @@ fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
         covered_run_id: f.run,
         covered_sequence: view.last_sequence,
         source_digest: crate::session::prefix_digest(&events, view.last_sequence).unwrap(),
-        provider: "scripted".into(),
+        provider: "openai".into(),
         model: "test".into(),
         prompt_version: 1,
         schema_version: 1,

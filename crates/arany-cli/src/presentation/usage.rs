@@ -317,17 +317,21 @@ fn plan_limits_summary(
 }
 
 fn status_route_is_chatgpt(view: &SessionView, run: Option<&arany::RunView>) -> bool {
-    let provider = match run {
-        Some(run) => run.config.as_ref().map(|config| config.provider.as_str()),
-        None => view.defaults.provider.as_deref(),
+    let kind = match run {
+        Some(run) => run.config.as_ref().map(|config| config.provider.kind()),
+        None => view
+            .defaults
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::parse),
     };
-    provider.and_then(ProviderKind::parse) == Some(ProviderKind::ChatGpt)
+    kind == Some(ProviderKind::ChatGpt)
 }
 
 fn status_account(view: &SessionView, run: Option<&arany::RunView>) -> Option<uuid::Uuid> {
     match run {
         Some(run) => run.config.as_ref().and_then(|config| {
-            (ProviderKind::parse(&config.provider) == Some(ProviderKind::ChatGpt))
+            (config.provider.kind() == ProviderKind::ChatGpt)
                 .then_some(config.chatgpt_provenance.as_ref()?.account_id)
         }),
         None if view
@@ -815,13 +819,13 @@ mod tests {
         for (provider, has_plan) in [
             ("openai", false),
             ("anthropic", false),
-            ("custom", false),
+            ("custom:local", false),
             ("chatgpt", true),
         ] {
             let mut selected = view.clone();
             selected.defaults.provider = Some("chatgpt".into());
             let config = selected.runs.last_mut().unwrap().config.as_mut().unwrap();
-            config.provider = provider.into();
+            config.provider = arany::ProviderRecord::parse(provider).expect("Provider record");
             config.chatgpt_provenance = None;
             let summary = usage_pages_at(&selected, true, None, Some(1000)).concat();
             assert_eq!(

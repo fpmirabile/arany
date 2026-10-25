@@ -1386,11 +1386,10 @@ pub(super) fn active_command_notice(
             "/agents changes are unavailable while a Run is active; /agents opens details; Ctrl+C cancels".into()
         }
         InteractiveCommand::Provider => {
-            let provider = run
+            let pinned_provider = run
                 .and_then(|run| run.config.as_ref())
-                .map_or(view.defaults.provider.as_deref(), |config| {
-                    Some(config.provider.as_str())
-                });
+                .map(|config| config.provider.profile());
+            let provider = pinned_provider.as_deref().or(view.defaults.provider.as_deref());
             format!(
                 "Provider: {}; /provider changes are unavailable while a Run is active; Ctrl+C cancels",
                 provider.unwrap_or("not selected")
@@ -1710,7 +1709,7 @@ mod tests {
             agent_definitions: None,
             roster: None,
             providers: None,
-            provider: "openai".into(),
+            provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
             model: "gpt-5.4".into(),
             effort: None,
             custom_profile_provenance: None,

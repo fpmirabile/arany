@@ -2330,7 +2330,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             agent_definitions: None,
             roster: None,
             providers: None,
-            provider: "scripted".into(),
+            provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
             model: "test-model".into(),
             effort: None,
             custom_profile_provenance: None,
@@ -2935,7 +2935,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 agent_definitions: None,
                 roster: None,
                 providers: None,
-                provider: "scripted".into(),
+                provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                 model: "test-model".into(),
                 effort: None,
                 custom_profile_provenance: None,
@@ -3295,7 +3295,7 @@ impl arany::Provider for HeldProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "held-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "held-model", arany::Provenance::native())
             });
         &IDENTITY
     }

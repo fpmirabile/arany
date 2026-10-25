@@ -992,7 +992,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         })
     );
     let config = view.runs[0].config.as_ref().expect("Run config");
-    assert_eq!(config.provider, "custom:local");
+    assert_eq!(config.provider.profile(), "custom:local");
     assert_eq!(config.model, case.model);
     assert_eq!(config.provider_concurrency, 1);
     let provenance = config

@@ -739,7 +739,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
         for run in &view.runs {
             let config = run.config.as_ref().expect("pinned config");
-            assert_eq!(config.provider, "custom:local");
+            assert_eq!(config.provider.profile(), "custom:local");
             assert_eq!(config.saved_api_account_id, None);
             assert!(config.roster.as_ref().unwrap().valid());
         }

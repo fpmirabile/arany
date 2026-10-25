@@ -35,7 +35,7 @@ impl Provider for GitJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+                arany::ProviderIdentity::new("openai", "tool-model", arany::Provenance::native())
             });
         &IDENTITY
     }

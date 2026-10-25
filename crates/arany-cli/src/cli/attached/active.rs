@@ -662,10 +662,18 @@ pub(super) async fn compact_current(
     composer: &mut Composer,
     pinned: Option<(&arany::RunConfig, arany::RunId)>,
 ) -> Result<CompactionOutcome, String> {
-    let selection = match compaction_selection(admission, view, pinned) {
-        Ok(selection) => selection,
-        Err(outcome) => return Ok(outcome),
-    };
+    let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
+        view.runs
+            .last()
+            .and_then(|run| run.config.as_ref())
+            .filter(|config| config.roster.is_some())
+    });
+    let profile = pinned_config.map(|config| config.provider.profile());
+    let selection =
+        match compaction_selection(admission, view, pinned_config.zip(profile.as_deref())) {
+            Ok(selection) => selection,
+            Err(outcome) => return Ok(outcome),
+        };
     let progress_text = if pinned.is_some() {
         "Automatically compacting Session... Ctrl+C interrupts"
     } else {
@@ -706,17 +714,11 @@ pub(super) async fn compact_current(
 fn compaction_selection<'a>(
     admission: &'a Admission,
     view: &'a SessionView,
-    pinned: Option<(&'a arany::RunConfig, arany::RunId)>,
+    pinned: Option<(&'a arany::RunConfig, &'a str)>,
 ) -> Result<Selection<'a>, CompactionOutcome> {
-    let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
-        view.runs
-            .last()
-            .and_then(|run| run.config.as_ref())
-            .filter(|config| config.roster.is_some())
-    });
-    let (profile, model, effort, account_id) = if let Some(config) = pinned_config {
+    let (profile, model, effort, account_id) = if let Some((config, profile)) = pinned {
         (
-            config.provider.as_str(),
+            profile,
             config.model.as_str(),
             config.effort,
             config.saved_api_account_id.or_else(|| {
