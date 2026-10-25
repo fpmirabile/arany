@@ -1,5 +1,6 @@
-use super::{InputFailure, InputRoute, RunProgress, RunUi};
+use super::{ActiveStop, InputFailure, InputRoute, RunProgress, RunUi};
 use crate::terminal::{Composer, TerminalInput};
+use arany::RunCancellation;
 
 #[derive(Default)]
 pub(super) struct ApprovalUi {
@@ -101,10 +102,163 @@ impl RunProgress<'_> {
         Ok(())
     }
 
+    fn approval_control(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+        choices: usize,
+    ) -> Result<InputRoute, InputFailure> {
+        if input == TerminalInput::CycleApprovalMode {
+            let _ = self.cycle_approval(ui.composer);
+            return Ok(InputRoute::Handled);
+        }
+        if interrupt_approval_input(&input, &self.cancellation, &mut self.stop) {
+            self.approval_ui.pending.take();
+            ui.terminal
+                .settle_child_notes(ui.view, &self.steering, true);
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|error| InputFailure::Return(error.to_string()))?;
+            return Ok(InputRoute::Handled);
+        }
+        if input == TerminalInput::Resize {
+            self.reset_approval_review(choices);
+            return Ok(InputRoute::Handled);
+        }
+        if input == TerminalInput::Suspend {
+            ui.terminal
+                .suspend_and_resume(ui.composer.input_capacity())
+                .map_err(|error| InputFailure::Return(error.to_string()))?;
+            self.reset_approval_focus(choices);
+            return Ok(InputRoute::Handled);
+        }
+        Ok(InputRoute::Composer)
+    }
+
+    fn navigate_approval(&mut self, input: TerminalInput, page: ApprovalPage, choices: usize) {
+        match input {
+            TerminalInput::Tab if matches!(page, ApprovalPage::Last) => {
+                self.approval_ui.choice = (self.approval_ui.choice + 1) % choices
+            }
+            TerminalInput::Up
+                if matches!(page, ApprovalPage::Last)
+                    && self.approval_ui.choice == 0
+                    && self.approval_ui.page > 0 =>
+            {
+                self.approval_ui.page -= 1
+            }
+            TerminalInput::Up if matches!(page, ApprovalPage::Last) => {
+                self.approval_ui.choice = self.approval_ui.choice.saturating_sub(1)
+            }
+            TerminalInput::Down if matches!(page, ApprovalPage::Last) => {
+                self.approval_ui.choice = (self.approval_ui.choice + 1).min(choices - 1)
+            }
+            TerminalInput::Down | TerminalInput::PageDown if matches!(page, ApprovalPage::More) => {
+                self.approval_ui.page += 1;
+                self.approval_ui.review_notice = false;
+            }
+            TerminalInput::Up | TerminalInput::PageUp => {
+                self.approval_ui.page = self.approval_ui.page.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn approval_reply(
+        &mut self,
+        ui: &RunUi<'_>,
+        input: TerminalInput,
+        page: ApprovalPage,
+        choices: &[crate::presentation::ToolApprovalChoice],
+    ) -> Option<crate::presentation::ToolApprovalChoice> {
+        if input == TerminalInput::Submit {
+            if matches!(page, ApprovalPage::More) {
+                self.approval_ui.page += 1;
+                return None;
+            }
+            return if ui.terminal.is_linear() {
+                let choice = linear_approval_choice(self.approval_ui.answer.text(), choices);
+                self.approval_ui.answer.clear();
+                choice
+            } else {
+                Some(choices[self.approval_ui.choice])
+            };
+        }
+        let choice = input
+            .choice_index(choices.len())
+            .map(|index| choices[index])?;
+        if matches!(page, ApprovalPage::More)
+            && choice != crate::presentation::ToolApprovalChoice::No
+        {
+            self.approval_ui.review_notice = true;
+            None
+        } else {
+            Some(choice)
+        }
+    }
+
+    fn decide_approval(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        choice: crate::presentation::ToolApprovalChoice,
+    ) -> Result<(), InputFailure> {
+        if choice == crate::presentation::ToolApprovalChoice::AutoEdits {
+            for _ in 0..2 {
+                if ui.composer.approval_mode() == Some(arany::ApprovalMode::AutoEdits) {
+                    break;
+                }
+                let _ = super::super::permissions::cycle(ui.composer);
+            }
+            self.approvals.set_mode(arany::ApprovalMode::AutoEdits);
+        }
+        self.approval_ui
+            .pending
+            .take()
+            .expect("pending action")
+            .decide(choice.reply());
+        ui.terminal
+            .restore_draft_input(ui.composer.input_capacity())
+            .map_err(|error| InputFailure::Return(error.to_string()))?;
+        Ok(())
+    }
+
+    fn reset_approval_focus(&mut self, choices: usize) {
+        self.approval_ui.page = 0;
+        self.approval_ui.choice = if self
+            .approval_ui
+            .pending
+            .as_ref()
+            .is_some_and(|approval| approval.unguarded.is_some())
+        {
+            choices - 1
+        } else {
+            0
+        };
+    }
+
+    fn reset_approval_review(&mut self, choices: usize) {
+        self.reset_approval_focus(choices);
+        self.approval_ui.review_notice = false;
+    }
+
     pub(super) fn cycle_approval(&self, composer: &mut Composer) -> String {
         let notice = super::super::permissions::cycle(composer);
         self.approvals
             .set_mode(composer.approval_mode().unwrap_or_default());
         notice
+    }
+}
+
+pub(super) fn interrupt_approval_input(
+    input: &TerminalInput,
+    cancellation: &RunCancellation,
+    stop: &mut ActiveStop,
+) -> bool {
+    if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
+        *stop = ActiveStop::Cancelling;
+        cancellation.cancel();
+        true
+    } else {
+        false
     }
 }
