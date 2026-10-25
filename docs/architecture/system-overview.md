@@ -52,7 +52,9 @@ owns Engine lifetime and admission.
 The binary's `serve` Server owns a bounded submission/response channel loop over
 that Engine. Its stdio adapter, ACP translator and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
-vocabulary at the binary edge. Each active submission has an owned task driving
+vocabulary at the binary edge; its translator owns the exhaustive typed Tool
+projection and preserves serve's Move FileChange path while giving GhPrList an
+explicit read projection. Each active submission has an owned task driving
 its RunHandle while the Server projects its committed Event subscription; bounded client backpressure
 cannot hold Journal appends. The library has no protocol or transport dependency. Supervised stdio avoids
 listener and discovery ownership; browser or multi-client transports require
