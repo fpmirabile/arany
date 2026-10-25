@@ -79,6 +79,9 @@ separate provisional data. The tap belongs to Journal rather than the Store
 thread so persistence does not own observer delivery. [Execution](../specs/execution.md#committed-event-stream),
 [telemetry](../specs/telemetry.md) and [diagnostics](../specs/diagnostics.md) own
 their observable contracts.
+Provider-owned diagnostic stage, count and response-shape types live in
+`provider/diagnostics.rs`; root `diagnostics.rs` retains record formatting and
+the bounded private sink.
 
 ```mermaid
 flowchart LR
@@ -187,7 +190,7 @@ modules.
 | Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
 | Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
 | SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
-| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
+| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
 
 [Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
 shared support. [Library](../../agents/arany.md) and
