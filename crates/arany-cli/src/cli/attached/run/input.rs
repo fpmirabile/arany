@@ -1,8 +1,48 @@
 use super::{
     ActiveStop, ApprovalPage, Feedback, RunProgress, RunUi, abandon_drafts_for_exit, active_escape,
-    exits_after_settled_run,
+    draft_retained_notice, exits_after_settled_run, hold_draft,
 };
-use crate::terminal::{AgentChatInput, ComposerEdit, TerminalError, TerminalInput, TerminalNotice};
+use crate::cli::attached::controls::ActiveSubmission;
+use crate::terminal::{
+    AgentChatInput, Composer, ComposerEdit, TerminalError, TerminalInput, TerminalNotice,
+};
+use arany::SteeringRefused;
+
+pub(super) const STEERING_SENT: &str = "Steering note sent to the agent";
+
+pub(super) fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
+    match refused {
+        SteeringRefused::RunFull => format!(
+            "No room for more steering notes this Run. {}",
+            draft_retained_notice(autonomous)
+        ),
+        SteeringRefused::TooLarge => "Steering note exceeds 8.0 KB; draft retained".into(),
+        SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
+        SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
+        SteeringRefused::ChildLimit => {
+            "Only eight children accept steering notes at once; draft retained".into()
+        }
+    }
+}
+
+pub(super) fn settle_recorded_note(
+    delivered: u64,
+    seen: &mut u64,
+    offered: &mut Option<String>,
+    composer: &mut Composer,
+) -> bool {
+    if delivered == *seen {
+        return false;
+    }
+    *seen = delivered;
+    let Some(text) = offered.take() else {
+        return false;
+    };
+    if composer.text() == text && composer.images().is_empty() {
+        composer.take();
+    }
+    true
+}
 
 pub(super) enum InputFailure {
     Shutdown(String),
@@ -15,6 +55,257 @@ pub(super) enum InputRoute {
 }
 
 impl RunProgress<'_> {
+    pub(super) fn offer_note(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        text: String,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        let feedback = if ui.terminal.is_linear() && self.held.is_some() {
+            Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
+        } else if !ui.composer.images().is_empty() {
+            Feedback::Transient("Steering notes are text only; draft retained".into())
+        } else if self.offered.is_some() && !ui.terminal.is_linear() {
+            // The composer still holds the waiting note; editing it withdraws the offer.
+            Feedback::Transient(
+                "Steering note waits for the agent's next step; editing withdraws it".into(),
+            )
+        } else {
+            match self.steering.offer_note(text) {
+                Ok(()) => {
+                    self.offered = Some(ui.composer.text().to_owned());
+                    if ui.terminal.is_linear() {
+                        self.linear_offers.push(ui.composer.take_draft());
+                        Feedback::Transient("Steering note waits for the agent's next step".into())
+                    } else {
+                        Feedback::Transient(
+                            "Steering note waits for the agent's next step; editing withdraws it"
+                                .into(),
+                        )
+                    }
+                }
+                Err(refused) => Feedback::Transient(steering_refusal(refused, self.autonomous)),
+            }
+        };
+        // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
+        if ui.terminal.is_linear()
+            && self.held.is_none()
+            && let Some(draft) = hold_draft(ui.composer)
+        {
+            self.held = Some(draft);
+        }
+        if ui
+            .terminal
+            .restore_draft_input(ui.composer.input_capacity())
+            .is_err()
+        {
+            return Err(InputFailure::Shutdown("terminal input failed".to_owned()));
+        }
+        Ok(Some(feedback))
+    }
+
+    pub(super) fn pause(&mut self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+        let notice = match self.stop {
+            ActiveStop::Running => {
+                self.steering.pause();
+                self.stop = ActiveStop::Pausing;
+                ui.terminal
+                    .settle_child_notes(ui.view, &self.steering, true);
+                "Pausing at the next step; Ctrl+C cancels now"
+            }
+            ActiveStop::Pausing => "Already pausing at the next step",
+            ActiveStop::Cancelling => "Run is already cancelling",
+        };
+        // Classic hides the history notice from the status row; linear prints notices as lines.
+        if self
+            .draw(ui, Some(TerminalNotice::History(notice)))
+            .is_err()
+            || (!ui.terminal.is_linear() && self.draw(ui, None).is_err())
+        {
+            return Err(InputFailure::Shutdown(
+                "terminal rendering failed".to_owned(),
+            ));
+        }
+        Ok(None)
+    }
+
+    pub(super) async fn active_submission(
+        &mut self,
+        ui: &mut RunUi<'_>,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        let submission = crate::cli::attached::controls::handle_active_submission(
+            ui.composer,
+            ui.view,
+            self.starting_sequence,
+        );
+        Ok(match submission {
+            ActiveSubmission::SteeringNote(text) => return self.offer_note(ui, text),
+            ActiveSubmission::Pause => return self.pause(ui),
+            ActiveSubmission::Rejected(notice) => {
+                if ui.terminal.is_linear() && !ui.composer.has_text_pastes() {
+                    ui.composer.take();
+                }
+                Some(Feedback::History(format!("Error: {notice}")))
+            }
+            ActiveSubmission::Notice(notice) => Some(Feedback::History(notice)),
+            ActiveSubmission::ReadClipboard => Some(match ui.terminal.request_clipboard_paste() {
+                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
+            }),
+            ActiveSubmission::OpenAgents => {
+                if ui.terminal.open_agents(ui.view, true).await.is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ActiveSubmission::OpenUsage { status } => {
+                if ui
+                    .terminal
+                    .open_usage(ui.view, status, Some(self.starting_sequence))
+                    .await
+                    .is_err()
+                {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ActiveSubmission::OpenHelp => {
+                if ui.terminal.open_help(ui.view).await.is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ActiveSubmission::OpenAgentChats(number) => {
+                match ui.terminal.open_agent_chats(ui.view, number).await {
+                    Ok(AgentChatInput::Notice(text)) => Some(Feedback::Transient(text.into())),
+                    Ok(
+                        AgentChatInput::ChildMessage { .. }
+                        | AgentChatInput::ChildEdited(_)
+                        | AgentChatInput::Pass
+                        | AgentChatInput::Handled
+                        | AgentChatInput::Returned,
+                    ) => None,
+                    Err(_) => {
+                        return Err(InputFailure::Shutdown(
+                            "terminal rendering failed".to_owned(),
+                        ));
+                    }
+                }
+            }
+            ActiveSubmission::OpenTranscript => {
+                if ui.terminal.toggle_transcript(ui.view).is_err() || self.draw(ui, None).is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+        })
+    }
+
+    pub(super) async fn composer_input(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        Ok(match input {
+            TerminalInput::Escape if ui.terminal.clipboard_loading() => {
+                ui.terminal.cancel_clipboard_paste();
+                Some(Feedback::Transient(
+                    "Clipboard read cancelled; draft retained".into(),
+                ))
+            }
+            TerminalInput::CycleApprovalMode => {
+                Some(Feedback::History(self.cycle_approval(ui.composer)))
+            }
+            TerminalInput::ClipboardPaste => Some(match ui.terminal.request_clipboard_paste() {
+                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
+            }),
+            TerminalInput::Paste => match ui.terminal.paste_into(ui.composer) {
+                Err(error) => Some(Feedback::History(format!(
+                    "Error: {error}; draft unchanged"
+                ))),
+                Ok(ComposerEdit::Changed) => {
+                    if self.draw(ui, None).is_err() {
+                        return Err(InputFailure::Shutdown(
+                            "terminal rendering failed".to_owned(),
+                        ));
+                    }
+                    None
+                }
+                Ok(ComposerEdit::AtCapacity | ComposerEdit::Unchanged) => None,
+            },
+            input @ (TerminalInput::Character(_)
+            | TerminalInput::Newline
+            | TerminalInput::Backspace
+            | TerminalInput::Delete
+            | TerminalInput::Left
+            | TerminalInput::Right
+            | TerminalInput::WordLeft
+            | TerminalInput::WordRight
+            | TerminalInput::BackspaceWord
+            | TerminalInput::Up
+            | TerminalInput::Down
+            | TerminalInput::Home
+            | TerminalInput::End
+            | TerminalInput::Tab
+            | TerminalInput::Escape) => return self.edit_composer(ui, input),
+            TerminalInput::LineRejected => Some(Feedback::History(
+                "Error: invalid or overlong terminal line; draft unchanged".into(),
+            )),
+            TerminalInput::LineContinued => return self.continued_line(ui),
+            TerminalInput::QuickActions => Some(Feedback::History(
+                "Quick actions are unavailable during a Run; /agents opens details".into(),
+            )),
+            TerminalInput::Submit => return self.submit_input(ui).await,
+            _ => return self.control_input(ui, input),
+        })
+    }
+
+    fn continued_line(&self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+        if self.held.is_some() {
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|_| InputFailure::Shutdown("terminal input failed".to_owned()))?;
+            Ok(Some(Feedback::Transient(
+                "Both drafts retained; wait for the Run to finish".into(),
+            )))
+        } else {
+            Ok(Some(Feedback::History(format!(
+                "Draft: {} characters; Enter offers it as a steering note",
+                ui.composer.character_count()
+            ))))
+        }
+    }
+
+    fn edit_composer(
+        &self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        Ok(match ui.composer.apply(input) {
+            ComposerEdit::AtCapacity => Some(Feedback::History(
+                "Error: message is too long; shorten it; draft unchanged".into(),
+            )),
+            ComposerEdit::Changed if !ui.terminal.is_linear() => {
+                if self.draw(ui, None).is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ComposerEdit::Unchanged => None,
+            ComposerEdit::Changed => None,
+        })
+    }
+
     pub(super) async fn on_input(
         &mut self,
         ui: &mut RunUi<'_>,
@@ -81,7 +372,7 @@ impl RunProgress<'_> {
                 Feedback::Transient("Steering note withdrawn; draft retained".into())
             } else {
                 // The Engine already took the note, so it is sent; the edited draft stays.
-                Feedback::History(super::STEERING_SENT.into())
+                Feedback::History(STEERING_SENT.into())
             });
         }
         if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
@@ -223,7 +514,7 @@ impl RunProgress<'_> {
                             format!("Note waiting for child {ordinal}'s next step"),
                             Some((text, count)),
                         ),
-                        Err(refused) => (super::steering_refusal(refused, self.autonomous), None),
+                        Err(refused) => (steering_refusal(refused, self.autonomous), None),
                     }
                 } else {
                     (

@@ -1,12 +1,16 @@
 use super::{
-    AgentRunId, PendingData, ReplayError, RunView, SealedWorkerData, pending_command_capture,
-    primary, tool, valid_delta, worker, worker_mut,
+    AgentRunId, PendingData, ReplayError, RunView, SealedWorkerData, integration_in_flight,
+    pending_command_capture, primary, private_criterion_evidence, tool, valid_delta, valid_discard,
+    verification_passed, worker, worker_mut,
 };
+use crate::session::GoalPlanContract;
 use crate::session::worker::{
-    WORKER_CHUNK_BYTES, WORKER_FILES, WorkerDataChunk, WorkerDataPurpose, WorkerDataSealed,
-    WorkerStopRecord, decode_data,
+    ChangesetSource, EffectTarget, WORKER_CHUNK_BYTES, WORKER_FILES, WorkerDataChunk,
+    WorkerDataPurpose, WorkerDataSealed, WorkerDisposition, WorkerHandover, WorkerIntegration,
+    WorkerIntegrationOutcome, WorkerSettlement, WorkerSettlementReason, WorkerStopRecord,
+    WorkerVerification, decode_data,
 };
-use crate::tools::ToolCall;
+use crate::tools::{ToolCall, ToolDisposition};
 
 pub(super) fn stop_observed(
     run: &mut RunView,
@@ -191,5 +195,186 @@ pub(super) fn data_sealed(
             return Err(ReplayError::InvalidTransition);
         }
     }
+    Ok(())
+}
+
+pub(super) fn handover(
+    run: &mut RunView,
+    h: &WorkerHandover,
+    actor: AgentRunId,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    let w = worker(run, h.assignment_id)?;
+    if actor != h.assignment_id
+        || run.workers.stop.is_some()
+        || w.handover.is_some()
+        || w.released.is_some()
+        || w.discarded.is_some()
+        || w.pins.base.sha256 != h.base_digest
+        || h.criterion_evidence != private_criterion_evidence(run, h.assignment_id)?
+        || w.outcome.as_ref().is_none_or(|(_, outcome)| {
+            outcome.disposition != WorkerDisposition::Ready
+                || outcome.data.as_ref() != Some(&h.data)
+        })
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    valid_delta(run, h.assignment_id, &h.data, true)?;
+    worker_mut(run, h.assignment_id)?.handover = Some((sequence, h.clone()));
+    Ok(())
+}
+
+pub(super) fn integration(
+    run: &mut RunView,
+    i: &WorkerIntegration,
+    actor: AgentRunId,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    if !primary(run, actor) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let w = worker(run, i.assignment_id)?;
+    let (handover_sequence, handover) =
+        w.handover.as_ref().ok_or(ReplayError::InvalidTransition)?;
+    let t = run
+        .tools
+        .iter()
+        .find(|t| t.intent.id == i.tool_id && t.finished_sequence == Some(i.finished_sequence))
+        .ok_or(ReplayError::InvalidTransition)?;
+    let o = t
+        .observation
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let expected = ChangesetSource::WorkerHandover {
+        assignment_id: i.assignment_id,
+        handover_sequence: *handover_sequence,
+        data: handover.data.clone(),
+    };
+    let outcome = match o.disposition {
+        ToolDisposition::Succeeded if o.attested_for(&t.intent) => {
+            WorkerIntegrationOutcome::Integrated
+        }
+        ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
+        ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
+        ToolDisposition::Failed | ToolDisposition::Limit | ToolDisposition::Cancelled
+            if o.attestation.is_none() =>
+        {
+            WorkerIntegrationOutcome::Denied
+        }
+        ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
+        _ => return Err(ReplayError::InvalidTransition),
+    };
+    if *handover_sequence != i.handover_sequence
+        || w.integration.is_some()
+        || w.discarded.is_some()
+        || w.released.is_some()
+        || i.outcome != outcome
+        || !matches!(&t.intent.call, ToolCall::ApplyChangeset { source } if source == &expected)
+        || t.intent.target != EffectTarget::Workspace
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    worker_mut(run, i.assignment_id)?.integration = Some((sequence, i.clone()));
+    Ok(())
+}
+
+pub(super) fn discard(
+    run: &mut RunView,
+    d: &WorkerSettlement,
+    actor: AgentRunId,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    if !primary(run, actor) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let w = worker(run, d.assignment_id)?;
+    if w.integration.as_ref().is_some_and(|(_, integration)| {
+        matches!(
+            integration.outcome,
+            WorkerIntegrationOutcome::Integrated | WorkerIntegrationOutcome::Uncertain
+        )
+    }) || w.discarded.is_some()
+        || w.released.is_some()
+        || integration_in_flight(run, d.assignment_id)
+        || d.handover_sequence != w.handover.as_ref().map(|(sequence, _)| *sequence)
+        || !valid_discard(run, w, d)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    worker_mut(run, d.assignment_id)?.discarded = Some((sequence, d.clone()));
+    Ok(())
+}
+
+pub(super) fn lease_release(
+    run: &mut RunView,
+    r: &WorkerSettlement,
+    actor: AgentRunId,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    if !primary(run, actor) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let w = worker(run, r.assignment_id)?;
+    let integrated = w
+        .integration
+        .as_ref()
+        .is_some_and(|(integration_sequence, i)| {
+            i.outcome == WorkerIntegrationOutcome::Integrated
+                && r.reason == WorkerSettlementReason::Integrated
+                && *integration_sequence == r.cause_sequence
+        });
+    let disposed = w.discarded.as_ref().is_some_and(|(discard_sequence, d)| {
+        *discard_sequence == r.cause_sequence && d.reason == r.reason
+    });
+    if w.released.is_some()
+        || w.outcome.is_none()
+        || integration_in_flight(run, r.assignment_id)
+        || r.handover_sequence != w.handover.as_ref().map(|(sequence, _)| *sequence)
+        || !(integrated || disposed)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    worker_mut(run, r.assignment_id)?.released = Some(sequence);
+    Ok(())
+}
+
+pub(super) fn verification(
+    run: &mut RunView,
+    v: &WorkerVerification,
+    actor: AgentRunId,
+    sequence: u64,
+    verification_contract: Option<GoalPlanContract>,
+) -> Result<(), ReplayError> {
+    if !primary(run, actor) || run.workers.stop.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let w = worker(run, v.assignment_id)?;
+    let released = w.released.ok_or(ReplayError::InvalidTransition)?;
+    let criterion = &w.pins.request.criterion;
+    if v.criterion_digest
+        != crate::validate::digest(
+            &serde_json::to_vec(criterion).map_err(|_| ReplayError::InvalidPayload)?,
+        )
+        || w.verification
+            .as_ref()
+            .is_some_and(|(_, prior)| prior.passed)
+        || w.outcome.as_ref().is_none_or(|(_, outcome)| {
+            !matches!(
+                outcome.disposition,
+                WorkerDisposition::Ready | WorkerDisposition::NoChange
+            )
+        })
+        || w.integration.as_ref().is_some_and(|(_, integration)| {
+            integration.outcome != WorkerIntegrationOutcome::Integrated
+        })
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let mut contract = verification_contract.ok_or(ReplayError::InvalidTransition)?;
+    contract.success_criterion = criterion.clone();
+    if v.passed != verification_passed(&contract, run, released, &v.evidence)? {
+        return Err(ReplayError::InvalidTransition);
+    }
+    worker_mut(run, v.assignment_id)?.verification = Some((sequence, v.clone()));
     Ok(())
 }
