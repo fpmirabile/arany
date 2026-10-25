@@ -51,7 +51,7 @@ queueing another task. Ctrl+C cancels active work. Once idle, review the retaine
 draft and press Enter explicitly. Errors do not automatically retry a task or
 restore an already consumed submission.
 
-Use Ctrl+O for a newline, `/paste` for an explicit clipboard read and `/help` for
+Use Ctrl+J for a newline, `/paste` for an explicit clipboard read and `/help` for
 available commands. The draft is limited to 8 KiB of UTF-8; invalid or oversized
 insertions reject without submitting a truncated task. Clipboard PNGs are
 limited to four images totaling 192 KiB. Original images remain in private
