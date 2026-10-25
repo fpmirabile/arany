@@ -5,6 +5,9 @@ use std::fmt::Write;
 
 pub(crate) const MAX_USAGE_PAGE_BYTES: usize = 8 * 1024;
 const MAX_USAGE_GROUPS: usize = 16;
+const MAX_FRESH_LIMIT_AGE_SECONDS: i64 = 15 * 60;
+const FIVE_HOUR_WINDOW_MINUTES: u32 = 300;
+const WEEKLY_WINDOW_MINUTES: u32 = 10_080;
 
 pub(crate) fn grouped_count(value: u64) -> String {
     let digits = value.to_string();
@@ -49,49 +52,11 @@ pub fn usage_pages_at(
     starting_sequence: Option<u64>,
     now: Option<i64>,
 ) -> Vec<String> {
-    let mut header = String::from("Usage: Provider-reported tokens\n");
     if status {
-        if view.created_sequence == 0 {
-            header.push_str("New conversation · not saved · 0 Runs\n");
-        } else {
-            let _ = writeln!(header, "Session {} · {} Runs", view.id, view.runs.len());
-        }
-        if let Some(run) = view
-            .runs
-            .last()
-            .filter(|run| starting_sequence.is_none_or(|sequence| run.accepted_sequence > sequence))
-        {
-            let _ = writeln!(
-                header,
-                "Task: {} · {} agent{} · details: /agents",
-                run.status,
-                run.agents.len(),
-                if run.agents.len() == 1 { "" } else { "s" }
-            );
-            if let Some(context) = run
-                .config
-                .as_ref()
-                .and_then(|config| config.context_usage.as_ref())
-                .filter(|_| run.status == arany::RunStatus::Active)
-            {
-                let _ = writeln!(
-                    header,
-                    "Request: {}% of local request budget; not model tokens",
-                    context.utilization_percent()
-                );
-                header.push_str("Includes chat, instructions, files and images\n");
-            }
-        }
+        return vec![status_summary(view, starting_sequence, now)];
     }
-    if status
-        && starting_sequence.is_some_and(|sequence| {
-            view.runs
-                .last()
-                .is_none_or(|run| run.accepted_sequence <= sequence)
-        })
-    {
-        header.push_str("Preparing message · Ctrl+C cancels\n");
-    }
+
+    let mut header = String::from("Usage: Provider-reported tokens\n");
     let _ = writeln!(header, "Committed through Event {}", view.last_sequence);
     header.push_str(
         "Cache reads/writes are included in input\nOutput includes reported reasoning tokens\n",
@@ -224,6 +189,330 @@ pub fn usage_pages_at(
     pages
 }
 
+fn status_summary(view: &SessionView, starting_sequence: Option<u64>, now: Option<i64>) -> String {
+    let run = view
+        .runs
+        .last()
+        .filter(|run| starting_sequence.is_none_or(|sequence| run.accepted_sequence > sequence));
+    let model = run
+        .and_then(|run| run.config.as_ref().map(|config| config.model.as_str()))
+        .or(view.defaults.model.as_deref())
+        .map(escape_terminal)
+        .unwrap_or_else(|| "not selected".into());
+    let mut summary = format!("Model: {model}\n");
+    if let Some(run) = run {
+        let mut input = TokenCount::default();
+        let mut output = TokenCount::default();
+        for group in view
+            .usage
+            .groups
+            .iter()
+            .filter(|group| group.run_id == run.id)
+        {
+            merge(&mut input, group.input);
+            merge(&mut output, group.output);
+        }
+        let pending = view
+            .usage
+            .pending
+            .iter()
+            .any(|(_, run_id, _)| *run_id == run.id);
+        let _ = writeln!(
+            summary,
+            "Tokens used: {} input · {} output",
+            count(input, pending),
+            count(output, pending)
+        );
+        if pending {
+            summary.push_str("Usage pending; totals incomplete\n");
+        }
+        if let Some(context) = run
+            .config
+            .as_ref()
+            .and_then(|config| config.context_usage.as_ref())
+        {
+            let remaining = context.budget_bytes.saturating_sub(context.used_bytes);
+            let _ = writeln!(
+                summary,
+                "Context left: {} (Arany request budget at admission)",
+                super::format_bytes(u64::from(remaining))
+            );
+        } else {
+            summary.push_str("Context left: unknown (not reported)\n");
+        }
+    } else {
+        summary.push_str("Tokens used: no calls yet\nContext left: unknown (not reported)\n");
+        if starting_sequence.is_some() {
+            summary.push_str("Preparing message · Ctrl+C cancels\n");
+        }
+    }
+    summary.push_str(&plan_limits_summary(view, run, now));
+    summary.push_str("/usage for details\n");
+    summary
+}
+
+fn plan_limits_summary(
+    view: &SessionView,
+    run: Option<&arany::RunView>,
+    now: Option<i64>,
+) -> String {
+    if !status_route_is_chatgpt(view, run) {
+        return String::new();
+    }
+    let mut summary = String::from("Plan limits remaining:\n");
+    let account = status_account(view, run);
+    let windows = account.map_or([None, None], |account| {
+        [
+            latest_plan_window(view, account, run, false),
+            latest_plan_window(view, account, run, true),
+        ]
+    });
+    for observation in windows.into_iter().flatten() {
+        append_plan_window(&mut summary, view, run, observation, now);
+    }
+    if windows.iter().all(Option::is_none)
+        && account.is_some_and(|account| has_unreported_plan_window(view, account))
+    {
+        summary.push_str("Plan windows: unknown (not reported)\n");
+    }
+    if windows
+        .iter()
+        .flatten()
+        .all(|(_, window)| window.window_minutes != Some(WEEKLY_WINDOW_MINUTES))
+    {
+        summary.push_str("Weekly: unknown (not reported)\n");
+    }
+    let mut selected_group = None;
+    for (limits, _) in windows.iter().flatten() {
+        if selected_group.is_some_and(|previous| std::ptr::eq(previous, *limits)) {
+            continue;
+        }
+        selected_group = Some(*limits);
+        let route = plan_route_note(limits, view, run);
+        if limits.latest_unreported {
+            let _ = writeln!(summary, "Latest call did not report limits{route}");
+        }
+        if let Some(failure) = limits.latest_unavailable {
+            let _ = writeln!(summary, "{}{}", unavailable_limits_text(failure), route);
+        }
+    }
+    if let Some(limits) = account.and_then(|account| latest_call_unreported(view, account, run))
+        && !windows
+            .iter()
+            .flatten()
+            .any(|(selected, _)| std::ptr::eq(limits, *selected))
+    {
+        summary.push_str("Latest call did not report limits\n");
+    }
+    if let Some((limits, failure)) =
+        account.and_then(|account| latest_call_unavailable(view, account, run))
+        && !windows
+            .iter()
+            .flatten()
+            .any(|(selected, _)| std::ptr::eq(limits, *selected))
+    {
+        summary.push_str(&unavailable_limits_line(failure));
+    }
+    summary
+}
+
+fn status_route_is_chatgpt(view: &SessionView, run: Option<&arany::RunView>) -> bool {
+    let provider = match run {
+        Some(run) => run.config.as_ref().map(|config| config.provider.as_str()),
+        None => view.defaults.provider.as_deref(),
+    };
+    provider.and_then(ProviderKind::parse) == Some(ProviderKind::ChatGpt)
+}
+
+fn status_account(view: &SessionView, run: Option<&arany::RunView>) -> Option<uuid::Uuid> {
+    match run {
+        Some(run) => run.config.as_ref().and_then(|config| {
+            (ProviderKind::parse(&config.provider) == Some(ProviderKind::ChatGpt))
+                .then_some(config.chatgpt_provenance.as_ref()?.account_id)
+        }),
+        None if view
+            .defaults
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::parse)
+            == Some(ProviderKind::ChatGpt) =>
+        {
+            view.defaults.account_id
+        }
+        None => None,
+    }
+}
+
+fn latest_plan_window<'a>(
+    view: &'a SessionView,
+    account: uuid::Uuid,
+    run: Option<&arany::RunView>,
+    secondary: bool,
+) -> Option<(&'a arany::PlanUsage, &'a arany::PlanWindow)> {
+    let mut latest: Option<(&'a arany::PlanUsage, &'a arany::PlanWindow, bool)> = None;
+    for limits in view.usage.plan_limits.iter().filter(|limits| {
+        ProviderKind::parse(&limits.provider) == Some(ProviderKind::ChatGpt)
+            && limits.matches_account(account)
+    }) {
+        let window = if secondary {
+            limits.secondary.as_ref()
+        } else {
+            limits.primary.as_ref()
+        };
+        let Some(window) = window else {
+            continue;
+        };
+        let current_route = run.is_some_and(|run| {
+            limits.session_id == view.id
+                && limits.run_id == run.id
+                && limits.model
+                    == run
+                        .config
+                        .as_ref()
+                        .map_or("", |config| config.model.as_str())
+        }) || run.is_none()
+            && limits.session_id == view.id
+            && limits.model == view.defaults.model.as_deref().unwrap_or_default();
+        let candidate = (limits, window, current_route);
+        if latest.is_none_or(|(_, previous, previous_route)| {
+            (window.observed_at, current_route) > (previous.observed_at, previous_route)
+        }) {
+            latest = Some(candidate);
+        }
+    }
+    latest.map(|(limits, window, _)| (limits, window))
+}
+
+fn has_unreported_plan_window(view: &SessionView, account: uuid::Uuid) -> bool {
+    view.usage.plan_limits.iter().any(|limits| {
+        ProviderKind::parse(&limits.provider) == Some(ProviderKind::ChatGpt)
+            && limits.matches_account(account)
+            && limits.primary.is_none()
+            && limits.secondary.is_none()
+    })
+}
+
+fn latest_call_unreported<'a>(
+    view: &'a SessionView,
+    account: uuid::Uuid,
+    run: Option<&arany::RunView>,
+) -> Option<&'a arany::PlanUsage> {
+    let run = run?;
+    let config = run.config.as_ref()?;
+    view.usage.plan_limits.iter().find(|limits| {
+        limits.session_id == view.id
+            && limits.run_id == run.id
+            && limits.model == config.model
+            && ProviderKind::parse(&limits.provider) == Some(ProviderKind::ChatGpt)
+            && limits.matches_account(account)
+            && limits.latest_unreported
+    })
+}
+
+fn latest_call_unavailable<'a>(
+    view: &'a SessionView,
+    account: uuid::Uuid,
+    run: Option<&arany::RunView>,
+) -> Option<(&'a arany::PlanUsage, arany::LimitFailure)> {
+    let run = run?;
+    let config = run.config.as_ref()?;
+    view.usage
+        .plan_limits
+        .iter()
+        .find(|limits| {
+            limits.session_id == view.id
+                && limits.run_id == run.id
+                && limits.model == config.model
+                && ProviderKind::parse(&limits.provider) == Some(ProviderKind::ChatGpt)
+                && limits.matches_account(account)
+        })
+        .and_then(|limits| limits.latest_unavailable.map(|failure| (limits, failure)))
+}
+
+fn unavailable_limits_line(failure: arany::LimitFailure) -> String {
+    format!("{}\n", unavailable_limits_text(failure))
+}
+
+fn unavailable_limits_text(failure: arany::LimitFailure) -> String {
+    let reason = match failure.reason {
+        arany::LimitUnavailable::Invalid => "invalid optional metadata",
+        arany::LimitUnavailable::Duplicate => "duplicate optional metadata",
+        arany::LimitUnavailable::Oversized => "optional metadata exceeded bounds",
+    };
+    format!(
+        "Limits unavailable: {reason} · last reported {}",
+        utc_timestamp(failure.observed_at)
+    )
+}
+
+fn append_plan_window(
+    summary: &mut String,
+    view: &SessionView,
+    run: Option<&arany::RunView>,
+    (limits, window): (&arany::PlanUsage, &arany::PlanWindow),
+    now: Option<i64>,
+) {
+    let name = match window.window_minutes {
+        Some(FIVE_HOUR_WINDOW_MINUTES) => "5-hour".into(),
+        Some(WEEKLY_WINDOW_MINUTES) => "Weekly".into(),
+        Some(minutes) => format!("{minutes}-minute"),
+        None => "Window duration unknown".into(),
+    };
+    let remaining = remaining_percent(window, now);
+    let reset = window
+        .reset_at
+        .map(utc_timestamp)
+        .unwrap_or_else(|| "unknown".into());
+    let route = plan_route_note(limits, view, run);
+    let _ = writeln!(summary, "{name}: {remaining} · reset {reset}{route}");
+}
+
+fn plan_route_note(
+    limits: &arany::PlanUsage,
+    view: &SessionView,
+    run: Option<&arany::RunView>,
+) -> String {
+    let model = escape_terminal(&limits.model);
+    if limits.session_id != view.id {
+        return format!(" · prior Session: {model}");
+    }
+    if run.is_some_and(|run| {
+        run.config
+            .as_ref()
+            .is_some_and(|config| config.model != limits.model)
+    }) || run.is_none() && view.defaults.model.as_deref() != Some(limits.model.as_str())
+    {
+        return format!(" · prior route: {model}");
+    }
+    if run.is_some_and(|run| run.id != limits.run_id) {
+        return format!(" · prior Run: {model}");
+    }
+    String::new()
+}
+
+fn remaining_percent(window: &arany::PlanWindow, now: Option<i64>) -> String {
+    let age = now
+        .and_then(|now| now.checked_sub(window.observed_at))
+        .filter(|age| *age >= 0);
+    let stale = window
+        .reset_at
+        .zip(now)
+        .is_some_and(|(reset, now)| now >= reset)
+        || age.is_none_or(|age| age > MAX_FRESH_LIMIT_AGE_SECONDS);
+    if stale {
+        return "unknown (stale)".into();
+    }
+    window.used_percent.map_or_else(
+        || "unknown (not reported)".into(),
+        |used| {
+            format!(
+                "{}% left",
+                ((100.0 - f64::from(used)) * 10.0).round() / 10.0
+            )
+        },
+    )
+}
+
 fn counters(group: &UsageGroup) -> [TokenCount; 4] {
     [
         group.input,
@@ -250,7 +539,7 @@ fn plan_section(
     if !windows
         .iter()
         .flatten()
-        .any(|window| window.window_minutes == Some(10_080))
+        .any(|window| window.window_minutes == Some(WEEKLY_WINDOW_MINUTES))
     {
         text.push_str("ChatGPT weekly: unknown (not reported)\n");
     }
@@ -261,24 +550,15 @@ fn plan_section(
         text.push_str("Latest call did not report limits\n");
     }
     if let Some(failure) = group.latest_unavailable {
-        let reason = match failure.reason {
-            arany::LimitUnavailable::Invalid => "invalid optional metadata",
-            arany::LimitUnavailable::Duplicate => "duplicate optional metadata",
-            arany::LimitUnavailable::Oversized => "optional metadata exceeded bounds",
-        };
-        let _ = writeln!(
-            text,
-            "Limits unavailable: {reason} · last reported {}",
-            utc_timestamp(failure.observed_at)
-        );
+        text.push_str(&unavailable_limits_line(failure));
     }
     text
 }
 
 fn window_lines(text: &mut String, window: &arany::PlanWindow, now: Option<i64>) {
     let label = match window.window_minutes {
-        Some(300) => "5-hour".into(),
-        Some(10_080) => "weekly".into(),
+        Some(FIVE_HOUR_WINDOW_MINUTES) => "5-hour".into(),
+        Some(WEEKLY_WINDOW_MINUTES) => "weekly".into(),
         Some(minutes) => format!("{minutes}-minute window"),
         None => "window duration unknown".into(),
     };
@@ -322,7 +602,7 @@ fn window_lines(text: &mut String, window: &arany::PlanWindow, now: Option<i64>)
         .is_some_and(|(now, reset)| now >= reset)
     {
         text.push_str("Stale; reset time passed, current usage unknown\n");
-    } else if age.is_some_and(|age| age > 15 * 60) {
+    } else if age.is_some_and(|age| age > MAX_FRESH_LIMIT_AGE_SECONDS) {
         text.push_str("Stale; last reported more than 15 minutes ago, current usage unknown\n");
     }
 }
@@ -395,13 +675,182 @@ mod tests {
         let (_, view) = reopen(&state, outcome.session_id).await;
         let before = view.clone();
         let expected = "\nChatGPT plan · Run 1 · route 1 · historical\nProvider: chatgpt\nModel: model-a\nAccount-level observation; not this Session's share\nChatGPT 5-hour: 25.5% used\nLast reported: 1970-01-01T00:16:40Z · headers\nObservation age: 0 s\nReset: 1970-01-01T02:31:40Z\nResets in 2 h 15 min\nChatGPT weekly: 70% used\nLast reported: 1970-01-01T00:16:40Z · headers\nObservation age: 0 s\nReset unknown\n";
-        for status in [false, true] {
-            let pages = usage_pages_at(&view, status, None, Some(1000));
-            assert_eq!(pages.len(), 1);
-            assert!(pages[0].ends_with(expected), "{}", pages[0]);
+        let details = usage_pages_at(&view, false, None, Some(1000));
+        assert_eq!(details.len(), 1);
+        assert!(details[0].ends_with(expected), "{}", details[0]);
+        let summary = usage_pages_at(&view, true, None, Some(1000));
+        assert_eq!(summary.len(), 1);
+        assert!(summary[0].starts_with("Model: model-a\nTokens used: "));
+        assert!(summary[0].contains("Plan limits remaining:\n5-hour: 74.5% left"));
+        assert!(summary[0].contains("Weekly: 30% left"));
+        assert!(summary[0].ends_with("/usage for details\n"));
+        assert!(!summary[0].contains("Session totals"));
+        assert_status_plan_provider_scope(&view);
+
+        let mut rejected_metadata = view.clone();
+        rejected_metadata
+            .usage
+            .plan_limits
+            .last_mut()
+            .unwrap()
+            .latest_unavailable = Some(arany::LimitFailure {
+            reason: arany::LimitUnavailable::Invalid,
+            source: arany::LimitSource::Headers,
+            observed_at: 1_100,
+        });
+        let summary = usage_pages_at(&rejected_metadata, true, None, Some(1_100)).concat();
+        assert!(summary.contains("5-hour: 74.5% left"));
+        assert!(summary.contains("Weekly: 30% left"));
+        assert!(summary.contains(
+            "Limits unavailable: invalid optional metadata · last reported 1970-01-01T00:18:20Z"
+        ));
+
+        let run_id = view.runs.last().expect("one completed Run").id;
+        let mut different_route = view.usage.plan_limits[0].clone();
+        different_route.model = "older-model".into();
+        different_route.primary.as_mut().unwrap().used_percent =
+            Some(arany::UsedPercent::try_from(99.0).unwrap());
+        different_route.primary.as_mut().unwrap().observed_at = 2_000;
+        different_route.secondary.as_mut().unwrap().observed_at = 2_000;
+        different_route.latest_unavailable = Some(arany::LimitFailure {
+            reason: arany::LimitUnavailable::Invalid,
+            source: arany::LimitSource::Headers,
+            observed_at: 2_000,
+        });
+        let mut mixed_routes = view.clone();
+        mixed_routes.usage.plan_limits.insert(0, different_route);
+        let summary = usage_pages_at(&mixed_routes, true, None, Some(2_000)).concat();
+        assert!(summary.contains("5-hour: 1% left"));
+        assert!(summary.contains("prior route: older-model"));
+        assert!(summary.contains(
+            "Limits unavailable: invalid optional metadata · last reported 1970-01-01T00:33:20Z · prior route: older-model"
+        ));
+        let mut omitted_metadata = mixed_routes.clone();
+        omitted_metadata.usage.plan_limits[0].latest_unreported = true;
+        omitted_metadata.usage.plan_limits[0].latest_unavailable = None;
+        let summary = usage_pages_at(&omitted_metadata, true, None, Some(2_000)).concat();
+        assert!(summary.contains("5-hour: 1% left · reset"));
+        assert!(summary.contains("Latest call did not report limits · prior route: older-model"));
+        assert!(
+            usage_pages_at(&mixed_routes, false, None, Some(1000))
+                .concat()
+                .contains("Model: older-model")
+        );
+
+        let mut switched_account = view.clone();
+        switched_account
+            .runs
+            .last_mut()
+            .expect("one completed Run")
+            .config
+            .as_mut()
+            .expect("Run configuration")
+            .chatgpt_provenance
+            .as_mut()
+            .expect("ChatGPT provenance")
+            .account_id = uuid::Uuid::now_v7();
+        let summary = usage_pages_at(&switched_account, true, None, Some(1000)).concat();
+        assert!(summary.contains("Weekly: unknown (not reported)"));
+        assert!(!summary.contains("74.5% left"));
+
+        let mut missing_windows = view.clone();
+        let limits = missing_windows.usage.plan_limits.last_mut().unwrap();
+        limits.primary = None;
+        limits.secondary = None;
+        limits.latest_unreported = true;
+        let summary = usage_pages_at(&missing_windows, true, None, Some(1000)).concat();
+        assert!(summary.contains("Plan windows: unknown (not reported)"));
+        assert!(summary.contains("Weekly: unknown (not reported)"));
+        assert!(summary.contains("Latest call did not report limits"));
+
+        let mut primary_only = view.clone();
+        primary_only.usage.plan_limits.last_mut().unwrap().secondary = None;
+        let summary = usage_pages_at(&primary_only, true, None, Some(1000)).concat();
+        assert!(summary.contains("Weekly: unknown (not reported)"));
+
+        let mut two_nonweekly = view.clone();
+        two_nonweekly
+            .usage
+            .plan_limits
+            .last_mut()
+            .unwrap()
+            .secondary
+            .as_mut()
+            .unwrap()
+            .window_minutes = Some(60);
+        let summary = usage_pages_at(&two_nonweekly, true, None, Some(1000)).concat();
+        assert!(summary.contains("5-hour: 74.5% left"));
+        assert!(summary.contains("60-minute: 30% left"));
+        assert!(summary.contains("Weekly: unknown (not reported)"));
+
+        let mut unknown_duration = two_nonweekly;
+        unknown_duration
+            .usage
+            .plan_limits
+            .last_mut()
+            .unwrap()
+            .secondary
+            .as_mut()
+            .unwrap()
+            .window_minutes = None;
+        let summary = usage_pages_at(&unknown_duration, true, None, Some(1000)).concat();
+        assert!(summary.contains("5-hour: 74.5% left"));
+        assert!(summary.contains("Window duration unknown: 30% left"));
+        assert!(summary.contains("Weekly: unknown (not reported)"));
+
+        for status in [arany::RunStatus::Active, arany::RunStatus::Interrupted] {
+            let mut pending = view.clone();
+            pending.runs.last_mut().unwrap().status = status;
+            pending.usage.groups.clear();
+            pending.usage.pending.push((pending.id, run_id, None));
+            let summary = usage_pages_at(&pending, true, None, Some(1000)).concat();
+            assert!(summary.contains("Tokens used: unknown (not reported) input"));
+            assert!(summary.contains("Usage pending; totals incomplete"));
         }
         assert_eq!(view, before);
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    }
+
+    fn assert_status_plan_provider_scope(view: &SessionView) {
+        for (provider, has_plan) in [
+            ("openai", false),
+            ("anthropic", false),
+            ("custom", false),
+            ("chatgpt", true),
+        ] {
+            let mut selected = view.clone();
+            selected.defaults.provider = Some("chatgpt".into());
+            let config = selected.runs.last_mut().unwrap().config.as_mut().unwrap();
+            config.provider = provider.into();
+            config.chatgpt_provenance = None;
+            let summary = usage_pages_at(&selected, true, None, Some(1000)).concat();
+            assert_eq!(
+                summary.contains("Plan limits remaining:"),
+                has_plan,
+                "{provider}"
+            );
+            assert_eq!(
+                summary.contains("Weekly: unknown (not reported)"),
+                has_plan,
+                "{provider}"
+            );
+            assert!(!summary.contains("74.5% left"));
+        }
+        let mut unconfigured = view.clone();
+        unconfigured.defaults.provider = Some("chatgpt".into());
+        unconfigured.runs.last_mut().unwrap().config = None;
+        let summary = usage_pages_at(&unconfigured, true, None, Some(1000)).concat();
+        assert!(!summary.contains("Plan limits remaining:"));
+        for (provider, has_plan) in [("openai", false), ("chatgpt", true)] {
+            unconfigured.defaults.provider = Some(provider.into());
+            let summary =
+                usage_pages_at(&unconfigured, true, Some(view.last_sequence), Some(1000)).concat();
+            assert_eq!(
+                summary.contains("Plan limits remaining:"),
+                has_plan,
+                "{provider}"
+            );
+        }
     }
 
     #[test]
@@ -476,5 +925,15 @@ mod tests {
             window_lines(&mut text, &window, None);
             assert!(text.contains(expected));
         }
+    }
+
+    #[test]
+    fn stale_plan_usage_is_unknown_without_a_current_observation_time() {
+        let mut window = arany::test_support::routing::plan_sample(1_000)
+            .primary
+            .unwrap();
+        window.reset_at = Some(9_100);
+        assert_eq!(remaining_percent(&window, Some(2_000)), "unknown (stale)");
+        assert_eq!(remaining_percent(&window, None), "unknown (stale)");
     }
 }
