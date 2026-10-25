@@ -729,26 +729,22 @@ fn valid_endpoint(endpoint: &str) -> bool {
 }
 
 fn messages_endpoint(base: &str) -> Option<(String, String)> {
-    if !valid_url(base, true) {
-        return None;
-    }
-    let normalized = base.strip_suffix('/').unwrap_or(base);
-    if normalized.ends_with("/v1/messages") {
-        return None;
-    }
-    let endpoint = format!("{normalized}/v1/messages");
-    valid_url(&endpoint, false).then(|| (normalized.to_owned(), endpoint))
+    derived_endpoint(base, "/v1/messages")
 }
 
 fn chat_completions_endpoint(base: &str) -> Option<(String, String)> {
+    derived_endpoint(base, "/chat/completions")
+}
+
+fn derived_endpoint(base: &str, suffix: &str) -> Option<(String, String)> {
     if !valid_url(base, true) {
         return None;
     }
     let normalized = base.strip_suffix('/').unwrap_or(base);
-    if normalized.ends_with("/chat/completions") {
+    if normalized.ends_with(suffix) {
         return None;
     }
-    let endpoint = format!("{normalized}/chat/completions");
+    let endpoint = format!("{normalized}{suffix}");
     valid_url(&endpoint, false).then(|| (normalized.to_owned(), endpoint))
 }
 
