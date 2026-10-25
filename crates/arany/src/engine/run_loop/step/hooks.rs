@@ -397,7 +397,11 @@ impl RunLoop<'_> {
             .and_then(|input| self.integration_hook_input(input, &intent.call)) else {
                 return Ok(HookFold::deny("hook input exceeds its limit", 0));
             };
-            if !self.task_fits_all(&runtime.with_hook_stdin(&bare), intent.agent_run_id, &post) {
+            if !self.task_fits_all(
+                &runtime.clone().with_hook_stdin(&bare),
+                intent.agent_run_id,
+                &post,
+            ) {
                 return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
             }
         }
@@ -411,7 +415,7 @@ impl RunLoop<'_> {
         };
         let input_digest = crate::validate::digest(input.as_bytes());
         let subject_digest = intent.digest();
-        let runtime = runtime.with_hook_stdin(&input);
+        let runtime = runtime.clone().with_hook_stdin(&input);
         // The complete Guard task must encode before any hook starts; a rejected task would strand it.
         if !self.task_fits_all(&runtime, intent.agent_run_id, &plans) {
             return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
@@ -602,7 +606,7 @@ impl RunLoop<'_> {
                 budget = if budget < 2048 { 0 } else { budget / 2 };
                 continue;
             };
-            let sized = runtime.with_hook_stdin(&input);
+            let sized = runtime.clone().with_hook_stdin(&input);
             if self.task_fits_all(&sized, observation.intent.agent_run_id, plans) {
                 return Ok((input, sized));
             }
@@ -806,7 +810,7 @@ impl RunLoop<'_> {
                 hook.subject,
                 budget,
             );
-            let sized = runtime.with_hook_stdin(&input);
+            let sized = runtime.clone().with_hook_stdin(&input);
             if self.task_fits_all(&sized, hook.agent, plans) {
                 return Ok(ControlFlow::Continue((input, sized)));
             }
