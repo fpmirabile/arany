@@ -1724,7 +1724,7 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 14);
+    assert_eq!(rows.len(), 15);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))

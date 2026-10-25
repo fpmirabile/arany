@@ -824,7 +824,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 14);
+    assert_eq!(rows.len(), 15);
     for (catalog, accepted) in [
         (
             json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
