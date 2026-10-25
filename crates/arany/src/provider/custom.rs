@@ -18,7 +18,7 @@ pub(crate) use destination::MAX_ADDRESSES;
 use destination::PinnedDestination;
 
 const MAX_PROFILES: usize = 32;
-pub const MAX_CUSTOM_PROFILE_NAME_BYTES: usize = 64;
+pub const MAX_CUSTOM_PROFILE_NAME_BYTES: usize = super::roster::MAX_PROFILE_NAME_BYTES;
 pub const MAX_CUSTOM_PROFILE_ENDPOINT_BYTES: usize = 512;
 pub const MAX_CUSTOM_PROFILE_MODEL_BYTES: usize = 128;
 pub const MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES: usize = 64;
@@ -510,7 +510,6 @@ fn encode_profiles(profiles: &[CustomProfileDraft]) -> Result<Vec<u8>, CustomPro
     if profiles.len() > MAX_PROFILES
         || profiles.iter().any(|profile| {
             !valid_name(&profile.name)
-                || profile.name.len() > MAX_CUSTOM_PROFILE_NAME_BYTES
                 || profile.endpoint.len() > MAX_CUSTOM_PROFILE_ENDPOINT_BYTES
                 || profile.model.len() > MAX_CUSTOM_PROFILE_MODEL_BYTES
                 || profile.credential_env.len() > MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES
@@ -641,7 +640,7 @@ fn effort_index(effort: Effort) -> usize {
 }
 
 fn valid_credential_env(name: &str) -> bool {
-    name.len() <= 64
+    name.len() <= MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES
         && name.strip_prefix("ARANY_PROVIDER_").is_some_and(|suffix| {
             !suffix.is_empty()
                 && suffix

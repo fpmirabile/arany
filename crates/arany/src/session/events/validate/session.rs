@@ -8,7 +8,6 @@ impl Event {
                 target,
                 ..
             } if operation_id.get_version() == Some(uuid::Version::SortRand)
-                && target.identity.len() <= 128
                 && match target.kind {
                     super::ProviderSetupTargetKind::NativeAccount => {
                         target.identity == "native" || valid_setup_identity(&target.identity)
