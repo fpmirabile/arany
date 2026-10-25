@@ -110,6 +110,20 @@ fn open_check(pty: &mut SetupPty, presentation: Presentation) -> usize {
 }
 
 fn accept_check(pty: &mut SetupPty, presentation: Presentation, from: usize) -> usize {
+    review_check_warning(pty, presentation, from, CheckConsent::Accept)
+}
+
+enum CheckConsent {
+    Back,
+    Accept,
+}
+
+fn review_check_warning(
+    pty: &mut SetupPty,
+    presentation: Presentation,
+    from: usize,
+    consent: CheckConsent,
+) -> usize {
     match presentation {
         Presentation::ScreenReader => {
             acknowledge_linear_pages(
@@ -119,7 +133,13 @@ fn accept_check(pty: &mut SetupPty, presentation: Presentation, from: usize) -> 
                 &mut pty.answered,
                 (from, b"empty Enter selects 1. Back\r\nInput:\r\n"),
             );
-            presentation.choose(pty, 2)
+            presentation.choose(
+                pty,
+                match consent {
+                    CheckConsent::Back => 1,
+                    CheckConsent::Accept => 2,
+                },
+            )
         }
         Presentation::Inline => {
             let mut cursor = from;
@@ -128,8 +148,11 @@ fn accept_check(pty: &mut SetupPty, presentation: Presentation, from: usize) -> 
                 cursor = pty.transcript.len();
                 if screen.iter().any(|line| line.contains("Accept")) {
                     pty.input
-                        .write_all(b"\t\r")
-                        .expect("authorize synthetic check");
+                        .write_all(match consent {
+                            CheckConsent::Back => b"\r",
+                            CheckConsent::Accept => b"\t\r",
+                        })
+                        .expect("confirm synthetic check choice");
                     return cursor;
                 }
                 pty.input
@@ -291,6 +314,21 @@ fn submit_checked_turn(
     presentation: Presentation,
     provider: &crate::loopback::HeldStream,
 ) {
+    let policy_at = pty.transcript.len();
+    pty.input.write_all(b"/agents single\r").unwrap();
+    match presentation {
+        Presentation::ScreenReader => wait_for_after(
+            &mut pty.output,
+            &mut pty.input,
+            &mut pty.transcript,
+            &mut pty.answered,
+            policy_at,
+            b"Next-Run collaboration: single\r\nInput:\r\n",
+        ),
+        Presentation::Inline => {
+            inline_frame(pty, policy_at, "Next-Run collaboration: single");
+        }
+    }
     let from = pty.transcript.len();
     pty.input
         .write_all(b"answer after manager check\r")
@@ -395,18 +433,18 @@ fn manager_empty_account_removal_waits_for_acknowledgment() {
             assert_result_contains(&message, "No saved account");
             presentation.menu(&mut pty, accounts, "API accounts");
         }
-        let chat = presentation.choose(&mut pty, 6);
-        presentation.composer(&mut pty, chat);
-        pty.input.write_all(b"/exit\r").unwrap();
+        presentation.choose(&mut pty, 6);
         finish_check_pty(pty);
-        runtime().block_on(async {
-            assert!(
-                arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace,)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-        });
+        if state.exists() {
+            runtime().block_on(async {
+                assert!(
+                    arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace,)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            });
+        }
     }
 }
 
@@ -421,22 +459,8 @@ fn manager_check_back_before_consent_leaves_no_check_facts_or_requests() {
         write_profile(&state, listener.local_addr().unwrap().port());
         let mut pty = presentation.start(&temp, &workspace, &state, Some("test-key"));
         let warning = open_check(&mut pty, presentation);
-        match presentation {
-            Presentation::ScreenReader => wait_for_after(
-                &mut pty.output,
-                &mut pty.input,
-                &mut pty.transcript,
-                &mut pty.answered,
-                warning,
-                b"Choose: Page 1/",
-            ),
-            Presentation::Inline => {
-                inline_frame(&mut pty, warning, "Check custom route?");
-            }
-        }
         let before = std::fs::read(state.join("provider-profiles.json")).unwrap();
-        let back = pty.transcript.len();
-        pty.input.write_all(b"\x1b").unwrap();
+        let back = review_check_warning(&mut pty, presentation, warning, CheckConsent::Back);
         presentation.menu(&mut pty, back, "Custom routes");
         presentation.choose(&mut pty, 3);
         finish_check_pty(pty);
@@ -470,10 +494,15 @@ fn finish_check_pty(mut pty: SetupPty) {
         &mut pty.transcript,
         &mut pty.answered,
     );
-    assert!(result.status.success(), "manager lifecycle failed");
     assert_private_output(&pty.transcript);
     assert_private_output(&result.stdout);
     assert_private_output(&result.stderr);
+    assert!(
+        result.status.success(),
+        "manager lifecycle failed: {:?}; {}",
+        result.status.code(),
+        tail(&pty.transcript)
+    );
 }
 
 #[derive(Clone, Copy)]

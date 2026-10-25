@@ -1296,8 +1296,8 @@ fn run_isolated(test_name: &str, stage: &str) {
             "--symlink",
             "usr/lib",
             "/lib",
-            "--symlink",
-            "usr/lib",
+            "--ro-bind-try",
+            "/lib64",
             "/lib64",
             "--ro-bind",
         ])

@@ -754,7 +754,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     assert_eq!(no_key.stdout, b"");
     assert_eq!(
         no_key.stderr,
-        b"error: custom Provider credential unavailable\n"
+        b"error: selected custom Provider credential is not set\n"
     );
 
     let success = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
@@ -1225,7 +1225,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             &state_path,
             arany::CheckDisposition::Failed
         ),
-        b"error: custom Provider credential unavailable\n"
+        b"error: selected custom Provider credential is not set\n"
     );
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
         .expect("inspect invalidated evidence");
@@ -2013,7 +2013,7 @@ fn interrupted_provider_check_never_retries_and_a_live_owner_cannot_be_recovered
         assert!(!fresh.status.success());
         assert_eq!(
             check_output(&fresh.stderr, &state, arany::CheckDisposition::Failed),
-            b"error: custom Provider credential unavailable\n"
+            b"error: selected custom Provider credential is not set\n"
         );
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();

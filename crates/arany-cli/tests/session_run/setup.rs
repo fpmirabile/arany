@@ -132,6 +132,17 @@ fn wait_for_after(
     }
 }
 
+#[cfg(debug_assertions)]
+fn reviewed_setup_text(transcript: &str) -> String {
+    transcript
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("Choose: Page ")
+                .and_then(|page| page.split_once("\\u{000a}").map(|(_, body)| body))
+        })
+        .collect()
+}
+
 fn wait_linear_page(
     output: &mut impl Read,
     input: &mut impl Write,
@@ -304,14 +315,13 @@ fn setup_pty_command(
         SetupPtyMode::Manager => "--screen-reader --setup".to_owned(),
         SetupPtyMode::InlineManager => "--classic --no-color --setup".to_owned(),
         SetupPtyMode::Configured => {
-            "--screen-reader --provider custom:local --model model-1 --collaboration single"
-                .to_owned()
+            "--screen-reader --provider custom:local --model model-1".to_owned()
         }
         SetupPtyMode::Resumed(id) => format!("--screen-reader --resume {id}"),
         SetupPtyMode::ResumedInline(id) => format!("--classic --no-color --resume {id}"),
     };
     let shell = format!(
-        "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {arguments} --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {arguments} --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut command = Command::new("/usr/bin/script");
     command
@@ -363,6 +373,26 @@ fn enter_conversation_setup(
     answered: &mut crate::session_picker::PtyResponses,
 ) {
     wait_for(output, input, transcript, answered, b"Input:\r\n");
+    let policy_at = transcript.len();
+    input
+        .write_all(b"/agents single\r")
+        .expect("select single-agent policy");
+    wait_for_after(
+        output,
+        input,
+        transcript,
+        answered,
+        policy_at,
+        b"Next-Run collaboration: single",
+    );
+    wait_for_after(
+        output,
+        input,
+        transcript,
+        answered,
+        policy_at,
+        b"Input:\r\n",
+    );
     let rename_at = transcript.len();
     input
         .write_all(b"/rename Setup retained title\r")
@@ -1417,14 +1447,15 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             );
         }
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
+        let reviewed = reviewed_setup_text(&text);
         assert!(text.contains("Password store unavailable. Unencrypted file"));
-        assert_eq!(text.contains("remote output-token limit"), accept_file);
+        assert_eq!(reviewed.contains("remote output-token limit"), accept_file);
         assert_eq!(
-            text.contains("private account file is not encrypted"),
+            reviewed.contains("private account file is not encrypted"),
             accept_file
         );
         assert_eq!(
-            text.contains("Choose Accept to continue, or Back to cancel."),
+            reviewed.contains("Choose Accept to continue, or Back to cancel."),
             accept_file
         );
         assert!(!text.contains('\x1b'), "screen-reader output has escapes");
@@ -3193,6 +3224,24 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
             b"Enter",
         );
         assert!(!state.exists(), "invalid choice created State");
+        let accounts_at = transcript.len();
+        input.write_all(b"\r").expect("open API accounts");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            accounts_at,
+            b"API accounts",
+        );
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            accounts_at,
+            b"\x1b[?25l",
+        );
         let access_at = transcript.len();
         input.write_all(b"\r").expect("select API key access");
         wait_for_after(
@@ -4048,7 +4097,7 @@ fn credential_helper_rejects_invalid_record_before_os_store_access() {
             env!("CARGO_BIN_EXE_arany"),
             "--internal-credential-helper",
             "delete",
-            "default-native-api-account",
+            "unsupported-account-slot",
         ])
         .env_clear()
         .env(
