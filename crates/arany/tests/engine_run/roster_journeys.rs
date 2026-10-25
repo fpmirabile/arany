@@ -680,7 +680,7 @@ async fn independent_preset_selections_pin_distinct_child_assignments_in_one_ses
             delegate(&[("inspect research", Some("spare"))]),
             finish("research answer"),
         ])
-        .with_profile("scripted", "primary"),
+        .with_profile("openai", "primary"),
     );
     let coding_child = answering("coding-child", &["coding facts"]);
     let research_child = answering("research-child", &["research facts"]);
