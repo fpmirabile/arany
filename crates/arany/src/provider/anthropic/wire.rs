@@ -18,7 +18,7 @@ const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in 
 
 pub(in crate::provider) struct MessageReply {
     pub(in crate::provider) bytes: Vec<u8>,
-    pub(in crate::provider) counts: crate::diagnostics::StreamCounts,
+    pub(in crate::provider) counts: crate::provider::diagnostics::StreamCounts,
 }
 
 pub(super) struct MessageStream<'a> {
@@ -33,7 +33,7 @@ pub(super) struct MessageStream<'a> {
     stopped: bool,
     tool_input: String,
     preview_failed: bool,
-    stage: crate::diagnostics::SubscriptionFailureStage,
+    stage: crate::provider::diagnostics::SubscriptionFailureStage,
     http_status: Option<u16>,
 }
 
@@ -60,7 +60,7 @@ impl<'a> MessageStream<'a> {
             stopped: false,
             tool_input: String::new(),
             preview_failed: false,
-            stage: crate::diagnostics::SubscriptionFailureStage::EventFraming,
+            stage: crate::provider::diagnostics::SubscriptionFailureStage::EventFraming,
             http_status: None,
         }
     }
@@ -70,12 +70,12 @@ impl<'a> MessageStream<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn stage(&self) -> crate::diagnostics::SubscriptionFailureStage {
+    pub(super) fn stage(&self) -> crate::provider::diagnostics::SubscriptionFailureStage {
         self.stage
     }
 
-    pub(super) fn counts(&self) -> crate::diagnostics::StreamCounts {
-        crate::diagnostics::StreamCounts {
+    pub(super) fn counts(&self) -> crate::provider::diagnostics::StreamCounts {
+        crate::provider::diagnostics::StreamCounts {
             bytes: self.framer.bytes,
             events: self.framer.events,
             http_status: self.http_status,
@@ -131,7 +131,7 @@ impl<'a> MessageStream<'a> {
     }
 
     fn event(&mut self, event: Value) -> Result<Option<Vec<u8>>, ProviderError> {
-        self.stage = crate::diagnostics::SubscriptionFailureStage::EventType;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::EventType;
         if self.stopped {
             return Err(ProviderError::InvalidStream);
         }
@@ -143,11 +143,12 @@ impl<'a> MessageStream<'a> {
         {
             "ping" => {}
             "error" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::RemoteFailure;
+                self.stage = crate::provider::diagnostics::SubscriptionFailureStage::RemoteFailure;
                 return Err(ProviderError::Unavailable);
             }
             "message_start" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseMessage;
+                self.stage =
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseMessage;
                 let message = event.get("message").ok_or_else(invalid)?;
                 if self.response.is_some()
                     || message.get("type").and_then(Value::as_str) != Some("message")
@@ -166,7 +167,8 @@ impl<'a> MessageStream<'a> {
                 self.response = Some(message.clone());
             }
             "content_block_start" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+                self.stage =
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
@@ -205,7 +207,8 @@ impl<'a> MessageStream<'a> {
                 }
             }
             "content_block_delta" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+                self.stage =
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
@@ -270,7 +273,8 @@ impl<'a> MessageStream<'a> {
                 }
             }
             "content_block_stop" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+                self.stage =
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
@@ -307,7 +311,7 @@ impl<'a> MessageStream<'a> {
                 }
             }
             "message_delta" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::UsageContract;
+                self.stage = crate::provider::diagnostics::SubscriptionFailureStage::UsageContract;
                 if self.closed.is_empty() || self.closed.iter().any(|closed| !closed) {
                     return Err(ProviderError::InvalidStream);
                 }
@@ -364,13 +368,14 @@ impl<'a> MessageStream<'a> {
                 self.delta_seen = true;
             }
             "message_stop" => {
-                self.stage = crate::diagnostics::SubscriptionFailureStage::CompletedResponse;
+                self.stage =
+                    crate::provider::diagnostics::SubscriptionFailureStage::CompletedResponse;
                 if !self.delta_seen || self.closed.iter().any(|closed| !closed) {
                     return Err(ProviderError::InvalidStream);
                 }
                 let response = self.response.take().ok_or_else(invalid)?;
                 if crate::provider::streaming::reflects_secret(&response, self.secret) {
-                    self.stage = crate::diagnostics::SubscriptionFailureStage::CredentialReflection;
+                    self.stage = crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection;
                     return Err(ProviderError::InvalidOutcome);
                 }
                 let response =
@@ -389,8 +394,8 @@ impl<'a> MessageStream<'a> {
 
 fn framing_stage(
     stage: crate::provider::streaming::FramingStage,
-) -> crate::diagnostics::SubscriptionFailureStage {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+) -> crate::provider::diagnostics::SubscriptionFailureStage {
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     match stage {
         crate::provider::streaming::FramingStage::Limit => Stage::StreamLimit,
         crate::provider::streaming::FramingStage::Framing => Stage::EventFraming,
@@ -441,7 +446,7 @@ pub(in crate::provider) fn decode_run(
     decode_run_with_counts(
         bytes,
         scope,
-        crate::diagnostics::StreamCounts {
+        crate::provider::diagnostics::StreamCounts {
             bytes: bytes.len(),
             ..Default::default()
         },
@@ -451,13 +456,13 @@ pub(in crate::provider) fn decode_run(
 pub(in crate::provider) fn decode_run_with_counts(
     bytes: &[u8],
     scope: &RunScope,
-    counts: crate::diagnostics::StreamCounts,
+    counts: crate::provider::diagnostics::StreamCounts,
 ) -> Result<ProviderResponse, ProviderError> {
     let (result, stage, tool_arguments) = decode_run_staged(bytes, scope);
     if result.is_err() {
         crate::diagnostics::messages_failure(
             stage,
-            crate::diagnostics::StreamCounts {
+            crate::provider::diagnostics::StreamCounts {
                 tool_arguments,
                 ..counts
             },
@@ -471,15 +476,15 @@ fn decode_run_staged(
     scope: &RunScope,
 ) -> (
     Result<ProviderResponse, ProviderError>,
-    crate::diagnostics::SubscriptionFailureStage,
+    crate::provider::diagnostics::SubscriptionFailureStage,
     Option<crate::diagnostics::ToolArgumentShape>,
 ) {
-    let mut stage = crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
+    let mut stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
     let mut tool_arguments = None;
     let result = (|| {
         let response: WireResponse =
             serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-        stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
         let admitted = response.admit(scope.model, scope.output_cap, &mut stage)?;
         let (outcome, provenance) = match admitted.stop {
             Stop::EndTurn => (
@@ -493,7 +498,8 @@ fn decode_run_staged(
                 ProviderWireProvenance::MessagesEndTurnStorageUnspecified,
             ),
             Stop::ToolUse => {
-                stage = crate::diagnostics::SubscriptionFailureStage::OutcomeToolArguments;
+                stage =
+                    crate::provider::diagnostics::SubscriptionFailureStage::OutcomeToolArguments;
                 match admitted.tool_requests(scope.offered) {
                     Ok(outcome) => (
                         outcome,
@@ -506,7 +512,7 @@ fn decode_run_staged(
                 }
             }
         };
-        stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
         let raw: Value =
             serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
         let turn = ProviderTurn::new(
@@ -530,7 +536,7 @@ fn decode_run_staged(
 pub(super) fn decode_run_failure_stage(
     bytes: &[u8],
     scope: &RunScope,
-) -> crate::diagnostics::SubscriptionFailureStage {
+) -> crate::provider::diagnostics::SubscriptionFailureStage {
     decode_run_staged(bytes, scope).1
 }
 
@@ -546,7 +552,7 @@ pub(in crate::provider) fn decode_compaction_with_counts(
     bytes: &[u8],
     model: &str,
     output_cap: u32,
-    counts: crate::diagnostics::StreamCounts,
+    counts: crate::provider::diagnostics::StreamCounts,
 ) -> Result<CompactionResponse, ProviderError> {
     decode_compaction_observed(bytes, model, output_cap, counts)
 }
@@ -561,7 +567,7 @@ pub(in crate::provider) fn decode_compaction(
         bytes,
         model,
         output_cap,
-        crate::diagnostics::StreamCounts {
+        crate::provider::diagnostics::StreamCounts {
             bytes: bytes.len(),
             ..Default::default()
         },
@@ -572,13 +578,13 @@ fn decode_compaction_observed(
     bytes: &[u8],
     model: &str,
     output_cap: u32,
-    counts: crate::diagnostics::StreamCounts,
+    counts: crate::provider::diagnostics::StreamCounts,
 ) -> Result<CompactionResponse, ProviderError> {
-    let mut stage = crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
+    let mut stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
     let result = (|| {
         let response: WireResponse =
             serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-        stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
         let admitted = response.admit(model, output_cap, &mut stage)?;
         if admitted.stop != Stop::EndTurn {
             return Err(ProviderError::InvalidOutcome);
@@ -596,7 +602,10 @@ fn decode_compaction_observed(
         })
     })();
     if result.is_err() {
-        crate::diagnostics::messages_failure(stage, crate::diagnostics::StreamCounts { ..counts });
+        crate::diagnostics::messages_failure(
+            stage,
+            crate::provider::diagnostics::StreamCounts { ..counts },
+        );
     }
     result
 }
@@ -906,9 +915,9 @@ impl<'a> WireResponse<'a> {
         self,
         model: &str,
         output_cap: u32,
-        stage: &mut crate::diagnostics::SubscriptionFailureStage,
+        stage: &mut crate::provider::diagnostics::SubscriptionFailureStage,
     ) -> Result<Admitted<'a>, ProviderError> {
-        *stage = crate::diagnostics::SubscriptionFailureStage::UsageContract;
+        *stage = crate::provider::diagnostics::SubscriptionFailureStage::UsageContract;
         let nested_creation = self
             .usage
             .cache_creation
@@ -936,7 +945,7 @@ impl<'a> WireResponse<'a> {
             .checked_add(cache_creation_input_tokens.unwrap_or(0))
             .and_then(|total| total.checked_add(self.usage.cache_read_input_tokens.unwrap_or(0)))
             .ok_or(ProviderError::InvalidOutcome)?;
-        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseStatus;
+        *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseStatus;
         if self.stop_details.is_some() || self.stop_sequence.is_some() {
             return Err(ProviderError::InvalidOutcome);
         }
@@ -945,22 +954,22 @@ impl<'a> WireResponse<'a> {
             "tool_use" => Stop::ToolUse,
             _ => return Err(ProviderError::InvalidOutcome),
         };
-        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseModel;
+        *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseModel;
         if self.kind != "message" || self.role != "assistant" || self.model != model {
             return Err(ProviderError::InvalidOutcome);
         }
-        *stage = crate::diagnostics::SubscriptionFailureStage::UsageContract;
+        *stage = crate::provider::diagnostics::SubscriptionFailureStage::UsageContract;
         if total_input_tokens > MAX_REPORTED_INPUT_TOKENS || self.usage.output_tokens > output_cap {
             return Err(ProviderError::InvalidOutcome);
         }
-        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseIdentifier;
+        *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseIdentifier;
         if self.id.is_empty()
             || self.id.len() > 128
             || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
         {
             return Err(ProviderError::InvalidOutcome);
         }
-        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
         if self.content.is_empty() || self.content.len() > MAX_CONTENT_BLOCKS {
             return Err(ProviderError::InvalidOutcome);
         }
