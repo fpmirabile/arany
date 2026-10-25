@@ -592,7 +592,7 @@ fn largest_tool_started_payload() -> String {
     Event::ToolStarted {
         run_id: intent.run_id,
         agent_run_id: intent.agent_run_id,
-        intent,
+        intent: intent.into(),
         active_ceiling_ms: u64::MAX,
     }
     .payload()

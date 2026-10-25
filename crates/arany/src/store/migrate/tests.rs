@@ -227,6 +227,59 @@ const EVENT_FIXTURES: [EventFixture<'static>; 65] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
 ];
+
+#[test]
+fn migrated_intent_records_preserve_runtime_bytes() {
+    for (kind, from, input, _) in EVENT_FIXTURES {
+        let payload = REGISTRY
+            .upgrade_payload(kind, from, input)
+            .unwrap()
+            .unwrap_or_else(|| input.to_owned());
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        let intent = value
+            .get("intent")
+            .or_else(|| value.get("observation")?.get("intent"));
+        assert_eq!(
+            intent.is_some(),
+            matches!(
+                kind,
+                "ToolStarted" | "ToolFinished" | "HookStarted" | "HookFinished"
+            ),
+            "{kind} v{from}"
+        );
+        if let Some(intent) = intent {
+            assert_intent_record_bytes(intent.clone());
+        }
+    }
+    for fixture in [
+        crate::session::worker_protocol_fixture(),
+        crate::session::worker_command_protocol_fixture(),
+        crate::session::worker_compacted_fixture(true),
+        crate::session::host_protocol_fixture(),
+        crate::session::session_host_protocol_fixture(),
+    ] {
+        for envelope in fixture.envelopes() {
+            if let Event::ToolStarted { intent, .. } = &envelope.event {
+                assert_intent_record_bytes(serde_json::to_value(intent).unwrap());
+            }
+        }
+    }
+}
+
+fn assert_intent_record_bytes(value: Value) {
+    let runtime: crate::tools::EffectIntent = serde_json::from_value(value.clone()).unwrap();
+    let record: crate::session::ToolIntentRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&runtime).unwrap(),
+        serde_json::to_vec(&record).unwrap()
+    );
+    assert_eq!(
+        crate::session::ToolIntentRecord::from(runtime.clone()),
+        record
+    );
+    assert_eq!(crate::tools::EffectIntent::from(record), runtime);
+}
+
 const GOAL_STARTED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_STARTED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","objective":"Literal @not-an-input","include_paths":null,"workspace_device":1,"workspace_inode":2,"budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"phase":"implementation","autonomous":false,"resource_settings":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"continues":null}"#;
 const GOAL_FINISHED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true}"#;

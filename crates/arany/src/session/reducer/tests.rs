@@ -1528,7 +1528,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read.clone(),
+                intent: read.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -1578,7 +1578,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read,
+                intent: read.into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -3549,7 +3549,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id,
                 agent_run_id,
-                intent,
+                intent: intent.into(),
                 active_ceiling_ms: 46_000,
             },
         ]);
@@ -4223,7 +4223,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: actor,
-                    intent: intent.clone(),
+                    intent: intent.clone().into(),
                     active_ceiling_ms: 0,
                 },
             );
@@ -4550,7 +4550,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read.clone(),
+                intent: read.clone().into(),
                 active_ceiling_ms: 0,
             }
         ));
@@ -4582,7 +4582,7 @@ mod goal_replay_tests {
         let started = Event::ToolStarted {
             run_id: run,
             agent_run_id: child,
-            intent: read.clone(),
+            intent: read.clone().into(),
             active_ceiling_ms: 0,
         };
         let finished = Event::ToolFinished {
@@ -4606,7 +4606,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: write,
+                intent: write.into(),
                 active_ceiling_ms: 0,
             }
         ));
@@ -4625,7 +4625,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: mcp,
+                intent: mcp.into(),
                 active_ceiling_ms: 0,
             }
         ));
@@ -4643,7 +4643,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: child,
-                    intent,
+                    intent: intent.into(),
                     active_ceiling_ms: 0,
                 }
             ));
@@ -4739,7 +4739,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: intent.clone(),
+                intent: intent.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -4796,7 +4796,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: outside.clone(),
+                intent: outside.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -4857,7 +4857,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: run,
                     agent_run_id: child,
-                    intent: read.clone(),
+                    intent: read.clone().into(),
                     active_ceiling_ms: 0,
                 },
             )
@@ -4908,7 +4908,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: child,
-                intent: read.clone(),
+                intent: read.clone().into(),
                 active_ceiling_ms: 0,
             },
         )
@@ -5495,7 +5495,7 @@ mod goal_replay_tests {
                         run_id: run,
                         agent_run_id: agent,
                         active_ceiling_ms: 0,
-                        intent: read_intent(run, agent, "src/main.rs")
+                        intent: read_intent(run, agent, "src/main.rs").into()
                     }
                 ));
             }
@@ -7082,7 +7082,8 @@ mod goal_replay_tests {
                         changeset: crate::tools::CommandChangeset { files: Vec::new() },
                     },
                 },
-            ),
+            )
+            .into(),
             active_ceiling_ms: 0,
         };
         assert!(rejected(&approved, integration));
@@ -7512,6 +7513,7 @@ mod goal_replay_tests {
                 _ => None,
             })
             .expect("pending host read");
+        let intent = crate::tools::EffectIntent::from(intent);
         for event in &mut fixture.events {
             if let Event::ToolPermissionDecided { verdict, .. } = event {
                 verdict.intent_digest = intent.digest();
@@ -7609,6 +7611,7 @@ mod goal_replay_tests {
                 _ => None,
             })
             .expect("pending host read");
+        let intent = crate::tools::EffectIntent::from(intent);
         for event in &mut fixture.events {
             if let Event::ToolPermissionDecided { verdict, .. } = event {
                 verdict.intent_digest = intent.digest();
@@ -7853,7 +7856,7 @@ mod goal_replay_tests {
         Event::ToolStarted {
             run_id: run,
             agent_run_id: agent,
-            intent: intent.clone(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 0,
         }
     }
@@ -8042,7 +8045,7 @@ mod goal_replay_tests {
             Event::ToolStarted {
                 run_id: run,
                 agent_run_id: agent,
-                intent: first.clone(),
+                intent: first.clone().into(),
                 active_ceiling_ms: 1000,
             },
         )
@@ -8680,7 +8683,7 @@ mod goal_replay_tests {
         let start = |intent: EffectIntent| Event::ToolStarted {
             run_id: run,
             agent_run_id: actor,
-            intent,
+            intent: intent.into(),
             active_ceiling_ms: 0,
         };
         assert!(rejected(&view, reserve_child_call(goal, run, actor)));
@@ -8843,7 +8846,7 @@ mod goal_replay_tests {
         let start = |intent: EffectIntent| Event::ToolStarted {
             run_id: intent.run_id,
             agent_run_id: intent.agent_run_id,
-            intent,
+            intent: intent.into(),
             active_ceiling_ms: 0,
         };
         for changed in [
@@ -8937,7 +8940,7 @@ mod goal_replay_tests {
                 Event::ToolStarted {
                     run_id: intent.run_id,
                     agent_run_id: intent.agent_run_id,
-                    intent: intent.clone(),
+                    intent: intent.clone().into(),
                     active_ceiling_ms: 0,
                 },
             )

@@ -194,6 +194,7 @@ pub(super) async fn started_at(
     let store = Store::open_read_only(StateRoot::open_existing(&state_dir).ok()?).ok()?;
     let events = store.load_session(thread_id).await;
     store.close().await.ok()?;
+    let intent = arany::ToolIntentRecord::from(intent);
     events
         .ok()?
         .into_iter()
