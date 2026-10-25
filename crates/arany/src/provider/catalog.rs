@@ -18,6 +18,7 @@ const MAX_PAGES: usize = 16;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelEntry {
     pub id: String,
+    pub context_window_tokens: Option<u32>,
     /// Reviewed native metadata, not Run authorization or a live-compatibility guarantee.
     pub runnable: bool,
     pub efforts: Vec<Effort>,
@@ -32,6 +33,7 @@ impl ModelEntry {
             .collect();
         Self {
             id,
+            context_window_tokens: None,
             runnable,
             efforts,
         }
@@ -40,6 +42,7 @@ impl ModelEntry {
     pub fn exact_custom(id: String) -> Self {
         Self {
             id,
+            context_window_tokens: None,
             runnable: false,
             efforts: Vec::new(),
         }
@@ -49,6 +52,8 @@ impl ModelEntry {
 #[derive(Deserialize)]
 struct CatalogRow {
     id: String,
+    #[serde(default)]
+    max_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -240,7 +245,13 @@ async fn list_at(
                 {
                     return Err(ProviderError::InvalidOutcome);
                 }
-                entries.push(ModelEntry::native(profile, row.id));
+                let mut entry = ModelEntry::native(profile, row.id);
+                if profile == "anthropic" {
+                    entry.context_window_tokens = row
+                        .max_input_tokens
+                        .and_then(super::admitted_context_window);
+                }
+                entries.push(entry);
             }
             Ok::<_, ProviderError>(next)
         }
@@ -471,8 +482,8 @@ mod tests {
         let (anthropic, requests) = fixture_with_header(
             "anthropic",
             &[
-                (r#"{"data":[{"id":"claude-sonnet-5"}],"has_more":true,"last_id":"claude-sonnet-5"}"#, None),
-                (r#"{"data":[{"id":"claude-opus-5-5"},{"id":"other-model"}],"has_more":false,"last_id":"other-model"}"#, None),
+                (r#"{"data":[{"id":"claude-sonnet-5","max_input_tokens":200000}],"has_more":true,"last_id":"claude-sonnet-5"}"#, None),
+                (r#"{"data":[{"id":"claude-opus-5-5"},{"id":"other-model","max_input_tokens":2000001}],"has_more":false,"last_id":"other-model"}"#, None),
             ],
             "Content-Type: application/json\r\n",
             Some("wrkspc_Fixture"),
@@ -483,6 +494,30 @@ mod tests {
         assert!(models[0].runnable);
         assert!(models[1].runnable);
         assert!(!models[2].runnable);
+        assert_eq!(
+            models
+                .iter()
+                .find(|entry| entry.id == "claude-sonnet-5")
+                .unwrap()
+                .context_window_tokens,
+            Some(200_000)
+        );
+        assert_eq!(
+            models
+                .iter()
+                .find(|entry| entry.id == "claude-opus-5-5")
+                .unwrap()
+                .context_window_tokens,
+            None
+        );
+        assert_eq!(
+            models
+                .iter()
+                .find(|entry| entry.id == "other-model")
+                .unwrap()
+                .context_window_tokens,
+            None
+        );
         assert!(
             requests.iter().all(|request| request
                 .to_ascii_lowercase()
@@ -545,6 +580,17 @@ mod tests {
                 "{profile} rejected parameterized JSON"
             );
         }
+        assert!(matches!(
+            fixture_with_header(
+                "anthropic",
+                &[(r#"{"data":[{"id":"claude-sonnet-5","max_input_tokens":"large"}],"has_more":false}"#, None)],
+                "Content-Type: application/json\r\n",
+                None,
+            )
+            .await
+            .0,
+            Err(ProviderError::InvalidOutcome)
+        ));
         for body in [
             "{}",
             r#"{"data":[{"id":"bad\u001bmodel"}]}"#,

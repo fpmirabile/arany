@@ -1892,7 +1892,7 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         [
             "SessionRenamed 6 -> 7 has no step and fixture",
             "SyntheticKind declares no migration floor",
-            "schema 6 -> 7 has no step and fixture",
+            "schema 7 -> 8 has no step and fixture",
         ]
     );
 }
@@ -2444,6 +2444,54 @@ fn diagnostic_schema_upgrade_preserves_sessions_and_discards_unproven_evidence()
         drop(upgraded);
         replays(&root, &sessions);
     }
+}
+
+#[test]
+fn anthropic_window_schema_upgrade_discards_old_evidence() {
+    let bounds = format!(
+        "BETWEEN {} AND {}",
+        crate::provider::MIN_CONTEXT_WINDOW_TOKENS,
+        crate::provider::MAX_CONTEXT_WINDOW_TOKENS,
+    );
+    assert!(SCHEMA_SQL.contains(&bounds));
+    assert!(include_str!("schema_v7.sql").contains(&bounds));
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE native_provider_evidence;
+        CREATE TABLE native_provider_evidence (
+            fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+            checked_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            check_id TEXT NOT NULL
+        ) STRICT;
+        PRAGMA user_version=6;",
+        )
+        .unwrap();
+    assert!(exact_schema(&connection, &REGISTRY.schema, 6).unwrap());
+    connection
+        .execute(
+            "INSERT INTO native_provider_evidence VALUES (?1, 1, 2, '00000000-0000-7000-8000-000000000000')",
+            [[2_u8; 32].as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(root.archive_incompatible_history().unwrap().is_none());
+    let upgraded = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    assert!(exact_schema(&upgraded, &REGISTRY.schema, SCHEMA_VERSION).unwrap());
+    assert_eq!(
+        upgraded
+            .query_row("SELECT COUNT(*) FROM native_provider_evidence", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    drop(upgraded);
+    replays(&root, &sessions);
 }
 
 fn restore_pre_check_schema(connection: &Connection, source_version: i64) {

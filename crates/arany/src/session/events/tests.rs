@@ -1050,7 +1050,7 @@ mod account_default_tests {
             ("chatgpt", Some(32_767), 64 * 1024, false),
             ("chatgpt-like", Some(272_000), 64 * 1024, false),
             ("openai", Some(272_000), 64 * 1024, false),
-            ("anthropic", Some(272_000), 64 * 1024, false),
+            ("anthropic", Some(272_000), 64 * 1024, true),
         ] {
             let mut pinned = if provider == "chatgpt" {
                 config.clone()
@@ -1081,10 +1081,14 @@ mod account_default_tests {
                 evidence_digest: [1; 32],
                 capability_evidence_version: 2,
             });
+        let mut anthropic = ordinary.identity().unwrap();
+        anthropic.profile = "anthropic".into();
+        anthropic.model = "claude-sonnet-5".into();
         for (fallback, window_valid) in [
             (fallback, true),
             (ordinary.identity().unwrap(), false),
             (custom, false),
+            (anthropic, true),
         ] {
             let mut pinned = config.clone();
             pinned.providers = Some(crate::provider::Providers::all(vec![

@@ -223,6 +223,7 @@ pub(super) async fn restore_saved_models(
             .iter()
             .map(|id| ModelEntry {
                 id: id.clone(),
+                context_window_tokens: None,
                 runnable: resolve_native_effort(&source.profile, id, None).is_ok(),
                 efforts: Effort::ALL
                     .into_iter()
@@ -549,6 +550,7 @@ async fn load_catalog_inner(
                 rows.into_iter()
                     .map(|row| ModelEntry {
                         id: row.slug,
+                        context_window_tokens: None,
                         runnable: false,
                         efforts: Vec::new(),
                     })

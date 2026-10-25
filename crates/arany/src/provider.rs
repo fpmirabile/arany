@@ -1272,6 +1272,11 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Refreshes this route's window evidence for a new Run admission.
+    async fn context_window_tokens_for_run(&self) -> Option<u32> {
+        self.context_window_tokens()
+    }
+
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
     /// The Engine independently validates its phase, bounds and durable transition.
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError>;
@@ -1323,6 +1328,9 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
     }
     fn context_window_tokens(&self) -> Option<u32> {
         (**self).context_window_tokens()
+    }
+    async fn context_window_tokens_for_run(&self) -> Option<u32> {
+        (**self).context_window_tokens_for_run().await
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         (**self).invoke(request).await

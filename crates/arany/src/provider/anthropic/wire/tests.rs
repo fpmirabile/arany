@@ -962,7 +962,12 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
     }
     let split = response("end_turn", json!([text_block("one"), text_block("two")]));
     assert!(decode_compaction(&serde_json::to_vec(&split).unwrap(), MODEL, 1024).is_err());
-    assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
+    assert!(
+        encode_request(&json!({
+            "oversize": "x".repeat(crate::provider::MAX_PROVIDER_REQUEST_BYTES)
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -2236,6 +2241,20 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
     });
     let bytes = encode_request(&body).expect("a compaction request at the bound is sent");
     assert!(bytes.len() <= crate::provider::MAX_PROVIDER_REQUEST_BYTES);
+}
+
+#[test]
+fn run_request_ceiling_tracks_admitted_window_and_keeps_default_bound() {
+    let mut run = primary_request(MODEL);
+    run.input.objective = "x".repeat(520 * 1024);
+    let request = body(&run, Effort::None);
+    let window_ceiling = crate::provider::request_ceiling(Some(200_000));
+    assert!(encode_request_within(&request, window_ceiling).is_ok());
+    assert!(encode_request_within(&request, crate::provider::MAX_PROVIDER_REQUEST_BYTES).is_err());
+
+    let oversized = json!({"input": "x".repeat(window_ceiling)});
+    assert!(encode_request_within(&oversized, window_ceiling).is_err());
+    assert!(encode_request_within(&request, crate::provider::request_ceiling(None)).is_err());
 }
 
 #[test]

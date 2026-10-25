@@ -428,6 +428,7 @@ struct AdmittedTurn {
 
 struct RootInput<'a> {
     assignment_profiles: Vec<String>,
+    context_window_tokens: Option<u32>,
     tool_context: Option<crate::tools::ToolContext>,
     inputs: &'a mut WorkspaceInputs,
     images: Vec<crate::provider::ProviderImage>,
@@ -443,6 +444,7 @@ struct PreparedTurn {
     history: Vec<crate::provider::HistoryTurn>,
     summary: Option<String>,
     config: RunConfig,
+    context_window_tokens: Option<u32>,
     context_started: SystemTime,
     context_ended: SystemTime,
     provider_concurrency: u8,
@@ -1507,7 +1509,9 @@ impl Engine {
                 leases,
             )
             .await?;
-        let prepared = self.prepare_turn(submission, &request, identity, &admitted)?;
+        let prepared = self
+            .prepare_turn(submission, &request, identity, &admitted)
+            .await?;
         let previous_run_failure = admitted
             .history
             .as_ref()
@@ -1531,6 +1535,7 @@ impl Engine {
             history,
             summary,
             config,
+            context_window_tokens,
             context_started,
             context_ended,
             provider_concurrency,
@@ -1617,6 +1622,7 @@ impl Engine {
                             .roster
                             .as_ref()
                             .map_or_else(Vec::new, |roster| roster.snapshot.child_profiles.clone()),
+                        context_window_tokens,
                         tool_context,
                         inputs: &mut inputs,
                         images,
@@ -1676,7 +1682,7 @@ impl Engine {
                 controls,
                 ledger,
                 publisher,
-            )
+            )?
             .execute(request),
         )
         .await
@@ -1987,7 +1993,7 @@ impl Engine {
         clippy::too_many_lines,
         reason = "turn admission keeps pinned context and Skill validation together"
     )]
-    fn prepare_turn(
+    async fn prepare_turn(
         &self,
         submission: &AdmittedSubmission,
         request: &RunRequest,
@@ -2103,7 +2109,7 @@ impl Engine {
         )?
         .checked_add(feedback_reserved)
         .ok_or(EngineError::ContextTooLarge)?;
-        let context_window_tokens = submission.providers.context_window_tokens();
+        let context_window_tokens = submission.providers.context_window_tokens_for_run().await;
         let context = CompiledContext::compile(
             history.as_ref(),
             objective,
@@ -2219,6 +2225,7 @@ impl Engine {
             history: context.history,
             summary: context.summary,
             config,
+            context_window_tokens,
             context_started,
             context_ended,
             provider_concurrency,
@@ -2469,6 +2476,7 @@ fn root_request(
         model: identity.model.clone(),
         max_output_tokens: identity.limits.max_output_tokens,
         input: RunInput {
+            context_window_tokens: input.context_window_tokens,
             assignment_profiles: input.assignment_profiles,
             images: input.images,
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),

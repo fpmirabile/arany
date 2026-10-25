@@ -2685,6 +2685,7 @@ mod tests {
             "openai",
             &[ModelEntry {
                 id: "gpt-5.4".into(),
+                context_window_tokens: None,
                 runnable: true,
                 efforts: vec![],
             }],
@@ -2710,6 +2711,7 @@ mod tests {
                 profile,
                 &[ModelEntry {
                     id: "pending-model".into(),
+                    context_window_tokens: None,
                     runnable: false,
                     efforts: vec![],
                 }],

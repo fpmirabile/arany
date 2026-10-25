@@ -46,6 +46,7 @@ pub struct ScriptedProvider {
     pub cached_input_tokens: u32,
     pub usage_override: Option<crate::Usage>,
     pub context_window_tokens: Option<u32>,
+    pub context_window_snapshots: Mutex<VecDeque<Option<u32>>>,
     pub input_tokens_at: Vec<(usize, u32)>,
     pub requests: Arc<Mutex<Vec<ProviderRequest>>>,
     pub compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
@@ -76,6 +77,7 @@ impl ScriptedProvider {
             cached_input_tokens: 0,
             usage_override: None,
             context_window_tokens: None,
+            context_window_snapshots: Mutex::new(VecDeque::new()),
             input_tokens_at: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
@@ -113,6 +115,11 @@ impl ScriptedProvider {
     /// Reports the input window an authenticated catalog would have supplied.
     pub fn with_context_window(mut self, tokens: u32) -> Self {
         self.context_window_tokens = Some(tokens);
+        self
+    }
+
+    pub fn with_context_window_snapshots(mut self, windows: Vec<Option<u32>>) -> Self {
+        self.context_window_snapshots = Mutex::new(windows.into());
         self
     }
 
@@ -187,6 +194,14 @@ impl Provider for ScriptedProvider {
 
     fn context_window_tokens(&self) -> Option<u32> {
         self.context_window_tokens
+    }
+
+    async fn context_window_tokens_for_run(&self) -> Option<u32> {
+        self.context_window_snapshots
+            .lock()
+            .expect("context window snapshots")
+            .pop_front()
+            .unwrap_or(self.context_window_tokens)
     }
 
     async fn invoke_observed(

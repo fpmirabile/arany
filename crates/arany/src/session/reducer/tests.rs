@@ -4029,7 +4029,6 @@ mod goal_replay_tests {
                 .unwrap(),
             view
         );
-        assert!(evaluator.pending_event().is_none());
         supervisor_corpus_labels(view, envelopes, goal);
     }
 
@@ -4132,8 +4131,18 @@ mod goal_replay_tests {
         evaluator: &mut SupervisorState,
     ) {
         let (run, actor) = (view.runs[0].id, view.runs[0].primary().unwrap().id);
-        evaluator.after(view, envelopes.last().unwrap());
-        let pending = evaluator.pending_event();
+        let pending = match evaluator.decide_verdict(view, envelopes.last().unwrap()) {
+            crate::supervisor::SupervisorDecision::Continue => None,
+            crate::supervisor::SupervisorDecision::Record {
+                run_id,
+                agent_run_id,
+                verdict,
+            } => Some(Event::SupervisorVerdictRecorded {
+                run_id,
+                agent_run_id,
+                verdict,
+            }),
+        };
 
         if i == 0 {
             let mut forged = view.clone();
@@ -4151,7 +4160,10 @@ mod goal_replay_tests {
         }
         if let Some(verdict) = pending {
             append_record(view, envelopes, verdict.clone());
-            evaluator.after(view, envelopes.last().unwrap());
+            assert_eq!(
+                evaluator.decide_verdict(view, envelopes.last().unwrap()),
+                crate::supervisor::SupervisorDecision::Continue
+            );
             let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
             assert_eq!(*recorded_actor, actor);
             assert!(
