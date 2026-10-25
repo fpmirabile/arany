@@ -1200,8 +1200,143 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
                 .count(),
             usize::from(ai)
         );
+        if denied {
+            let continuation = requests
+                .iter()
+                .rev()
+                .find(|request| request.phase == AgentPhase::ChildWork)
+                .unwrap();
+            assert_eq!(
+                continuation
+                    .input
+                    .tools
+                    .as_ref()
+                    .unwrap()
+                    .observations()
+                    .last()
+                    .unwrap()
+                    .output,
+                "permission_rule_denied: no operation was dispatched"
+            );
+            let synthesis = requests
+                .iter()
+                .find(|request| request.phase == AgentPhase::RootSynthesis)
+                .unwrap();
+            assert!(synthesis.input.child_results.iter().any(|report| {
+                report
+                    .result
+                    .contains("permission_rule_denied: no operation was dispatched")
+            }));
+        }
         assert!(events.iter().any(|event| matches!(&event.event, Event::ToolPermissionDecided { agent_run_id, .. } if *agent_run_id == child.id)));
     }
+}
+
+#[tokio::test]
+async fn researcher_decline_reaches_child_continuation_and_primary_report() {
+    let mut fixture = Fixture::new(Some(&json!({"permissions":{"ask":["Read"]}})), false);
+    fixture.deny_humans = true;
+    let (result, requests, humans) = fixture
+        .run(
+            vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        editor: None,
+                        objective: "Inspect the facts".into(),
+                        profile: None,
+                    }],
+                }),
+                tool_outcome(call("read")),
+                finish("report"),
+                finish("answer"),
+            ],
+            Some(arany::ApprovalMode::Request),
+            true,
+        )
+        .await;
+    assert_eq!(humans, 1);
+    let (_, view) = fixture.reopen(result.session_id).await;
+    let child = &view.runs[0].agents[1];
+    assert_eq!(
+        child.tools[0].model_denial_output(),
+        Some("user_declined: no operation was dispatched")
+    );
+    let continuation = requests
+        .iter()
+        .rev()
+        .find(|request| request.phase == AgentPhase::ChildWork)
+        .unwrap();
+    assert_eq!(
+        continuation
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()
+            .last()
+            .unwrap()
+            .output,
+        "user_declined: no operation was dispatched"
+    );
+    let synthesis = requests
+        .iter()
+        .find(|request| request.phase == AgentPhase::RootSynthesis)
+        .unwrap();
+    assert!(synthesis.input.child_results.iter().any(|report| {
+        report
+            .result
+            .contains("user_declined: no operation was dispatched")
+    }));
+}
+
+#[tokio::test]
+async fn researcher_enforcement_cause_reaches_primary_report() {
+    let fixture = Fixture::new(None, false);
+    std::fs::create_dir(fixture.workspace.join("notes/.gitignore")).unwrap();
+    let (result, requests, humans) = fixture
+        .run(
+            vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        editor: None,
+                        objective: "Inspect the notes".into(),
+                        profile: None,
+                    }],
+                }),
+                tool_outcome(arany::ToolCall::List {
+                    path: "notes".into(),
+                }),
+                finish("report"),
+                finish("answer"),
+            ],
+            None,
+            true,
+        )
+        .await;
+    assert_eq!(humans, 0);
+    let (_, view) = fixture.reopen(result.session_id).await;
+    let tool = &view.runs[0].agents[1].tools[0];
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+    assert_eq!(
+        observation.enforcement_cause,
+        Some(arany::EnforcementCause::FilesystemDenied)
+    );
+    assert!(observation.attestation.is_some());
+    assert_eq!(tool.model_denial_output(), None);
+    let synthesis = requests
+        .iter()
+        .find(|request| request.phase == AgentPhase::RootSynthesis)
+        .unwrap();
+    assert!(synthesis.input.child_results.iter().any(|report| {
+        report
+            .result
+            .contains(arany::EnforcementCause::FilesystemDenied.diagnostic())
+            && !report.result.contains("cause unavailable")
+            && !report.result.contains("no operation was dispatched")
+    }));
 }
 
 #[tokio::test]
