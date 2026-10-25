@@ -1,8 +1,6 @@
 use super::catalog::{Family, Site};
-use crate::session::worker::{
-    ChangesetSource, EffectTarget, WorkerDataRef, WorkerMutation, WorkerPreparation,
-};
-use crate::session::{AgentRunId, RunId};
+use crate::session::worker::{ChangesetSource, WorkerDataRef, WorkerMutation, WorkerPreparation};
+use crate::session::{AgentRunId, EffectTarget, RunId};
 use crate::validate::{digest, forbidden, hex_digest, valid_digest, valid_relative};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
