@@ -250,12 +250,20 @@ fn usage(usage: &crate::Usage) -> Option<CheckUsage> {
     })
 }
 
-fn answer_probe_matches(outcome: &ProviderOutcome, chat_completions: bool, preview: &str) -> bool {
-    matches!(outcome, ProviderOutcome::Answer(value) if if chat_completions {
-        !value.text.trim().is_empty()
-    } else {
-        !preview.is_empty() && value.text.starts_with(preview)
-    })
+fn answer_probe_matches(
+    outcome: &ProviderOutcome,
+    protocol: &super::Protocol,
+    preview: &str,
+) -> bool {
+    let ProviderOutcome::Answer(value) = outcome else {
+        return false;
+    };
+    match protocol {
+        super::Protocol::OpenaiChatCompletions { .. } => !value.text.trim().is_empty(),
+        super::Protocol::OpenaiResponses | super::Protocol::AnthropicMessages { .. } => {
+            !preview.is_empty() && value.text.starts_with(preview)
+        }
+    }
 }
 
 async fn probe(
@@ -296,7 +304,7 @@ async fn probe(
     };
     if !answer_probe_matches(
         &direct_response.outcome,
-        chat_completions,
+        &profile.protocol,
         &observed.borrow().answer,
     ) {
         return Err(rejected(journal).await);
@@ -405,7 +413,7 @@ async fn probe(
         };
         if !answer_probe_matches(
             &response.outcome,
-            chat_completions,
+            &profile.protocol,
             &observed.borrow().answer,
         ) {
             return Err(rejected(journal).await);
