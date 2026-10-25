@@ -1858,6 +1858,12 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
             .max_by_key(|(from, _)| *from)
             .expect("canonical payload fixture");
         assert_eq!(from + 1, crate::session::payload_version(kind).unwrap());
+        // The host migration fixture lacks the Supervisor required by its Tool policy.
+        let fixture = if kind == "RunStarted" {
+            GLOBAL_RUNSTARTED
+        } else {
+            fixture
+        };
         let (run_id, agent_run_id) = match kind {
             "GoalStarted" | "GoalFinished" => (None, None),
             "RunStarted" | "AgentSpawned" => (
@@ -1871,7 +1877,7 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
             ),
         };
         let event = Event::decode(kind, from + 1, fixture, run_id, agent_run_id)
-            .expect("current fixture decodes");
+            .unwrap_or_else(|error| panic!("{kind} v{} fixture decode: {error:?}", from + 1));
         assert_eq!(event.payload().unwrap(), fixture, "{kind}");
     }
     assert_eq!(
