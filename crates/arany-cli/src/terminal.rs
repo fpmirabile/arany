@@ -1,8 +1,8 @@
 use crate::presentation::{
-    AgentInspectorModel, DraftAction, MAX_AGENT_ROWS, PresentationModel, image_message_lines,
-    render_answer, user_message_lines,
+    AgentInspectorModel, DraftAction, MAX_AGENT_ROWS, PresentationModel, image_description,
+    image_message_lines, render_answer, user_message_lines,
 };
-use arany::{Effort, ModelEntry};
+use arany::{Effort, ImageAttachment, ModelEntry};
 use arany::{RunStatus, SessionListItem, SessionView};
 use crossterm::{
     execute,
@@ -29,6 +29,7 @@ mod backend;
 mod clipboard;
 mod commands;
 mod composer;
+mod graphics;
 mod history;
 mod input;
 mod linear;
@@ -404,11 +405,10 @@ pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
 use view::{
     AGENT_PICKER_ROWS, Palette, agent_detail_lines, agent_detail_rows, agent_picker_index,
-    bottom_area, completion_height, composer_height, draw_agent_inspector_frame,
-    draw_frame_with_history, draw_help_frame, draw_model_catalog_frame, draw_quick_actions_frame,
-    draw_session_picker_frame, draw_settings_frame, draw_setup_choices_frame, draw_setup_frame,
-    draw_setup_text_frame, draw_setup_warning_frame, history_top_padding, screen_terminal,
-    session_picker_index,
+    bottom_area, completion_height, composer_height, draw_agent_inspector_frame, draw_help_frame,
+    draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
+    draw_settings_frame, draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame,
+    draw_setup_warning_frame, history_top_padding, screen_terminal, session_picker_index,
 };
 
 struct UsagePanel {
@@ -596,18 +596,24 @@ pub fn setup_choices_need_paging(instruction: &str, choices: &[(u8, &str)]) -> b
 const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Visual sessions negotiate modifier support. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
-// Button, drag and SGR reporting only; any-motion (1003) and urxvt (1015) stay off.
+// Button, drag and SGR reporting; any-motion is enabled only after a graphics probe succeeds.
 const MOUSE_CAPTURE: [&[u8]; 2] = [
     b"\x1b[?1000h\x1b[?1002h\x1b[?1006h",
-    b"\x1b[?1006l\x1b[?1002l\x1b[?1000l",
+    b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l",
 ];
-const ALTERNATE_SCROLL: [&[u8]; 2] = [b"\x1b[?1007h", b"\x1b[?1007l"];
+const MOUSE_CAPTURE_WITH_MOTION: [&[u8]; 2] = [
+    b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h",
+    b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l",
+];
+const ALTERNATE_SCROLL: [&[u8]; 2] = [b"\x1b[?1007h", b"\x1b[?1003l\x1b[?1007l"];
 #[cfg(unix)]
 const BRACKETED_PASTE: [&[u8]; 2] = [b"\x1b[?2004h", b"\x1b[?2004l"];
 #[cfg(unix)]
 const KEYBOARD_DISAMBIGUATION: [&[u8]; 2] = [b"\x1b[>1u", b"\x1b[<u"];
 #[cfg(unix)]
-const KEYBOARD_QUERY: &[u8] = b"\x1b[?u\x1b[c";
+const KEYBOARD_ONLY_QUERY: &[u8] = b"\x1b[?u\x1b[c";
+#[cfg(unix)]
+const KEYBOARD_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?u\x1b[c";
 static SELECTION_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn report_error(message: impl std::fmt::Display) {
@@ -642,6 +648,37 @@ impl Default for PointerSettings {
 
 fn mouse_capture_enabled() -> bool {
     !std::env::var_os("ARANY_DISABLE_MOUSE").is_some_and(|value| value != "0")
+}
+
+#[cfg(unix)]
+fn graphics_probe_allowed(mode: TerminalMode) -> bool {
+    mode == TerminalMode::Fullscreen
+        && mouse_capture_enabled()
+        && std::env::var_os("TMUX").is_none()
+}
+
+fn hovered_image_at(chips: &[(usize, Rect)], column: u16, row: u16) -> Option<usize> {
+    chips.iter().find_map(|(index, area)| {
+        area.contains(ratatui::layout::Position::new(column, row))
+            .then_some(*index)
+    })
+}
+
+fn pointer_position(input: TerminalInput) -> Option<(u16, u16)> {
+    match input {
+        TerminalInput::PointerMove { column, row }
+        | TerminalInput::PointerDrag { column, row }
+        | TerminalInput::PointerRelease { column, row } => Some((column, row)),
+        _ => None,
+    }
+}
+
+fn transition_hover(current: &mut Option<usize>, next: Option<usize>) -> bool {
+    if *current == next {
+        return false;
+    }
+    *current = next;
+    true
 }
 
 impl TerminalMode {
@@ -919,12 +956,17 @@ fn pointer_modes(
     mode: TerminalMode,
     linear: bool,
     mouse_enabled: bool,
+    graphics: bool,
 ) -> io::Result<Option<ModeGuard>> {
     if linear || mode == TerminalMode::Classic {
         return Ok(None);
     }
     ModeGuard::acquire(if mouse_enabled {
-        MOUSE_CAPTURE
+        if graphics {
+            MOUSE_CAPTURE_WITH_MOTION
+        } else {
+            MOUSE_CAPTURE
+        }
     } else {
         ALTERNATE_SCROLL
     })
@@ -932,8 +974,8 @@ fn pointer_modes(
 }
 
 #[cfg(unix)]
-fn keyboard_mode(input: &TerminalReader) -> io::Result<Option<ModeGuard>> {
-    match input.probe_keyboard(&mut io::stderr())? {
+fn keyboard_mode(input: &TerminalReader, graphics: bool) -> io::Result<Option<ModeGuard>> {
+    match input.probe_keyboard(&mut io::stderr(), graphics)? {
         input::KeyboardSupport::Disambiguated => {
             ModeGuard::acquire(KEYBOARD_DISAMBIGUATION).map(Some)
         }
@@ -962,6 +1004,14 @@ pub struct AttachedTerminal {
     _raw_mode: Option<RawMode>,
     pointer: PointerSettings,
     pointer_modes: Option<ModeGuard>,
+    graphics_protocol: Option<GraphicsProtocol>,
+    image_chip_areas: Vec<(usize, Rect)>,
+    hovered_image: Option<usize>,
+    pointer_position: Option<ratatui::layout::Position>,
+    graphics_hover_changed: bool,
+    graphics_placement: Option<GraphicsPlacement>,
+    hovered_image_digest: Option<[u8; 32]>,
+    frame_area: Option<Rect>,
     history_area: Option<Rect>,
     panel_selection: PanelSelection,
     panel_copy: Option<PanelCopy>,
@@ -997,6 +1047,18 @@ pub struct AttachedTerminal {
     hangup: tokio::signal::unix::Signal,
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GraphicsProtocol {
+    Kitty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GraphicsPlacement {
+    image_index: usize,
+    digest: [u8; 32],
+    inner: Rect,
 }
 
 pub struct ProfileSelection<'a> {
@@ -1166,6 +1228,7 @@ impl AttachedTerminal {
         choice: Option<usize>,
         review_notice: bool,
     ) -> Result<bool, TerminalError> {
+        self.clear_graphics_hover();
         self.cancel_clipboard_paste();
         // Approval owns the primary authority surface and arms through its own barrier.
         self.end_agent_chat()?;
@@ -1206,6 +1269,7 @@ impl AttachedTerminal {
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
         self.history_area = history_area;
+        self.delete_graphics_placement()?;
         Ok(more)
     }
     pub fn acquire_with_mode(
@@ -1271,9 +1335,22 @@ impl AttachedTerminal {
             .is_none()
             .then(|| ModeGuard::acquire(BRACKETED_PASTE))
             .transpose()?;
-        let pointer_modes = pointer_modes(mode, mode_label.is_some(), mouse_capture_enabled())?;
         #[cfg(unix)]
-        let keyboard = keyboard_mode(&input)?;
+        let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
+        #[cfg(unix)]
+        let keyboard = keyboard_mode(&input, graphics_probe)?;
+        #[cfg(unix)]
+        let graphics_protocol = input
+            .kitty_graphics_supported()
+            .then_some(GraphicsProtocol::Kitty);
+        #[cfg(not(unix))]
+        let graphics_protocol = None;
+        let pointer_modes = pointer_modes(
+            mode,
+            mode_label.is_some(),
+            mouse_capture_enabled(),
+            graphics_protocol.is_some(),
+        )?;
         Ok(Self {
             terminal,
             newline_shortcut: NewlineShortcut::default(),
@@ -1293,6 +1370,14 @@ impl AttachedTerminal {
             _raw_mode: raw_mode,
             pointer,
             pointer_modes,
+            graphics_protocol,
+            image_chip_areas: Vec::new(),
+            hovered_image: None,
+            pointer_position: None,
+            graphics_hover_changed: false,
+            graphics_placement: None,
+            hovered_image_digest: None,
+            frame_area: None,
             history_area: None,
             panel_selection: PanelSelection::default(),
             panel_copy: None,
@@ -1443,6 +1528,20 @@ impl AttachedTerminal {
                 return Ok(TerminalInput::PanelSelectionChanged);
             }
         };
+        if chat
+            && self.graphics_protocol.is_some()
+            && mouse_capture_enabled()
+            && let Some((column, row)) = pointer_position(input)
+        {
+            self.pointer_position = Some(ratatui::layout::Position::new(column, row));
+            let hovered = hovered_image_at(&self.image_chip_areas, column, row);
+            if transition_hover(&mut self.hovered_image, hovered) {
+                self.hovered_image_digest = None;
+                self.graphics_hover_changed = true;
+            } else {
+                self.graphics_hover_changed = false;
+            }
+        }
         if let Some(result) = self
             .panel_pointer_input(input, mouse_capture_enabled())
             .await
@@ -1619,6 +1718,7 @@ impl AttachedTerminal {
     }
 
     pub fn toggle_transcript(&mut self, view: &SessionView) -> Result<(), TerminalError> {
+        self.clear_graphics_hover();
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
             return linear
@@ -1640,6 +1740,8 @@ impl AttachedTerminal {
     // `[` in the pager: leave capture and the alternate screen, then append the bounded transcript.
     fn dump_to_scrollback(&mut self, view: &SessionView) -> Result<(), TerminalError> {
         let text = history::scrollback_transcript(view);
+        self.hovered_image = None;
+        self.delete_graphics_placement()?;
         if let Some(mut modes) = self.pointer_modes.take() {
             modes.release()?;
         }
@@ -1667,9 +1769,19 @@ impl AttachedTerminal {
         self.scrollback_dump = false;
         #[cfg(unix)]
         {
-            self.keyboard = keyboard_mode(self.reader())?;
+            let graphics_probe = graphics_probe_allowed(self.mode);
+            self.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
+            self.graphics_protocol = self
+                .reader()
+                .kitty_graphics_supported()
+                .then_some(GraphicsProtocol::Kitty);
         }
-        self.pointer_modes = pointer_modes(self.mode, false, mouse_capture_enabled())?;
+        self.pointer_modes = pointer_modes(
+            self.mode,
+            false,
+            mouse_capture_enabled(),
+            self.graphics_protocol.is_some(),
+        )?;
         // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
         let terminal = self.owned();
         let area = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
@@ -2035,19 +2147,31 @@ impl AttachedTerminal {
         let selects =
             !self.is_linear() && self.mode == TerminalMode::Fullscreen && mouse_capture_enabled();
         match input {
-            TerminalInput::PointerMove { .. } => true,
+            TerminalInput::PointerMove { .. } => {
+                !selects || !std::mem::take(&mut self.graphics_hover_changed)
+            }
             TerminalInput::PointerClick { column, row, .. } => {
                 !selects || (self.history_cell(column, row).is_none() && !self.history.selecting())
             }
-            TerminalInput::PointerDrag { .. } => !selects || !self.history.selecting(),
+            TerminalInput::PointerDrag { .. } => {
+                let graphics_changed = std::mem::take(&mut self.graphics_hover_changed);
+                !selects || (!self.history.selecting() && !graphics_changed)
+            }
             TerminalInput::PointerRelease { .. } => {
                 if !self.history.has_selection() {
                     self.history.clear_selection();
                 }
-                !selects || !self.pointer.copy_on_select || !self.history.has_selection()
+                let graphics_changed = std::mem::take(&mut self.graphics_hover_changed);
+                !selects
+                    || (!graphics_changed
+                        && (!self.pointer.copy_on_select || !self.history.has_selection()))
             }
             _ => false,
         }
+    }
+
+    pub fn take_graphics_hover_changed(&mut self) -> bool {
+        std::mem::take(&mut self.graphics_hover_changed)
     }
 
     fn history_cell(&self, column: u16, row: u16) -> Option<(usize, usize)> {
@@ -2334,11 +2458,15 @@ impl AttachedTerminal {
         terminal.draw(|frame| render(frame, frame.area()))?;
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
+        if self.hovered_image.is_none() {
+            self.delete_graphics_placement()?;
+        }
         Ok(())
     }
 
     // A selector opens unarmed; `arm_dialog` admits input once the reader barrier completes.
     pub fn begin_dialog(&mut self) {
+        self.clear_graphics_hover();
         self.dialog_armed = false;
         self.panel_selection.enabled = false;
         self.panel_selection.area = None;
@@ -2347,6 +2475,25 @@ impl AttachedTerminal {
         if let Some(linear) = &mut self.linear {
             linear.disarm();
         }
+    }
+
+    fn clear_graphics_hover(&mut self) {
+        transition_hover(&mut self.hovered_image, None);
+        self.pointer_position = None;
+        self.hovered_image_digest = None;
+        self.image_chip_areas.clear();
+        self.graphics_hover_changed = false;
+    }
+
+    fn delete_graphics_placement(&mut self) -> io::Result<()> {
+        if self.graphics_placement.take().is_none() {
+            return Ok(());
+        }
+        self.terminal.as_mut().map_or(Ok(()), |terminal| {
+            terminal
+                .backend_mut()
+                .write_graphics(graphics::kitty_delete())
+        })
     }
 
     // Returns true when this call armed the selector, so the caller redraws before reading input.
@@ -2368,6 +2515,7 @@ impl AttachedTerminal {
         height: u16,
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<Rect, TerminalError> {
+        self.clear_graphics_hover();
         self.prepare_frame_height(height)?;
         let palette = self.palette();
         let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
@@ -2402,6 +2550,7 @@ impl AttachedTerminal {
         }
         self.history_area = history_area;
         self.panel_selection.lines = panel_lines;
+        self.delete_graphics_placement()?;
         Ok(area)
     }
 
@@ -2413,6 +2562,15 @@ impl AttachedTerminal {
         state: SnapshotState,
         picker: Option<&ModelPicker<'_>>,
     ) -> Result<(), TerminalError> {
+        if picker.is_some()
+            || self.help_selected.is_some()
+            || self.agent_panel.is_some()
+            || self.agent_chat_shown(view)
+            || self.transcript_open
+            || composer.paste_detail().is_some()
+        {
+            self.clear_graphics_hover();
+        }
         let notice = notice.or_else(|| {
             crate::presentation::tool_capacity_notice(view, self.waiting_tool)
                 .map(TerminalNotice::Transient)
@@ -2455,6 +2613,17 @@ impl AttachedTerminal {
         let cue = self.selection_cue.clone();
         let notice = notice.or_else(|| cue.as_deref().map(TerminalNotice::Transient));
         let screen = Rect::from((ratatui::layout::Position::ORIGIN, self.owned().size()?));
+        if self.frame_area.is_some_and(|previous| previous != screen) {
+            self.clear_graphics_hover();
+        }
+        self.frame_area = Some(screen);
+        if let Some(index) = self.hovered_image
+            && self.hovered_image_digest.is_some_and(|digest| {
+                composer.images().get(index).map(ImageAttachment::digest) != Some(digest)
+            })
+        {
+            self.clear_graphics_hover();
+        }
         if let Some((label, text, scroll)) = composer.paste_detail() {
             let palette = self.palette();
             return self.draw_frame(screen.height, |frame, area| {
@@ -2577,9 +2746,13 @@ impl AttachedTerminal {
         let palette = self.palette();
         let armed = self.dialog_armed;
         let mut history_area = Rect::default();
+        let mut image_chip_areas = Vec::new();
+        let mut preview_inner = None;
+        let pointer_position = self.pointer_position;
+        let mut hovered_image = self.hovered_image;
         let newline_hint = composer.newline_hint(self.keyboard_support());
         self.draw_frame(height, |frame, _| {
-            history_area = draw_frame_with_history(
+            let geometry = view::draw_frame_with_history_and_chips(
                 frame,
                 &model,
                 composer,
@@ -2588,6 +2761,22 @@ impl AttachedTerminal {
                 &history_rows,
                 history_status.as_deref(),
             );
+            history_area = geometry.history_area;
+            image_chip_areas = geometry.image_chips;
+            if let Some(position) = pointer_position {
+                hovered_image = hovered_image_at(&image_chip_areas, position.x, position.y);
+            }
+            if let Some(index) = hovered_image
+                && let Some(image) = composer.images().get(index)
+                && let Some(chip) = image_chip_areas
+                    .iter()
+                    .find_map(|(chip_index, area)| (*chip_index == index).then_some(*area))
+                && let Some((balloon, inner)) =
+                    graphics::preview_geometry(frame.area(), chip, image)
+            {
+                view::draw_image_preview(frame, balloon, &image_description(image, index));
+                preview_inner = Some(inner);
+            }
             if let Some(picker) = picker {
                 draw_model_catalog_frame(
                     frame,
@@ -2600,6 +2789,46 @@ impl AttachedTerminal {
             }
         })?;
         self.history_area = (self.mode == TerminalMode::Fullscreen).then_some(history_area);
+        self.image_chip_areas = image_chip_areas;
+        self.hovered_image = hovered_image;
+        self.hovered_image_digest = self
+            .hovered_image
+            .and_then(|index| composer.images().get(index).map(ImageAttachment::digest));
+        self.emit_graphics_preview(composer, preview_inner)?;
+        Ok(())
+    }
+
+    fn emit_graphics_preview(
+        &mut self,
+        composer: &Composer,
+        inner: Option<Rect>,
+    ) -> Result<(), TerminalError> {
+        let image = self
+            .hovered_image
+            .and_then(|index| composer.images().get(index).map(|image| (index, image)));
+        let preview = image.and_then(|(index, image)| inner.map(|inner| (index, image, inner)));
+        let placement = preview.map(|(index, image, inner)| GraphicsPlacement {
+            image_index: index,
+            digest: image.digest(),
+            inner,
+        });
+        let unchanged = placement.is_some() && self.graphics_placement == placement;
+        if unchanged {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        if self.graphics_placement.take().is_some() {
+            bytes.extend_from_slice(graphics::kitty_delete());
+        }
+        if let (Some(GraphicsProtocol::Kitty), Some((_, image, inner))) =
+            (self.graphics_protocol, preview)
+        {
+            bytes.extend_from_slice(&graphics::kitty_image(image, inner));
+            self.graphics_placement = placement;
+        }
+        if !bytes.is_empty() {
+            self.owned().backend_mut().write_graphics(&bytes)?;
+        }
         Ok(())
     }
 
@@ -3457,10 +3686,13 @@ impl AttachedTerminal {
 
     fn release(&mut self) -> io::Result<()> {
         self.cancel_clipboard_paste();
+        let mut first_error = None;
+        if let Err(error) = self.delete_graphics_placement() {
+            first_error.get_or_insert(error);
+        }
         if let Some(mut input) = self.input.take() {
             input.stop();
         }
-        let mut first_error = None;
         #[cfg(unix)]
         if let Some(mut echo) = self.secret_echo.take()
             && let Err(error) = echo.release()
@@ -3724,6 +3956,95 @@ impl Drop for AttachedTerminal {
         if self.shutdown_clipboard_on_drop {
             let _ = clipboard::shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod graphics_lifecycle_tests {
+    use super::{GraphicsPlacement, TerminalBackend, hovered_image_at, transition_hover};
+    use ratatui::{Terminal, layout::Rect};
+
+    #[test]
+    fn hover_enter_leave_request_one_frame_and_motion_inside_is_suppressed() {
+        let chip = [(2, Rect::new(10, 4, 12, 1))];
+        let mut hovered = None;
+        let mut frames = 0;
+
+        for next in [
+            hovered_image_at(&chip, 10, 4),
+            hovered_image_at(&chip, 15, 4),
+            hovered_image_at(&chip, 30, 4),
+        ] {
+            if transition_hover(&mut hovered, next) {
+                frames += 1;
+            }
+        }
+
+        assert_eq!(frames, 2);
+        assert_eq!(hovered, None);
+    }
+
+    #[test]
+    fn stationary_pointer_is_revalidated_after_chip_geometry_moves() {
+        let position = (10, 4);
+        let old_chip = [(0, Rect::new(10, 4, 12, 1))];
+        let new_chip = [(0, Rect::new(20, 4, 12, 1))];
+        assert_eq!(hovered_image_at(&old_chip, position.0, position.1), Some(0));
+        assert_eq!(hovered_image_at(&new_chip, position.0, position.1), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_after_failed_delete_does_not_expect_an_owned_terminal() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let backend = TerminalBackend::failing_graphics_writer(80, 24);
+                let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+                attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
+                attached.graphics_placement = Some(GraphicsPlacement {
+                    image_index: 0,
+                    digest: [1; 32],
+                    inner: Rect::new(1, 2, 3, 4),
+                });
+                assert!(attached.release().is_err());
+                assert!(attached.graphics_placement.is_none());
+                attached
+                    .delete_graphics_placement()
+                    .expect("repeated cleanup is idempotent");
+                drop(attached);
+            });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opening_agent_chat_clears_preview_and_propagates_delete_failure() {
+        let backend = TerminalBackend::failing_graphics_writer(80, 24);
+        let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
+        attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
+        attached.hovered_image = Some(0);
+        attached.graphics_placement = Some(GraphicsPlacement {
+            image_index: 0,
+            digest: [1; 32],
+            inner: Rect::new(1, 2, 3, 4),
+        });
+        let failure = attached
+            .open_agent_chats(&crate::presentation::team_view(), None)
+            .await
+            .err()
+            .expect("graphics delete failure");
+        assert!(matches!(
+            failure,
+            super::TerminalError::Io(error)
+                if error.to_string() == "injected graphics writer failure"
+        ));
+        assert!(attached.hovered_image.is_none());
+        assert!(attached.graphics_placement.is_none());
+        attached
+            .release()
+            .expect("graphics cleanup is not repeated during release");
     }
 }
 
