@@ -1607,17 +1607,19 @@ async fn cancel_when_hook_process_is_running(
     observation_root: std::path::PathBuf,
     cancellation: RunCancellation,
 ) -> bool {
-    tokio::time::timeout(HOOK_PROCESS_OBSERVATION_TIMEOUT, async move {
-        loop {
+    let deadline = std::time::Instant::now() + HOOK_PROCESS_OBSERVATION_TIMEOUT;
+    tokio::task::spawn_blocking(move || {
+        while std::time::Instant::now() < deadline {
             if process_list_contains(&marker, &observation_root) {
                 cancellation.cancel();
-                return;
+                return true;
             }
-            tokio::time::sleep(HOOK_PROCESS_POLL_INTERVAL).await;
+            std::thread::sleep(HOOK_PROCESS_POLL_INTERVAL);
         }
+        false
     })
     .await
-    .is_ok()
+    .expect("hook process observation task")
 }
 
 fn hook_json(decision: &str) -> String {
