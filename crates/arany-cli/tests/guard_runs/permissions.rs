@@ -4421,6 +4421,12 @@ fn assert_narrowed_batch_stop(
 ) {
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+    assert_eq!(
+        arany_cli::presentation::run_feedback(run).as_deref(),
+        Some(
+            "Error: Run failed. The Goal budget refused the next action. No answer was committed. Use /agents to inspect this Run."
+        )
+    );
     let tools = &run.tools;
     assert_eq!(
         tools.len(),

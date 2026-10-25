@@ -9441,6 +9441,47 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
 }
 
 #[tokio::test]
+async fn empty_tool_steps_fail_as_provider_calls_without_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = facts_workspace(temp.path(), "bounded facts");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Tools(
+        Vec::new(),
+    )]));
+    let mut input = request(&workspace, "Read the facts");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a malformed Tool response has a durable failed Run");
+    engine.close().await.unwrap();
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(*run, outcome.run);
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.failure, Some(arany::RunFailure::ProviderCall));
+    assert!(run.tools.is_empty());
+    assert!(run.assistant_message.is_none());
+    let calls = &run.agents[0].provider_calls;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].disposition,
+        ProviderCallDisposition::InvalidResponse
+    );
+    assert!(calls[0].refusal.is_none());
+    assert_eq!(calls[0].requested_tools, 0);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() {
     for (case, count, invalid, duplicate, window) in [
         ("four reads", 4, false, false, None),

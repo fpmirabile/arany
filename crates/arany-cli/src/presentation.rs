@@ -413,7 +413,6 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
             let tool = run.stopping_tool().or_else(|| run.tools.last());
-            let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
             if let Some(reason) = run.failure.and_then(run_failure_notice) {
                 let last_refusal = run
                     .agents
@@ -439,7 +438,6 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 .filter(|agent| agent.status == AgentStatus::Failed)
                 .filter_map(|agent| agent.provider_calls.last())
                 .filter(|call| call.phase != arany::AgentPhase::ToolReview)
-                .filter(|_| !budget_stop)
                 .find_map(provider_failure_notice);
             if let Some(reason) = reason {
                 return Some(format!(
@@ -505,14 +503,10 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             if run.primary_tool_limit_reached() {
                 return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
             }
-            Some(format!(
-                "Error: Run failed. {}No answer was committed. Use /agents to inspect this Run.",
-                if budget_stop {
-                    "The Goal budget refused the next action. "
-                } else {
-                    ""
-                }
-            ))
+            Some(
+                "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
+                    .into(),
+            )
         }
         RunStatus::StoppedByHook => Some(match run.hook_stop_reason().flatten() {
             Some(reason) => format!("Run stopped by hook: {}", escape_terminal(reason)),
@@ -545,9 +539,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
 fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
     use arany::RunFailure;
     Some(match cause {
-        RunFailure::ProviderCall | RunFailure::ToolStopped | RunFailure::BudgetExhausted => {
-            return None;
-        }
+        RunFailure::ProviderCall | RunFailure::ToolStopped => return None,
+        RunFailure::BudgetExhausted => "The Goal budget refused the next action.",
         RunFailure::ProposalRefused => "Arany refused the proposed operation before dispatch.",
         RunFailure::DefinitionInvalid => "An agent definition could not be loaded.",
         RunFailure::PlanAdmission => {

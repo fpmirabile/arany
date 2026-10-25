@@ -1660,10 +1660,7 @@ fn proposal_refusal(result: &CallResult, cause: ProposalRefusalCause) -> Option<
         ProviderOutcome::Answer(_) => "answer".to_owned(),
         ProviderOutcome::Review(_) => "review".to_owned(),
         ProviderOutcome::Delegate(_) => "delegate".to_owned(),
-        ProviderOutcome::Tools(requests) => requests.first().map_or_else(
-            || "answer".to_owned(),
-            |request| format!("arany_{}", request.call.label()),
-        ),
+        ProviderOutcome::Tools(requests) => format!("arany_{}", requests.first()?.call.label()),
     };
     Some(ProposalRefusal { operation, cause })
 }
