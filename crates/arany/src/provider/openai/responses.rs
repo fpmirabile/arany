@@ -1,6 +1,8 @@
 use super::limits;
 use super::wire;
-use crate::diagnostics::{ResponseShape, StreamCounts, SubscriptionFailureStage as Stage};
+use crate::provider::diagnostics::{
+    ResponseShape, StreamCounts, SubscriptionFailureStage as Stage,
+};
 use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{MAX_RESPONSE_BYTES, ProviderError, RateLimitSlot, ResponsePreview};
 use serde::Deserialize;

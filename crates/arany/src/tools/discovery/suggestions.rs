@@ -1,8 +1,7 @@
 use super::{Output, Request, SuggestionIndex};
-use crate::engine::ToolGrant;
 use crate::session::WorkspaceIdentity;
 use crate::store::StateRoot;
-use crate::tools::{Cancellation, ToolCall, ToolError, config::Config, fs};
+use crate::tools::{Cancellation, ToolCall, ToolError, ToolGrant, config::Config, fs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

@@ -335,7 +335,7 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
 
 #[test]
 fn streamed_messages_report_closed_failure_stages() {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     for (wire, expected) in [
         ("data: {\n\n".to_owned(), Stage::EventJson),
         (
@@ -1265,7 +1265,7 @@ fn a_clean_end_after_a_framed_event_is_a_retryable_cut_and_a_non_stream_is_not()
 
 #[test]
 fn decoded_messages_report_closed_failure_stages() {
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let request = primary_request(MODEL);
     let conversation = render::conversation(&request).unwrap();
     let offered: Vec<_> = conversation
@@ -1365,7 +1365,7 @@ fn completed_stream_rejection_logs_decoder_record_with_received_counters() {
     if crate::test_process::isolate_test() {
         return;
     }
-    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let temp = tempfile::tempdir().expect("diagnostic state");
     let root =
         crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
@@ -1404,7 +1404,8 @@ fn completed_stream_rejection_logs_decoder_record_with_received_counters() {
 }
 
 #[cfg(debug_assertions)]
-fn malformed_completed_write_stream() -> (Vec<u8>, crate::diagnostics::StreamCounts, usize) {
+fn malformed_completed_write_stream() -> (Vec<u8>, crate::provider::diagnostics::StreamCounts, usize)
+{
     let mut start = message_start();
     start["message"]["model"] = json!(MODEL);
     let streamed = sse(&[
