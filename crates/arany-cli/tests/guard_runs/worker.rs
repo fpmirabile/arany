@@ -228,7 +228,7 @@ pub(super) async fn worker_case(case: &'static str) {
         max_provider_calls: Some(if case == "calls" {
             4
         } else if case.starts_with("clear_") {
-            64
+            128
         } else {
             32
         }),
@@ -366,7 +366,12 @@ pub(super) async fn worker_case(case: &'static str) {
         .count();
     if case.starts_with("clear_") {
         let result = result.expect(case);
-        assert_eq!(result.run.run.status, RunStatus::Finished, "{case}");
+        assert_eq!(
+            result.run.run.status,
+            RunStatus::Finished,
+            "{case}: {:?}",
+            result.run.run.failure
+        );
         assert_eq!(run.status, RunStatus::Finished, "{case}: strict replay");
         if case == "clear_after_wave" {
             let context = calls

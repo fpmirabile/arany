@@ -4198,7 +4198,7 @@ mod lifecycle_hooks {
         use arany::permissions::{HookEvent, HookResult};
         const STOPPED_UNCONSUMED: usize = 2;
         // Three recent pages leave room for the next turn; clearing one page still needs a summary.
-        let page = 60 * 1024;
+        let page = 40 * 1024;
         let reads = 5;
         let call_budget = u32::try_from(2 * reads + 1).unwrap();
 
