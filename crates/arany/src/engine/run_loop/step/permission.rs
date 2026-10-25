@@ -172,12 +172,11 @@ fn decide_host_prefix(
 ) -> HostPrefixDecision {
     use crate::tools::permissions::PermissionMode;
     if !eligible
-        || !attached
         || !facts.host
         || !facts.settings_admitted
         || facts.epoch.is_none()
         || facts.state_target != Some(false)
-        || facts.terminal_mode != Some(ApprovalMode::Request)
+        || !matches!(facts.terminal_mode, None | Some(ApprovalMode::Request))
         || facts.hook_restriction.is_some()
         || facts.permission.basis == PermissionSource::Rule
     {
@@ -194,7 +193,9 @@ fn decide_host_prefix(
         {
             HostPrefixDecision::Reuse
         }
-        None if matches!(facts.mode, None | Some(PermissionMode::Default))
+        None if attached
+            && facts.terminal_mode == Some(ApprovalMode::Request)
+            && matches!(facts.mode, None | Some(PermissionMode::Default))
             && facts.permission.decision == Decision::Ask
             && facts.permission.basis == PermissionSource::Mode =>
         {
@@ -779,6 +780,20 @@ mod host_prefix_tests {
             decide_host_prefix(&baseline, Some(Decision::Allow), true, true),
             HostPrefixDecision::Reuse
         );
+        for terminal_mode in [None, Some(ApprovalMode::Request)] {
+            let facts = HostReuseFacts {
+                terminal_mode,
+                ..baseline
+            };
+            assert_eq!(
+                decide_host_prefix(&facts, Some(Decision::Allow), true, false),
+                HostPrefixDecision::Reuse
+            );
+            assert_eq!(
+                decide_host_prefix(&facts, None, true, false),
+                HostPrefixDecision::NoReuse
+            );
+        }
         for (facts, rule, eligible, attached) in [
             (
                 HostReuseFacts {
@@ -876,7 +891,6 @@ mod host_prefix_tests {
             (baseline, Some(Decision::Deny), true, true),
             (baseline, Some(Decision::Ask), true, true),
             (baseline, Some(Decision::Allow), false, true),
-            (baseline, Some(Decision::Allow), true, false),
         ] {
             assert_eq!(
                 decide_host_prefix(&facts, rule, eligible, attached),

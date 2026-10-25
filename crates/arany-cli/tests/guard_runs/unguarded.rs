@@ -1535,62 +1535,78 @@ async fn host_prefix_modes_channels_and_explicit_rules_never_widen_authority() {
         ("acceptEdits", ApprovalMode::Request, true, None, false),
         ("default", ApprovalMode::Auto, true, None, false),
         ("default", ApprovalMode::AutoEdits, true, None, false),
-        ("default", ApprovalMode::Request, false, None, false),
+        ("default", ApprovalMode::Request, false, None, true),
+        ("dontAsk", ApprovalMode::Request, false, None, true),
+        ("dontAsk", ApprovalMode::Request, false, Some("ask"), false),
+        ("default", ApprovalMode::Request, false, Some("ask"), false),
+        ("default", ApprovalMode::Request, false, Some("deny"), false),
+        ("auto", ApprovalMode::Request, false, None, false),
+        ("acceptEdits", ApprovalMode::Request, false, None, false),
+        ("plan", ApprovalMode::Request, false, None, false),
         ("default", ApprovalMode::Request, true, Some("ask"), false),
         ("default", ApprovalMode::Request, true, Some("deny"), false),
         ("plan", ApprovalMode::Request, true, None, false),
     ] {
-        let host = Host::new(None);
-        let call = prefix_call();
-        let first = host
-            .run(
-                &host.workspace,
-                vec![tool_outcome(call.clone()), finish("done")],
-                Some(ApprovalMode::Request),
-                vec![ApprovalReply::AllowPrefixInFolder],
-            )
-            .await;
-        assert_eq!(first.outcome.run.unguarded_tools(), 1);
-        let file = host.state.join("permissions.json");
-        let mut value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        value["permissions"]["defaultMode"] = json!(mode);
-        if let Some(restriction) = restriction {
-            value["permissions"][restriction] = json!(["Bash"]);
-        }
-        private_file(&file, &serde_json::to_vec(&value).unwrap());
-        host.engine.readmit_host_permissions().unwrap();
-        let prompts =
-            channel && !reuse && restriction != Some("deny") && !matches!(mode, "plan" | "dontAsk");
-        let seen = host
-            .run(
-                &host.workspace,
-                vec![tool_outcome(call), finish("done")],
-                channel.then_some(terminal),
-                if prompts {
-                    vec![ApprovalReply::AllowOnce]
-                } else {
-                    vec![]
-                },
-            )
-            .await;
-        assert_eq!(
-            seen.prompts.len(),
-            usize::from(prompts),
-            "{mode} {terminal:?} {channel} {restriction:?}"
-        );
-        assert_eq!(
-            seen.outcome.run.unguarded_tools(),
-            usize::from(reuse || prompts)
-        );
-        let source = last_tool(&seen).permission_verdict.as_ref().unwrap().source;
-        assert_eq!(source == PermissionSource::HostPrefixRule, reuse);
-        let (events, view) = host.reopen(seen.outcome.session_id).await;
-        assert_eq!(
-            view.runs[0].unguarded_tools(),
-            usize::from(reuse || prompts)
-        );
-        if mode == "dontAsk" && restriction == Some("ask") {
-            assert_host_ask_denial(&seen, &events);
+        for restricted in [false, true] {
+            let mut host = Host::new(None);
+            let call = prefix_call();
+            let first = host
+                .run(
+                    &host.workspace,
+                    vec![tool_outcome(call.clone()), finish("done")],
+                    Some(ApprovalMode::Request),
+                    vec![ApprovalReply::AllowPrefixInFolder],
+                )
+                .await;
+            assert_eq!(first.outcome.run.unguarded_tools(), 1);
+            let file = host.state.join("permissions.json");
+            let mut value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            value["permissions"]["defaultMode"] = json!(mode);
+            if let Some(restriction) = restriction {
+                value["permissions"][restriction] = json!(["Bash"]);
+            }
+            private_file(&file, &serde_json::to_vec(&value).unwrap());
+            host.engine.readmit_host_permissions().unwrap();
+            host.restricted_approvals = restricted;
+            let prompts = channel
+                && !restricted
+                && !reuse
+                && restriction != Some("deny")
+                && !matches!(mode, "plan" | "dontAsk");
+            let seen = host
+                .run(
+                    &host.workspace,
+                    vec![tool_outcome(call), finish("done")],
+                    channel.then_some(terminal),
+                    if prompts {
+                        vec![ApprovalReply::AllowOnce]
+                    } else {
+                        vec![]
+                    },
+                )
+                .await;
+            assert_eq!(
+                seen.prompts.len(),
+                usize::from(prompts),
+                "{mode} {terminal:?} {channel} {restriction:?}"
+            );
+            assert_eq!(
+                seen.outcome.run.unguarded_tools(),
+                usize::from(reuse || prompts)
+            );
+            let source = last_tool(&seen).permission_verdict.as_ref().unwrap().source;
+            assert_eq!(source == PermissionSource::HostPrefixRule, reuse);
+            let (events, view) = host.reopen(seen.outcome.session_id).await;
+            assert_eq!(
+                view.runs[0].unguarded_tools(),
+                usize::from(reuse || prompts)
+            );
+            for prefix in 1..=events.len() {
+                SessionView::replay(seen.outcome.session_id, &events[..prefix]).unwrap();
+            }
+            if mode == "dontAsk" && restriction == Some("ask") {
+                assert_host_ask_denial(&seen, &events);
+            }
         }
     }
 }

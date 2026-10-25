@@ -4407,3 +4407,157 @@ async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
     adapter.close().await;
     drop(close);
 }
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native ACP host policy; requires the arany executable"
+)]
+fn admitted_host_prefixes_follow_h1_without_acp_permission_requests() {
+    let _gate = crate::test_process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let launcher = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("arany");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (mode, rule, restriction, allowed) in [
+                ("default", true, None, true),
+                ("dontAsk", true, None, true),
+                ("auto", true, None, false),
+                ("acceptEdits", true, None, false),
+                ("default", false, None, false),
+                ("default", true, Some("ask"), false),
+                ("dontAsk", true, Some("ask"), false),
+                ("default", true, Some("deny"), false),
+            ] {
+                let _deadline = crate::cli::serve::tests::deadline();
+                host_policy_scenario(launcher.clone(), mode, rule, restriction, allowed).await;
+            }
+        });
+}
+
+async fn host_policy_scenario(
+    launcher: PathBuf,
+    mode: &str,
+    rule: bool,
+    restriction: Option<&str>,
+    allowed: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let call =
+        arany::test_support::approval::seed_host_prefix(&state, &workspace, launcher.clone()).await;
+    let path = state.join("permissions.json");
+    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    settings["permissions"]["defaultMode"] = json!(mode);
+    if !rule {
+        settings["permissions"]["hostPrefixes"] = json!([]);
+    }
+    if let Some(restriction) = restriction {
+        settings["permissions"][restriction] = json!(["Bash"]);
+    }
+    std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            arany::test_support::scenario::tool_outcome(call),
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Host policy settled".into(),
+            }),
+        ])
+        .with_profile("openai", "gpt-5.4"),
+    );
+    let (mut writer, mut reader, task) = start_with_guard(&state, provider.clone(), true, launcher);
+    initialize(&mut writer, &mut reader).await;
+    let session = session(&mut writer, &mut reader, &workspace).await;
+    send(
+        &mut writer,
+        json!(3),
+        "session/prompt",
+        json!({"sessionId":session,"prompt":[{"type":"text","text":"Inspect host value"}]}),
+    )
+    .await;
+    writer.write_all(&encode_line(&json!({"jsonrpc":"2.0","id":999,"result":{"outcome":{"outcome":"selected","optionId":"allow_always"}}})).unwrap()).await.unwrap();
+    let mut tools = 0;
+    loop {
+        let message = next(&mut reader).await;
+        assert_ne!(
+            message["method"], "session/request_permission",
+            "{mode} {restriction:?}"
+        );
+        if message["params"]["update"]["sessionUpdate"] == "tool_call_update" {
+            tools += 1;
+            assert!(
+                message["params"]["update"]["title"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Unguarded command")
+            );
+        }
+        if message["id"] == 3 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+    assert_eq!(tools, 1);
+    writer.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        serde_json::to_vec(&settings).unwrap()
+    );
+    assert_host_policy_history(&state, session, &provider, allowed).await;
+}
+
+async fn assert_host_policy_history(
+    state: &std::path::Path,
+    session: SessionId,
+    provider: &ScriptedProvider,
+    allowed: bool,
+) {
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+    let events = store.load_session(session).await.unwrap();
+    let view = store.load_view(session).await.unwrap().unwrap();
+    store.close().await.unwrap();
+    for prefix in 1..=events.len() {
+        arany::SessionView::replay(session, &events[..prefix]).unwrap();
+    }
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(tool.permission_verdict.as_ref().unwrap().approved, allowed);
+    assert_eq!(view.runs[0].unguarded_tools(), usize::from(allowed));
+    if allowed {
+        assert_eq!(
+            tool.permission_verdict.as_ref().unwrap().source,
+            arany::permissions::PermissionSource::HostPrefixRule
+        );
+        assert!(
+            tool.observation
+                .as_ref()
+                .unwrap()
+                .output
+                .contains("host value")
+        );
+        assert!(matches!(
+            tool.observation.as_ref().unwrap().attestation,
+            Some(arany::Attestation::Unguarded(_))
+        ));
+    } else {
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Denied
+        );
+    }
+}
