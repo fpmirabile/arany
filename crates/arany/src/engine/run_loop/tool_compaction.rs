@@ -770,7 +770,7 @@ mod tests {
         let cleared = crate::tools::types::cleared_model_result(&observed)
             .to_string()
             .len();
-        let mut context = tool_context(serde_json::json!({"git": {}}));
+        let mut context = tool_context(crate::provider::test_support::catalog());
         context.steps = vec![
             ToolStep {
                 refusal: None,

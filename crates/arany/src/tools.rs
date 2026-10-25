@@ -25,6 +25,7 @@ mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;
 pub(crate) mod types;
+pub use types::{DEFAULT_PR_LIMIT, PrState};
 pub(crate) mod unguarded;
 pub(crate) mod unguarded_rules;
 pub(crate) mod worker;
@@ -1086,16 +1087,18 @@ impl ToolRuntime {
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.guard_available && self.config.git_available() {
                 let write = self.config.write && self.git_writes_available;
-                let operations: Vec<_> = catalog::git_operations(write, self.config.write)
+                let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
-                        "git_push" | "gh_pr_create" => self.host_authentication.as_ref().as_ref()
+                        "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
+                            .is_some_and(|auth| auth.offers(name)),
+                        "gh_pr_list" => self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         _ => true,
                     })
-                    .filter(|name| *name != "gh_pr_create" || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
+                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list") || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
                     .collect();
-                serde_json::json!({"write":write,"host":self.config.write,"operations":operations,"scope":catalog::GIT_SCOPE})
+                serde_json::json!({"write":write,"host":true,"operations":operations,"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },

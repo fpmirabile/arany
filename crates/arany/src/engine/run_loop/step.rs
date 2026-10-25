@@ -464,20 +464,26 @@ impl RunLoop<'_> {
         phase: &'a BeforeDispatch,
     ) -> Result<DispatchFacts<'a>, EngineError> {
         let intent = &phase.intent;
+        let typed_host_read = phase.site == DispatchSite::Primary
+            && matches!(intent.call, ToolCall::GhPrList { .. })
+            && phase.permission.decision == Decision::Allow
+            && phase.permission.basis == PermissionSource::TypedPrefixRule;
         Ok(DispatchFacts {
             site: phase.site,
             permission: phase.permission,
             hooks: &phase.hooks,
             timeout_limit: phase.timeout_limit,
             host: intent.call.is_host(),
+            typed_host_read,
             host_unpinned: intent.call.is_host() && intent.host.is_none(),
-            human_only_unavailable: (intent.call.is_host() && self.controls.approvals.is_none())
-                || self.controls.approvals.is_some_and(|approvals| {
-                    !approvals.admits_human_only(
-                        &intent.call,
-                        phase.hooks.restriction == Some(Decision::Ask),
-                    )
-                }),
+            human_only_unavailable: !typed_host_read
+                && ((intent.call.is_host() && self.controls.approvals.is_none())
+                    || self.controls.approvals.is_some_and(|approvals| {
+                        !approvals.admits_human_only(
+                            &intent.call,
+                            phase.hooks.restriction == Some(Decision::Ask),
+                        )
+                    })),
             unguarded: match grant {
                 Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
                     gate: unguarded_gate(runtime, intent).await.map(|mut prompt| {
@@ -625,8 +631,14 @@ impl RunLoop<'_> {
     ) -> Result<(), EngineError> {
         let unguarded = phase.intent.call.is_unguarded();
         let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
+        let primary_host_read = matches!(grant, Grant::Primary { .. })
+            && matches!(phase.intent.call, ToolCall::GhPrList { .. });
         let mode = effective_permission_mode(runtime.permissions(), grant);
-        if mode.is_none() && !unguarded && !(matches!(grant, Grant::Primary { .. }) && git_write) {
+        if mode.is_none()
+            && !unguarded
+            && !primary_host_read
+            && !(matches!(grant, Grant::Primary { .. }) && git_write)
+        {
             return Ok(());
         }
         let approved = matches!(resolution.verdict, Verdict::Dispatch { .. });

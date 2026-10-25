@@ -1567,7 +1567,7 @@ mod tests {
             SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
                 .expect("typed Session ID");
         let (events, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
-        assert_eq!(requests.lock().expect("requests").len(), 2);
+        assert_eq!(requests.lock().expect("Provider requests").len(), 2);
         (report, events, view)
     }
 
@@ -1595,16 +1595,24 @@ mod tests {
 
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
-        let budget = GoalBudget {
+        let _deadline = arany::test_support::engine::deadline(
+            "JSONL budget feedback",
+            std::time::Duration::from_secs(30),
+        );
+        let (report, _, view) = exec_budget_report(GoalBudget {
             max_active_ms: Some(ACTIVE_LIMIT_MS),
             ..GoalBudget::default()
-        };
-        let (report, _, view) = exec_budget_report(budget).await;
+        })
+        .await;
         let run = view.runs.last().expect("Finished Run");
         assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(
+            run.assistant_message.as_deref(),
+            Some("The notes remain unchanged")
+        );
         let goal = view.goals.last().expect("Failed Goal");
         assert_eq!(goal.status, GoalStatus::Failed);
-        assert!(goal.active_ms >= budget.max_active_ms.expect("active-time limit"));
+        assert!(goal.active_ms >= ACTIVE_LIMIT_MS);
         assert_eq!(
             goal.budget_refusal.expect("budget refusal").dimension,
             arany::GoalLimit::ActiveTime
