@@ -2357,6 +2357,7 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
     );
     let before_edit = std::fs::read(state.join("provider-profiles.json")).unwrap();
     edit_custom_chat_route_unchanged(&mut pty);
+    assert_changed_protocol_requires_destination(&mut pty);
     pty.input.write_all(b"3\r").expect("leave custom routes");
     let (result, transcript) = finish_setup_pty_with_transcript(pty);
     assert!(result.status.success(), "fresh custom setup failed");
@@ -2771,6 +2772,45 @@ fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
         String::from_utf8_lossy(&pty.transcript[edit_start..])
             .contains("Arany adds /chat/completions")
     );
+}
+
+#[cfg(debug_assertions)]
+fn assert_changed_protocol_requires_destination(pty: &mut SetupPty) {
+    let mut cursor = pty.transcript.len();
+    pty.input.write_all(b"1\r").expect("select saved route");
+    wait_setup_choices(pty, cursor);
+    cursor = pty.transcript.len();
+    pty.input.write_all(b"4\r").expect("edit saved route");
+    wait_setup_choices(pty, cursor);
+    cursor = pty.transcript.len();
+    pty.input.write_all(b"1\r").expect("switch to Responses");
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (cursor, b"Input:\r\n"),
+    );
+    cursor = pty.transcript.len();
+    pty.input.write_all(b"\r").expect("retain route name");
+    wait_setup_choices(pty, cursor);
+    let destination_prompt = String::from_utf8_lossy(&pty.transcript[cursor..]);
+    assert!(destination_prompt.contains("Exact canonical /responses URL"));
+    assert!(!destination_prompt.contains("Current value:"));
+    assert!(!destination_prompt.contains("empty Enter keeps it"));
+    cursor = pty.transcript.len();
+    pty.input
+        .write_all(b"\r")
+        .expect("submit empty destination");
+    wait_setup_choices(pty, cursor);
+    assert!(
+        String::from_utf8_lossy(&pty.transcript[cursor..]).contains("This field cannot be empty")
+    );
+    cursor = pty.transcript.len();
+    pty.input
+        .write_all(b"\x1b")
+        .expect("cancel protocol change");
+    wait_setup_choices(pty, cursor);
 }
 
 #[cfg(debug_assertions)]

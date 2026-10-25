@@ -1651,7 +1651,9 @@ async fn read_custom_profile_fields(
         terminal,
         "Custom route destination",
         endpoint_prompt,
-        initial.map_or("", |draft| &draft.endpoint),
+        initial
+            .filter(|draft| draft.protocol == protocol)
+            .map_or("", |draft| &draft.endpoint),
         MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
     )
     .await?
