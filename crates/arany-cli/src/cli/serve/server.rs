@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, watch};
 pub(in crate::cli) enum ApprovalChannel {
     #[default]
     Human,
+    Terminal,
     Restricted,
 }
 
@@ -94,6 +95,7 @@ struct ActiveTurn {
     thread_id: SessionId,
     result: tokio::task::AbortHandle,
     events: arany::Subscription,
+    display: Option<DisplayFollower>,
     cancel: RunCancellation,
     approvals: Arc<super::approvals::Approvals>,
     approval_mode: ToolApprovals,
@@ -102,6 +104,38 @@ struct ActiveTurn {
     result_done: bool,
     pending_close: Option<RequestId>,
     state: TurnState,
+}
+
+struct DisplayFollower {
+    previews: arany::RunPreview,
+    waiting: arany::RunHints,
+}
+
+impl DisplayFollower {
+    fn new(hints: arany::RunHints) -> Self {
+        Self {
+            previews: hints.previews(),
+            waiting: hints,
+        }
+    }
+
+    async fn next(&mut self) -> (Option<arany::RunId>, DisplayUpdate) {
+        tokio::select! {
+            preview = self.previews.changed() => {
+                let run = preview.as_ref().map(|preview| preview.run_id);
+                let preview = preview.map(|preview| DisplayPreview {
+                    agent_run_id: preview.agent_run_id,
+                    call_index: preview.call_index,
+                    answer: preview.text.answer.clone(),
+                    commentary: preview.text.commentary.clone(),
+                    commentary_limited: preview.text.commentary_limited,
+                    tentative: preview.text.tentative,
+                });
+                (run, DisplayUpdate::Preview { preview })
+            }
+            intent_id = self.waiting.waiting_changed() => (None, DisplayUpdate::Waiting { intent_id }),
+        }
+    }
 }
 
 impl Drop for ActiveTurn {
@@ -659,6 +693,7 @@ mod tests {
             thread_id: session,
             result: worker.abort_handle(),
             events,
+            display: None,
             cancel,
             approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
             approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
@@ -758,6 +793,7 @@ mod tests {
             thread_id: session,
             result: worker.abort_handle(),
             events: engine.subscribe(),
+            display: None,
             cancel: RunCancellation::new(),
             approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
             approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
