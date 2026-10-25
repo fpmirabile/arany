@@ -128,6 +128,8 @@ pub(super) enum TerminalReader {
     Keys(InputReader),
     #[cfg(unix)]
     Lines(LineReader),
+    #[cfg(test)]
+    Test(std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>),
 }
 
 impl TerminalReader {
@@ -144,6 +146,8 @@ impl TerminalReader {
                     .probe_keyboard_within(output, KEYBOARD_PROBE_TIMEOUT, graphics)
             }
             Self::Lines(_) => Ok(KeyboardSupport::Legacy),
+            #[cfg(test)]
+            Self::Test(_) => Ok(KeyboardSupport::Legacy),
         }
     }
 
@@ -173,6 +177,8 @@ impl TerminalReader {
             Self::Keys(reader) => Some(reader.queries.clone()),
             #[cfg(unix)]
             Self::Lines(_) => None,
+            #[cfg(test)]
+            Self::Test(_) => None,
         }
     }
     pub(super) fn start(linear: bool) -> io::Result<Self> {
@@ -189,6 +195,8 @@ impl TerminalReader {
             Self::Keys(reader) => reader.recv().await,
             #[cfg(unix)]
             Self::Lines(reader) => reader.recv().await,
+            #[cfg(test)]
+            Self::Test(_) => Err(TerminalError::Io(io::Error::other("test reader"))),
         }
     }
 
@@ -197,6 +205,8 @@ impl TerminalReader {
             Self::Keys(reader) => reader.stop(),
             #[cfg(unix)]
             Self::Lines(reader) => reader.stop(),
+            #[cfg(test)]
+            Self::Test(steps) => steps.borrow_mut().push("reader"),
         }
     }
 
@@ -216,6 +226,8 @@ impl TerminalReader {
                 reader.epoch = reader.admission.barrier().await?;
                 reader.reset_draft();
             }
+            #[cfg(test)]
+            Self::Test(_) => {}
         }
         #[cfg(unix)]
         Ok(())
@@ -233,6 +245,8 @@ impl TerminalReader {
             Self::Keys(reader) => reader.paste.take(),
             #[cfg(unix)]
             Self::Lines(_) => None,
+            #[cfg(test)]
+            Self::Test(_) => None,
         }
     }
 
@@ -241,6 +255,8 @@ impl TerminalReader {
             Self::Keys(_) => true,
             #[cfg(unix)]
             Self::Lines(reader) => reader.pending.is_empty(),
+            #[cfg(test)]
+            Self::Test(_) => true,
         }
     }
 
