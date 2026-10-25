@@ -268,6 +268,23 @@ pub(crate) fn pump(
     transcript: &mut Vec<u8>,
     answered: &mut PtyResponses,
 ) {
+    drain_pty(output, transcript);
+    reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
+    if answered.auto_consent {
+        let mut declined = false;
+        process::decline_workspace_consent(
+            input,
+            &transcript[answered.consent_from..],
+            &mut declined,
+        );
+        if declined {
+            answered.consent_from = transcript.len();
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(crate) fn drain_pty(output: &mut impl std::io::Read, transcript: &mut Vec<u8>) {
     loop {
         let mut chunk = [0; 4096];
         match output.read(&mut chunk) {
@@ -291,18 +308,6 @@ pub(crate) fn pump(
         .filter(|part| *part == b"\x1b[6n")
         .count();
     assert!(queries <= 128, "bounded cursor queries");
-    reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
-    if answered.auto_consent {
-        let mut declined = false;
-        process::decline_workspace_consent(
-            input,
-            &transcript[answered.consent_from..],
-            &mut declined,
-        );
-        if declined {
-            answered.consent_from = transcript.len();
-        }
-    }
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]

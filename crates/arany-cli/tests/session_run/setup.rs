@@ -418,12 +418,7 @@ fn finish_setup_pty(pty: SetupPty) -> Output {
 #[cfg(debug_assertions)]
 fn finish_setup_pty_with_transcript(mut pty: SetupPty) -> (Output, Vec<u8>) {
     let result = wait_product(pty.child.take());
-    pump(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-    );
+    crate::drain_pty(&mut pty.output, &mut pty.transcript);
     (result, pty.transcript)
 }
 

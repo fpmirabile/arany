@@ -194,12 +194,7 @@ fn inspection_case(presentation: Presentation, storage: &str, access: Access) {
     assert_eq!(session_snapshot(&state, id), before);
     pty.input.write_all(b"/exit\r").unwrap();
     let result = wait_product(pty.child.take());
-    pump(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-    );
+    crate::drain_pty(&mut pty.output, &mut pty.transcript);
     assert!(result.status.success());
     assert!(
         account_root

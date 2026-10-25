@@ -492,12 +492,7 @@ fn manager_check_back_before_consent_leaves_no_check_facts_or_requests() {
 
 fn finish_check_pty(mut pty: SetupPty) {
     let result = wait_product(pty.child.take());
-    pump(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-    );
+    crate::drain_pty(&mut pty.output, &mut pty.transcript);
     assert_private_output(&pty.transcript);
     assert_private_output(&result.stdout);
     assert_private_output(&result.stderr);
