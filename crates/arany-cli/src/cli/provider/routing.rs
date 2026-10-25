@@ -121,7 +121,7 @@ pub(crate) fn references_custom_profile(
         .into_iter()
         .flatten()
         .flatten()
-        .any(|route| route.provider == format!("custom:{name}")))
+        .any(|route| route.provider == ProviderKind::custom_profile(name)))
 }
 
 fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {

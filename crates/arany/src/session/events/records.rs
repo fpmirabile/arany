@@ -453,7 +453,7 @@ impl RunConfig {
 
 fn supports_context_window_evidence(identity: &crate::provider::ProviderIdentity) -> bool {
     identity.chatgpt_provenance().is_some()
-        || identity.profile == "anthropic"
+        || ProviderKind::parse(&identity.profile) == Some(ProviderKind::Anthropic)
             && matches!(
                 identity.provenance,
                 crate::provider::Provenance::Native { .. }

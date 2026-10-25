@@ -1034,7 +1034,7 @@ fn select_custom_profile(profile: &CustomProfile) -> SetupSelection {
         .find(|effort| *effort == Effort::Low);
     SetupSelection::Custom {
         defaults: SessionDefaults {
-            provider: Some(format!("custom:{}", profile.name())),
+            provider: Some(ProviderKind::custom_profile(profile.name())),
             model: Some(profile.model().to_owned()),
             effort,
             account_id: None,
