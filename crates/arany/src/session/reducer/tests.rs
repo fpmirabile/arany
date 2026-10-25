@@ -6410,7 +6410,7 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(&mut view, requesting_step(run, agent, 2)).unwrap();
         let first = read_intent(run, agent, "src/lib.rs");
-        let second = read_intent(run, agent, "src/main.rs");
+        let second = read_intent(run, agent, "src/lib.rs");
         for intent in [&first, &second] {
             apply(&mut view, tool_started(run, agent, intent)).unwrap();
         }
