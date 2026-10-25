@@ -3555,7 +3555,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     let (shell_pid, before) = {
         let text = String::from_utf8_lossy(&transcript);
