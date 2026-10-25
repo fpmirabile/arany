@@ -1,5 +1,5 @@
 use super::active_terminal::{ProductGuard, product_child_of_executable, wait_stopped};
-use super::loopback::{ChildGuard, wait_product};
+use super::loopback::{ChildGuard, read_request, send_response, wait_product, write_profile};
 use super::session_picker::{PtyResponses, pump, screen_rows, tail};
 use arany::{StateRoot, create_session};
 use rustix::{
@@ -8,14 +8,17 @@ use rustix::{
 };
 use std::{
     io::Write,
+    net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{ChildStdin, ChildStdout, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 const CAPTURE: [u32; 3] = [1000, 1002, 1006];
+const CAPTURE_WITH_MOTION: [u32; 4] = [1000, 1002, 1003, 1006];
 const TRACKED: [u32; 6] = [1000, 1002, 1003, 1006, 1007, 1015];
 const EMPTY_COMPOSER: &[u8] = b"\x1b[?25h\x1b[22;3H";
 
@@ -65,6 +68,8 @@ struct Chat {
     answered: PtyResponses,
     // Modes folded from captures that `fresh` discarded.
     folded: Modes,
+    reply_to_kitty: bool,
+    kitty_reply_sent: bool,
 }
 
 impl Chat {
@@ -115,6 +120,8 @@ impl Chat {
             transcript: Vec::new(),
             answered: PtyResponses::default(),
             folded: Modes::default(),
+            reply_to_kitty: false,
+            kitty_reply_sent: false,
         }
     }
 
@@ -125,6 +132,18 @@ impl Chat {
             &mut self.transcript,
             &mut self.answered,
         );
+        if self.reply_to_kitty
+            && !self.kitty_reply_sent
+            && self
+                .transcript
+                .windows(b"\x1b_Gi=31,s=1,v=1,a=q".len())
+                .any(|part| part == b"\x1b_Gi=31,s=1,v=1,a=q")
+        {
+            self.input
+                .write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[?0u\x1b[?62;52;c")
+                .expect("answer Kitty graphics probe");
+            self.kitty_reply_sent = true;
+        }
     }
 
     fn wait(&mut self, from: usize, done: impl Fn(&[u8]) -> bool, label: &str) {
@@ -236,6 +255,462 @@ impl Chat {
         );
         self.modes()
     }
+}
+
+#[test]
+fn kitty_probe_enables_any_motion_and_a_burst_keeps_following_keys() {
+    let (temp, state, workspace) = session_fixture(true);
+    let mut chat = Chat::start(temp.path(), &state, &workspace, &[]);
+    chat.reply_to_kitty = true;
+    chat.wait_for(
+        0,
+        &[b"\x1b_Gi=31,s=1,v=1,a=q", b"\x1b[?1003h"],
+        "Kitty probe and any-motion capture",
+    );
+    chat.assert_active(&CAPTURE_WITH_MOTION, "Kitty capable terminal");
+    chat.wait_armed(0, "armed fullscreen picker");
+    chat.step(
+        "picker close",
+        b"\r",
+        &[EMPTY_COMPOSER],
+        &CAPTURE_WITH_MOTION,
+    );
+
+    let motion = b"\x1b[<35;40;12M";
+    for _ in 0..50 {
+        for _ in 0..4 {
+            chat.send(motion);
+        }
+        chat.pump();
+    }
+    let from = chat.send(b"x");
+    chat.wait_for(from, &[b"x"], "key after motion burst");
+    chat.step(
+        "burst draft cleared",
+        b"\x7f",
+        &[EMPTY_COMPOSER],
+        &CAPTURE_WITH_MOTION,
+    );
+    let modes = chat.exit();
+    assert_eq!(modes.active, Vec::<u32>::new(), "motion mode restored");
+    assert!(modes.enabled.contains(&1003));
+}
+
+#[test]
+fn kitty_hover_tracks_drag_leave_and_revalidates_composer_geometry() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let (temp, state, workspace) = session_fixture(true);
+    let image = arany::test_support::test_image();
+    std::fs::write(
+        workspace.join("preview.png"),
+        STANDARD.decode(image.base64()).expect("test PNG bytes"),
+    )
+    .expect("workspace PNG");
+    let mut chat = Chat::start(temp.path(), &state, &workspace, &[]);
+    chat.reply_to_kitty = true;
+    chat.wait_for(
+        0,
+        &[b"\x1b_Gi=31,s=1,v=1,a=q", b"\x1b[?1003h"],
+        "Kitty probe and any-motion capture",
+    );
+    chat.wait_armed(0, "armed fullscreen picker");
+    chat.step(
+        "picker close",
+        b"\r",
+        &[EMPTY_COMPOSER],
+        &CAPTURE_WITH_MOTION,
+    );
+
+    let attached = chat.send(b"\x1b[200~preview.png\x1b[201~");
+    chat.wait(attached, has_image_chip, "image attachment chip");
+    let (column, row) = image_chip_position(&chat.transcript);
+    let transfer = b"\x1b_Ga=T";
+    let deletion = b"\x1b_Ga=d,d=I,i=31";
+
+    let before_enter = chat.transcript.len();
+    let frames_before_enter = count_bytes(&chat.transcript, b"\x1b[?25h");
+    chat.send(format!("\x1b[<35;{column};{row}M").as_bytes());
+    chat.wait(
+        before_enter,
+        |bytes| count_bytes(bytes, transfer) == 1,
+        "first Kitty preview transfer",
+    );
+    assert!(screen_has_preview(&chat.transcript), "preview frame drawn");
+    assert_eq!(
+        count_bytes(&chat.transcript, b"\x1b[?25h") - frames_before_enter,
+        1,
+        "enter draws one frame"
+    );
+
+    let before_drag = chat.transcript.len();
+    let frames_before_drag = count_bytes(&chat.transcript, b"\x1b[?25h");
+    let inside_column = column.saturating_add(2);
+    let drag = format!(
+        "\x1b[<35;{inside_column};{row}M\x1b[<0;{column};{row}M\x1b[<32;70;{row}M\x1b[<0;70;{row}m"
+    );
+    chat.send(drag.as_bytes());
+    chat.wait(
+        before_drag,
+        |bytes| count_bytes(bytes, deletion) == 1,
+        "drag out deletes Kitty preview",
+    );
+    assert!(
+        !screen_has_preview(&chat.transcript),
+        "leave repaints balloon cells"
+    );
+    assert_eq!(
+        count_bytes(&chat.transcript, transfer),
+        1,
+        "no retransmit on drag"
+    );
+    assert_eq!(
+        count_bytes(&chat.transcript, b"\x1b[?25h") - frames_before_drag,
+        1,
+        "within-chip motion is suppressed and drag leave draws one frame"
+    );
+
+    let (moved_column, moved_row) = image_chip_position(&chat.transcript);
+    let before_reenter = chat.transcript.len();
+    chat.send(format!("\x1b[<35;{moved_column};{moved_row}M").as_bytes());
+    chat.wait(
+        before_reenter,
+        |bytes| count_bytes(bytes, transfer) == 1,
+        "preview reentry after drag",
+    );
+    let previous_cursor = kitty_image_cursor(&chat.transcript[before_reenter..])
+        .expect("first Kitty placement coordinates");
+
+    let before_geometry = chat.transcript.len();
+    let old_row = moved_row;
+    let wrap = format!("\x1b[200~{}\x1b[201~", "a".repeat(80));
+    chat.send(wrap.as_bytes());
+    chat.wait(
+        before_geometry,
+        |bytes| count_bytes(bytes, deletion) == 1,
+        "composer reflow invalidates old placement",
+    );
+    let (new_column, new_row) = image_chip_position(&chat.transcript);
+    assert_ne!(new_row, old_row, "wrapped draft moves the image chip");
+    assert!(
+        !screen_has_preview(&chat.transcript),
+        "stale pointer leaves preview closed"
+    );
+
+    let before_reposition = chat.transcript.len();
+    chat.send(format!("\x1b[<35;{new_column};{new_row}M").as_bytes());
+    chat.wait(
+        before_reposition,
+        |bytes| count_bytes(bytes, transfer) == 1,
+        "preview follows the reflowed image chip",
+    );
+    let repositioned_cursor = kitty_image_cursor(&chat.transcript[before_reposition..])
+        .expect("repositioned Kitty coordinates");
+    assert_ne!(
+        repositioned_cursor, previous_cursor,
+        "image placement uses the updated geometry"
+    );
+
+    let before_picker = chat.transcript.len();
+    chat.send(b"\x0b");
+    chat.wait(
+        before_picker,
+        |bytes| count_bytes(bytes, deletion) == 1,
+        "quick-action picker deletes the active preview",
+    );
+    assert!(
+        !screen_has_preview(&chat.transcript),
+        "picker clears preview frame"
+    );
+    chat.wait_armed(before_picker, "armed quick-action picker");
+    let before_close = chat.transcript.len();
+    chat.send(b"\x1b");
+    chat.wait(
+        0,
+        |bytes| position(&bytes[before_close..], b"\x1b[?25h").is_some() && has_image_chip(bytes),
+        "picker closes",
+    );
+    assert!(
+        has_image_chip(&chat.transcript),
+        "draft chip remains after picker"
+    );
+    assert_eq!(
+        count_bytes(&chat.transcript, transfer),
+        3,
+        "close does not restore hover"
+    );
+
+    let (column, row) = image_chip_position(&chat.transcript);
+    let before_final_enter = chat.transcript.len();
+    chat.send(format!("\x1b[<35;{column};{row}M").as_bytes());
+    chat.wait(
+        before_final_enter,
+        |bytes| count_bytes(bytes, transfer) == 1,
+        "preview reentry after picker cleanup",
+    );
+    let before_clear = chat.transcript.len();
+    chat.send(b"\x03");
+    chat.wait(
+        before_clear,
+        |bytes| count_bytes(bytes, deletion) == 1,
+        "removing the chip deletes the active preview",
+    );
+    let modes = chat.exit();
+    assert_eq!(modes.active, Vec::<u32>::new(), "capture restored on exit");
+}
+
+#[test]
+fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::json;
+
+    let (temp, state, workspace) = session_fixture(true);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback provider");
+    write_profile(
+        &state,
+        listener.local_addr().expect("provider address").port(),
+    );
+    let (run_ready_sender, run_ready) = mpsc::channel();
+    let (compact_ready_sender, compact_ready) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    listener
+        .set_nonblocking(true)
+        .expect("bounded provider accept");
+    let provider = thread::spawn(move || {
+        let accept = |context| {
+            crate::process::accept_with_deadline(&listener, Duration::from_secs(30), context)
+        };
+        for index in 0..3 {
+            let mut stream = accept("provider conformance request");
+            read_request(&mut stream);
+            let text = match index {
+                0 => json!("ok"),
+                1 => {
+                    json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
+                }
+                _ => json!("synthetic summary"),
+            };
+            send_response(&mut stream, index, text);
+        }
+
+        let mut run = accept("Run request");
+        read_request(&mut run);
+        run_ready_sender.send(()).expect("Run request observed");
+        release_receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("release Run response");
+        send_response(&mut run, 0, json!("active answer"));
+
+        let mut compact = accept("compaction request");
+        let body = read_request(&mut compact);
+        let request: serde_json::Value = serde_json::from_slice(&body).expect("compaction JSON");
+        crate::loopback::assert_compaction_request(&request);
+        compact_ready_sender
+            .send(())
+            .expect("compaction request observed");
+        release_receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("release compaction response");
+        send_response(&mut compact, 1, json!("synthetic summary"));
+    });
+    crate::loopback::check_profile(&workspace, &state);
+
+    let png = STANDARD
+        .decode(arany::test_support::test_image().base64())
+        .expect("test PNG bytes");
+    std::fs::write(workspace.join("preview.png"), png).expect("workspace PNG");
+    let mut chat = Chat::launch(
+        temp.path(),
+        &state,
+        &workspace,
+        &[
+            ("ARANY_PROVIDER_LOCAL_KEY", "test-key"),
+            ("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22"),
+        ],
+        "--resume --provider custom:local --model model-1",
+        true,
+    );
+    chat.reply_to_kitty = true;
+    chat.wait_for(
+        0,
+        &[b"\x1b_Gi=31,s=1,v=1,a=q", b"\x1b[?1003h"],
+        "Kitty probe and any-motion capture",
+    );
+    chat.wait_armed(0, "armed fullscreen picker");
+    chat.step(
+        "picker close",
+        b"\r",
+        &[EMPTY_COMPOSER],
+        &CAPTURE_WITH_MOTION,
+    );
+
+    chat.send(b"start work\r");
+    run_ready
+        .recv_timeout(Duration::from_secs(10))
+        .expect("Run provider request");
+    let attach = chat.send(b"\x1b[200~preview.png\x1b[201~");
+    chat.wait(attach, has_image_chip, "Run draft image chip");
+    let (column, row) = image_chip_position(&chat.transcript);
+    let (history_column, history_row) =
+        screen_text_position(&chat.transcript, "start work").expect("Run objective in History");
+    let transfer = b"\x1b_Ga=T";
+    let deletion = b"\x1b_Ga=d,d=I,i=31";
+    let clipboard_copy = b"\x1b]52;c;";
+    let from_run = chat.transcript.len();
+    let selection = format!(
+        "\x1b[<0;{history_column};{history_row}M\x1b[<32;{column};{row}M\x1b[<0;{column};{row}m"
+    );
+    chat.send(selection.as_bytes());
+    chat.wait(
+        from_run,
+        |bytes| {
+            count_bytes(bytes, transfer) >= 1
+                && bytes
+                    .windows(clipboard_copy.len())
+                    .any(|part| part == clipboard_copy)
+        },
+        "Run History drag crossing chip renders and copies",
+    );
+    chat.send(format!("\x1b[<35;70;{row}M").as_bytes());
+    chat.wait(
+        from_run,
+        |bytes| count_bytes(bytes, deletion) >= 1,
+        "Run input loop deletes on leave",
+    );
+    release_sender.send(()).expect("release Run response");
+    chat.wait(
+        0,
+        |bytes| screen_text_position(bytes, "active answer").is_some(),
+        "Run completes",
+    );
+    let clear = chat.send(b"\x03");
+    chat.wait_for(clear, &[EMPTY_COMPOSER], "Run draft cleared");
+
+    chat.send(b"/compact\r");
+    compact_ready
+        .recv_timeout(Duration::from_secs(10))
+        .expect("compaction provider request");
+    let attach = chat.send(b"\x1b[200~preview.png\x1b[201~");
+    chat.wait(attach, has_image_chip, "compaction draft image chip");
+    let (column, row) = image_chip_position(&chat.transcript);
+    let (history_column, history_row) =
+        screen_text_position(&chat.transcript, "start work").expect("compaction History objective");
+    let from_compaction = chat.transcript.len();
+    let selection = format!(
+        "\x1b[<0;{history_column};{history_row}M\x1b[<32;{column};{row}M\x1b[<0;{column};{row}m"
+    );
+    chat.send(selection.as_bytes());
+    chat.wait(
+        from_compaction,
+        |bytes| {
+            count_bytes(bytes, transfer) >= 1
+                && bytes
+                    .windows(clipboard_copy.len())
+                    .any(|part| part == clipboard_copy)
+        },
+        "compaction History drag crossing chip renders and copies",
+    );
+    chat.send(format!("\x1b[<35;70;{row}M").as_bytes());
+    chat.wait(
+        from_compaction,
+        |bytes| count_bytes(bytes, deletion) >= 1,
+        "compaction input loop deletes on leave",
+    );
+    release_sender
+        .send(())
+        .expect("release compaction response");
+    provider.join().expect("provider thread");
+    chat.wait(
+        0,
+        |bytes| screen_text_position(bytes, "Compaction saved").is_some(),
+        "compaction completes",
+    );
+    let clear = chat.send(b"\x03");
+    chat.wait_for(clear, &[EMPTY_COMPOSER], "compaction draft cleared");
+    chat.exit();
+}
+
+fn count_bytes(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes
+        .windows(needle.len())
+        .filter(|part| *part == needle)
+        .count()
+}
+
+fn visible_screen(transcript: &[u8]) -> Vec<String> {
+    let sanitized = strip_kitty_control_strings(transcript);
+    screen_rows(&sanitized, 80, 24)
+}
+
+fn strip_kitty_control_strings(bytes: &[u8]) -> Vec<u8> {
+    let mut sanitized = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some(start) = rest.windows(3).position(|part| part == b"\x1b_G") {
+        sanitized.extend_from_slice(&rest[..start]);
+        rest = &rest[start + 3..];
+        let Some(end) = rest.windows(2).position(|part| part == b"\x1b\\") else {
+            return sanitized;
+        };
+        rest = &rest[end + 2..];
+    }
+    sanitized.extend_from_slice(rest);
+    sanitized
+}
+
+fn has_image_chip(transcript: &[u8]) -> bool {
+    let marker = b"\x1b[?25h";
+    let Some(frame_end) = transcript
+        .windows(marker.len())
+        .rposition(|part| part == marker)
+    else {
+        return false;
+    };
+    visible_screen(&transcript[..frame_end])
+        .iter()
+        .any(|line| line.contains("[Image #1]"))
+}
+
+fn screen_text_position(transcript: &[u8], text: &str) -> Option<(usize, usize)> {
+    visible_screen(transcript)
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(text).map(|column| (column + 1, row + 1)))
+}
+
+fn image_chip_position(transcript: &[u8]) -> (usize, usize) {
+    visible_screen(transcript)
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find("[Image #1]").map(|column| (column + 1, row + 1)))
+        .unwrap_or_else(|| panic!("image chip on screen: {}", tail(transcript)))
+}
+
+fn screen_has_preview(transcript: &[u8]) -> bool {
+    visible_screen(transcript)
+        .iter()
+        .any(|line| line.contains("Image 1: PNG"))
+}
+
+fn kitty_image_cursor(bytes: &[u8]) -> Option<(usize, usize)> {
+    let marker = b"\x1b[s";
+    let start = bytes
+        .windows(marker.len())
+        .rposition(|part| part == marker)?;
+    let sequence = &bytes[start + marker.len()..];
+    let end = sequence.iter().position(|byte| *byte == b'H')?;
+    let mut coordinates = sequence[..end]
+        .strip_prefix(b"\x1b[")?
+        .split(|byte| *byte == b';');
+    Some((
+        std::str::from_utf8(coordinates.next()?)
+            .ok()?
+            .parse()
+            .ok()?,
+        std::str::from_utf8(coordinates.next()?)
+            .ok()?
+            .parse()
+            .ok()?,
+    ))
 }
 
 fn session_fixture(fullscreen: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -371,6 +846,7 @@ fn classic_chat_enables_no_mouse_or_alternate_scroll_mode() {
     chat.adopt_product(&state);
     let from = chat.send(b"\r");
     chat.wait_for(from, &[b"\x1b[?25h"], "Classic composer");
+    assert_no_kitty_probe(&chat.transcript);
     let modes = chat.exit();
     assert_eq!(modes.enabled, Vec::<u32>::new(), "Classic enabled a mode");
 }
@@ -387,6 +863,7 @@ fn disabled_mouse_fullscreen_uses_alternate_scroll_only() {
         );
         chat.wait_for(0, &[b"\x1b[?1049h", b"\x1b[?1007h"], "alternate scroll");
         chat.wait_armed(0, "armed fullscreen picker");
+        assert_no_kitty_probe(&chat.transcript);
         chat.adopt_product(&state);
         chat.assert_active(&[1007], "startup picker");
         chat.step("picker close", b"\r", &[EMPTY_COMPOSER], &[1007]);
@@ -394,6 +871,72 @@ fn disabled_mouse_fullscreen_uses_alternate_scroll_only() {
         assert_eq!(modes.active, Vec::<u32>::new(), "alternate scroll restored");
         assert_eq!(modes.enabled, [1007], "no mouse reporting mode: {value:?}");
     }
+}
+
+#[test]
+fn tmux_suppresses_the_kitty_graphics_probe() {
+    let (temp, state, workspace) = session_fixture(true);
+    let mut chat = Chat::start(
+        temp.path(),
+        &state,
+        &workspace,
+        &[("TMUX", "session,pane,server")],
+    );
+    chat.wait_armed(0, "armed fullscreen picker inside tmux");
+    assert_no_kitty_probe(&chat.transcript);
+    chat.adopt_product(&state);
+    let modes = chat.exit_with(b"\x1b");
+    assert_eq!(
+        modes.active,
+        Vec::<u32>::new(),
+        "modes restored on cancellation"
+    );
+}
+
+#[test]
+fn linear_chat_suppresses_the_kitty_graphics_probe() {
+    let (temp, state, workspace) = session_fixture(true);
+    let mut chat = Chat::start(temp.path(), &state, &workspace, &[("TERM", "dumb")]);
+    chat.wait_for(
+        0,
+        &[
+            b"Resume:",
+            b"Choice 1: Only",
+            b"Choose number, exact ID, n next, p previous, or q close:",
+        ],
+        "linear resume picker",
+    );
+    assert_no_kitty_probe(&chat.transcript);
+    chat.adopt_product(&state);
+    let from = chat.send(b"1\r");
+    chat.wait_for(from, &[b"Input:"], "linear composer");
+    chat.exit();
+}
+
+#[test]
+fn screen_reader_chat_suppresses_the_kitty_graphics_probe() {
+    let (temp, state, workspace) = session_fixture(true);
+    let mut chat = Chat::launch(
+        temp.path(),
+        &state,
+        &workspace,
+        &[],
+        "--screen-reader",
+        false,
+    );
+    chat.wait_for(0, &[b"Input:\r\n"], "screen-reader startup");
+    assert_no_kitty_probe(&chat.transcript);
+    chat.exit();
+}
+
+fn assert_no_kitty_probe(bytes: &[u8]) {
+    assert!(
+        !bytes
+            .windows(b"\x1b_Gi=31,s=1,v=1,a=q".len())
+            .any(|part| part == b"\x1b_Gi=31,s=1,v=1,a=q"),
+        "excluded terminal session sent the Kitty graphics query: {}",
+        tail(bytes)
+    );
 }
 
 fn position(bytes: &[u8], needle: &[u8]) -> Option<usize> {

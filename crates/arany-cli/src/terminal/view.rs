@@ -13,10 +13,11 @@ use arany::SessionListItem;
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
     backend::Backend,
+    buffer::CellDiffOption,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
 };
 use std::io;
 use unicode_segmentation::UnicodeSegmentation;
@@ -1191,6 +1192,7 @@ pub(super) fn draw_pager_frame(
     history_area
 }
 
+#[cfg(test)]
 pub(super) fn draw_frame_with_history(
     frame: &mut Frame,
     model: &PresentationModel,
@@ -1200,10 +1202,39 @@ pub(super) fn draw_frame_with_history(
     history_rows: &[HistoryRow],
     history_status: Option<&str>,
 ) -> Rect {
+    draw_frame_with_history_and_chips(
+        frame,
+        model,
+        composer,
+        notice,
+        hints,
+        history_rows,
+        history_status,
+    )
+    .history_area
+}
+
+pub(super) struct FrameGeometry {
+    pub history_area: Rect,
+    pub image_chips: Vec<(usize, Rect)>,
+}
+
+pub(super) fn draw_frame_with_history_and_chips(
+    frame: &mut Frame,
+    model: &PresentationModel,
+    composer: &Composer,
+    notice: Option<&str>,
+    hints: ComposerHints<'_>,
+    history_rows: &[HistoryRow],
+    history_status: Option<&str>,
+) -> FrameGeometry {
     let palette = hints.palette;
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
-        return Rect::default();
+        return FrameGeometry {
+            history_area: Rect::default(),
+            image_chips: Vec::new(),
+        };
     }
     let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
     let composer_height = (draft_rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
@@ -1388,7 +1419,7 @@ pub(super) fn draw_frame_with_history(
         height: composer_height,
         ..area
     };
-    draw_composer(
+    let image_chips = draw_composer(
         frame,
         model,
         composer,
@@ -1438,7 +1469,30 @@ pub(super) fn draw_frame_with_history(
             Rect::new(area.x, status_y, area.width, 1),
         );
     }
-    history_area
+    FrameGeometry {
+        history_area,
+        image_chips,
+    }
+}
+
+pub(super) fn draw_image_preview(frame: &mut Frame, area: Rect, title: &str) {
+    frame.render_widget(Clear, area);
+    let title = safe_truncate(title, usize::from(area.width.saturating_sub(4)));
+    frame.render_widget(Block::bordered().title(title), area);
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    for row in inner.y..inner.bottom() {
+        for column in inner.x..inner.right() {
+            if let Some(cell) = frame.buffer_mut().cell_mut(Position::new(column, row)) {
+                cell.set_style(Style::default().add_modifier(Modifier::HIDDEN));
+                cell.set_diff_option(CellDiffOption::Skip);
+            }
+        }
+    }
 }
 
 pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Line<'static> {
@@ -1579,7 +1633,7 @@ fn draw_composer(
     composer: &Composer,
     composer_area: Rect,
     hints: ComposerHints<'_>,
-) {
+) -> Vec<(usize, Rect)> {
     let ComposerHints {
         palette,
         menu_height,
@@ -1697,6 +1751,25 @@ fn draw_composer(
     } else {
         "Draft"
     };
+    let mut image_chips = Vec::new();
+    if !compact_image_chip {
+        let lead_width = if title == "Ask Arany" { 2 } else { 0 };
+        let mut x = area.x.saturating_add(lead_width + title.len() as u16 + 3);
+        for index in 0..composer.images().len() {
+            x = x.saturating_add(u16::from(composer.selected_image() == Some(index)));
+            let width = format!("[Image #{}]", index + 1).len() as u16;
+            image_chips.push((index, Rect::new(x, area.y, width, 1)));
+            x = x.saturating_add(width + 1);
+        }
+    } else if let Some(index) = composer.selected_image() {
+        let x = area.x.saturating_add(2);
+        image_chips.push((index, Rect::new(x, area.y, "[Image #0]".len() as u16, 1)));
+    } else if composer.images().len() == 1 {
+        image_chips.push((
+            0,
+            Rect::new(area.x + 1, area.y, "[Image #1]".len() as u16, 1),
+        ));
+    }
     let lead = if title == "Ask Arany" { "─ " } else { "" };
     let heading_cells = UnicodeWidthStr::width(lead) + title.len() + position.len() + 1;
     frame.render_widget(
@@ -1855,6 +1928,7 @@ fn draw_composer(
             ),
         });
     }
+    image_chips
 }
 
 pub(super) fn draw_quick_actions_frame(

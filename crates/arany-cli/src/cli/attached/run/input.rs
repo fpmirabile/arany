@@ -349,8 +349,15 @@ impl RunProgress<'_> {
             InputRoute::Handled => return Ok(()),
             InputRoute::Composer => {}
         }
-        match self.route_history(ui, input).await? {
+        let history_route = self.route_history(ui, input).await?;
+        let hover_changed = ui.terminal.take_graphics_hover_changed();
+        match history_route {
             InputRoute::Handled => return Ok(()),
+            InputRoute::Composer if hover_changed => {
+                return self
+                    .draw(ui, None)
+                    .map_err(|_| InputFailure::Shutdown("terminal rendering failed".to_owned()));
+            }
             InputRoute::Composer => {}
         }
         let input = ui.composer.chat_input(input);

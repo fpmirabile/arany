@@ -135,11 +135,21 @@ impl TerminalReader {
     pub(super) fn probe_keyboard(
         &self,
         output: &mut impl io::Write,
+        graphics: bool,
     ) -> io::Result<KeyboardSupport> {
         match self {
-            Self::Keys(reader) => reader.queries.probe_keyboard(output),
+            Self::Keys(reader) => {
+                reader
+                    .queries
+                    .probe_keyboard_within(output, KEYBOARD_PROBE_TIMEOUT, graphics)
+            }
             Self::Lines(_) => Ok(KeyboardSupport::Legacy),
         }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn kitty_graphics_supported(&self) -> bool {
+        matches!(self, Self::Keys(reader) if reader.queries.graphics_supported())
     }
 
     pub(super) fn set_chat_input(&mut self, chat: bool, child: bool, primary_capacity: usize) {
@@ -643,6 +653,8 @@ enum ReaderEvent {
     CursorPosition(u16, u16),
     #[cfg(unix)]
     KeyboardReply(KeyboardReply),
+    #[cfg(unix)]
+    GraphicsReply,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -652,10 +664,10 @@ pub(super) enum KeyboardSupport {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum KeyboardReply {
     Flags,
-    DeviceAttributes,
+    DeviceAttributes(Vec<u32>),
 }
 
 #[cfg(unix)]
@@ -664,7 +676,6 @@ enum KeyboardProbe {
     #[default]
     Idle,
     Waiting(Instant),
-    Supported,
     Unsupported,
 }
 
@@ -676,6 +687,14 @@ struct QueryState {
     #[cfg(unix)]
     keyboard: KeyboardProbe,
     #[cfg(unix)]
+    keyboard_supported: bool,
+    #[cfg(unix)]
+    graphics: bool,
+    #[cfg(unix)]
+    kitty_graphics: bool,
+    #[cfg(unix)]
+    device_attributes: Option<Vec<u32>>,
+    #[cfg(unix)]
     waiting: bool,
     #[cfg(unix)]
     position: Option<(u16, u16)>,
@@ -684,15 +703,11 @@ struct QueryState {
 
 impl TerminalQueries {
     #[cfg(unix)]
-    fn probe_keyboard(&self, output: &mut impl io::Write) -> io::Result<KeyboardSupport> {
-        self.probe_keyboard_within(output, KEYBOARD_PROBE_TIMEOUT)
-    }
-
-    #[cfg(unix)]
     fn probe_keyboard_within(
         &self,
         output: &mut impl io::Write,
         timeout: Duration,
+        graphics: bool,
     ) -> io::Result<KeyboardSupport> {
         let (state, ready) = &*self.0;
         let mut state = state
@@ -706,10 +721,16 @@ impl TerminalQueries {
         }
         let deadline = Instant::now() + timeout;
         state.keyboard = KeyboardProbe::Waiting(deadline);
-        if let Err(error) = output
-            .write_all(super::KEYBOARD_QUERY)
-            .and_then(|()| output.flush())
-        {
+        state.keyboard_supported = false;
+        state.graphics = graphics;
+        state.kitty_graphics = false;
+        state.device_attributes = None;
+        let query = if graphics {
+            super::KEYBOARD_QUERY
+        } else {
+            super::KEYBOARD_ONLY_QUERY
+        };
+        if let Err(error) = output.write_all(query).and_then(|()| output.flush()) {
             state.keyboard = KeyboardProbe::Idle;
             return Err(error);
         }
@@ -720,11 +741,10 @@ impl TerminalQueries {
                 |state| matches!(state.keyboard, KeyboardProbe::Waiting(_)) && !state.closed,
             )
             .map_err(|_| io::Error::other("input owner failed"))?;
-        let support = match state.keyboard {
-            KeyboardProbe::Supported => KeyboardSupport::Disambiguated,
-            KeyboardProbe::Idle | KeyboardProbe::Waiting(_) | KeyboardProbe::Unsupported => {
-                KeyboardSupport::Legacy
-            }
+        let support = if state.keyboard_supported {
+            KeyboardSupport::Disambiguated
+        } else {
+            KeyboardSupport::Legacy
         };
         state.keyboard = KeyboardProbe::Idle;
         if state.closed {
@@ -742,16 +762,38 @@ impl TerminalQueries {
         if let Ok(mut state) = state.lock()
             && let KeyboardProbe::Waiting(deadline) = state.keyboard
         {
-            state.keyboard = if Instant::now() < deadline {
+            if Instant::now() < deadline {
                 match reply {
-                    KeyboardReply::Flags => KeyboardProbe::Supported,
-                    KeyboardReply::DeviceAttributes => KeyboardProbe::Unsupported,
+                    KeyboardReply::Flags => state.keyboard_supported = true,
+                    KeyboardReply::DeviceAttributes(attributes) => {
+                        state.device_attributes = Some(attributes);
+                        state.keyboard = KeyboardProbe::Unsupported;
+                        ready.notify_one();
+                    }
                 }
             } else {
-                KeyboardProbe::Unsupported
-            };
-            ready.notify_one();
+                state.keyboard = KeyboardProbe::Unsupported;
+                ready.notify_one();
+            }
         }
+    }
+
+    #[cfg(unix)]
+    fn graphics_reply(&self) {
+        if let Ok(mut state) = self.0.0.lock()
+            && state.graphics
+            && matches!(state.keyboard, KeyboardProbe::Waiting(_))
+        {
+            state.kitty_graphics = true;
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn graphics_supported(&self) -> bool {
+        self.0
+            .0
+            .lock()
+            .is_ok_and(|state| state.kitty_graphics && state.device_attributes.is_some())
     }
 
     #[cfg(unix)]
@@ -921,7 +963,7 @@ impl InputReader {
                 #[cfg(unix)]
                 ReaderEvent::CursorPosition(_, _) => {}
                 #[cfg(unix)]
-                ReaderEvent::KeyboardReply(_) => {}
+                ReaderEvent::KeyboardReply(_) | ReaderEvent::GraphicsReply => {}
             }
         }
     }
@@ -1048,6 +1090,33 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn kitty_probe_requires_both_exact_graphics_reply_and_da1() {
+        let queries = TerminalQueries::default();
+        {
+            let mut state = queries.0.0.lock().unwrap();
+            state.graphics = true;
+            state.keyboard = KeyboardProbe::Waiting(Instant::now() + Duration::from_secs(1));
+        }
+        queries.graphics_reply();
+        queries.keyboard_reply(KeyboardReply::DeviceAttributes(vec![1, 4]));
+        assert!(queries.graphics_supported());
+        assert_eq!(
+            queries.0.0.lock().unwrap().device_attributes,
+            Some(vec![1, 4])
+        );
+
+        let mut query = Vec::new();
+        assert_eq!(
+            queries
+                .probe_keyboard_within(&mut query, Duration::ZERO, true)
+                .unwrap(),
+            KeyboardSupport::Legacy
+        );
+        assert_eq!(query, super::super::KEYBOARD_QUERY);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1913,7 +1982,9 @@ mod tests {
                         ReaderEvent::Event(event) => map_input(event).expect("admitted raw key"),
                         ReaderEvent::Pointer(input) => input,
                         ReaderEvent::Paste(_) => panic!("ordinary sequence became a paste"),
-                        ReaderEvent::CursorPosition(_, _) | ReaderEvent::KeyboardReply(_) => {
+                        ReaderEvent::CursorPosition(_, _)
+                        | ReaderEvent::KeyboardReply(_)
+                        | ReaderEvent::GraphicsReply => {
                             panic!("ordinary sequence became a cursor response")
                         }
                     })
