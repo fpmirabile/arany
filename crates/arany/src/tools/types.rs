@@ -300,6 +300,15 @@ pub enum ToolCall {
         expected_digest: String,
         edits: Vec<LiteralEdit>,
     },
+    Delete {
+        path: String,
+        expected_digest: String,
+    },
+    Move {
+        source: String,
+        destination: String,
+        expected_digest: String,
+    },
     Command {
         program: String,
         args: Vec<String>,
@@ -498,11 +507,13 @@ impl ToolCall {
             | Self::Mkdir { path }
             | Self::Write { path, .. }
             | Self::Edit { path, .. }
+            | Self::Delete { path, .. }
             | Self::MultiEdit {
                 file_path: path, ..
             } => Some((path, false)),
             Self::Command { cwd, .. } | Self::CommandUnguarded { cwd, .. } => Some((cwd, true)),
-            Self::ParseAgentDefinition { .. }
+            Self::Move { .. }
+            | Self::ParseAgentDefinition { .. }
             | Self::ApplyChangeset { .. }
             | Self::PrepareWorker { .. }
             | Self::Skill { .. }
@@ -997,6 +1008,8 @@ impl Attestation {
                             | ToolCall::Write { .. }
                             | ToolCall::Edit { .. }
                             | ToolCall::MultiEdit { .. }
+                            | ToolCall::Delete { .. }
+                            | ToolCall::Move { .. }
                     )
                     && receipt.valid_for(intent)
                     && mutation.data.assignment_id == intent.agent_run_id

@@ -139,6 +139,8 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_git_branch",
             "arany_git_switch",
             "arany_multiedit",
+            "arany_delete",
+            "arany_move",
             "arany_plan"
         ]
     );

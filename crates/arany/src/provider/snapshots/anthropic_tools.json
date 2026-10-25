@@ -671,6 +671,50 @@
       "name": "arany_multiedit"
     },
     {
+      "description": "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_digest": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "expected_digest"
+        ],
+        "type": "object"
+      },
+      "name": "arany_delete"
+    },
+    {
+      "description": "Move one regular Workspace file to a missing destination, guarded by the source SHA-256. Preserves bytes and executable status; creates missing destination parents. Never overwrites an existing destination.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "expected_digest": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination",
+          "expected_digest"
+        ],
+        "type": "object"
+      },
+      "name": "arany_move"
+    },
+    {
       "cache_control": {
         "type": "ephemeral"
       },
@@ -1074,6 +1118,56 @@
                           "file_path",
                           "expected_digest",
                           "edits"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "expected_digest": {
+                            "type": "string"
+                          },
+                          "operation": {
+                            "enum": [
+                              "delete"
+                            ],
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "operation",
+                          "path",
+                          "expected_digest"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "destination": {
+                            "type": "string"
+                          },
+                          "expected_digest": {
+                            "type": "string"
+                          },
+                          "operation": {
+                            "enum": [
+                              "move"
+                            ],
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "operation",
+                          "source",
+                          "destination",
+                          "expected_digest"
                         ],
                         "type": "object"
                       }

@@ -5280,3 +5280,87 @@ fn worker_child_unguarded_grant_can_only_narrow_explicit_parent_permission() {
         }
     }
 }
+
+#[test]
+fn worker_delete_and_move_replay_require_the_exact_source_and_destination_delta() {
+    for move_file in [false, true] {
+        for forged in [false, true] {
+            let version = FileVersion::from_bytes(b"original", true);
+            let mut f = fixture_with_manifest(
+                WorkerManifest {
+                    entries: vec![
+                        WorkerManifestEntry {
+                            path: "src".into(),
+                            version: WorkerBaseVersion::Directory,
+                        },
+                        WorkerManifestEntry {
+                            path: "src/a".into(),
+                            version: WorkerBaseVersion::Directory,
+                        },
+                        WorkerManifestEntry {
+                            path: "src/a/source".into(),
+                            version: WorkerBaseVersion::File {
+                                sha256: version.sha256.clone(),
+                                bytes: 8,
+                                executable: true,
+                            },
+                        },
+                    ],
+                },
+                vec!["delete".into(), "move".into(), "write".into()],
+                vec![WorkerTool::Write, WorkerTool::Delete, WorkerTool::Move],
+                None,
+            );
+            f.view();
+            f.call(
+                f.child,
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::ToolRequested,
+                None,
+            );
+            let call = if move_file {
+                ToolCall::Move {
+                    source: "src/a/source".into(),
+                    destination: "src/a/target".into(),
+                    expected_digest: version.sha256.clone(),
+                }
+            } else {
+                ToolCall::Delete {
+                    path: "src/a/source".into(),
+                    expected_digest: version.sha256.clone(),
+                }
+            };
+            let intent = f.intent(f.child, call, f.target(0));
+            f.started(&intent);
+            let mut files = vec![FileChange {
+                path: "src/a/source".into(),
+                before: Some(version.clone()),
+                after: None,
+            }];
+            if move_file {
+                files.push(FileChange {
+                    path: "src/a/target".into(),
+                    before: None,
+                    after: Some(if forged {
+                        FileVersion::from_bytes(b"forged", false)
+                    } else {
+                        version.clone()
+                    }),
+                });
+            } else if forged {
+                files[0].path = "src/a/other".into();
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            let data = f.data(
+                &intent,
+                WorkerDataPurpose::Mutation,
+                &serde_json::to_vec(&WorkerChangeset { files }).unwrap(),
+            );
+            f.observed(&intent, ToolDisposition::Succeeded, Some(Attestation::WorkerMutation {
+                receipt: receipt(&intent), mutation: Box::new(WorkerMutation { previous_revision: 0, next_revision: 1, data }),
+            }), &serde_json::json!({"removed":{"sha256":version.sha256,"bytes":8,"executable":true}}).to_string());
+            let replay = SessionView::replay_open(f.session, &f.envelopes());
+            assert_eq!(replay.is_ok(), !forged, "move={move_file}, forged={forged}");
+        }
+    }
+}

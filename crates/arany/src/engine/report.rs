@@ -697,6 +697,7 @@ fn push_success_facts(
                 crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. }
+                | crate::tools::ToolCall::Delete { path, .. }
                 | crate::tools::ToolCall::MultiEdit {
                     file_path: path, ..
                 } => {
@@ -704,6 +705,18 @@ fn push_success_facts(
                         report,
                         GoalReportSection::Changes,
                         &format!("{} {path}.", call.label()),
+                        omitted_facts,
+                    );
+                }
+                crate::tools::ToolCall::Move {
+                    source,
+                    destination,
+                    ..
+                } => {
+                    push_goal_report_item(
+                        report,
+                        GoalReportSection::Changes,
+                        &format!("Moved {source} to {destination}."),
                         omitted_facts,
                     );
                 }
@@ -847,9 +860,15 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         | crate::tools::ToolCall::Mkdir { path }
         | crate::tools::ToolCall::Write { path, .. }
         | crate::tools::ToolCall::Edit { path, .. }
+        | crate::tools::ToolCall::Delete { path, .. }
         | crate::tools::ToolCall::MultiEdit {
             file_path: path, ..
         } => format!("{} {path}", call.label()),
+        crate::tools::ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => format!("move {source} to {destination}"),
         crate::tools::ToolCall::Glob { pattern, path, .. } => format!("glob {pattern} in {path}"),
         crate::tools::ToolCall::Command { program, .. } => format!("Command {program}"),
         crate::tools::ToolCall::CommandUnguarded { program, .. } => {

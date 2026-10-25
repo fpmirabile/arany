@@ -2597,3 +2597,48 @@ fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
         config.git = None;
     }
 }
+
+#[test]
+fn delete_and_move_rules_cover_both_paths_without_partial_allows() {
+    let delete = ToolCall::Delete {
+        path: "src/source".into(),
+        expected_digest: "0".repeat(64),
+    };
+    let move_call = ToolCall::Move {
+        source: "src/source".into(),
+        destination: "dest/target".into(),
+        expected_digest: "0".repeat(64),
+    };
+    assert_eq!(
+        config(json!({"allow":["Edit(./src/**)"]})).decision(&delete),
+        Decision::Allow
+    );
+    for path in ["src", "dest"] {
+        for (list, expected) in [
+            ("deny", Decision::Deny),
+            ("ask", Decision::Ask),
+            ("allow", Decision::Ask),
+        ] {
+            assert_eq!(
+                config(json!({list:[format!("Edit(./{path}/**)")]})).decision(&move_call),
+                expected
+            );
+        }
+        assert_eq!(
+            config(json!({"deny":[format!("Read(./{path}/**)")]})).decision(&move_call),
+            Decision::Deny
+        );
+    }
+    assert_eq!(
+        config(json!({"allow":["Edit(**)"]})).decision(&move_call),
+        Decision::Allow
+    );
+    assert_eq!(
+        config(json!({"deny":["delete"]})).decision(&delete),
+        Decision::Deny
+    );
+    assert_eq!(
+        config(json!({"deny":["move"]})).decision(&move_call),
+        Decision::Deny
+    );
+}
