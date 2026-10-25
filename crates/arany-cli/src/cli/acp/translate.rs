@@ -6,11 +6,15 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 use tokio::sync::{Notify, mpsc};
 
 pub(super) type Shared = Arc<Mutex<State>>;
+
+fn locked(state: &Shared) -> MutexGuard<'_, State> {
+    state.lock().expect("translator state")
+}
 
 struct InputContext<'a> {
     config: &'a Config,
@@ -103,7 +107,7 @@ async fn send_request(
     pending: Pending,
 ) -> Result<(), String> {
     let message = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         if state.pending.len() >= 64 {
             return Err("ACP pending request bound exceeded".into());
         }
@@ -167,7 +171,7 @@ pub(super) async fn input(
         );
     }
     let refusal = {
-        let state = state.lock().expect("translator state");
+        let state = locked(state);
         if request.method == "initialize" && state.initialized {
             Some(wire::error(
                 Some(id.clone()),
@@ -256,7 +260,7 @@ async fn close_input(
     };
     let shared = context.state;
     let cancel = {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         if !state.sessions.contains_key(&params.session_id) {
             return immediate(
                 context.output,
@@ -355,7 +359,7 @@ async fn prompt_input(
         return immediate(context.output, invalid_params(&id));
     };
     let refusal = {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         if !state.authenticated {
             Some(wire::auth_required(id.clone()))
         } else if !state.sessions.contains_key(&session_id) {
@@ -430,7 +434,7 @@ async fn load_input(
         return immediate(context.output, invalid_params(&id));
     }
     let busy = {
-        let state = context.state.lock().expect("translator state");
+        let state = locked(context.state);
         state
             .active
             .as_ref()
@@ -448,10 +452,7 @@ async fn load_input(
     notice_mcp(context.state, &params.mcp_servers);
     let cwd = params.cwd;
     let mut selection = context.config.thread(cwd.clone());
-    let mode = context
-        .state
-        .lock()
-        .expect("translator state")
+    let mode = locked(context.state)
         .sessions
         .get(&params.session_id)
         .map(|session| session.mode.clone())
@@ -505,10 +506,7 @@ async fn mode_input(
     let Ok(params) = params else {
         return immediate(context.output, invalid_params(&id));
     };
-    if !context
-        .state
-        .lock()
-        .expect("translator state")
+    if !locked(context.state)
         .sessions
         .contains_key(&params.session_id)
     {
@@ -540,7 +538,7 @@ async fn input_notification(
     serve: &mpsc::Sender<ClientMessage>,
 ) -> Result<(), String> {
     let cancel = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         if let Some(active) = &mut state.active {
             let matches = match note.method.as_str() {
                 "session/cancel" => {
@@ -566,7 +564,7 @@ async fn input_notification(
             None
         }
     };
-    state.lock().expect("translator state").changed.notify_one();
+    locked(state).changed.notify_one();
     if let Some(cancel) = cancel {
         send_request(state, serve, "turn/interrupt", cancel, Pending::Interrupt).await?;
     }
@@ -602,7 +600,7 @@ async fn initialize_input(
     let Ok(client) = parse::<wire::Initialize>(params).and_then(wire::Initialize::client) else {
         return immediate(output, invalid_params(&id));
     };
-    state.lock().expect("translator state").initialized = true;
+    locked(state).initialized = true;
     send_request(
         state,
         serve,
@@ -623,7 +621,7 @@ async fn authenticate_input(
     state: &Shared,
     output: &mpsc::Sender<Value>,
 ) -> Result<(), String> {
-    if state.lock().expect("translator state").active.is_some() {
+    if locked(state).active.is_some() {
         return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
     }
     let Ok(params) = parse::<wire::Authenticate>(params) else {
@@ -633,7 +631,7 @@ async fn authenticate_input(
         return immediate(output, invalid_params(&id));
     }
     let authenticated = config.authenticate().await;
-    state.lock().expect("translator state").authenticated = authenticated;
+    locked(state).authenticated = authenticated;
     immediate(
         output,
         if authenticated {
@@ -666,7 +664,7 @@ async fn new_session_input(
 
 fn notice_mcp(state: &Shared, servers: &[Value]) {
     if !servers.is_empty() {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         if !state.mcp_notice {
             eprintln!("Arany ignores editor MCP servers.");
             state.mcp_notice = true;
@@ -725,7 +723,7 @@ pub(super) async fn output(
         if let Some(withdrawal) = withdraw_permission(&state, None, false) {
             emit(&outbound, withdrawal).await?;
         }
-        let changed = state.lock().expect("translator state").changed.clone();
+        let changed = locked(&state).changed.clone();
         let message = if let Some(message) = pending.pop_front() {
             Some(message)
         } else if closed {
@@ -778,9 +776,7 @@ pub(super) async fn output(
         }
     }
 
-    let completed = state
-        .lock()
-        .expect("translator state")
+    let completed = locked(&state)
         .active
         .as_ref()
         .filter(|active| active.completion.is_some())
@@ -798,9 +794,7 @@ async fn recover(
     prompt: u64,
     params: EventsSubscribeParams,
 ) -> Result<(), String> {
-    if !state
-        .lock()
-        .expect("translator state")
+    if !locked(state)
         .active
         .as_ref()
         .is_some_and(|a| a.generation == prompt)
@@ -846,7 +840,7 @@ async fn new_session_response(
     let result: ThreadResult =
         serde_json::from_value(result).map_err(|_| "invalid serve thread")?;
     {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         state.sessions.insert(
             result.thread.id,
             Session {
@@ -881,7 +875,7 @@ async fn load_session_response(
         }
     }
     {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         state.sessions.insert(
             result.thread.id,
             Session {
@@ -908,10 +902,7 @@ async fn mode_response(
 ) -> Result<(), String> {
     let result: ThreadSettingsUpdateResult =
         serde_json::from_value(result).map_err(|_| "invalid serve settings")?;
-    context
-        .state
-        .lock()
-        .expect("translator state")
+    locked(context.state)
         .sessions
         .get_mut(&session)
         .ok_or("no loaded ACP Session")?
@@ -933,7 +924,7 @@ async fn close_session_response(
     context: &ResponseContext<'_>,
 ) -> Result<(), String> {
     {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         state.sessions.remove(&session);
         state.closing.remove(&session);
     }
@@ -977,7 +968,7 @@ async fn start_turn_response(
 ) -> Result<(), String> {
     let result: TurnResult = serde_json::from_value(result).map_err(|_| "invalid serve turn")?;
     let cancel = {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         let active = state.active.as_mut().ok_or("no active ACP prompt")?;
         active.turn = Some(result.turn.id);
         (active.cancelled && !*context.stopping.borrow()).then_some(TurnInterruptParams {
@@ -996,7 +987,7 @@ async fn start_turn_response(
         .await?;
     }
     let watch = {
-        let state = context.state.lock().expect("translator state");
+        let state = locked(context.state);
         state.active.as_ref().filter(|a| a.watch_plan).map(|a| {
             (
                 a.session,
@@ -1027,10 +1018,7 @@ async fn watch_turn_response(
     result: Value,
     context: &ActiveResponseContext<'_>,
 ) -> Result<(), String> {
-    if !context
-        .state
-        .lock()
-        .expect("translator state")
+    if !locked(context.state)
         .active
         .as_ref()
         .is_some_and(|a| a.session == session && a.turn == Some(run))
@@ -1108,7 +1096,7 @@ async fn recover_turn_response(
     let page: EventsSubscribeResult =
         serde_json::from_value(result).map_err(|_| "invalid serve events")?;
     let Some((session, run, prompt)) = ({
-        let state = context.state.lock().expect("translator state");
+        let state = locked(context.state);
         state
             .active
             .as_ref()
@@ -1131,12 +1119,7 @@ async fn recover_turn_response(
         }
     }
     if let Some(last) = page.events.last()
-        && let Some(loaded) = context
-            .state
-            .lock()
-            .expect("translator state")
-            .sessions
-            .get_mut(&session)
+        && let Some(loaded) = locked(context.state).sessions.get_mut(&session)
     {
         loaded.sequence = last.sequence;
     }
@@ -1199,12 +1182,7 @@ async fn on_response(
     let RequestId::Integer(id) = reply.id else {
         return Ok(());
     };
-    let pending = context
-        .state
-        .lock()
-        .expect("translator state")
-        .pending
-        .remove(&id);
+    let pending = locked(context.state).pending.remove(&id);
     match pending {
         Some(Pending::Initialize(id)) => initialize_response(id, context).await?,
         Some(Pending::New(id, cwd, mode)) => {
@@ -1249,12 +1227,7 @@ async fn on_error(reply: ErrorResponse, context: &ActiveResponseContext<'_>) -> 
     let Some(RequestId::Integer(id)) = reply.id else {
         return Ok(());
     };
-    let pending = context
-        .state
-        .lock()
-        .expect("translator state")
-        .pending
-        .remove(&id);
+    let pending = locked(context.state).pending.remove(&id);
     match pending {
         Some(
             Pending::Initialize(id)
@@ -1264,19 +1237,11 @@ async fn on_error(reply: ErrorResponse, context: &ActiveResponseContext<'_>) -> 
             | Pending::List(id),
         ) => emit(context.outbound, remap(id, reply.error)).await?,
         Some(Pending::Close(id, session)) => {
-            context
-                .state
-                .lock()
-                .expect("translator state")
-                .closing
-                .remove(&session);
+            locked(context.state).closing.remove(&session);
             emit(context.outbound, remap(id, reply.error)).await?
         }
         Some(Pending::Start) => {
-            let active = context
-                .state
-                .lock()
-                .expect("translator state")
+            let active = locked(context.state)
                 .active
                 .take()
                 .ok_or("no active ACP prompt")?;
@@ -1292,19 +1257,13 @@ async fn on_error(reply: ErrorResponse, context: &ActiveResponseContext<'_>) -> 
         }
         Some(Pending::Recover) => {
             eprintln!("Arany could not reconcile all committed ACP updates; check Session history");
-            let prompt = context
-                .state
-                .lock()
-                .expect("translator state")
-                .active
-                .as_ref()
-                .map(|a| a.generation);
+            let prompt = locked(context.state).active.as_ref().map(|a| a.generation);
             if let Some(prompt) = prompt {
                 finish(context.state, context.serve, context.outbound, prompt, true).await?;
             }
         }
         Some(Pending::Watch { session, run }) => {
-            if let Some(active) = &mut context.state.lock().expect("translator state").active
+            if let Some(active) = &mut locked(context.state).active
                 && active.session == session
                 && active.turn == Some(run)
             {
@@ -1324,7 +1283,7 @@ async fn on_notification(
         "item/started" | "item/completed" => item_notification(note, context).await?,
         "turn/completed" => turn_completed_notification(note, context).await?,
         "events/resync" => {
-            if let Some(active) = &mut context.state.lock().expect("translator state").active {
+            if let Some(active) = &mut locked(context.state).active {
                 active.resync = true;
             }
         }
@@ -1353,7 +1312,7 @@ async fn item_notification(
     };
     if !started {
         let withdrawal_id = {
-            let state = context.state.lock().expect("translator state");
+            let state = locked(context.state);
             state
                 .permission
                 .as_ref()
@@ -1379,7 +1338,7 @@ async fn turn_completed_notification(
     let result: TurnNotification = serde_json::from_value(note.params.unwrap_or(Value::Null))
         .map_err(|_| "invalid serve completion")?;
     let since = {
-        let mut state = context.state.lock().expect("translator state");
+        let mut state = locked(context.state);
         if let Some(active) = &mut state.active
             && active.session == result.thread_id
             && active.turn == Some(result.turn.id)
@@ -1466,7 +1425,7 @@ fn project_plan(
     if event.kind != "GoalPlanContractRecorded" {
         return Ok(None);
     }
-    let mut state = state.lock().expect("translator state");
+    let mut state = locked(state);
     let Some(active) = state.active.as_mut().filter(|a| {
         a.session == session
             && a.turn
@@ -1531,7 +1490,7 @@ async fn expire_close(
 ) {
     tokio::time::sleep(crate::cli::run_outcome::SHUTDOWN_GRACE).await;
     let active = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(&state);
         if !state
             .active
             .as_ref()
@@ -1572,11 +1531,7 @@ async fn unload(
     id: RequestId,
     session: SessionId,
 ) -> Result<(), String> {
-    state
-        .lock()
-        .expect("translator state")
-        .closing
-        .insert(session);
+    locked(state).closing.insert(session);
     send_request(
         state,
         serve,
@@ -1595,7 +1550,7 @@ async fn finish(
     incomplete: bool,
 ) -> Result<(), String> {
     let active = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         if !state
             .active
             .as_ref()
@@ -1735,7 +1690,7 @@ fn remap(id: RequestId, error: ErrorObject) -> Value {
 }
 
 pub(super) fn cancel_active(state: &Shared) {
-    let mut state = state.lock().expect("translator state");
+    let mut state = locked(state);
     if let Some(active) = &mut state.active {
         active.cancelled = true;
     }
@@ -1749,7 +1704,7 @@ fn project(
     item: Item,
     started: bool,
 ) -> Option<Value> {
-    let mut state = state.lock().expect("translator state");
+    let mut state = locked(state);
     let cwd = &state.sessions.get(&session)?.cwd.clone();
     let active = state
         .active
@@ -1831,7 +1786,7 @@ async fn permission_reply(
         _ => "unavailable",
     };
     let pending = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         if state.active.as_ref().is_some_and(|a| a.cancelled) {
             return Ok(());
         }
@@ -1851,7 +1806,7 @@ async fn permission_reply(
 }
 
 fn withdraw_permission(state: &Shared, id: Option<&RequestId>, force: bool) -> Option<Value> {
-    let mut state = state.lock().expect("translator state");
+    let mut state = locked(state);
     let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
     let pending = state
         .permission
@@ -1873,7 +1828,7 @@ async fn permission_request(
     let intent: arany::EffectIntent = serde_json::from_value(params.intent.clone())
         .map_err(|_| "invalid serve approval intent")?;
     let prepared = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         let valid = state.active.as_ref().is_some_and(|a| {
             a.session == params.thread_id
                 && a.turn.is_none_or(|run| run == params.turn_id)
@@ -1928,7 +1883,7 @@ async fn permission_request(
         return approval_response(serve, request.id, "unavailable").await;
     };
     let delivered = {
-        let mut state = state.lock().expect("translator state");
+        let mut state = locked(state);
         let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
         let live = state
             .permission
