@@ -239,18 +239,19 @@ impl RunConfig {
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
     }
 
-    // Only ChatGPT check evidence carries a window, and it only resizes within the hard ceilings.
     fn context_window_valid(&self) -> bool {
         let ceiling = super::content_ceiling(self.context_window_tokens);
         self.context_window_tokens.is_none_or(|tokens| {
             crate::provider::admitted_context_window(u64::from(tokens)).is_some()
                 && self.custom_profile_provenance.is_none()
-                && self.chatgpt_provenance.is_some()
+                && self
+                    .identity()
+                    .is_some_and(|identity| supports_context_window_evidence(&identity))
                 && self.providers.as_ref().is_none_or(|providers| {
                     providers
                         .primary
                         .iter()
-                        .all(|identity| identity.chatgpt_provenance().is_some())
+                        .all(supports_context_window_evidence)
                 })
         }) && self
             .context_usage
@@ -386,6 +387,15 @@ impl RunConfig {
         }
         self.policy.validate()
     }
+}
+
+fn supports_context_window_evidence(identity: &crate::provider::ProviderIdentity) -> bool {
+    identity.chatgpt_provenance().is_some()
+        || identity.profile == "anthropic"
+            && matches!(
+                identity.provenance,
+                crate::provider::Provenance::Native { .. }
+            )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

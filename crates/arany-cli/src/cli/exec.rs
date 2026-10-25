@@ -1612,6 +1612,7 @@ mod tests {
         );
         let goal = view.goals.last().expect("Failed Goal");
         assert_eq!(goal.status, GoalStatus::Failed);
+        assert!(goal.active_ms >= ACTIVE_LIMIT_MS);
         assert_eq!(
             goal.budget_refusal.expect("budget refusal").dimension,
             arany::GoalLimit::ActiveTime

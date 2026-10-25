@@ -361,7 +361,6 @@ pub(super) struct GoalLedger {
 }
 
 struct State {
-    supervisor: crate::supervisor::SupervisorState,
     view: SessionView,
     in_flight: InFlight,
 }
@@ -426,7 +425,6 @@ impl GoalLedger {
         Self {
             goal_id,
             state: Mutex::new(State {
-                supervisor: Default::default(),
                 view,
                 in_flight: InFlight::default(),
             }),
@@ -454,7 +452,6 @@ impl GoalLedger {
         Ok(read(&state.view))
     }
 
-    // The ledger is fed before any subscriber can see the Event.
     pub(super) fn append<'a>(
         &'a self,
         journal: &'a Journal,
@@ -462,39 +459,24 @@ impl GoalLedger {
         event: Event,
     ) -> super::run_loop::step::BoxedStep<'a, u64> {
         Box::pin(async move {
-            let (committed, fed) = journal
-                .append_then(session_id, event, |envelope| self.committed(envelope))
-                .await?;
-            fed?;
-            let pending = self
-                .state
-                .lock()
-                .map_err(|_| EngineError::CoordinatorFailed)?
-                .supervisor
-                .pending_event();
-            if let Some(event) = pending {
-                let (_, fed) = journal
-                    .append_then(session_id, event, |envelope| self.committed(envelope))
-                    .await?;
-                fed?;
-            }
-            Ok(committed.sequence)
+            self.append_committed(journal, session_id, event)
+                .await
+                .map(|committed| committed.sequence)
         })
     }
 
-    pub(super) fn tool_verdict_follows(
+    // The ledger is fed before any subscriber can see the Event.
+    pub(super) async fn append_committed(
         &self,
-        observation: &crate::tools::ToolObservation,
-    ) -> Result<bool, EngineError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| EngineError::CoordinatorFailed)?;
-        Ok(state.supervisor.tool_verdict_follows(
-            &state.view,
-            state.view.last_sequence + 1,
-            observation,
-        ))
+        journal: &Journal,
+        session_id: SessionId,
+        event: Event,
+    ) -> Result<Arc<EventEnvelope>, EngineError> {
+        let (committed, fed) = journal
+            .append_then(session_id, event, |envelope| self.committed(envelope))
+            .await?;
+        fed?;
+        Ok(committed)
     }
 
     fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
@@ -506,10 +488,6 @@ impl GoalLedger {
             .view
             .apply_committed(envelope)
             .map_err(|_| EngineError::InvalidHistory)?;
-        let State {
-            view, supervisor, ..
-        } = &mut *state;
-        supervisor.after(view, envelope);
         if let Event::RunFinished { .. } = &envelope.event {
             let in_flight = &mut state.in_flight;
             in_flight.run_active_ms = 0;

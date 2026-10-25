@@ -102,7 +102,7 @@ impl Corpus {
     }
 
     pub(crate) fn observe(&mut self, view: &SessionView, envelope: &EventEnvelope) {
-        self.evaluator.after(view, envelope);
+        self.evaluator.decide_verdict(view, envelope);
         match &envelope.event {
             Event::SupervisorVerdictRecorded { verdict, .. } => {
                 if let Some((_, sequence, index)) = self.recent.back()

@@ -447,6 +447,92 @@ fn supervisor_worst_case_verdict_fits_its_byte_bound() {
 }
 
 #[test]
+fn supervisor_roots_initialize_once_and_refresh_only_at_plan_and_run_boundaries() {
+    let fixture = crate::session::worker_protocol_fixture();
+    let envelopes = fixture.envelopes();
+    let mut view = SessionView::replay_open(fixture.session, &envelopes)
+        .unwrap()
+        .unwrap();
+    view.goals[0].plan_contract.as_mut().unwrap().paths = vec!["src".into(), "tests".into()];
+    let mut live = SupervisorState::from_committed(&view);
+    let mut corpus = SupervisorState::default();
+    let started = envelopes
+        .iter()
+        .find(|e| matches!(e.event, Event::RunStarted { .. }))
+        .unwrap();
+    corpus.decide_verdict(&view, started);
+    assert_eq!(live, corpus);
+    assert_eq!(live.declared_roots, 2);
+    view.goals[0]
+        .plan_contract
+        .as_mut()
+        .unwrap()
+        .paths
+        .push("docs".into());
+    for envelope in envelopes.iter().filter(|e| {
+        matches!(
+            e.event,
+            Event::WorkerDataChunk { .. } | Event::ToolFinished { .. }
+        )
+    }) {
+        live.decide_verdict(&view, envelope);
+        corpus.decide_verdict(&view, envelope);
+        assert_eq!(live, corpus);
+        assert_eq!(live.declared_roots, 2);
+    }
+    let plan = envelopes
+        .iter()
+        .find(|e| matches!(e.event, Event::GoalPlanContractRecorded { .. }))
+        .unwrap();
+    live.decide_verdict(&view, plan);
+    corpus.decide_verdict(&view, plan);
+    assert_eq!(live, corpus);
+    assert_eq!(live.declared_roots, 3);
+    live.decide_verdict(&view, started);
+    assert_eq!(live, SupervisorState::from_committed(&view));
+}
+
+#[test]
+fn supervisor_decision_table_keeps_negatives_cap_and_run_actor_scope() {
+    let run = RunId::new();
+    let actor = AgentRunId::new();
+    for (prior, policy, records, capped) in [
+        (0, SupervisorPolicy::default(), true, false),
+        (MAX_VERDICTS - 1, SupervisorPolicy::default(), true, true),
+        (MAX_VERDICTS, SupervisorPolicy::default(), false, false),
+        (0, SupervisorPolicy::all_off(), false, false),
+    ] {
+        let mut state = SupervisorState {
+            verdicts: prior,
+            ..Default::default()
+        };
+        for sequence in 1..=3 {
+            let decision = state.observe(
+                run,
+                actor,
+                sequence,
+                (Site::ToolOutcome, step(sequence, 1, true), None),
+                &policy,
+            );
+            match decision {
+                SupervisorDecision::Continue => assert!(sequence < 3 || !records),
+                SupervisorDecision::Record {
+                    run_id,
+                    agent_run_id,
+                    verdict,
+                } => {
+                    assert!(records);
+                    assert_eq!((run_id, agent_run_id), (run, actor));
+                    assert_eq!(verdict.subject_sequence, 3);
+                    assert_eq!(verdict.capped, capped);
+                    assert!(verdict.valid());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn supervisor_one_crossing_journals_one_verdict_not_a_stream() {
     let policy = SupervisorPolicy::default();
     let mut window = VecDeque::new();

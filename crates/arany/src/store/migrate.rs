@@ -156,6 +156,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
                 source: include_str!("migrate/schema_v5.sql"),
                 sql: include_str!("migrate/schema_v6.sql"),
             },
+            SchemaStep {
+                from: 6,
+                source: include_str!("migrate/schema_v6_source.sql"),
+                sql: include_str!("migrate/schema_v7.sql"),
+            },
         ],
     },
     event_floor: &EVENT_FLOOR,
