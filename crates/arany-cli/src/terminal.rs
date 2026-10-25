@@ -82,6 +82,7 @@ fn pasted_png_path(
     let path = input.trim().trim_matches(['"', '\'']);
     if path.len() > MAX_PASTED_PNG_PATH_BYTES
         || path.contains(char::is_control)
+        || path.contains("://")
         || !path.to_ascii_lowercase().ends_with(".png")
     {
         return Ok(None);
@@ -216,7 +217,15 @@ mod workspace_image_tests {
         }
         assert!(read_pasted_workspace_image("../photo.png", &workspace, identity).is_err());
         assert!(read_pasted_workspace_image("/tmp/photo.png", &workspace, identity).is_err());
-        for path in ["missing.png", "missing/photo.png", "Please resize logo.png"] {
+        for path in [
+            "missing.png",
+            "missing/photo.png",
+            "Please resize logo.png",
+            "https://example.com/a.png",
+            "http://example.com/a.PNG",
+            "'https://example.com/a.png'",
+            "file:///tmp/photo.png",
+        ] {
             assert_eq!(
                 read_pasted_workspace_image(path, &workspace, identity),
                 Ok(None)

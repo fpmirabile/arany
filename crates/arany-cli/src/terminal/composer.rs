@@ -1220,10 +1220,24 @@ impl Composer {
                     self.selected_image = None;
                     return ComposerEdit::Changed;
                 }
-                _ => {
+                TerminalInput::Character(character) if character.is_control() => {
+                    return ComposerEdit::Unchanged;
+                }
+                TerminalInput::Character(_)
+                | TerminalInput::Newline
+                | TerminalInput::WordLeft
+                | TerminalInput::WordRight
+                | TerminalInput::BackspaceWord
+                | TerminalInput::Up
+                | TerminalInput::Down
+                | TerminalInput::Home
+                | TerminalInput::End
+                | TerminalInput::Tab
+                | TerminalInput::Escape => {
                     self.selected_image = None;
                     deselected = true;
                 }
+                _ => return ComposerEdit::Unchanged,
             }
         } else if !self.images.is_empty() {
             match input {
@@ -1422,15 +1436,29 @@ mod tests {
     fn image_focus_changes_redraw_and_submission_retains_the_selected_attachment() {
         let draft = "draft";
         let end = draft.len();
-        for (input, cursor) in [
-            (TerminalInput::Home, 0),
-            (TerminalInput::End, end),
-            (TerminalInput::Up, end),
-            (TerminalInput::Down, end),
-            (TerminalInput::Escape, end),
-            (TerminalInput::WordLeft, 0),
-            (TerminalInput::WordRight, end),
-            (TerminalInput::Tab, end),
+        for (input, cursor, selection) in [
+            (TerminalInput::Home, 0, None),
+            (TerminalInput::End, end, None),
+            (TerminalInput::Up, end, None),
+            (TerminalInput::Down, end, None),
+            (TerminalInput::Escape, end, None),
+            (TerminalInput::WordLeft, 0, None),
+            (TerminalInput::WordRight, end, None),
+            (TerminalInput::Tab, end, None),
+            (TerminalInput::IgnoredKey, end, Some(0)),
+            (
+                TerminalInput::PointerMove { column: 1, row: 1 },
+                end,
+                Some(0),
+            ),
+            (TerminalInput::Resize, end, Some(0)),
+            (TerminalInput::PageUp, end, Some(0)),
+            (TerminalInput::Character('\0'), end, Some(0)),
+            (
+                TerminalInput::ModifiedEnter(NewlineShortcut::AltEnter),
+                end,
+                Some(0),
+            ),
         ] {
             let mut composer = Composer::default();
             composer.insert_literal(draft).unwrap();
@@ -1438,8 +1466,16 @@ mod tests {
             composer
                 .attach_image(arany::test_support::test_image())
                 .unwrap();
-            assert_eq!(composer.apply(input), ComposerEdit::Changed, "{input:?}");
-            assert_eq!(composer.selected_image(), None);
+            assert_eq!(
+                composer.apply(input),
+                if selection.is_some() {
+                    ComposerEdit::Unchanged
+                } else {
+                    ComposerEdit::Changed
+                },
+                "{input:?}"
+            );
+            assert_eq!(composer.selected_image(), selection);
             assert_eq!(composer.text(), draft);
             assert_eq!(composer.cursor_byte_offset(), cursor);
             assert_eq!(composer.images().len(), 1);
