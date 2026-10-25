@@ -240,6 +240,12 @@ impl Config {
         self.git.is_some() && self.workspace_paths == ["."]
     }
 
+    pub(super) fn pinned_gh(&self) -> Option<&Program> {
+        self.commands.iter().find(|program| {
+            program.name == "gh" && !program.interpreter && program.inputs.is_empty()
+        })
+    }
+
     pub(super) fn discover_skills(&mut self, workspace: &std::path::Path) -> Result<(), ToolError> {
         if !self.permits_project_skills() {
             return Ok(());
@@ -344,17 +350,10 @@ impl Config {
                 return self.git_available()
                     && self.write
                     && (!matches!(call, ToolCall::GhPrCreate { .. })
-                        || self
-                            .commands
-                            .iter()
-                            .any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()));
+                        || self.pinned_gh().is_some());
             }
             ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
-                return self.git_available()
-                    && self
-                        .commands
-                        .iter()
-                        .any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty());
+                return self.git_available() && self.pinned_gh().is_some();
             }
             ToolCall::GitStatus { .. }
             | ToolCall::GitDiff { .. }

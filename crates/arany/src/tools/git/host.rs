@@ -1063,11 +1063,7 @@ fn prepare_gh_command<'a>(
     root: &Path,
     call: &ToolCall,
 ) -> Result<(&'a crate::tools::config::Program, Vec<String>), ToolError> {
-    let gh = config
-        .commands
-        .iter()
-        .find(|program| program.name == "gh" && !program.interpreter && program.inputs.is_empty())
-        .ok_or(ToolError::Configuration)?;
+    let gh = config.pinned_gh().ok_or(ToolError::Configuration)?;
     verified_copy(gh, &root.join("gh-executable"))?;
     let args = match call {
         ToolCall::GhPrCreate {
