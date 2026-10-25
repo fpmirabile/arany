@@ -5,9 +5,9 @@ use super::super::{
     threads::{self, Threads},
 };
 use super::{
-    ActiveTurn, ApprovalChannel, ClientMessage, Completion, Fault, Inbound, OutputControl,
-    REWIND_BUSY_QUEUE, Refused, ServerMessage, complete, controls, emit, internal, observe, params,
-    response, send,
+    ActiveTurn, ApprovalChannel, ClientMessage, Completion, DisplayFollower, Fault, Inbound,
+    OutputControl, REWIND_BUSY_QUEUE, Refused, ServerMessage, complete, controls, emit, internal,
+    observe, params, response, send,
 };
 use arany::{
     Engine, EngineError, Event, RunCancellation, RunControls, RunRequest, RunSteering, SessionId,
@@ -25,6 +25,7 @@ struct ServerLoop {
     opt_out: Vec<String>,
     initialized: bool,
     host_session_approval: bool,
+    provisional_display: bool,
     next_server_id: Arc<std::sync::atomic::AtomicI64>,
     // Drop workers and the active turn before releasing the Engine.
     workers: tokio::task::JoinSet<Result<arany::RunResult, EngineError>>,
@@ -55,6 +56,7 @@ impl ServerLoop {
                 Event(Option<Tapped>),
                 Committed(Option<Tapped>),
                 Done(Result<Option<Refused>, EngineError>),
+                Display(Option<arany::RunId>, DisplayUpdate),
             }
             let next = if let Some(turn) = self.active.as_mut() {
                 tokio::select! { biased;
@@ -63,6 +65,7 @@ impl ServerLoop {
                     event = turn.events.next() => Next::Event(event),
                     event = self.committed.next() => Next::Committed(event),
                     result = self.workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(Refused::from_result)),
+                    (run, update) = async { turn.display.as_mut().expect("display follower").next().await }, if turn.display.is_some() => Next::Display(run, update),
                 }
             } else {
                 if self.shutdown {
@@ -90,6 +93,7 @@ impl ServerLoop {
                 Next::Committed(Some(event)) => self.on_committed_event(event).await?,
                 Next::Committed(None) => return Err("committed Event stream closed".into()),
                 Next::Done(result) => self.on_run_finished(result).await?,
+                Next::Display(run, update) => self.on_display(run, update),
             }
         }
         Ok(())
@@ -198,6 +202,10 @@ impl ServerLoop {
             return Err(Fault::state(Reason::AlreadyInitialized));
         }
         let params: InitializeParams = params(request.params)?;
+        self.provisional_display = params
+            .capabilities
+            .as_ref()
+            .is_some_and(|c| c.provisional_display);
         self.host_session_approval = params
             .capabilities
             .as_ref()
@@ -489,7 +497,50 @@ impl ServerLoop {
 
     async fn start_turn(&mut self, request: Request) -> Result<Option<Value>, Fault> {
         let id = request.id.clone();
-        let mut input = controls::Submission::parse(&request.method, request.params)?;
+        let (request, controls, inbox, first_sequence) =
+            self.prepare_turn(&request.method, request.params).await?;
+        let thread_id = request.session_id.expect("loaded thread");
+        let submitted_goal = request.goal.id;
+        let providers = self.threads.map[&thread_id].providers.clone();
+        let display = controls.hints.clone().map(DisplayFollower::new);
+        let approval_mode = controls.approvals.clone().expect("approval channel");
+        let steering = controls.steering.clone().expect("steering channel");
+        let approval_end = RunCancellation::new();
+        let SubmittedRun {
+            result,
+            events,
+            cancel,
+        } = self
+            .submit_run(providers, request, controls, approval_end.clone())
+            .await?;
+        let approvals = self.start_approvals(inbox, cancel.clone(), thread_id, approval_end);
+        self.active = Some(ActiveTurn {
+            thread_id,
+            result,
+            events,
+            display,
+            cancel,
+            approvals: Arc::new(approvals),
+            approval_mode,
+            steering,
+            pending_start: Some(id.clone()),
+            result_done: false,
+            pending_close: None,
+            state: TurnState {
+                goal_id: submitted_goal,
+                first_sequence: Some(first_sequence),
+                ..Default::default()
+            },
+        });
+        Ok(None)
+    }
+
+    async fn prepare_turn(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(RunRequest, RunControls, arany::ApprovalInbox, u64), Fault> {
+        let mut input = controls::Submission::parse(method, params)?;
         if self.active.is_some() {
             return Err(Fault::state(Reason::Busy));
         }
@@ -505,9 +556,10 @@ impl ServerLoop {
             return Err(Fault::engine(EngineError::ProviderSetupBlocked));
         }
         let goal = input.goal(loaded, &view)?;
-        let submitted_goal = goal.id;
         let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
-        let approvals = if self.host_session_approval {
+        let approvals = if self.threads.approval_channel == ApprovalChannel::Terminal {
+            approvals
+        } else if self.host_session_approval {
             approvals.without_prefix_rules()
         } else {
             approvals.once_only()
@@ -521,7 +573,7 @@ impl ServerLoop {
             .last_sequence
             .checked_add(1)
             .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?;
-        let providers = loaded.providers.clone();
+
         let request = RunRequest {
             skill: None,
             session_id: Some(input.thread_id),
@@ -535,41 +587,17 @@ impl ServerLoop {
             goal,
         };
         let steering = RunSteering::new();
+        let hints = (self.provisional_display
+            && !self.opt_out.iter().any(|method| method == "turn/display"))
+        .then(arany::RunHints::with_previews);
         let controls = RunControls {
             tools: loaded.grant.clone(),
-            approvals: Some(approvals.clone()),
-            steering: Some(steering.clone()),
+            approvals: Some(approvals),
+            steering: Some(steering),
             cancellation: RunCancellation::new(),
-            hints: None,
+            hints,
         };
-        let approval_end = RunCancellation::new();
-        let SubmittedRun {
-            result,
-            events,
-            cancel,
-        } = self
-            .submit_run(providers, request, controls, approval_end.clone())
-            .await?;
-        let approval_mode = approvals;
-        let approvals = self.start_approvals(inbox, cancel.clone(), input.thread_id, approval_end);
-        self.active = Some(ActiveTurn {
-            thread_id: input.thread_id,
-            result,
-            events,
-            cancel,
-            approvals: Arc::new(approvals),
-            approval_mode,
-            steering,
-            pending_start: Some(id.clone()),
-            result_done: false,
-            pending_close: None,
-            state: TurnState {
-                goal_id: submitted_goal,
-                first_sequence: Some(first_sequence),
-                ..Default::default()
-            },
-        });
-        Ok(None)
+        Ok((request, controls, inbox, first_sequence))
     }
 
     async fn submit_run(
@@ -627,7 +655,7 @@ impl ServerLoop {
             approvals::Channel {
                 outbound: self.outbound.clone(),
                 next_id: self.next_server_id.clone(),
-                withdrawals: self.threads.approval_channel == ApprovalChannel::Restricted,
+                approval_channel: self.threads.approval_channel,
             },
             approval_end,
             {
@@ -652,6 +680,24 @@ impl ServerLoop {
         turn.approvals.close();
         turn.cancel.cancel();
         Ok(Some(json!({})))
+    }
+
+    fn on_display(&self, run: Option<arany::RunId>, update: DisplayUpdate) {
+        let turn = self.active.as_ref().expect("active turn");
+        let Some(turn_id) = run.or(turn.state.run_id) else {
+            return;
+        };
+        let message = Message::Notification(notification(
+            "turn/display",
+            TurnDisplayNotification {
+                thread_id: turn.thread_id,
+                turn_id,
+                update,
+            },
+        ));
+        if encode_line(&message).is_ok() {
+            let _ = self.outbound.try_send(message);
+        }
     }
 
     async fn on_run_event(&mut self, event: Tapped) -> Result<(), String> {
@@ -848,6 +894,7 @@ pub(in crate::cli) async fn run_configured(
         next_server_id: Arc::new(std::sync::atomic::AtomicI64::new(1)),
         initialized: false,
         host_session_approval: false,
+        provisional_display: false,
         opt_out: Vec::new(),
         shutdown: false,
     };
