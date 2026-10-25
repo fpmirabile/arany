@@ -6,6 +6,8 @@ use std::fmt::Write;
 pub(crate) const MAX_USAGE_PAGE_BYTES: usize = 8 * 1024;
 const MAX_USAGE_GROUPS: usize = 16;
 const MAX_FRESH_LIMIT_AGE_SECONDS: i64 = 15 * 60;
+const FIVE_HOUR_WINDOW_MINUTES: u32 = 300;
+const WEEKLY_WINDOW_MINUTES: u32 = 10_080;
 
 pub(crate) fn grouped_count(value: u64) -> String {
     let digits = value.to_string();
@@ -254,6 +256,9 @@ fn plan_limits_summary(
     run: Option<&arany::RunView>,
     now: Option<i64>,
 ) -> String {
+    if !status_route_is_chatgpt(view, run) {
+        return String::new();
+    }
     let mut summary = String::from("Plan limits remaining:\n");
     let account = status_account(view, run);
     let windows = account.map_or([None, None], |account| {
@@ -273,7 +278,7 @@ fn plan_limits_summary(
     if windows
         .iter()
         .flatten()
-        .all(|(_, window)| window.window_minutes != Some(10_080))
+        .all(|(_, window)| window.window_minutes != Some(WEEKLY_WINDOW_MINUTES))
     {
         summary.push_str("Weekly: unknown (not reported)\n");
     }
@@ -309,6 +314,14 @@ fn plan_limits_summary(
         summary.push_str(&unavailable_limits_line(failure));
     }
     summary
+}
+
+fn status_route_is_chatgpt(view: &SessionView, run: Option<&arany::RunView>) -> bool {
+    let provider = match run {
+        Some(run) => run.config.as_ref().map(|config| config.provider.as_str()),
+        None => view.defaults.provider.as_deref(),
+    };
+    provider.and_then(ProviderKind::parse) == Some(ProviderKind::ChatGpt)
 }
 
 fn status_account(view: &SessionView, run: Option<&arany::RunView>) -> Option<uuid::Uuid> {
@@ -440,8 +453,8 @@ fn append_plan_window(
     now: Option<i64>,
 ) {
     let name = match window.window_minutes {
-        Some(300) => "5-hour".into(),
-        Some(10_080) => "Weekly".into(),
+        Some(FIVE_HOUR_WINDOW_MINUTES) => "5-hour".into(),
+        Some(WEEKLY_WINDOW_MINUTES) => "Weekly".into(),
         Some(minutes) => format!("{minutes}-minute"),
         None => "Window duration unknown".into(),
     };
@@ -526,7 +539,7 @@ fn plan_section(
     if !windows
         .iter()
         .flatten()
-        .any(|window| window.window_minutes == Some(10_080))
+        .any(|window| window.window_minutes == Some(WEEKLY_WINDOW_MINUTES))
     {
         text.push_str("ChatGPT weekly: unknown (not reported)\n");
     }
@@ -544,8 +557,8 @@ fn plan_section(
 
 fn window_lines(text: &mut String, window: &arany::PlanWindow, now: Option<i64>) {
     let label = match window.window_minutes {
-        Some(300) => "5-hour".into(),
-        Some(10_080) => "weekly".into(),
+        Some(FIVE_HOUR_WINDOW_MINUTES) => "5-hour".into(),
+        Some(WEEKLY_WINDOW_MINUTES) => "weekly".into(),
         Some(minutes) => format!("{minutes}-minute window"),
         None => "window duration unknown".into(),
     };
@@ -672,6 +685,7 @@ mod tests {
         assert!(summary[0].contains("Weekly: 30% left"));
         assert!(summary[0].ends_with("/usage for details\n"));
         assert!(!summary[0].contains("Session totals"));
+        assert_status_plan_provider_scope(&view);
 
         let mut rejected_metadata = view.clone();
         rejected_metadata
@@ -795,6 +809,48 @@ mod tests {
         }
         assert_eq!(view, before);
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    }
+
+    fn assert_status_plan_provider_scope(view: &SessionView) {
+        for (provider, has_plan) in [
+            ("openai", false),
+            ("anthropic", false),
+            ("custom", false),
+            ("chatgpt", true),
+        ] {
+            let mut selected = view.clone();
+            selected.defaults.provider = Some("chatgpt".into());
+            let config = selected.runs.last_mut().unwrap().config.as_mut().unwrap();
+            config.provider = provider.into();
+            config.chatgpt_provenance = None;
+            let summary = usage_pages_at(&selected, true, None, Some(1000)).concat();
+            assert_eq!(
+                summary.contains("Plan limits remaining:"),
+                has_plan,
+                "{provider}"
+            );
+            assert_eq!(
+                summary.contains("Weekly: unknown (not reported)"),
+                has_plan,
+                "{provider}"
+            );
+            assert!(!summary.contains("74.5% left"));
+        }
+        let mut unconfigured = view.clone();
+        unconfigured.defaults.provider = Some("chatgpt".into());
+        unconfigured.runs.last_mut().unwrap().config = None;
+        let summary = usage_pages_at(&unconfigured, true, None, Some(1000)).concat();
+        assert!(!summary.contains("Plan limits remaining:"));
+        for (provider, has_plan) in [("openai", false), ("chatgpt", true)] {
+            unconfigured.defaults.provider = Some(provider.into());
+            let summary =
+                usage_pages_at(&unconfigured, true, Some(view.last_sequence), Some(1000)).concat();
+            assert_eq!(
+                summary.contains("Plan limits remaining:"),
+                has_plan,
+                "{provider}"
+            );
+        }
     }
 
     #[test]
