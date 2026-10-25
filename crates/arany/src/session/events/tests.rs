@@ -429,8 +429,8 @@ mod goal_success_tests {
         assert_eq!(event.scope(), (Some(run_id), Some(agent_run_id)));
         let payload = event.payload().unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
-            serde_json::json!({"goal_id":goal_id,"text":"literal /grant all"})
+            payload,
+            format!(r#"{{"goal_id":"{goal_id}","text":"literal /grant all"}}"#)
         );
         assert_eq!(
             Event::decode(event.kind(), 1, &payload, Some(run_id), Some(agent_run_id)).unwrap(),
@@ -476,8 +476,8 @@ mod goal_success_tests {
         assert_eq!(event.scope(), (Some(run_id), None));
         let payload = event.payload().unwrap();
         assert_eq!(
-            Event::decode(event.kind(), event.version(), &payload, Some(run_id), None).unwrap(),
-            event
+            payload,
+            format!(r#"{{"goal_id":"{goal_id}","text":"use the smaller fixture"}}"#)
         );
 
         assert!(note("").validate().is_err());
@@ -1731,6 +1731,7 @@ mod payload_version_tests {
             title: "renamed".into(),
         };
         let payload = event.payload().expect("payload");
+        assert_eq!(payload, r#"{"title":"renamed"}"#);
         let version = payload_version(event.kind()).expect("known kind");
         assert_eq!(
             Event::decode(event.kind(), version, &payload, None, None).expect("current replay"),
@@ -2947,12 +2948,51 @@ fn accepted_message_requires_current_nullable_skill() {
         );
         assert!(Event::decode("MessageAccepted", 6, &payload.to_string(), run_id, None).is_err());
     }
+    for fixture in [
+        r#"{"skill":null,"text":"do X","images":[]}"#,
+        r#"{"skill":"ask-matt","text":"do X","images":[]}"#,
+    ] {
+        assert_eq!(
+            Event::decode("MessageAccepted", 7, fixture, run_id, None)
+                .unwrap()
+                .payload()
+                .unwrap(),
+            fixture
+        );
+        assert!(Event::decode("MessageAccepted", 6, fixture, run_id, None).is_err());
+    }
     for payload in [
         serde_json::json!({"text":"do X", "images":[]}),
         serde_json::json!({"text":"do X", "images":[], "skill":"../escape"}),
         serde_json::json!({"text":"do X", "images":[], "skill":false}),
     ] {
         assert!(Event::decode("MessageAccepted", 7, &payload.to_string(), run_id, None).is_err());
+    }
+}
+
+#[test]
+fn remaining_borrowed_payloads_match_fixed_bytes() {
+    const RECORD: &str = r#"{"covered_run_id":"01900000-0000-7000-8000-000000000001","covered_sequence":1,"source_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"provider":"openai","model":"model","prompt_version":1,"schema_version":1,"compiler_version":3,"source_bytes":4,"source_tokens_estimate":1,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"response_id":null,"wire_provenance":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","status":{"status":"failed","reason":"provider_unavailable"}}"#;
+    let (run, agent) = (Some(RunId::new()), Some(AgentRunId::new()));
+    let cases = [
+        ("SessionStarted", r#"{"title":"started","workspace_device":1,"workspace_inode":2}"#.into(), None, None),
+        ("SessionForked", r#"{"title":"forked","source_session_id":"01900000-0000-7000-8000-000000000003","source_run_id":"01900000-0000-7000-8000-000000000004","source_sequence":3,"prefix_digest":[4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]}"#.into(), None, None),
+        ("ContextCompacted", format!(r#"{{"record":{RECORD},"active_ms":null}}"#), None, None),
+        ("ContextCompacted", format!(r#"{{"record":{RECORD},"active_ms":9}}"#), None, None),
+        ("GoalContextCompacted", format!(r#"{{"goal_id":"01900000-0000-7000-8000-000000000002","covered_tool_count":1,"record":{RECORD}}}"#), run, None),
+        ("MessageCommitted", r#"{"text":"committed"}"#.into(), run, None),
+        ("AgentFinished", r#"{"worker":null,"disposition":"finished","summary":"done","result":"answer"}"#.into(), run, agent),
+        ("AgentFinished", r#"{"worker":{"cleanup":null,"disposition":"failed","cause":"tool_failed","data":null},"disposition":"failed","summary":null,"result":null}"#.into(), run, agent),
+    ];
+    for (kind, fixture, run, agent) in cases {
+        assert_eq!(
+            Event::decode(kind, payload_version(kind).unwrap(), &fixture, run, agent)
+                .unwrap()
+                .payload()
+                .unwrap(),
+            fixture,
+            "{kind}"
+        );
     }
 }
 
