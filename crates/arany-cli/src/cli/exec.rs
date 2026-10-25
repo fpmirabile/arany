@@ -1439,6 +1439,54 @@ mod tests {
         assert_eq!(error, "Goal is not available for explicit resume");
     }
 
+    async fn exec_with_exhaustion_at_finish(
+        mut exec: ExecArgs,
+        provider: Arc<dyn Provider>,
+        elapsed: std::time::Duration,
+    ) -> CommandOutput {
+        let engine = arany::test_support::engine::open(
+            StateRoot::admit(exec.state_dir.as_ref().expect("state path")).expect("state"),
+            EngineConfig {
+                guard_executable: std::env::current_exe().ok(),
+                ..EngineConfig::default()
+            },
+        )
+        .expect("engine");
+        let session = engine
+            .create_session(exec.workspace.clone().expect("Workspace"), None)
+            .await
+            .expect("Session");
+        exec.session_id = Some(session.to_string());
+        let admission = exec.admit().expect("valid autonomous command");
+        let (entered, release) =
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(
+                    event,
+                    arany::Event::AgentFinished {
+                        disposition: arany::AgentDisposition::Finished,
+                        ..
+                    }
+                )
+            });
+        let running = run_on_engine(
+            exec,
+            admission,
+            AdmittedProviders::single(provider),
+            engine,
+            None,
+        );
+        tokio::pin!(running);
+        tokio::select! {
+            result = &mut running => panic!("exec ended before terminal settlement: {:?}", result.err()),
+            entered = entered => entered.expect("accepted answer reached terminal settlement"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(elapsed).await;
+        tokio::time::resume();
+        release.send(()).expect("release terminal acknowledgment");
+        running.await.expect("Finished Run with an exhausted Goal")
+    }
+
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
         use std::os::unix::fs::PermissionsExt;
@@ -1486,19 +1534,20 @@ mod tests {
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
-        .with_profile("openai", "gpt-5.4")
-        .with_clock_advance_before_call(1, std::time::Duration::from_secs(59));
+        .with_profile("openai", "gpt-5.4");
         let mut exec = args(state_dir.clone(), workspace.clone(), "Inspect the notes");
         exec.prompt = None;
         exec.goal = Some("Inspect the notes".into());
         exec.output = OutputArg::Jsonl;
         exec.tools = true;
-        let admission = exec.admit().expect("valid autonomous command");
-        let report = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled())
-            .await
-            .expect("completed Run with an exhausted Goal");
+        let report = exec_with_exhaustion_at_finish(
+            exec,
+            Arc::new(provider),
+            std::time::Duration::from_millis(budget.max_active_ms.expect("finite active budget")),
+        )
+        .await;
         let first_event: serde_json::Value =
-            serde_json::from_str(report.stdout.lines().next().expect("SessionStarted line"))
+            serde_json::from_str(report.stdout.lines().next().expect("first Event line"))
                 .expect("JSONL Event");
         let session_id =
             SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
@@ -1506,9 +1555,11 @@ mod tests {
         let (_, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
         let run = view.runs.last().expect("Finished Run");
         assert_eq!(run.status, RunStatus::Finished);
+        let goal = view.goals.last().expect("Failed Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
         assert_eq!(
-            view.goals.last().expect("Failed Goal").status,
-            GoalStatus::Failed
+            goal.budget_refusal.expect("budget refusal").dimension,
+            arany::GoalLimit::ActiveTime
         );
         let feedback =
             crate::presentation::session_run_feedback(&view, run).expect("budget refusal feedback");
