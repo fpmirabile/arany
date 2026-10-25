@@ -70,6 +70,9 @@ transitions. `GoalLedger` admits, reserves and settles actions over the reducer'
 approval, dispatch, committed observation and continuation have one owner.
 Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
 it during admission, so the source dependency points from Engine to Tools.
+Engine permission selection, host session reuse and remembering eligibility live
+in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
+shared ask and dispatch flow.
 Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file or command view and its private cache restore, attests private mutation/capture and publishes only the primary's eligible changeset. Editor commands use the shared permission and delegated hook path; the coordinator gates answer on private evidence before handover, while primary verification remains independent. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
