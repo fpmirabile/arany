@@ -10,6 +10,8 @@
       "enum": [
         "accept",
         "acceptForSession",
+        "allowPrefixInFolder",
+        "unavailable",
         "decline",
         "cancel"
       ],
@@ -18,6 +20,9 @@
     "ApprovalParams": {
       "additionalProperties": false,
       "properties": {
+        "allowAutoEdits": {
+          "type": "boolean"
+        },
         "availableDecisions": {
           "items": {
             "$ref": "#/$defs/ApprovalDecision"
@@ -94,6 +99,9 @@
             "array",
             "null"
           ]
+        },
+        "provisionalDisplay": {
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -130,6 +138,89 @@
         "team"
       ],
       "type": "string"
+    },
+    "DisplayPreview": {
+      "additionalProperties": false,
+      "properties": {
+        "agentRunId": {
+          "type": "string"
+        },
+        "answer": {
+          "type": "string"
+        },
+        "callIndex": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "commentary": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "commentaryLimited": {
+          "type": "boolean"
+        },
+        "tentative": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "agentRunId",
+        "callIndex",
+        "answer",
+        "commentary",
+        "commentaryLimited",
+        "tentative"
+      ],
+      "type": "object"
+    },
+    "DisplayUpdate": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "preview": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DisplayPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "const": "preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "intentId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "waiting",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Empty": {
       "additionalProperties": false,
@@ -2380,6 +2471,26 @@
       ],
       "type": "object"
     },
+    "TurnDisplayNotification": {
+      "additionalProperties": false,
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "update": {
+          "$ref": "#/$defs/DisplayUpdate"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "update"
+      ],
+      "type": "object"
+    },
     "TurnError": {
       "additionalProperties": false,
       "properties": {
@@ -2737,6 +2848,11 @@
     "turn/completed": {
       "params": {
         "$ref": "#/$defs/TurnNotification"
+      }
+    },
+    "turn/display": {
+      "params": {
+        "$ref": "#/$defs/TurnDisplayNotification"
       }
     },
     "turn/started": {
