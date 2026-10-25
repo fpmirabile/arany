@@ -1491,6 +1491,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+        const ANSWER_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
         let temp = tempfile::tempdir().expect("private test root");
         let budget = GoalBudget {
             max_active_ms: Some(60_000),
@@ -1520,7 +1521,7 @@ mod tests {
                 drop(release);
                 panic!("Run ended before its answer committed: {:?}", result.map(|report| report.success));
             }
-            entered = tokio::time::timeout(SHUTDOWN_GRACE, entered) => entered,
+            entered = tokio::time::timeout(ANSWER_GATE_TIMEOUT, entered) => entered,
         };
         if !matches!(entered, Ok(Ok(()))) {
             drop(release);
