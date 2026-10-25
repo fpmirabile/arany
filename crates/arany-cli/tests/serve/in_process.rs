@@ -2251,9 +2251,9 @@ async fn failed_accepted_turns_complete_with_error_guidance_instead_of_rpc_error
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = root.path().join("state");
-        StateRoot::admit(&state).unwrap().record(arany::RecordKind::UiPreferences).replace(&serde_json::to_vec(&json!({"version":4,"preferences":{
+        StateRoot::admit(&state).unwrap().record(arany::RecordKind::UiPreferences).replace(&serde_json::to_vec(&json!({"version":6,"preferences":{
         "completion":"tabs", "view":"fullscreen", "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-        "resources":arany::ToolResourceSettings::default(), "mouse":"wheel_and_clicks", "copy_on_select":true
+        "resources":arany::ToolResourceSettings::default(), "copy_on_select":true,"newline":"shift_enter"
     }})).unwrap()).unwrap();
         let provider = Arc::new(
             ScriptedProvider::new(if budget_stop {

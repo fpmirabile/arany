@@ -1011,21 +1011,30 @@ impl RunLoop<'_> {
         deadline: Option<&crate::engine::ledger::ActiveDeadline>,
         approvals: &crate::tools::ToolApprovals,
     ) -> Result<(ApprovalReply, Option<ApprovalWithdrawal>), EngineError> {
+        use crate::tools::ApprovalWaitReply;
+
         let mut cancellation = self.controls.cancellation.clone();
         let activity_started = self.ledger().active_elapsed();
         let wall_started = Instant::now();
         let mut pending = approvals.begin_local(intent, false, None).await;
         let (reply, interrupted) = tokio::select! {
             biased;
-            () = cancellation.cancelled() => (ApprovalReply::Unavailable, true),
-            () = self.approval_paused() => (ApprovalReply::Unavailable, true),
+            () = cancellation.cancelled() => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
+            () = self.approval_paused() => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = async {
                 match deadline {
                     Some(deadline) => deadline.elapsed().await,
                     None => std::future::pending().await,
                 }
-            } => (ApprovalReply::Unavailable, true),
+            } => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             reply = pending.reply() => (reply, false),
+        };
+        let reply = match reply {
+            ApprovalWaitReply::Replied(reply) => reply,
+            ApprovalWaitReply::Closed => {
+                self.controls.cancellation.cancel();
+                ApprovalReply::Unavailable
+            }
         };
         let active_during = self
             .ledger()

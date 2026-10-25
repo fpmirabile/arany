@@ -35,10 +35,10 @@ mod tests;
 
 use crate::session::{AgentRunId, RunId, WorkspaceIdentity};
 use crate::store::StateRoot;
-pub(crate) use approval::ApprovalWithdrawal;
 pub use approval::{
     ApprovalInbox, ApprovalMode, ApprovalReply, ToolApproval, ToolApprovals, UnguardedPrompt,
 };
+pub(crate) use approval::{ApprovalWaitReply, ApprovalWithdrawal};
 pub use cancel::Cancellation;
 use config::Config;
 pub(crate) use git::host::sweep_stale as sweep_host_scratch;
