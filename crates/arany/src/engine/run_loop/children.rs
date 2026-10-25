@@ -28,6 +28,7 @@ use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::Instant;
 
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
+const MAX_CHILD_TOOL_FACTS: usize = 8;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
 pub(crate) const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
@@ -2317,16 +2318,29 @@ impl RunLoop<'_> {
                         .summary
                         .clone()
                         .unwrap_or_else(|| "Worker did not finish".into()),
-                    result: if let Some(history) = workers.iter().find(|w| w.assignment_id == a.id) {
-                        let mut report = format!("{}\n{}", history.description(), a.result.as_deref().unwrap_or("Unpublished private work discarded"));
+                    result: {
+                        let history = workers.iter().find(|w| w.assignment_id == a.id);
+                        let tool_facts = child_tool_facts(&a.tools);
+                        let result = a.result.as_deref().unwrap_or(if history.is_some() {
+                            "Unpublished private work discarded"
+                        } else {
+                            ""
+                        });
+                        let mut report = [
+                            history.map(|history| history.description()).unwrap_or_default(),
+                            tool_facts,
+                            result.to_owned(),
+                        ]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
                         let mut end = report.len().min(MAX_CHILD_RESULT_BYTES);
                         while !report.is_char_boundary(end) {
                             end -= 1;
                         }
                         report.truncate(end);
                         report
-                    } else {
-                        a.result.clone().unwrap_or_default()
                     },
                 }))
                 .collect::<Vec<_>>();
@@ -2952,6 +2966,101 @@ impl RunLoop<'_> {
     }
 }
 
+fn child_tool_facts(tools: &[crate::session::ToolView]) -> String {
+    use crate::tools::ToolDisposition;
+
+    let facts: Vec<_> = tools
+        .iter()
+        .filter_map(|tool| {
+            let observation = tool.observation.as_ref()?;
+            let command_failure = child_command_failure(tool);
+            let cause = match observation.disposition {
+                ToolDisposition::Succeeded if command_failure.is_none() => return None,
+                ToolDisposition::Succeeded => "succeeded",
+                ToolDisposition::Denied => tool
+                    .model_denial_output()
+                    .or_else(|| {
+                        observation
+                            .enforcement_cause
+                            .map(|cause| cause.diagnostic())
+                    })
+                    .unwrap_or("denied; cause unavailable"),
+                ToolDisposition::Limit => match observation.limit_cause {
+                    Some(crate::tools::LimitCause::Timeout) => "limit: timeout",
+                    Some(crate::tools::LimitCause::OutputCeiling) => "limit: output ceiling",
+                    Some(crate::tools::LimitCause::ContextFull) => "limit: context full",
+                    Some(crate::tools::LimitCause::ReadCapacity) => "limit: read capacity",
+                    Some(crate::tools::LimitCause::RequestedTime) => "limit: requested time",
+                    Some(crate::tools::LimitCause::Resource) => "limit: resource",
+                    None => "limit reached",
+                },
+                ToolDisposition::Conflict => "conflict",
+                ToolDisposition::Failed => observation
+                    .enforcement_cause
+                    .map_or("failed", |cause| cause.diagnostic()),
+                ToolDisposition::Cancelled => "cancelled",
+                ToolDisposition::Uncertain => "uncertain; outcome unknown and not retried",
+            };
+            let mut fact = format!("Tool {}: {cause}", tool.intent.call.label());
+            if let Some(details) = command_failure {
+                fact.push_str("; ");
+                fact.push_str(&details);
+            }
+            Some(fact)
+        })
+        .collect();
+    if facts.is_empty() {
+        return String::new();
+    }
+    let omitted = facts.len().saturating_sub(MAX_CHILD_TOOL_FACTS);
+    let mut report = String::from("Recent child Tool outcomes:");
+    for fact in facts.iter().rev().take(MAX_CHILD_TOOL_FACTS) {
+        report.push_str("\n- ");
+        report.push_str(fact);
+    }
+    if omitted > 0 {
+        report.push_str(&format!("\n- {omitted} earlier Tool outcome(s) omitted."));
+    }
+    report
+}
+
+fn child_command_failure(tool: &crate::session::ToolView) -> Option<String> {
+    use crate::worker::{PrivateCapture, PrivateCaptureRejection, WorkerCommandResult};
+
+    let observation = tool.observation.as_ref()?;
+    if !matches!(
+        observation.attestation,
+        Some(crate::tools::Attestation::WorkerCommand { .. })
+    ) || !observation.attested_for(&tool.intent)
+    {
+        return None;
+    }
+    let result =
+        WorkerCommandResult::parse(&observation.output).filter(WorkerCommandResult::valid)?;
+    let rejection = match result.private_capture {
+        PrivateCapture::Rejected { cause } => Some(match cause {
+            PrivateCaptureRejection::OutOfLease => "out_of_lease",
+            PrivateCaptureRejection::Overflow => "overflow",
+            PrivateCaptureRejection::UnsupportedEntry => "unsupported_entry",
+        }),
+        PrivateCapture::None {} | PrivateCapture::Sealed { .. } => None,
+    };
+    if result.exit_code == Some(0) && rejection.is_none() {
+        return None;
+    }
+    let mut details = format!(
+        "exit code {}",
+        result
+            .exit_code
+            .map_or_else(|| "unknown".into(), |code| code.to_string())
+    );
+    if let Some(cause) = rejection {
+        details.push_str("; private capture rejected: ");
+        details.push_str(cause);
+    }
+    Some(details)
+}
+
 fn classify_join(
     joined: Result<(Id, crate::engine::routing::AttemptResult), JoinError>,
 ) -> (Id, crate::engine::routing::AttemptResult) {
@@ -2998,6 +3107,98 @@ fn active_deadline_allowance(
         ActiveReservationLimit::ActionBound => ActiveDeadlineCause::Delegation,
     };
     (allowance_ms, cause)
+}
+
+#[cfg(test)]
+mod child_tool_report_tests {
+    use super::*;
+
+    #[test]
+    fn approved_execution_denial_is_reported_without_inventing_a_permission_refusal() {
+        use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
+        use crate::tools::{
+            Attestation, CacheUpdate, EffectIntent, EnforcementCause, GuardReceipt, ToolCall,
+            ToolDisposition, ToolLimits, ToolObservation,
+        };
+
+        let intent = EffectIntent {
+            host: None,
+            host_command: None,
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::List {
+                path: "notes".into(),
+            },
+            limits: ToolLimits::default(),
+            use_count: 1,
+        };
+        let denied = crate::session::ToolView {
+            checkpoint: None,
+            intent: intent.clone(),
+            observation: Some(ToolObservation {
+                intent: intent.clone(),
+                disposition: ToolDisposition::Denied,
+                enforcement_cause: Some(EnforcementCause::FilesystemDenied),
+                limit_cause: None,
+                output: "Guard enforcement: protected filesystem path refused".into(),
+                attestation: Some(Attestation::Guard(GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                })),
+                approval_cause: None,
+                cache_update: CacheUpdate::NotApplicable,
+            }),
+            review_call_index: None,
+            permission_verdict: Some(PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                decision: Decision::Allow,
+                mode: None,
+                basis: PermissionSource::Human,
+                source: PermissionSource::Human,
+                approved: true,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+            hooks: Vec::new(),
+            hook_sequence: None,
+            finished_sequence: Some(1),
+        };
+
+        for (cause, disposition) in [
+            (EnforcementCause::FilesystemDenied, ToolDisposition::Denied),
+            (EnforcementCause::GuardBootstrap, ToolDisposition::Failed),
+        ] {
+            let mut tool = denied.clone();
+            let observation = tool.observation.as_mut().unwrap();
+            observation.enforcement_cause = Some(cause);
+            observation.disposition = disposition;
+            if cause == EnforcementCause::GuardBootstrap {
+                observation.attestation = None;
+            }
+            assert!(observation.valid());
+            assert_eq!(tool.model_denial_output(), None);
+            let report = child_tool_facts(&[tool]);
+            assert_eq!(
+                report,
+                format!(
+                    "Recent child Tool outcomes:\n- Tool list: {}",
+                    cause.diagnostic()
+                )
+            );
+            assert!(!report.contains("no operation was dispatched"));
+            assert!(!report.contains("protected filesystem path"));
+        }
+    }
 }
 
 fn restrict_catalog(

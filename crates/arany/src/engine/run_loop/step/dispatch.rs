@@ -293,10 +293,7 @@ impl<'a> DispatchFacts<'a> {
             });
         }
         if self.human_only_unavailable {
-            return Err(refuse(
-                NotDispatched::HumanOnlyUnavailable,
-                (self.site == DispatchSite::Researcher).then_some(StopCause::ToolStopped),
-            ));
+            return Err(refuse(NotDispatched::HumanOnlyUnavailable, None));
         }
         if let Some(unguarded) = &self.unguarded
             && let Err(refusal) = &unguarded.gate
@@ -420,10 +417,10 @@ fn dispatch_gate<'a>(
     active_time_exhausted: bool,
 ) -> Result<Dispatch, Refusal<'a>> {
     let refused = |reason| {
-        let stop = if facts.site == DispatchSite::Primary && recoverable_primary_refusal(&reason) {
-            None
-        } else {
-            Some(refusal_cause(after.paused, after.cancelled, after.deadline))
+        let stop = match facts.site {
+            DispatchSite::Primary if recoverable_primary_refusal(&reason) => None,
+            DispatchSite::Researcher if recoverable_child_refusal(&reason) => None,
+            _ => Some(refusal_cause(after.paused, after.cancelled, after.deadline)),
         };
         Err(refuse(reason, stop))
     };
@@ -479,6 +476,15 @@ fn dispatch_gate<'a>(
             NotDispatched::ApprovalRefused
         }),
     }
+}
+
+fn recoverable_child_refusal(reason: &NotDispatched) -> bool {
+    matches!(
+        reason,
+        NotDispatched::HumanOnlyUnavailable
+            | NotDispatched::ApprovalUnavailable
+            | NotDispatched::ApprovalRefused
+    )
 }
 
 pub(super) fn decide_queue_pause(reserved: bool, paused: bool) -> Result<(), Refusal<'static>> {
@@ -1042,7 +1048,7 @@ mod tests {
             (decide(Primary, asks(Request), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Rule), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::DelegationDeadline), Some(StopCause::DelegationDeadline)), allow_, S::Rule),
             (decide(Primary, asks(Request), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, None), ask_, S::UnavailableApproval),
-            (decide(Researcher, allow(S::Rule), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Researcher, allow(S::Rule), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[NotOffered], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::GuardAlias), None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Auto), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Mode), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), allow_, S::Mode),
@@ -1064,8 +1070,8 @@ mod tests {
             // A researcher after its Ask, or where it would have been.
             (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
-            (decide(Researcher, asks(Request), &none, &[], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::ToolStopped)), ask_, S::Human),
-            (decide(Researcher, asks(Request), &none, &[Blocked], None), None, no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, None), ask_, S::Human),
+            (decide(Researcher, asks(Request), &none, &[Blocked], None), None, no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::DelegationDeadline, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[Blocked, GoalDeadline], None), None, no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::UnavailableApproval),
             (decide(Researcher, asks(Request), &none, &[GoalDeadline], ok(true, S::Human)), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),

@@ -2039,11 +2039,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
         } else {
             assert_eq!(
                 outcome.cause,
-                if case == "command_review_denied" {
-                    crate::worker::WorkerCause::ToolFailed
-                } else {
-                    crate::worker::WorkerCause::CriterionUnverified
-                },
+                crate::worker::WorkerCause::CriterionUnverified,
                 "{case}: {} child calls, {} commands, {} gate rejections",
                 child.provider_calls.len(),
                 commands.len(),
@@ -2092,6 +2088,37 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
                 let verdict = commands[0].permission_verdict.as_ref().unwrap();
                 assert!(!verdict.approved);
                 assert_eq!(verdict.source, crate::permissions::PermissionSource::Human);
+                let continuation = requests
+                    .iter()
+                    .filter(|request| request.phase == AgentPhase::ChildWork)
+                    .nth(1)
+                    .expect("declined command reaches child continuation");
+                let step = continuation
+                    .input
+                    .tools
+                    .as_ref()
+                    .unwrap()
+                    .steps
+                    .iter()
+                    .find(|step| {
+                        step.observations
+                            .iter()
+                            .any(|observation| observation.intent.id == commands[0].intent.id)
+                    })
+                    .expect("child continuation retains the correlated command result");
+                assert_eq!(step.requests.len(), 1);
+                assert_eq!(step.requests[0].call, commands[0].intent.call);
+                assert_eq!(step.observations.len(), 1);
+                let observation = &step.observations[0];
+                assert_eq!(observation.intent, commands[0].intent);
+                assert_eq!(
+                    observation.approval_cause,
+                    Some(crate::ApprovalCause::Declined)
+                );
+                assert_eq!(
+                    observation.output,
+                    "user_declined: no operation was dispatched"
+                );
             }
             if case == "command_denied" {
                 assert_eq!(commands.len(), 16);

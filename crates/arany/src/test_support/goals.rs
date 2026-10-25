@@ -574,6 +574,25 @@ impl ForegroundWorkerProvider {
             }
             return finish_with("Private command work ready");
         }
+        let expected = match self.case {
+            "command_review_denied" => {
+                Some("Tool command: user_declined: no operation was dispatched")
+            }
+            "command_nonzero" => Some("Tool command: failed; exit code 1"),
+            "command_rejected" => {
+                Some("Tool command: succeeded; exit code 0; private capture rejected: out_of_lease")
+            }
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            self.check(
+                request.input.child_results.iter().any(|report| {
+                    report.result.contains(expected)
+                        && report.result.contains("CriterionUnverified")
+                }),
+                "primary did not receive the specific child command failure",
+            );
+        }
         if self.case != "command_success" {
             return finish_with("Worker criterion remains unresolved");
         }
@@ -881,11 +900,36 @@ impl crate::Provider for ForegroundWorkerProvider {
                     request.input.role == crate::PromptRole::Editor,
                     "editor prompt role",
                 );
-                let (path, old, new) = if step == 0 {
+                let (path, old, new) = if self.case == "denial" {
+                    if step == 0 {
+                        ("notes/b", b"original b".as_slice(), "edited b")
+                    } else {
+                        ("notes/a", b"original a".as_slice(), "edited a")
+                    }
+                } else if step == 0 {
                     ("notes/a", b"original a".as_slice(), "edited a")
                 } else {
                     ("notes/b", b"original b".as_slice(), "edited b")
                 };
+                if self.case == "denial" && step == 1 {
+                    let denied = request.input.tools.as_ref().and_then(|tools| {
+                        tools
+                            .steps
+                            .iter()
+                            .flat_map(|step| &step.observations)
+                            .last()
+                    });
+                    self.check(
+                        denied.is_some_and(|observation| {
+                            observation.disposition == crate::ToolDisposition::Denied
+                                && observation.approval_cause
+                                    == Some(crate::ApprovalCause::Declined)
+                                && observation.output
+                                    == "user_declined: no operation was dispatched"
+                        }),
+                        "declined Tool result was not returned to the child",
+                    );
+                }
                 super::scenario::tool_outcome(if self.case == "success" {
                     ToolCall::MultiEdit {
                         file_path: path.into(),
@@ -925,13 +969,34 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::ChildWork, 3) => {
                 let tools = request.input.tools.as_ref().unwrap();
                 self.check(
-                    self.case == "hook_write_update"
+                    matches!(self.case, "hook_write_update" | "no_channel")
                         || tools
                             .observations()
                             .last()
                             .is_some_and(|o| o.output.contains("edited a")),
                     "Read did not see acknowledged private edit",
                 );
+                if matches!(self.case, "hook_write_update" | "no_channel") {
+                    let expected = if self.case == "no_channel" {
+                        "channel_unavailable: no operation was dispatched"
+                    } else {
+                        "hook_denied: no operation was dispatched"
+                    };
+                    let refusals: Vec<_> = tools
+                        .observations()
+                        .into_iter()
+                        .filter(|observation| {
+                            observation.disposition == crate::ToolDisposition::Denied
+                        })
+                        .collect();
+                    self.check(
+                        refusals.len() == 2
+                            && refusals
+                                .iter()
+                                .all(|observation| observation.output == expected),
+                        "refused Tool feedback was not correlated and sanitized",
+                    );
+                }
                 if self.case == "conflict" {
                     std::fs::write(self.workspace.join("notes/b"), "host b").unwrap();
                 }
@@ -949,10 +1014,33 @@ impl crate::Provider for ForegroundWorkerProvider {
                 );
                 finish_with("Private changes ready")
             }
+            (AgentPhase::ChildWork, 4..=6)
+                if matches!(self.case, "no_channel" | "hook_write_update") =>
+            {
+                finish_with("Unable to satisfy the private edit criterion")
+            }
+            (AgentPhase::RootSynthesis, 0)
+                if matches!(self.case, "no_channel" | "hook_write_update") =>
+            {
+                let expected = if self.case == "no_channel" {
+                    "channel_unavailable: no operation was dispatched"
+                } else {
+                    "hook_denied: no operation was dispatched"
+                };
+                self.check(
+                    request.input.child_results.iter().any(|report| {
+                        report.result.contains(expected)
+                            && report.result.contains("CriterionUnverified")
+                    }),
+                    "primary did not receive the bounded worker failure report",
+                );
+                finish_with("The worker edit was refused and the Workspace is unchanged")
+            }
             (AgentPhase::RootSynthesis, 0)
                 if matches!(
                     self.case,
                     "success"
+                        | "denial"
                         | "unverified"
                         | "hook_write"
                         | "hook_default_timeout"
@@ -964,6 +1052,16 @@ impl crate::Provider for ForegroundWorkerProvider {
                     std::fs::read(self.workspace.join("notes/a")).unwrap() == b"edited a",
                     "integration was not visible to primary",
                 );
+                if self.case == "denial" {
+                    self.check(
+                        request.input.child_results.iter().any(|report| {
+                            report
+                                .result
+                                .contains("user_declined: no operation was dispatched")
+                        }),
+                        "primary did not receive the declined Tool outcome",
+                    );
+                }
                 if self.case == "unverified" {
                     finish_with("Unverified finish")
                 } else {
