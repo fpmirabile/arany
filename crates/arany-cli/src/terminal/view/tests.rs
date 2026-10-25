@@ -45,10 +45,12 @@ fn image_chip_rectangles_match_only_visible_full_chips() {
             })
             .unwrap();
         assert_eq!(chips.len(), 2, "{width} columns");
-        let header = buffer_row(terminal.backend().buffer(), chips[0].1.y);
         for (index, area) in chips {
             assert!(area.width > 0 && area.height == 1);
-            assert!(header.contains(&format!("[Image #{}]", index + 1)));
+            let rendered = (area.x..area.right())
+                .map(|column| terminal.backend().buffer()[(column, area.y)].symbol())
+                .collect::<String>();
+            assert_eq!(rendered, format!("[Image #{}]", index + 1));
         }
     }
 
