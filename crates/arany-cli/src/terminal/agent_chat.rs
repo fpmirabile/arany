@@ -1071,7 +1071,7 @@ impl AttachedTerminal {
             return Ok(());
         }
         let classic = self.mode == TerminalMode::Classic;
-        let screen = self.terminal.as_mut().expect("owned terminal").size()?;
+        let screen = self.owned.terminal().size()?;
         self.prepare_frame_height(if classic {
             AGENT_CHAT_ROWS
         } else {
@@ -1122,7 +1122,7 @@ impl AttachedTerminal {
         }
         chat.shown = true;
         let label = chat.label().to_owned();
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = self.owned.terminal();
         terminal.draw(|frame| {
             let area = dialog_area(frame.area(), AGENT_CHAT_ROWS, classic);
             if !classic && let Some(transcript) = &chat.transcript {

@@ -712,6 +712,330 @@ fn transition_hover(current: &mut Option<usize>, next: Option<usize>) -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcquisitionStep {
+    RawMode,
+    Reader,
+    AlternateScreen,
+    VisualTerminal,
+    BracketedPaste,
+    KeyboardMode,
+    PointerModes,
+}
+
+const ACQUISITION_STEPS: [AcquisitionStep; 7] = [
+    AcquisitionStep::RawMode,
+    AcquisitionStep::Reader,
+    AcquisitionStep::AlternateScreen,
+    AcquisitionStep::VisualTerminal,
+    AcquisitionStep::BracketedPaste,
+    AcquisitionStep::KeyboardMode,
+    AcquisitionStep::PointerModes,
+];
+
+struct OwnedTerminal {
+    raw_mode: Option<RawMode>,
+    input: Option<TerminalReader>,
+    alternate: Option<AlternateScreen>,
+    terminal: Option<Terminal<TerminalBackend>>,
+    #[cfg(unix)]
+    bracketed_paste: Option<ModeGuard>,
+    #[cfg(unix)]
+    keyboard: Option<ModeGuard>,
+    graphics_protocol: Option<GraphicsProtocol>,
+    pointer_modes: Option<ModeGuard>,
+}
+
+impl OwnedTerminal {
+    fn new() -> Self {
+        Self {
+            raw_mode: None,
+            input: None,
+            alternate: None,
+            terminal: None,
+            #[cfg(unix)]
+            bracketed_paste: None,
+            #[cfg(unix)]
+            keyboard: None,
+            graphics_protocol: None,
+            pointer_modes: None,
+        }
+    }
+
+    fn terminal(&mut self) -> &mut Terminal<TerminalBackend> {
+        self.terminal_with_context("owned terminal")
+    }
+
+    fn terminal_with_context(&mut self, context: &'static str) -> &mut Terminal<TerminalBackend> {
+        self.terminal.as_mut().expect(context)
+    }
+
+    fn reader(&mut self) -> &mut TerminalReader {
+        self.input.as_mut().expect("active terminal input")
+    }
+
+    fn active(&self) -> bool {
+        self.input.is_some()
+    }
+
+    fn stop_reader(&mut self) {
+        if let Some(input) = &mut self.input {
+            input.stop();
+        }
+    }
+
+    fn release(
+        &mut self,
+        scrollback_dump: &mut bool,
+        first_error: &mut Option<io::Error>,
+        after_reader: impl FnOnce(&mut Option<io::Error>),
+        close_linear: impl FnOnce() -> io::Result<()>,
+    ) {
+        self.stop_reader();
+        self.input.take();
+        after_reader(first_error);
+        if let Some(mut modes) = self.pointer_modes.take() {
+            attempt_cleanup(first_error, || modes.release());
+        }
+        #[cfg(unix)]
+        if let Some(mut keyboard) = self.keyboard.take() {
+            attempt_cleanup(first_error, || keyboard.release());
+        }
+        #[cfg(unix)]
+        if let Some(mut paste) = self.bracketed_paste.take() {
+            attempt_cleanup(first_error, || paste.release());
+        }
+        if let Some(mut terminal) = self.terminal.take() {
+            // Avoid input queries after reader stop and avoid clearing primary-screen dumps.
+            attempt_cleanup(first_error, || {
+                if std::mem::take(scrollback_dump) {
+                    Ok(())
+                } else {
+                    terminal.backend_mut().clear_owned()
+                }
+            });
+            attempt_cleanup(first_error, || terminal.show_cursor());
+            attempt_cleanup(first_error, || terminal.backend_mut().flush());
+            // Ratatui's Drop writes to stderr if cursor restoration fails.
+            terminal.backend_mut().detach();
+        }
+        if let Some(mut alternate) = self.alternate.take() {
+            attempt_cleanup(first_error, || alternate.release());
+        }
+        attempt_cleanup(first_error, close_linear);
+        if let Some(mut raw_mode) = self.raw_mode.take() {
+            attempt_cleanup(first_error, || raw_mode.release());
+        }
+    }
+}
+
+#[cfg(unix)]
+struct TerminalSignals {
+    interrupt: tokio::signal::unix::Signal,
+    suspend: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(not(unix))]
+struct TerminalSignals;
+
+impl AttachedTerminal {
+    fn from_acquired(
+        owned: OwnedTerminal,
+        mode_label: Option<&'static str>,
+        mode: TerminalMode,
+        pointer: PointerSettings,
+        screen_reader: bool,
+        _signals: TerminalSignals,
+    ) -> Self {
+        Self {
+            owned,
+            newline_shortcut: NewlineShortcut::default(),
+            waiting_tool: None,
+            mode,
+            classic_pinned: false,
+            transcript_open: false,
+            scrollback_dump: false,
+            native: NativeTranscript::default(),
+            active_run: None,
+            history: History::default(),
+            classic_history: History::default(),
+            dialog_armed: false,
+            history_adjacent: true,
+            pointer,
+            image_chip_areas: Vec::new(),
+            hovered_image: None,
+            pointer_position: None,
+            graphics_hover_changed: false,
+            graphics_placement: None,
+            hovered_image_digest: None,
+            frame_area: None,
+            history_area: None,
+            panel_selection: PanelSelection::default(),
+            panel_copy: None,
+            selection_cue: None,
+            #[cfg(unix)]
+            session_picker_area: None,
+            agent_picker_area: None,
+            linear: mode_label.map(LinearState::new),
+            kept_tools: None,
+            #[cfg(unix)]
+            secret_echo: None,
+            agent_panel: None,
+            agent_chat: None,
+            child_drafts: Vec::new(),
+            primary_input_capacity: crate::terminal::MAX_PRIMARY_DRAFT_BYTES,
+            help_selected: None,
+            usage_panel: None,
+            clipboard: None,
+            clipboard_paste: None,
+            deferred_input: None,
+            clipboard_preview: false,
+            shutdown_clipboard_on_drop: true,
+            requested_screen_reader: screen_reader,
+            color_enabled: std::env::var_os("NO_COLOR").is_none(),
+            #[cfg(unix)]
+            interrupt: _signals.interrupt,
+            #[cfg(unix)]
+            suspend: _signals.suspend,
+            #[cfg(unix)]
+            hangup: _signals.hangup,
+            #[cfg(unix)]
+            terminate: _signals.terminate,
+        }
+    }
+}
+
+impl OwnedTerminal {
+    fn acquire_in_order(
+        &mut self,
+        mut acquire: impl FnMut(AcquisitionStep, &mut Self) -> io::Result<()>,
+    ) -> io::Result<()> {
+        for step in ACQUISITION_STEPS {
+            acquire(step, self)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OwnedTerminal {
+    fn drop(&mut self) {
+        self.pointer_modes.take();
+        #[cfg(unix)]
+        self.keyboard.take();
+        #[cfg(unix)]
+        self.bracketed_paste.take();
+        self.terminal.take();
+        self.alternate.take();
+        if let Some(input) = &mut self.input {
+            input.stop();
+        }
+        self.input.take();
+        self.raw_mode.take();
+    }
+}
+
+fn classic_cursor_timeout_fallback<T>(
+    stop_reader: impl FnOnce(),
+    release_raw_mode: impl FnOnce() -> io::Result<()>,
+    start_linear_reader: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    stop_reader();
+    release_raw_mode()?;
+    start_linear_reader()
+}
+
+fn acquire_visual_terminal(
+    mode: TerminalMode,
+    mode_label: &mut Option<&'static str>,
+    resources: &mut OwnedTerminal,
+) -> io::Result<Option<Terminal<TerminalBackend>>> {
+    if mode_label.is_some() {
+        return Ok(None);
+    }
+    let reader = resources.input.as_ref().expect("terminal reader acquired");
+    match screen_terminal(mode, reader.cursor_query()) {
+        Ok(terminal) => Ok(Some(terminal)),
+        Err(error) if mode == TerminalMode::Classic && error.kind() == io::ErrorKind::TimedOut => {
+            let reader = resources.input.as_mut().expect("terminal reader acquired");
+            *reader = classic_cursor_timeout_fallback(
+                || reader.stop(),
+                || {
+                    resources
+                        .raw_mode
+                        .take()
+                        .map_or(Ok(()), |mut raw| raw.release())
+                },
+                || TerminalReader::start(true),
+            )?;
+            *mode_label = Some("linear fallback (cursor response unavailable)");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+impl OwnedTerminal {
+    fn acquire(mode: TerminalMode, mode_label: &mut Option<&'static str>) -> io::Result<Self> {
+        let mut resources = Self::new();
+        resources.acquire_in_order(|step, resources| {
+            match step {
+                AcquisitionStep::RawMode => {
+                    resources.raw_mode = mode_label.is_none().then(RawMode::acquire).transpose()?;
+                }
+                AcquisitionStep::Reader => {
+                    resources.input = Some(TerminalReader::start(mode_label.is_some())?);
+                }
+                AcquisitionStep::AlternateScreen => {
+                    resources.alternate = (mode_label.is_none()
+                        && mode == TerminalMode::Fullscreen)
+                        .then(AlternateScreen::acquire)
+                        .transpose()?;
+                }
+                AcquisitionStep::VisualTerminal => {
+                    resources.terminal = acquire_visual_terminal(mode, mode_label, resources)?;
+                }
+                AcquisitionStep::BracketedPaste => {
+                    #[cfg(unix)]
+                    {
+                        resources.bracketed_paste = mode_label
+                            .is_none()
+                            .then(|| ModeGuard::acquire(BRACKETED_PASTE))
+                            .transpose()?;
+                    }
+                }
+                AcquisitionStep::KeyboardMode => {
+                    #[cfg(unix)]
+                    {
+                        let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
+                        let reader = resources.input.as_ref().expect("terminal reader acquired");
+                        resources.keyboard = keyboard_mode(reader, graphics_probe)?;
+                        resources.graphics_protocol =
+                            detected_graphics_protocol(reader, graphics_probe);
+                    }
+                }
+                AcquisitionStep::PointerModes => {
+                    resources.pointer_modes = pointer_modes(
+                        mode,
+                        mode_label.is_some(),
+                        mouse_capture_enabled(),
+                        resources.graphics_protocol.is_some(),
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(resources)
+    }
+}
+
+fn attempt_cleanup(first_error: &mut Option<io::Error>, cleanup: impl FnOnce() -> io::Result<()>) {
+    if let Err(error) = cleanup() {
+        first_error.get_or_insert(error);
+    }
+}
+
 impl TerminalMode {
     pub const fn label(self) -> &'static str {
         match self {
@@ -730,21 +1054,45 @@ impl TerminalMode {
 
 struct AlternateScreen {
     active: bool,
+    #[cfg(test)]
+    test_reset: Option<std::rc::Rc<std::cell::RefCell<ModeResetProbe>>>,
 }
 
 impl AlternateScreen {
     fn acquire() -> io::Result<Self> {
-        let guard = Self { active: true };
+        let guard = Self {
+            active: true,
+            #[cfg(test)]
+            test_reset: None,
+        };
         execute!(io::stderr(), EnterAlternateScreen)?;
         Ok(guard)
     }
 
     fn release(&mut self) -> io::Result<()> {
         if self.active {
+            #[cfg(test)]
+            if let Some(result) = probe_reset(self.test_reset.as_ref()) {
+                result?;
+                self.active = false;
+                return Ok(());
+            }
             execute!(io::stderr(), LeaveAlternateScreen)?;
             self.active = false;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn tracked_for_test(
+        name: &'static str,
+        steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+        fail_next: bool,
+    ) -> Self {
+        Self {
+            active: true,
+            test_reset: Some(reset_probe(name, steps, fail_next)),
+        }
     }
 }
 
@@ -873,6 +1221,8 @@ pub enum TerminalError {
 
 struct RawMode {
     active: bool,
+    #[cfg(test)]
+    test_reset: Option<std::rc::Rc<std::cell::RefCell<ModeResetProbe>>>,
 }
 
 struct TerminalOutput(Option<Stderr>);
@@ -893,15 +1243,37 @@ impl Write for TerminalOutput {
 impl RawMode {
     fn acquire() -> io::Result<Self> {
         enable_raw_mode()?;
-        Ok(Self { active: true })
+        Ok(Self {
+            active: true,
+            #[cfg(test)]
+            test_reset: None,
+        })
     }
 
     fn release(&mut self) -> io::Result<()> {
         if self.active {
+            #[cfg(test)]
+            if let Some(result) = probe_reset(self.test_reset.as_ref()) {
+                result?;
+                self.active = false;
+                return Ok(());
+            }
             disable_raw_mode()?;
             self.active = false;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn tracked_for_test(
+        name: &'static str,
+        steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+        fail_next: bool,
+    ) -> Self {
+        Self {
+            active: true,
+            test_reset: Some(reset_probe(name, steps, fail_next)),
+        }
     }
 }
 
@@ -951,6 +1323,44 @@ impl Drop for SecretEcho {
 struct ModeGuard {
     disable: &'static [u8],
     active: bool,
+    #[cfg(test)]
+    test_reset: Option<std::rc::Rc<std::cell::RefCell<ModeResetProbe>>>,
+}
+
+#[cfg(test)]
+struct ModeResetProbe {
+    name: &'static str,
+    steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    fail_next: bool,
+}
+
+#[cfg(test)]
+fn probe_reset(
+    probe: Option<&std::rc::Rc<std::cell::RefCell<ModeResetProbe>>>,
+) -> Option<io::Result<()>> {
+    let mut probe = probe?.borrow_mut();
+    probe.steps.borrow_mut().push(probe.name);
+    Some(if std::mem::take(&mut probe.fail_next) {
+        Err(io::Error::other(format!(
+            "injected {} reset failure",
+            probe.name
+        )))
+    } else {
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn reset_probe(
+    name: &'static str,
+    steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    fail_next: bool,
+) -> std::rc::Rc<std::cell::RefCell<ModeResetProbe>> {
+    std::rc::Rc::new(std::cell::RefCell::new(ModeResetProbe {
+        name,
+        steps,
+        fail_next,
+    }))
 }
 
 impl ModeGuard {
@@ -958,21 +1368,48 @@ impl ModeGuard {
         let guard = Self {
             disable,
             active: true,
+            #[cfg(test)]
+            test_reset: None,
         };
         let mut output = io::stderr();
-        output.write_all(enable)?;
-        output.flush()?;
+        Self::finish_acquire(guard, || {
+            output.write_all(enable)?;
+            output.flush()
+        })
+    }
+
+    fn finish_acquire(guard: Self, enable: impl FnOnce() -> io::Result<()>) -> io::Result<Self> {
+        enable()?;
         Ok(guard)
     }
 
     fn release(&mut self) -> io::Result<()> {
         if self.active {
+            #[cfg(test)]
+            if let Some(result) = probe_reset(self.test_reset.as_ref()) {
+                result?;
+                self.active = false;
+                return Ok(());
+            }
             let mut output = io::stderr();
             output.write_all(self.disable)?;
             output.flush()?;
             self.active = false;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn tracked_for_test(
+        name: &'static str,
+        steps: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+        fail_next: bool,
+    ) -> Self {
+        Self {
+            disable: b"",
+            active: true,
+            test_reset: Some(reset_probe(name, steps, fail_next)),
+        }
     }
 }
 
@@ -1017,10 +1454,9 @@ fn keyboard_mode(input: &TerminalReader, graphics: bool) -> io::Result<Option<Mo
 pub struct AttachedTerminal {
     newline_shortcut: NewlineShortcut,
     waiting_tool: Option<uuid::Uuid>,
-    terminal: Option<Terminal<TerminalBackend>>,
+    owned: OwnedTerminal,
     mode: TerminalMode,
     classic_pinned: bool,
-    alternate: Option<AlternateScreen>,
     transcript_open: bool,
     // The pager's `[` left the alternate screen and capture; Enter reacquires them.
     scrollback_dump: bool,
@@ -1031,11 +1467,7 @@ pub struct AttachedTerminal {
     dialog_armed: bool,
     // The row above the Classic viewport holds history or shell output, not rows it vacated.
     history_adjacent: bool,
-    input: Option<TerminalReader>,
-    _raw_mode: Option<RawMode>,
     pointer: PointerSettings,
-    pointer_modes: Option<ModeGuard>,
-    graphics_protocol: Option<GraphicsProtocol>,
     image_chip_areas: Vec<(usize, Rect)>,
     hovered_image: Option<usize>,
     pointer_position: Option<ratatui::layout::Position>,
@@ -1047,10 +1479,6 @@ pub struct AttachedTerminal {
     panel_selection: PanelSelection,
     panel_copy: Option<PanelCopy>,
     selection_cue: Option<String>,
-    #[cfg(unix)]
-    bracketed_paste: Option<ModeGuard>,
-    #[cfg(unix)]
-    keyboard: Option<ModeGuard>,
     session_picker_area: Option<Rect>,
     agent_picker_area: Option<Rect>,
     linear: Option<LinearState>,
@@ -1103,21 +1531,11 @@ pub struct ProfileSelection<'a> {
 
 impl AttachedTerminal {
     fn owned(&mut self) -> &mut Terminal<TerminalBackend> {
-        Self::owned_terminal(&mut self.terminal)
-    }
-
-    fn owned_terminal(
-        terminal: &mut Option<Terminal<TerminalBackend>>,
-    ) -> &mut Terminal<TerminalBackend> {
-        terminal.as_mut().expect("owned terminal")
+        self.owned.terminal()
     }
 
     fn reader(&mut self) -> &mut TerminalReader {
-        Self::active_reader(&mut self.input)
-    }
-
-    fn active_reader(input: &mut Option<TerminalReader>) -> &mut TerminalReader {
-        input.as_mut().expect("active terminal input")
+        self.owned.reader()
     }
 
     pub fn set_waiting_tool(&mut self, id: Option<uuid::Uuid>) {
@@ -1279,7 +1697,7 @@ impl AttachedTerminal {
         let height = view::tool_approval_height(&lines, &choices, screen.width).min(screen.height);
         self.prepare_frame_height(height)?;
         let palette = self.palette();
-        let terminal = Self::owned_terminal(&mut self.terminal);
+        let terminal = self.owned.terminal();
         let history = &mut self.history;
         let mut more = true;
         let mut history_area = None;
@@ -1313,15 +1731,16 @@ impl AttachedTerminal {
             return Err(TerminalError::Ineligible);
         }
         #[cfg(unix)]
-        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        #[cfg(unix)]
-        let suspend = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(
-            Signal::TSTP.as_raw(),
-        ))?;
-        #[cfg(unix)]
-        let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-        #[cfg(unix)]
-        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let signals = TerminalSignals {
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
+            suspend: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(
+                Signal::TSTP.as_raw(),
+            ))?,
+            hangup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?,
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+        };
+        #[cfg(not(unix))]
+        let signals = TerminalSignals;
         let height = size().ok().map(|(_, height)| height);
         let mut mode_label = if screen_reader {
             Some("screen-reader")
@@ -1338,117 +1757,20 @@ impl AttachedTerminal {
         if mode == TerminalMode::Classic && !io::stdout().is_terminal() && mode_label.is_none() {
             mode_label = Some("linear fallback (console cursor unavailable)");
         }
-        let mut raw_mode = mode_label.is_none().then(RawMode::acquire).transpose()?;
-        let mut input = TerminalReader::start(mode_label.is_some())?;
-        let alternate = (mode_label.is_none() && mode == TerminalMode::Fullscreen)
-            .then(AlternateScreen::acquire)
-            .transpose()?;
-        let terminal = if mode_label.is_none() {
-            match screen_terminal(mode, input.cursor_query()) {
-                Ok(terminal) => Some(terminal),
-                Err(error)
-                    if mode == TerminalMode::Classic && error.kind() == io::ErrorKind::TimedOut =>
-                {
-                    input.stop();
-                    if let Some(mut raw) = raw_mode.take() {
-                        raw.release()?;
-                    }
-                    input = TerminalReader::start(true)?;
-                    mode_label = Some("linear fallback (cursor response unavailable)");
-                    None
-                }
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            None
-        };
-        #[cfg(unix)]
-        let bracketed_paste = mode_label
-            .is_none()
-            .then(|| ModeGuard::acquire(BRACKETED_PASTE))
-            .transpose()?;
-        #[cfg(unix)]
-        let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
-        #[cfg(unix)]
-        let keyboard = keyboard_mode(&input, graphics_probe)?;
-        #[cfg(unix)]
-        let graphics_protocol = detected_graphics_protocol(&input, graphics_probe);
-        #[cfg(not(unix))]
-        let graphics_protocol = None;
-        let pointer_modes = pointer_modes(
+        let owned = OwnedTerminal::acquire(mode, &mut mode_label)?;
+        Ok(Self::from_acquired(
+            owned,
+            mode_label,
             mode,
-            mode_label.is_some(),
-            mouse_capture_enabled(),
-            graphics_protocol.is_some(),
-        )?;
-        Ok(Self {
-            terminal,
-            newline_shortcut: NewlineShortcut::default(),
-            waiting_tool: None,
-            mode,
-            classic_pinned: false,
-            alternate,
-            transcript_open: false,
-            scrollback_dump: false,
-            native: NativeTranscript::default(),
-            active_run: None,
-            history: History::default(),
-            classic_history: History::default(),
-            dialog_armed: false,
-            history_adjacent: true,
-            input: Some(input),
-            _raw_mode: raw_mode,
             pointer,
-            pointer_modes,
-            graphics_protocol,
-            image_chip_areas: Vec::new(),
-            hovered_image: None,
-            pointer_position: None,
-            graphics_hover_changed: false,
-            graphics_placement: None,
-            hovered_image_digest: None,
-            frame_area: None,
-            history_area: None,
-            panel_selection: PanelSelection::default(),
-            panel_copy: None,
-            selection_cue: None,
-            #[cfg(unix)]
-            bracketed_paste,
-            #[cfg(unix)]
-            keyboard,
-            session_picker_area: None,
-            agent_picker_area: None,
-            linear: mode_label.map(LinearState::new),
-            kept_tools: None,
-            #[cfg(unix)]
-            secret_echo: None,
-            agent_panel: None,
-            agent_chat: None,
-            child_drafts: Vec::new(),
-            primary_input_capacity: crate::terminal::MAX_PRIMARY_DRAFT_BYTES,
-            help_selected: None,
-            usage_panel: None,
-            clipboard: None,
-            clipboard_paste: None,
-            deferred_input: None,
-            clipboard_preview: false,
-            shutdown_clipboard_on_drop: true,
-            requested_screen_reader: screen_reader,
-            color_enabled: std::env::var_os("NO_COLOR").is_none(),
-            #[cfg(unix)]
-            interrupt,
-            #[cfg(unix)]
-            suspend,
-            #[cfg(unix)]
-            hangup,
-            #[cfg(unix)]
-            terminate,
-        })
+            screen_reader,
+            signals,
+        ))
     }
 
     fn keyboard_support(&self) -> input::KeyboardSupport {
         #[cfg(unix)]
-        if self.keyboard.is_some() {
+        if self.owned.keyboard.is_some() {
             return input::KeyboardSupport::Disambiguated;
         }
         input::KeyboardSupport::Legacy
@@ -1488,17 +1810,21 @@ impl AttachedTerminal {
     }
 
     async fn read_input(&mut self, chat: bool) -> Result<TerminalInput, TerminalError> {
-        if let Some(input) = &mut self.input {
+        if let Some(input) = &mut self.owned.input {
             input.set_chat_input(chat, self.agent_chat.is_some(), self.primary_input_capacity);
         }
         self.clipboard_paste = None;
         if let Some(input) = self.deferred_input.take() {
             return Ok(input);
         }
-        let clipboard_ready = self.input.as_ref().is_some_and(TerminalReader::paste_ready);
+        let clipboard_ready = self
+            .owned
+            .input
+            .as_ref()
+            .is_some_and(TerminalReader::paste_ready);
         #[cfg(unix)]
         let input = tokio::select! {
-            input = Self::active_reader(&mut self.input).recv() => InputRead::Input(input?),
+            input = self.owned.reader().recv() => InputRead::Input(input?),
             signal = self.interrupt.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
                 InputRead::Input(TerminalInput::Interrupt)
@@ -1531,7 +1857,7 @@ impl AttachedTerminal {
         };
         #[cfg(not(unix))]
         let input = tokio::select! {
-            input = Self::active_reader(&mut self.input).recv() => InputRead::Input(input?),
+            input = self.owned.reader().recv() => InputRead::Input(input?),
             paste = async {
                 match self.clipboard.as_mut() {
                     Some(read) => read.recv().await,
@@ -1551,6 +1877,7 @@ impl AttachedTerminal {
             InputRead::PanelCopy(result) => {
                 let mut stderr = io::stderr();
                 let terminal_output = self
+                    .owned
                     .input
                     .is_some()
                     .then_some(&mut stderr as &mut dyn Write);
@@ -1559,7 +1886,7 @@ impl AttachedTerminal {
             }
         };
         if chat
-            && self.graphics_protocol.is_some()
+            && self.owned.graphics_protocol.is_some()
             && mouse_capture_enabled()
             && let Some((column, row)) = pointer_position(input)
         {
@@ -1772,15 +2099,15 @@ impl AttachedTerminal {
         let text = history::scrollback_transcript(view);
         self.hovered_image = None;
         self.delete_graphics_placement()?;
-        if let Some(mut modes) = self.pointer_modes.take() {
+        if let Some(mut modes) = self.owned.pointer_modes.take() {
             modes.release()?;
         }
         #[cfg(unix)]
-        if let Some(mut keyboard) = self.keyboard.take() {
+        if let Some(mut keyboard) = self.owned.keyboard.take() {
             keyboard.release()?;
         }
         self.scrollback_dump = true;
-        if let Some(mut alternate) = self.alternate.take() {
+        if let Some(mut alternate) = self.owned.alternate.take() {
             alternate.release()?;
         }
         self.owned().show_cursor()?;
@@ -1795,19 +2122,20 @@ impl AttachedTerminal {
         if !self.scrollback_dump {
             return Ok(());
         }
-        self.alternate = Some(AlternateScreen::acquire()?);
+        self.owned.alternate = Some(AlternateScreen::acquire()?);
         self.scrollback_dump = false;
         #[cfg(unix)]
         {
             let graphics_probe = graphics_probe_allowed(self.mode);
-            self.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
-            self.graphics_protocol = detected_graphics_protocol(self.reader(), graphics_probe);
+            self.owned.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
+            self.owned.graphics_protocol =
+                detected_graphics_protocol(self.reader(), graphics_probe);
         }
-        self.pointer_modes = pointer_modes(
+        self.owned.pointer_modes = pointer_modes(
             self.mode,
             false,
             mouse_capture_enabled(),
-            self.graphics_protocol.is_some(),
+            self.owned.graphics_protocol.is_some(),
         )?;
         // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
         let terminal = self.owned();
@@ -1833,7 +2161,7 @@ impl AttachedTerminal {
             return false;
         }
         let limit = composer.paste_detail().and_then(|(_, text, _)| {
-            let size = self.terminal.as_mut()?.size().ok()?;
+            let size = self.owned.terminal.as_mut()?.size().ok()?;
             Some(view::paste_detail_scroll_limit(
                 text,
                 usize::from(size.width),
@@ -1936,7 +2264,10 @@ impl AttachedTerminal {
 
     #[must_use]
     pub fn input_boundary_ready(&self) -> bool {
-        self.input.as_ref().is_some_and(TerminalReader::paste_ready)
+        self.owned
+            .input
+            .as_ref()
+            .is_some_and(TerminalReader::paste_ready)
     }
 
     pub fn disable_color(&mut self) {
@@ -2264,14 +2595,15 @@ impl AttachedTerminal {
                 ClipboardContent::Image(_) => Err("image paste is only available in chat"),
             };
         }
-        self.input
+        self.owned
+            .input
             .as_mut()
             .and_then(TerminalReader::take_paste)
             .ok_or("paste is unavailable")?
     }
 
     pub fn request_clipboard_paste(&mut self) -> Result<(), &'static str> {
-        if self.input.is_none() {
+        if self.owned.input.is_none() {
             return Err("terminal input is not active");
         }
         if self.clipboard.is_some() {
@@ -2286,7 +2618,7 @@ impl AttachedTerminal {
         let mut stderr = io::stderr();
         clipboard::copy(
             request,
-            (self.input.is_some() && !self.is_linear())
+            (self.owned.active() && !self.is_linear())
                 .then_some(&mut stderr as &mut (dyn Write + Send)),
         )
         .await
@@ -2371,14 +2703,22 @@ impl AttachedTerminal {
     }
 
     pub fn reacquire_after_output(&mut self) -> Result<(), TerminalError> {
-        if self.input.is_some() {
+        self.reacquire_with(|screen_reader, mode, pointer| {
+            Self::acquire_with_mode(screen_reader, mode, pointer)
+        })
+    }
+
+    fn reacquire_with(
+        &mut self,
+        acquire: impl FnOnce(bool, TerminalMode, PointerSettings) -> Result<Self, TerminalError>,
+    ) -> Result<(), TerminalError> {
+        if self.owned.active() {
             return Err(TerminalError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "terminal is still active",
             )));
         }
-        let mut replacement =
-            Self::acquire_with_mode(self.requested_screen_reader, self.mode, self.pointer)?;
+        let mut replacement = acquire(self.requested_screen_reader, self.mode, self.pointer)?;
         replacement.color_enabled = self.color_enabled;
         self.replace_released(replacement);
         Ok(())
@@ -2448,7 +2788,7 @@ impl AttachedTerminal {
     fn prepare_frame_height(&mut self, height: u16) -> Result<(), TerminalError> {
         // A dialog such as a Tool approval needs the screen, so it ends a scrollback dump.
         self.end_scrollback_dump()?;
-        let terminal = Self::owned_terminal(&mut self.terminal);
+        let terminal = self.owned.terminal();
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
             let before = terminal.get_frame().area();
@@ -2516,10 +2856,10 @@ impl AttachedTerminal {
         if self.graphics_placement.take().is_none() {
             return Ok(());
         }
-        if self.graphics_protocol != Some(GraphicsProtocol::Kitty) {
+        if self.owned.graphics_protocol != Some(GraphicsProtocol::Kitty) {
             return Ok(());
         }
-        self.terminal.as_mut().map_or(Ok(()), |terminal| {
+        self.owned.terminal.as_mut().map_or(Ok(()), |terminal| {
             terminal
                 .backend_mut()
                 .write_graphics(graphics::kitty_delete())
@@ -2556,7 +2896,7 @@ impl AttachedTerminal {
             None
         };
         let selection = &mut self.panel_selection;
-        let terminal = Self::owned_terminal(&mut self.terminal);
+        let terminal = self.owned.terminal();
         let mut area = Rect::default();
         let classic = self.mode == TerminalMode::Classic;
         let mut history_area = None;
@@ -2707,9 +3047,8 @@ impl AttachedTerminal {
             }
         }
         let area = self
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
+            .owned
+            .terminal_with_context("inline terminal")
             .get_frame()
             .area();
         if matches!(state, SnapshotState::Busy) {
@@ -2848,11 +3187,11 @@ impl AttachedTerminal {
         }
         let mut bytes = Vec::new();
         if self.graphics_placement.take().is_some()
-            && self.graphics_protocol == Some(GraphicsProtocol::Kitty)
+            && self.owned.graphics_protocol == Some(GraphicsProtocol::Kitty)
         {
             bytes.extend_from_slice(graphics::kitty_delete());
         }
-        if let (Some(protocol), Some((_, image, inner))) = (self.graphics_protocol, preview) {
+        if let (Some(protocol), Some((_, image, inner))) = (self.owned.graphics_protocol, preview) {
             bytes.extend_from_slice(&match protocol {
                 GraphicsProtocol::Kitty => graphics::kitty_image(image, inner),
                 GraphicsProtocol::ITerm2 => graphics::inline_image(image, inner),
@@ -3441,9 +3780,8 @@ impl AttachedTerminal {
                 panel.page = panel.page.min(panel.pages.len() - 1);
             }
             let width = self
-                .terminal
-                .as_mut()
-                .expect("visual terminal")
+                .owned
+                .terminal_with_context("visual terminal")
                 .size()?
                 .width;
             let lines = view::usage_lines(&panel.pages[panel.page], width);
@@ -3528,11 +3866,10 @@ impl AttachedTerminal {
                 .map(|()| true)
                 .map_err(TerminalError::Io);
         }
-        let area = self.terminal.as_mut().expect("inline terminal").size()?;
+        let area = self.owned.terminal_with_context("inline terminal").size()?;
         self.draw_snapshot(view, composer, None, SnapshotState::Session, Some(picker))?;
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
+        self.owned
+            .terminal_with_context("inline terminal")
             .hide_cursor()?;
         Ok(area.width >= 16 && area.height >= 8)
     }
@@ -3655,7 +3992,7 @@ impl AttachedTerminal {
     }
 
     fn agent_model(&mut self, view: &SessionView) -> Result<AgentInspectorModel, TerminalError> {
-        let width = match &mut self.terminal {
+        let width = match &mut self.owned.terminal {
             Some(terminal) if self.linear.is_none() => terminal.size()?.width,
             _ => 120,
         };
@@ -3691,9 +4028,8 @@ impl AttachedTerminal {
             return Ok(());
         }
         let width = self
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
+            .owned
+            .terminal_with_context("inline terminal")
             .size()?
             .width;
         let (_, screen_height) = size()?;
@@ -3720,74 +4056,40 @@ impl AttachedTerminal {
     fn release(&mut self) -> io::Result<()> {
         self.cancel_clipboard_paste();
         let mut first_error = None;
-        if let Err(error) = self.delete_graphics_placement() {
-            first_error.get_or_insert(error);
-        }
-        if let Some(mut input) = self.input.take() {
-            input.stop();
-        }
+        attempt_cleanup(&mut first_error, || self.delete_graphics_placement());
+        let owned = &mut self.owned;
+        let scrollback_dump = &mut self.scrollback_dump;
         #[cfg(unix)]
-        if let Some(mut echo) = self.secret_echo.take()
-            && let Err(error) = echo.release()
-        {
-            first_error.get_or_insert(error);
-        }
-        self.session_picker_area = None;
-        self.agent_picker_area = None;
-        self.history_area = None;
-        self.selection_cue = None;
-        if let Some(mut modes) = self.pointer_modes.take()
-            && let Err(error) = modes.release()
-        {
-            first_error.get_or_insert(error);
-        }
-        #[cfg(unix)]
-        if let Some(mut keyboard) = self.keyboard.take()
-            && let Err(error) = keyboard.release()
-        {
-            first_error.get_or_insert(error);
-        }
-        #[cfg(unix)]
-        if let Some(mut paste) = self.bracketed_paste.take()
-            && let Err(error) = paste.release()
-        {
-            first_error.get_or_insert(error);
-        }
-        if let Some(mut terminal) = self.terminal.take() {
-            for result in [
-                // Cleanup must not query input after stopping its reader, nor clear a dump on the primary screen.
-                if std::mem::take(&mut self.scrollback_dump) {
-                    Ok(())
-                } else {
-                    terminal.backend_mut().clear_owned()
-                },
-                terminal.show_cursor(),
-                terminal.backend_mut().flush(),
-            ] {
-                if let Err(error) = result {
-                    first_error.get_or_insert(error);
+        let secret_echo = &mut self.secret_echo;
+        let session_picker_area = &mut self.session_picker_area;
+        let agent_picker_area = &mut self.agent_picker_area;
+        let history_area = &mut self.history_area;
+        let selection_cue = &mut self.selection_cue;
+        let linear = &mut self.linear;
+        let kept_tools = &mut self.kept_tools;
+        owned.release(
+            scrollback_dump,
+            &mut first_error,
+            |first_error| {
+                #[cfg(unix)]
+                if let Some(mut echo) = secret_echo.take() {
+                    attempt_cleanup(first_error, || echo.release());
                 }
-            }
-            // Ratatui's Drop prints to stderr if cursor restoration fails.
-            terminal.backend_mut().detach();
-        }
-        if let Some(mut alternate) = self.alternate.take()
-            && let Err(error) = alternate.release()
-        {
-            first_error.get_or_insert(error);
-        }
-        let linear = self.linear.take();
-        self.kept_tools = linear.as_ref().and_then(LinearState::written_tools);
-        if linear.is_some_and(|linear| linear.line_open)
-            && let Err(error) = writeln!(io::stderr())
-        {
-            first_error.get_or_insert(error);
-        }
-        if let Some(mut raw_mode) = self._raw_mode.take()
-            && let Err(error) = raw_mode.release()
-        {
-            first_error.get_or_insert(error);
-        }
+                *session_picker_area = None;
+                *agent_picker_area = None;
+                *history_area = None;
+                *selection_cue = None;
+            },
+            || {
+                let linear = linear.take();
+                *kept_tools = linear.as_ref().and_then(LinearState::written_tools);
+                if linear.is_some_and(|linear| linear.line_open) {
+                    writeln!(io::stderr())
+                } else {
+                    Ok(())
+                }
+            },
+        );
         first_error.map_or(Ok(()), Err)
     }
 
@@ -4080,8 +4382,8 @@ mod graphics_lifecycle_tests {
             .block_on(async {
                 let backend = TerminalBackend::failing_graphics_writer(80, 24);
                 let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
-                attached.graphics_protocol = Some(GraphicsProtocol::Kitty);
-                attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
+                attached.owned.graphics_protocol = Some(GraphicsProtocol::Kitty);
+                attached.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
                 attached.graphics_placement = Some(GraphicsPlacement {
                     image_index: 0,
                     digest: [1; 32],
@@ -4101,8 +4403,8 @@ mod graphics_lifecycle_tests {
     async fn opening_agent_chat_clears_preview_and_propagates_delete_failure() {
         let backend = TerminalBackend::failing_graphics_writer(80, 24);
         let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
-        attached.graphics_protocol = Some(GraphicsProtocol::Kitty);
-        attached.terminal = Some(Terminal::new(backend).expect("test terminal"));
+        attached.owned.graphics_protocol = Some(GraphicsProtocol::Kitty);
+        attached.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
         attached.hovered_image = Some(0);
         attached.graphics_placement = Some(GraphicsPlacement {
             image_index: 0,
@@ -4124,6 +4426,286 @@ mod graphics_lifecycle_tests {
         attached
             .release()
             .expect("graphics cleanup is not repeated during release");
+    }
+}
+
+#[cfg(test)]
+mod terminal_lifecycle_tests {
+    use super::{
+        AcquisitionStep, AlternateScreen, GraphicsPlacement, GraphicsProtocol, ModeGuard, RawMode,
+        TerminalBackend, TerminalMode, classic_cursor_timeout_fallback,
+    };
+    use ratatui::{Terminal, TerminalOptions, Viewport, layout::Rect};
+    use std::{cell::RefCell, io, rc::Rc};
+
+    #[test]
+    fn classic_cursor_timeout_stops_reader_releases_raw_and_starts_linear_in_order() {
+        let steps = RefCell::new(Vec::new());
+        let reader = classic_cursor_timeout_fallback(
+            || steps.borrow_mut().push("stop"),
+            || {
+                steps.borrow_mut().push("release");
+                Ok(())
+            },
+            || {
+                steps.borrow_mut().push("start linear");
+                Ok(())
+            },
+        );
+
+        assert!(reader.is_ok());
+        assert_eq!(*steps.borrow(), ["stop", "release", "start linear"]);
+    }
+
+    #[test]
+    fn classic_cursor_timeout_does_not_restart_reader_when_raw_release_fails() {
+        let steps = RefCell::new(Vec::new());
+        let error = classic_cursor_timeout_fallback(
+            || steps.borrow_mut().push("stop"),
+            || {
+                steps.borrow_mut().push("release");
+                Err(io::Error::other("raw release failed"))
+            },
+            || {
+                steps.borrow_mut().push("start linear");
+                Ok(())
+            },
+        )
+        .expect_err("raw release failure stops fallback");
+
+        assert_eq!(error.to_string(), "raw release failed");
+        assert_eq!(*steps.borrow(), ["stop", "release"]);
+    }
+
+    #[test]
+    fn acquisition_failure_unwinds_every_earlier_step_in_reverse_order() {
+        assert_eq!(
+            super::ACQUISITION_STEPS,
+            [
+                AcquisitionStep::RawMode,
+                AcquisitionStep::Reader,
+                AcquisitionStep::AlternateScreen,
+                AcquisitionStep::VisualTerminal,
+                AcquisitionStep::BracketedPaste,
+                AcquisitionStep::KeyboardMode,
+                AcquisitionStep::PointerModes,
+            ]
+        );
+
+        for (failed_index, failed_step) in super::ACQUISITION_STEPS.iter().enumerate() {
+            let dropped = Rc::new(RefCell::new(Vec::new()));
+            let error = {
+                let mut resources = super::OwnedTerminal::new();
+                resources
+                    .acquire_in_order(|step, resources| {
+                        install_acquisition_fixture(step, resources, dropped.clone());
+                        if step == *failed_step {
+                            Err(io::Error::other("injected acquisition-stage failure"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .expect_err("injected acquisition-stage failure")
+            };
+
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            let expected = super::ACQUISITION_STEPS[..=failed_index]
+                .iter()
+                .rev()
+                .map(|step| match step {
+                    AcquisitionStep::RawMode => "raw",
+                    AcquisitionStep::Reader => "reader",
+                    AcquisitionStep::AlternateScreen => "alternate",
+                    AcquisitionStep::VisualTerminal => "visual",
+                    AcquisitionStep::BracketedPaste => "paste",
+                    AcquisitionStep::KeyboardMode => "keyboard",
+                    AcquisitionStep::PointerModes => "pointer",
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(*dropped.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn partially_enabled_mode_is_reset_when_acquisition_fails() {
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let error = ModeGuard::finish_acquire(
+            ModeGuard::tracked_for_test("partial mode", steps.clone(), false),
+            || {
+                steps.borrow_mut().push("enable");
+                Err(io::Error::other("injected enable failure"))
+            },
+        )
+        .err()
+        .expect("failed mode enable");
+
+        assert_eq!(error.to_string(), "injected enable failure");
+        assert_eq!(*steps.borrow(), ["enable", "partial mode"]);
+    }
+
+    #[tokio::test]
+    async fn release_continues_after_each_terminal_reset_failure() {
+        for (failure, expected_error) in [
+            ("graphics", "injected graphics writer failure"),
+            ("pointer", "injected pointer reset failure"),
+            ("keyboard", "injected keyboard reset failure"),
+            ("paste", "injected paste reset failure"),
+            ("clear", "injected clear failure"),
+            ("cursor", "injected cursor failure"),
+            ("flush", "injected flush failure"),
+            ("alternate", "injected alternate reset failure"),
+            ("raw", "injected raw reset failure"),
+        ] {
+            let steps = Rc::new(RefCell::new(Vec::new()));
+            let backend =
+                TerminalBackend::failing_lifecycle_writer(80, 24, vec![failure], steps.clone());
+            let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+            terminal.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
+            terminal.owned.graphics_protocol = Some(GraphicsProtocol::Kitty);
+            terminal.graphics_placement = Some(GraphicsPlacement {
+                image_index: 0,
+                digest: [1; 32],
+                inner: Rect::new(1, 2, 3, 4),
+            });
+            terminal.owned.pointer_modes = Some(super::ModeGuard::tracked_for_test(
+                "pointer",
+                steps.clone(),
+                failure == "pointer",
+            ));
+            #[cfg(unix)]
+            {
+                terminal.owned.keyboard = Some(super::ModeGuard::tracked_for_test(
+                    "keyboard",
+                    steps.clone(),
+                    failure == "keyboard",
+                ));
+                terminal.owned.bracketed_paste = Some(super::ModeGuard::tracked_for_test(
+                    "paste",
+                    steps.clone(),
+                    failure == "paste",
+                ));
+            }
+            terminal.owned.alternate = Some(super::AlternateScreen::tracked_for_test(
+                "alternate",
+                steps.clone(),
+                failure == "alternate",
+            ));
+            terminal.owned.raw_mode = Some(super::RawMode::tracked_for_test(
+                "raw",
+                steps.clone(),
+                failure == "raw",
+            ));
+
+            let error = terminal.release().expect_err("injected reset failure");
+
+            assert_eq!(error.to_string(), expected_error);
+            let steps = steps.borrow();
+            let order = [
+                "graphics",
+                "pointer",
+                "keyboard",
+                "paste",
+                "clear",
+                "cursor",
+                "flush",
+                "alternate",
+                "raw",
+            ];
+            let positions = order
+                .iter()
+                .filter_map(|step| steps.iter().position(|seen| seen == step))
+                .collect::<Vec<_>>();
+            assert_eq!(positions.len(), order.len());
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn release_keeps_first_error_and_retries_failed_mode_reset_on_drop() {
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let backend = TerminalBackend::failing_lifecycle_writer(
+            80,
+            24,
+            vec!["clear", "cursor", "flush"],
+            steps.clone(),
+        );
+        let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+        terminal.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
+        terminal.owned.pointer_modes = Some(super::ModeGuard::tracked_for_test(
+            "pointer",
+            steps.clone(),
+            true,
+        ));
+
+        let error = terminal.release().expect_err("injected reset failures");
+
+        assert_eq!(error.to_string(), "injected pointer reset failure");
+        assert_eq!(
+            *steps.borrow(),
+            ["pointer", "pointer", "clear", "cursor", "flush"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_reacquisition_keeps_terminal_released() {
+        let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+
+        let error = terminal
+            .reacquire_with(|_, _, _| Err(super::TerminalError::Ineligible))
+            .expect_err("injected acquisition failure");
+
+        assert!(matches!(error, super::TerminalError::Ineligible));
+        assert!(terminal.owned.input.is_none());
+        assert!(terminal.owned.terminal.is_none());
+    }
+
+    fn install_acquisition_fixture(
+        step: AcquisitionStep,
+        resources: &mut super::OwnedTerminal,
+        dropped: Rc<RefCell<Vec<&'static str>>>,
+    ) {
+        match step {
+            AcquisitionStep::RawMode => {
+                resources.raw_mode = Some(RawMode::tracked_for_test("raw", dropped, false));
+            }
+            AcquisitionStep::Reader => {
+                resources.input = Some(super::input::TerminalReader::Test(dropped));
+            }
+            AcquisitionStep::AlternateScreen => {
+                resources.alternate = Some(AlternateScreen::tracked_for_test(
+                    "alternate",
+                    dropped,
+                    false,
+                ));
+            }
+            AcquisitionStep::VisualTerminal => {
+                let mut backend = TerminalBackend::new(TerminalMode::Fullscreen, None);
+                backend.track_drop_for_test("visual", dropped);
+                resources.terminal = Some(
+                    Terminal::with_options(
+                        backend,
+                        TerminalOptions {
+                            viewport: Viewport::Fullscreen,
+                        },
+                    )
+                    .expect("test terminal"),
+                );
+            }
+            AcquisitionStep::BracketedPaste => {
+                resources.bracketed_paste =
+                    Some(ModeGuard::tracked_for_test("paste", dropped, false));
+            }
+            AcquisitionStep::KeyboardMode => {
+                resources.keyboard = Some(ModeGuard::tracked_for_test("keyboard", dropped, false));
+                resources.graphics_protocol = None;
+            }
+            AcquisitionStep::PointerModes => {
+                resources.pointer_modes =
+                    Some(ModeGuard::tracked_for_test("pointer", dropped, false));
+            }
+        }
     }
 }
 
