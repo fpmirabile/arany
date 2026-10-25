@@ -173,6 +173,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         },
         variant_step!(
             "ProviderSetupEditStarted",
+            2,
+            crate::session::pre_roster_setup_payload
+        ),
+        variant_step!(
+            "ProviderSetupEditStarted",
             1,
             crate::session::pre_role_routing_payload
         ),

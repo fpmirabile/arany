@@ -247,7 +247,7 @@ fn wait_for_after(
 
 // A selector takes keys only once its armed frame shows `screen_ready`.
 #[track_caller]
-fn wait_for_frame(
+pub(super) fn wait_for_frame(
     output: &mut impl Read,
     input: &mut impl Write,
     transcript: &mut Vec<u8>,
