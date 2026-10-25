@@ -337,9 +337,11 @@ fn budget_tool_fact(
         let cause = match source {
             Some(PermissionSource::Human) => "permission_denied; human approval not granted",
             Some(PermissionSource::Hook) => "hook_denied",
-            Some(PermissionSource::Rule | PermissionSource::TypedPrefixRule) => {
-                "permission_rule_denied"
-            }
+            Some(
+                PermissionSource::Rule
+                | PermissionSource::TypedPrefixRule
+                | PermissionSource::HostPrefixRule,
+            ) => "permission_rule_denied",
             Some(PermissionSource::Mode) => "permission_mode_denied",
             Some(PermissionSource::UnavailableApproval) => {
                 "permission_denied; approval unavailable"

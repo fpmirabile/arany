@@ -40,6 +40,7 @@ pub struct ToolApprovals {
     sender: mpsc::Sender<ToolApproval>,
     human_only: bool,
     session_scope: bool,
+    prefix_rules: bool,
 }
 
 pub struct ApprovalInbox(mpsc::Receiver<ToolApproval>);
@@ -65,6 +66,7 @@ pub struct UnguardedPrompt {
     pub executable: String,
     pub attribution: Option<EnforcementCause>,
     pub remember: bool,
+    pub prefix: bool,
     pub sensitive: bool,
     pub inactive_rules: bool,
 }
@@ -147,6 +149,7 @@ impl ToolApprovals {
                 sender,
                 human_only: true,
                 session_scope: true,
+                prefix_rules: true,
             },
             ApprovalInbox(receiver),
         )
@@ -154,7 +157,12 @@ impl ToolApprovals {
 
     pub fn once_only(mut self) -> Self {
         self.session_scope = false;
+        self.prefix_rules = false;
         self
+    }
+
+    pub(crate) fn admits_prefix_rules(&self) -> bool {
+        self.human_only && self.prefix_rules
     }
 
     pub(crate) fn admits_session_scope(&self) -> bool {
@@ -163,6 +171,7 @@ impl ToolApprovals {
 
     pub fn without_human_only(mut self) -> Self {
         self.human_only = false;
+        self.prefix_rules = false;
         self
     }
 
@@ -364,6 +373,7 @@ mod tests {
                     args: vec!["status".into()],
                     cwd: ".".into(),
                     justification: "sandbox failure".into(),
+                    prefix_rule: None,
                 },
                 [true; 3],
             ),
@@ -408,6 +418,7 @@ mod tests {
             args: Vec::new(),
             cwd: ".".into(),
             justification: "j".into(),
+            prefix_rule: None,
         };
         let (approvals, _inbox) = ToolApprovals::new(ApprovalMode::Request);
         let approvals = approvals.without_human_only();

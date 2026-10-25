@@ -677,7 +677,7 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
                     Event::ToolStarted {
                         run_id: f.run,
                         agent_run_id: f.primary,
-                        intent: intent.clone(),
+                        intent: intent.clone().into(),
                         active_ceiling_ms: 0,
                     },
                 )

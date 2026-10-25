@@ -262,3 +262,79 @@ fn upgrades_hold_the_record_writer_lock_and_errors_never_carry_record_content() 
     }
     assert_eq!(std::fs::read(&target).unwrap(), original);
 }
+
+#[test]
+fn inactive_host_archive_preserves_the_source_fixture_and_refuses_interrupted_moves() {
+    let source = br#"{"version":1,"commands":[{"workspace":{"path":"/workspace","device":1,"inode":2},"program":"printf","args":["inspected"],"cwd":"","created_unix_ms":1}]}"#;
+    assert!((crate::tools::unguarded_rules::UNGUARDED_COMMANDS.accepts)(
+        source
+    ));
+    let mut interrupted = 0;
+    let mut completed = 0;
+    let mut manifest_failure = false;
+    for fail in 0..16 {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, path) = root(temp.path());
+        plant(&path, RecordKind::UnguardedCommands, source);
+        FAIL_AT.with(|point| point.set(Some(fail)));
+        let result = state.archive_inactive_host_rules();
+        FAIL_AT.with(|point| point.set(None));
+        let original = path.join("unguarded-commands.json");
+        let target = path.join("archive/inactive-host-commands/unguarded-commands.json");
+        let pending = target.with_file_name("pending.json");
+        let temporary = target.with_file_name("pending.tmp");
+        let manifest = target.with_file_name("manifest.json");
+        if fail == 0 {
+            assert!(result.is_err());
+            assert!(path.join("archive").is_dir());
+            assert!(!target.parent().unwrap().exists());
+            assert!(
+                original.exists(),
+                "StateRoot sync precedes preparation and move"
+            );
+        }
+        let retained = if original.exists() {
+            &original
+        } else {
+            &target
+        };
+        assert_eq!(
+            std::fs::read(retained).unwrap(),
+            source,
+            "failure step {fail}"
+        );
+        drop(state);
+        let reopened = StateRoot::open_existing(&path).unwrap();
+        match result {
+            Ok(true) => {
+                completed += 1;
+                assert!(!original.exists());
+                assert!(manifest.exists() && !pending.exists() && !temporary.exists());
+                assert!(reopened.archive_inactive_host_rules().unwrap());
+            }
+            Err(_) => {
+                interrupted += 1;
+                if manifest.exists() {
+                    manifest_failure = true;
+                    assert!(
+                        pending.exists(),
+                        "manifest sync failure retains the interlock"
+                    );
+                }
+                if pending.exists() || temporary.exists() || target.exists() || manifest.exists() {
+                    assert!(
+                        matches!(
+                            reopened.archive_inactive_host_rules(),
+                            Err(StoreError::ReplaceUnconfirmed)
+                        ),
+                        "no retry or automatic completion of unconfirmed archive at step {fail}"
+                    );
+                    assert_eq!(std::fs::read(retained).unwrap(), source);
+                }
+            }
+            Ok(false) => panic!("present source was not archived"),
+        }
+        assert!(!path.join("permissions.json").exists());
+    }
+    assert!(completed > 0 && interrupted > 0 && manifest_failure);
+}

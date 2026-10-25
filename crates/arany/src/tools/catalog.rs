@@ -684,6 +684,7 @@ mod tests {
                 args: Vec::new(),
                 cwd: ".".into(),
                 justification: "Run the failed command once on the host".into(),
+                prefix_rule: None,
             },
             ToolCall::ParseAgentDefinition {
                 index: 0,
@@ -852,6 +853,7 @@ mod tests {
                 args: Vec::new(),
                 cwd: ".".into(),
                 justification: "run".into(),
+                prefix_rule: None,
             }
             .facts()
             .site

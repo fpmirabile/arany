@@ -25,7 +25,7 @@ pub use records::{
     DisplayChunk, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
     MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunFailure,
-    SessionDefaults,
+    SessionDefaults, ToolIntentRecord,
 };
 use validate::bounded;
 
@@ -167,7 +167,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 6),
+    ("ToolPermissionDecided", 7),
     ("HookStarted", 11),
     ("HookFinished", 17),
     ("ToolFinished", 28),
@@ -379,7 +379,7 @@ pub enum Event {
     ToolStarted {
         run_id: RunId,
         agent_run_id: AgentRunId,
-        intent: crate::tools::EffectIntent,
+        intent: ToolIntentRecord,
         active_ceiling_ms: u64,
     },
     SupervisorVerdictRecorded {
@@ -623,7 +623,7 @@ struct ToolFinishedPayload {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolStartedPayload {
-    intent: crate::tools::EffectIntent,
+    intent: ToolIntentRecord,
     active_ceiling_ms: u64,
 }
 #[derive(Serialize, Deserialize)]
@@ -1697,6 +1697,19 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
     before_operations(kind, payload, &["glob"], Some("glob"))
 }
 
+pub(crate) fn pre_host_prefix_payload(kind: &str, payload: &str) -> Option<String> {
+    if kind != "ToolPermissionDecided" {
+        return None;
+    }
+    let verdict: crate::tools::permissions::PermissionVerdict =
+        serde_json::from_str(payload).ok()?;
+    (verdict.source != crate::tools::permissions::PermissionSource::HostPrefixRule
+        && verdict.basis != crate::tools::permissions::PermissionSource::HostPrefixRule
+        && verdict.host.as_ref().is_none_or(|host| host.rule.is_none()))
+    .then(|| serde_json::to_string(&verdict).ok())
+    .flatten()
+}
+
 pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
     use crate::tools::permissions::{HookResult, PermissionSource};
     fn again<T: Serialize + for<'de> Deserialize<'de>>(
@@ -1733,12 +1746,13 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
         "RunStarted" => again::<RunStartedPayload>(payload, |data| {
             data.config.tool_policy.as_ref().is_none_or(|policy| {
                 policy.host_epoch.is_none()
+                    && policy.host_prefixes.is_empty()
                     && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
             })
         }),
-        "ToolStarted" => {
-            expiring_again::<ToolStartedPayload>(kind, payload, |data| intent_allowed(&data.intent))
-        }
+        "ToolStarted" => expiring_again::<ToolStartedPayload>(kind, payload, |data| {
+            intent_allowed(&data.intent.clone().into())
+        }),
         "ToolFinished" => expiring_again::<ToolFinishedPayload>(kind, payload, |data| {
             observation_allowed(&data.observation)
         }),

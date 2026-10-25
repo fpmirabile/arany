@@ -68,9 +68,11 @@ pub(super) fn project(
             (*run_id, user_message(*run_id, text, images), true)
         }
         Event::MessageCommitted { run_id, text } => (*run_id, answer(*run_id, text), false),
-        Event::ToolStarted { run_id, intent, .. } => {
-            (*run_id, tool_item(intent, None, false), true)
-        }
+        Event::ToolStarted { run_id, intent, .. } => (
+            *run_id,
+            tool_item(&intent.clone().into(), None, false),
+            true,
+        ),
         Event::ToolFinished {
             run_id,
             observation,

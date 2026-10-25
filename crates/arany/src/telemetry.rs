@@ -562,7 +562,10 @@ impl RunTrace {
                 ..
             } => self.provider_call(*agent_run_id, record, at),
             Event::ToolStarted { intent, .. } if intent.call.is_unguarded() => {
-                self.unguarded_pending.insert(intent.digest(), false);
+                self.unguarded_pending.insert(
+                    crate::tools::EffectIntent::from(intent.clone()).digest(),
+                    false,
+                );
             }
             Event::ToolPermissionDecided { verdict, .. } => {
                 if let Some(approved) = self.unguarded_pending.get_mut(&verdict.intent_digest) {

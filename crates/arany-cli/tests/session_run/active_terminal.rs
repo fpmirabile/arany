@@ -421,8 +421,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 "Notice: Model: model-1 \u{b7} default; /model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
                     .as_bytes(),
             );
-            patterns.push(b"Request: ");
-            patterns.push(b"\r\n");
+            patterns.push(b"Context left: ");
+            patterns.push(b" (Arany request budget at admission)\r\n/usage for details\r\n");
         }
         if expect_help {
             patterns.push(if inline {
@@ -1169,8 +1169,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             .and_then(|config| config.context_usage.as_ref())
             .expect("current Run footprint");
         let status = format!(
-            "Request: {}% of local request budget; not model tokens\r\nIncludes chat, instructions, files and images\r\n",
-            usage.utilization_percent(),
+            "Context left: {} (Arany request budget at admission)\r\n/usage for details\r\n",
+            arany_cli::presentation::format_bytes(u64::from(
+                usage.budget_bytes.saturating_sub(usage.used_bytes)
+            )),
         );
         assert_eq!(transcript.matches(&status).count(), 1);
         assert!(!transcript.contains("Notice: Preparing message · Ctrl+C cancels"));

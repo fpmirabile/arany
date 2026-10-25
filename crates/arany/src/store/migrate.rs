@@ -227,6 +227,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         variant_step!("ToolStarted", 17, crate::session::pre_host_payload),
         variant_step!("ToolFinished", 23, crate::session::pre_host_payload),
         variant_step!("ToolPermissionDecided", 5, crate::session::pre_host_payload),
+        variant_step!(
+            "ToolPermissionDecided",
+            6,
+            crate::session::pre_host_prefix_payload
+        ),
         variant_step!("AgentSpawned", 13, crate::session::pre_host_payload),
         variant_step!("HookStarted", 7, crate::session::pre_host_payload),
         variant_step!("HookFinished", 12, crate::session::pre_host_payload),
