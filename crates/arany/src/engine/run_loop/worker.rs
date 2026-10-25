@@ -697,7 +697,7 @@ impl RunLoop<'_> {
             .get_mut(&intent.agent_run_id)
             .ok_or(EngineError::CoordinatorFailed)?;
         view.note_intent(&intent);
-        let runtime = runtime.with_queue_accounting();
+        let runtime = runtime.clone().with_queue_accounting();
         if matches!(
             intent.call,
             ToolCall::Read { .. }
