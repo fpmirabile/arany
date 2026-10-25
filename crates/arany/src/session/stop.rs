@@ -298,7 +298,7 @@ mod tests {
         crate::session::ToolView {
             checkpoint: None,
             permission_verdict: None,
-            started_sequence: Some(0),
+            started_sequence: Some(1),
             hooks: Vec::new(),
             hook_sequence: None,
             intent: intent.clone(),
@@ -440,6 +440,15 @@ mod tests {
         let rows = [
             (Vec::new(), &open, RunStop::Interrupted),
             (vec![tool(known)], &open, RunStop::Interrupted),
+            (
+                vec![{
+                    let mut proposal = tool(None);
+                    proposal.started_sequence = None;
+                    proposal
+                }],
+                &open,
+                RunStop::Interrupted,
+            ),
             (vec![tool(None)], &open, RunStop::Uncertain),
             (
                 vec![

@@ -1477,6 +1477,158 @@ fn worker_protocol_receipts_handover_order_and_verification_are_causal() {
     );
 }
 
+fn researcher_tool_request(f: &mut Fixture) -> EffectIntent {
+    let researcher = AgentRunId::new();
+    let objective = "Inspect the current files";
+    let Event::ProviderCallRecorded { record, .. } = f.events.iter_mut().rev()
+        .find(|event| matches!(event, Event::ProviderCallRecorded { record, .. } if record.delegation.is_some())).unwrap() else {
+        unreachable!()
+    };
+    record
+        .delegation
+        .as_mut()
+        .unwrap()
+        .push(ChildAssignment::Researcher {
+            objective: objective.into(),
+            definition: None,
+            profile: None,
+        });
+    f.push(Event::AgentSpawned {
+        run_id: f.run,
+        agent_run_id: researcher,
+        role: AgentRole::Child,
+        ordinal: 2,
+        objective: Some(objective.into()),
+        grant: Some(ChildGrant::ReadOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
+        definition: None,
+        profile: None,
+        assignment: None,
+    });
+    f.call(
+        researcher,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    f.intent(
+        researcher,
+        ToolCall::Read {
+            path: "src/a".into(),
+            offset: None,
+            limit: Some(32),
+        },
+        EffectTarget::Workspace,
+    )
+}
+
+fn stop_editor_hook(f: &mut Fixture) {
+    use crate::tools::permissions::{
+        HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
+    };
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: String::new(),
+        },
+        EffectTarget::Workspace,
+    );
+    f.push(Event::HookStarted {
+        run_id: f.run,
+        agent_run_id: f.child,
+        hook: HookInvocation {
+            event: HookEvent::SubagentStop,
+            group: 0,
+            handler: 0,
+            subject_digest: stop_subject(f.child, 0),
+            intent: intent.clone(),
+            input_digest: [9; 32],
+            active_ceiling_ms: Some(1),
+        },
+    });
+    let stdout = r#"{"continue":false}"#;
+    f.push(Event::HookFinished {
+        run_id: f.run, agent_run_id: f.child,
+        outcome: HookOutcome {
+            boundary_active_ms: None, result: HookResult::Stopped { reason: None },
+            observation: ToolObservation {
+                attestation: Some(Attestation::Guard(receipt(&intent))), intent,
+                disposition: ToolDisposition::Succeeded, enforcement_cause: None,
+                limit_cause: None, approval_cause: None, cache_update: CacheUpdate::NotApplicable,
+                output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":stdout,"stderr":"","stdout_total":{"bytes":stdout.len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+            },
+        },
+    });
+    assert_eq!(f.view().runs[0].hook_stop_reason(), Some(None));
+}
+
+#[test]
+fn stopped_hooks_reject_new_or_approved_tools_but_settle_proposed_denials() {
+    use crate::tools::permissions::Decision;
+    for pending in [false, true] {
+        let mut f = configured_fixture();
+        let intent = researcher_tool_request(&mut f);
+        if pending {
+            f.push(Event::ToolProposed {
+                run_id: f.run,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            });
+        }
+        allow_permission(&mut f, &intent);
+        let mut start = f.events.pop().unwrap();
+        let mut before = f.view();
+        before
+            .apply_committed(&f.envelope(start.clone(), before.last_sequence + 1))
+            .unwrap();
+        stop_editor_hook(&mut f);
+        refused(
+            &f,
+            start.clone(),
+            "approved dispatch after another actor's hook stop",
+        );
+        let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut start
+        else {
+            unreachable!()
+        };
+        verdict.decision = Decision::Deny;
+        verdict.approved = false;
+        if pending {
+            f.push(start);
+            f.observed(
+                &intent,
+                ToolDisposition::Denied,
+                None,
+                "Permission deny rule blocked this Tool",
+            );
+            assert!(
+                SessionView::replay(f.session, &f.envelopes())
+                    .unwrap()
+                    .is_some()
+            );
+        } else {
+            refused(
+                &f,
+                start,
+                "unproposed settlement after another actor's hook stop",
+            );
+        }
+    }
+}
+
 fn proposal_before_worker_stop(
     reason: WorkerStopReason,
     configured: bool,

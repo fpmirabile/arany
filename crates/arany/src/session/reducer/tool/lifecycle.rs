@@ -413,6 +413,11 @@ pub(super) fn started(
     };
     let pending = super::pending_tool(active_run(current, *run_id)?, *agent_run_id)
         .is_ok_and(|tool| tool.intent.id == intent.id && tool.started_sequence.is_none());
+    if active_run(current, *run_id)?.hook_stop_reason().is_some()
+        && (!pending || verdict.as_ref().is_none_or(|verdict| verdict.approved))
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     if !pending
         && verdict
             .as_ref()

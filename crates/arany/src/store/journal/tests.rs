@@ -569,6 +569,9 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
 
 // The largest typed Write: a six-byte escape per content byte and a long escaped path.
 fn largest_tool_started_payload() -> String {
+    use crate::tools::permissions::{
+        Decision, MAX_HOOKS_PER_OCCURRENCE, PermissionMode, PermissionSource, PermissionVerdict,
+    };
     let intent = crate::tools::EffectIntent {
         host: None,
         host_command: None,
@@ -590,7 +593,18 @@ fn largest_tool_started_payload() -> String {
     };
     assert!(intent.valid());
     Event::ToolStarted {
-        verdict: None,
+        verdict: Some(PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Ask,
+            mode: Some(PermissionMode::AcceptEdits),
+            basis: PermissionSource::Hook,
+            source: PermissionSource::UnavailableApproval,
+            approved: false,
+            hook_restriction: Some(Decision::Ask),
+            hooks: u8::try_from(MAX_HOOKS_PER_OCCURRENCE).unwrap(),
+            narrowed: false,
+        }),
         run_id: intent.run_id,
         agent_run_id: intent.agent_run_id,
         intent: intent.into(),
@@ -734,6 +748,12 @@ fn every_event_slot_admits_a_current_tool_observation() {
     let payload = largest_tool_started_payload();
     assert!(payload.len() > crate::store::MAX_EVENT_BYTES);
     assert!(payload.len() <= event_payload_limit("ToolStarted", started));
+    let host = crate::session::session_host_protocol_fixture();
+    let host_start = host.events.iter().rev().find(|event| matches!(event,
+        Event::ToolStarted { verdict: Some(verdict), .. }
+            if verdict.host.as_ref().is_some_and(|approval| approval.source_intent.is_some())
+    )).expect("host start with a session approval source");
+    assert!(host_start.payload().unwrap().len() <= event_payload_limit("ToolStarted", started));
     assert_eq!(payload_version("ToolPermissionDecided"), None);
     let proposed = payload_version("ToolProposed").expect("proposal version");
     assert_eq!(
