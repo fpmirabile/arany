@@ -4320,14 +4320,53 @@ mod lifecycle_hooks {
         }
     }
 
+    const AUTO_PRE_COMPACT_READS: usize = 5;
+
+    fn auto_pre_compact_fixture(fixture: &Fixture) -> (Arc<ScriptedProvider>, arany::GoalBudget) {
+        // Three recent pages leave room for the next turn; clearing one page still needs a summary.
+        const PAGE_BYTES: usize = 60 * 1024;
+        const LINE_BYTES: usize = 1024;
+        std::fs::write(
+            fixture.workspace.join("notes/data.txt"),
+            format!("{}\n", "x".repeat(LINE_BYTES - 1)).repeat(PAGE_BYTES / LINE_BYTES),
+        )
+        .unwrap();
+        let mut outcomes: Vec<_> = (0..AUTO_PRE_COMPACT_READS)
+            .map(|_| {
+                tool_outcome(arany::ToolCall::Read {
+                    path: "notes/data.txt".into(),
+                    offset: None,
+                    limit: None,
+                })
+            })
+            .collect();
+        outcomes.push(finish("done"));
+        let provider = Arc::new(
+            ScriptedProvider::new(outcomes).with_compactions(
+                (0..AUTO_PRE_COMPACT_READS)
+                    .map(|_| {
+                        Ok(CompactionResponse {
+                            summary: "Earlier reads remain recorded in the journal.".into(),
+                            response_id: None,
+                            usage: arany::Usage::default(),
+                            wire_provenance: None,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+        let budget = arany::GoalBudget {
+            max_provider_calls: Some(u32::try_from(2 * AUTO_PRE_COMPACT_READS + 1).unwrap()),
+            ..budget()
+        };
+        (provider, budget)
+    }
+
     #[tokio::test]
     async fn in_run_auto_pre_compact_journals_before_reservation_or_skips_and_continues() {
         use arany::permissions::{HookEvent, HookResult};
         const STOPPED_UNCONSUMED: usize = 2;
-        // Three recent pages leave room for the next turn; clearing one page still needs a summary.
-        let page = 60 * 1024;
-        let reads = 5;
-        let call_budget = u32::try_from(2 * reads + 1).unwrap();
+        let reads = AUTO_PRE_COMPACT_READS;
 
         for (script, expected) in [
             ("exit 0", HookResult::Passed),
@@ -4353,45 +4392,9 @@ mod lifecycle_hooks {
             } else {
                 0
             };
-            std::fs::write(
-                fixture.workspace.join("notes/data.txt"),
-                format!("{}\n", "x".repeat(1023)).repeat(usize::try_from(page / 1024).unwrap()),
-            )
-            .unwrap();
-            let mut outcomes: Vec<_> = (0..reads)
-                .map(|_| {
-                    tool_outcome(arany::ToolCall::Read {
-                        path: "notes/data.txt".into(),
-                        offset: None,
-                        limit: None,
-                    })
-                })
-                .collect();
-            outcomes.push(finish("done"));
-            let provider = Arc::new(
-                ScriptedProvider::new(outcomes).with_compactions(
-                    (0..reads)
-                        .map(|_| {
-                            Ok(CompactionResponse {
-                                summary: "Earlier reads remain recorded in the journal.".into(),
-                                response_id: None,
-                                usage: arany::Usage::default(),
-                                wire_provenance: None,
-                            })
-                        })
-                        .collect(),
-                ),
-            );
+            let (provider, budget) = auto_pre_compact_fixture(&fixture);
             let (result, requests, humans) = fixture
-                .run_provider(
-                    provider.clone(),
-                    None,
-                    false,
-                    arany::GoalBudget {
-                        max_provider_calls: Some(call_budget),
-                        ..budget()
-                    },
-                )
+                .run_provider(provider.clone(), None, false, budget)
                 .await;
             if matches!(expected, HookResult::Stopped { .. }) {
                 assert_eq!(result.run.status, RunStatus::StoppedByHook);
@@ -4518,45 +4521,11 @@ mod lifecycle_hooks {
         ] {
             let settings = json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[hook]}]}});
             let fixture = Fixture::new(Some(&settings), false);
-            let page = 60 * 1024;
-            let reads = 5;
-            let call_budget = u32::try_from(2 * reads + 1).unwrap();
-            std::fs::write(
-                fixture.workspace.join("notes/data.txt"),
-                format!("{}\n", "x".repeat(1023)).repeat(usize::try_from(page / 1024).unwrap()),
-            )
-            .unwrap();
-            let mut outcomes: Vec<_> = (0..reads)
-                .map(|_| {
-                    tool_outcome(arany::ToolCall::Read {
-                        path: "notes/data.txt".into(),
-                        offset: None,
-                        limit: None,
-                    })
-                })
-                .collect();
-            outcomes.push(finish("done"));
-            let provider = Arc::new(
-                ScriptedProvider::new(outcomes).with_compactions(
-                    (0..reads)
-                        .map(|_| {
-                            Ok(CompactionResponse {
-                                summary: "Earlier reads remain recorded in the journal.".into(),
-                                response_id: None,
-                                usage: arany::Usage::default(),
-                                wire_provenance: None,
-                            })
-                        })
-                        .collect(),
-                ),
-            );
+            let (provider, budget) = auto_pre_compact_fixture(&fixture);
             let mut input = request(&fixture.workspace, "Inspect and complete the task");
             input.include_paths.clear();
             input.policy = CollaborationPolicy::Single;
-            input.goal.budget = Some(arany::GoalBudget {
-                max_provider_calls: Some(call_budget),
-                ..budget()
-            });
+            input.goal.budget = Some(budget);
             let events = assert_hook_cancellation(fixture, &provider, input, gate).await;
             assert!(provider.compact_requests.lock().unwrap().is_empty());
             assert!(
