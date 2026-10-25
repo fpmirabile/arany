@@ -802,8 +802,9 @@ async fn run_signalled(
 mod tests {
     use super::*;
     use arany::{
-        AgentPhase, Answer, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-        RunId, RunStop, SessionView, Tapped,
+        AgentPhase, Answer, Event, ProviderError, ProviderOutcome, ProviderRequest,
+        ProviderResponse, RunId, RunStop, SessionView, Tapped,
+        test_support::scenario::ScriptedProvider,
     };
     use std::{
         collections::VecDeque,
@@ -1439,13 +1440,7 @@ mod tests {
 
     const ACTIVE_LIMIT_MS: u64 = 60_000;
 
-    fn jsonl_budget_fixture(
-        budget: GoalBudget,
-    ) -> (
-        tempfile::TempDir,
-        ExecArgs,
-        arany::test_support::scenario::ScriptedProvider,
-    ) {
+    fn jsonl_budget_fixture(budget: GoalBudget) -> (tempfile::TempDir, ExecArgs, ScriptedProvider) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
@@ -1483,7 +1478,7 @@ mod tests {
                 content: "v2".into(),
             },
         };
-        let provider = arany::test_support::scenario::ScriptedProvider::new(vec![
+        let provider = ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(contract),
             arany::test_support::goals::finish_with("The notes remain unchanged"),
         ])
@@ -1496,53 +1491,50 @@ mod tests {
         (temp, exec, provider)
     }
 
-    async fn run_with_exhaustion_after_answer(
+    async fn run_with_budget_spent_after_answer(
         exec: ExecArgs,
-        provider: arany::test_support::scenario::ScriptedProvider,
-        active_ms: u64,
+        admission: Admission,
+        provider: ScriptedProvider,
+        active_time: std::time::Duration,
     ) -> CommandOutput {
         const ANSWER_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let requests = Arc::clone(&provider.requests);
-        let (publish, gate) = tokio::sync::oneshot::channel();
-        let publish = Mutex::new(Some(publish));
+        let (gate_tx, mut gate_rx) = tokio::sync::mpsc::channel(1);
         let provider = provider.with_before_call(1, move || {
             let session = requests
                 .lock()
                 .expect("requests")
                 .last()
-                .expect("Answer call")
+                .expect("call")
                 .session_id;
             let gate = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(event, arany::Event::MessageCommitted { .. })
+                matches!(event, Event::MessageCommitted { .. })
             });
-            publish
-                .lock()
-                .expect("gate sender")
-                .take()
-                .expect("one gate")
-                .send(gate)
-                .expect("gate receiver");
+            gate_tx.try_send(gate).expect("one answer gate");
         });
-        let admission = exec.admit().expect("valid autonomous command");
-        let advance_after_answer = async {
-            let (entered, release) = tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, gate)
-                .await
-                .expect("answer gate deadline")
-                .expect("answer gate");
-            tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, entered)
-                .await
-                .expect("answer commit deadline")
-                .expect("answer committed");
-            tokio::time::pause();
-            tokio::time::advance(std::time::Duration::from_millis(active_ms)).await;
-            tokio::time::resume();
-            release.send(()).expect("answer acknowledgement released");
-        };
-        let (report, ()) = tokio::join!(
-            run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled()),
-            advance_after_answer,
-        );
-        report.expect("completed Run with an exhausted Goal")
+        let run = run_with_provider(exec, admission, Arc::new(provider), Telemetry::disabled());
+        tokio::pin!(run);
+        let (entered, release) = tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, async {
+            tokio::select! {
+                gate = gate_rx.recv() => gate.expect("answer gate installed"),
+                result = &mut run => panic!("Run ended before the answer gate: {:?}", result.map(|output| output.success)),
+            }
+        })
+        .await
+        .expect("answer gate deadline");
+        tokio::time::timeout(ANSWER_COMMIT_TIMEOUT, async {
+            tokio::select! {
+                entered = entered => entered.expect("accepted answer committed"),
+                result = &mut run => panic!("Run ended before answer acknowledgment: {:?}", result.map(|output| output.success)),
+            }
+        })
+        .await
+        .expect("answer commit deadline");
+        tokio::time::pause();
+        tokio::time::advance(active_time).await;
+        tokio::time::resume();
+        release.send(()).expect("release accepted answer");
+        run.await.expect("completed Run with an exhausted Goal")
     }
 
     #[tokio::test]
@@ -1553,10 +1545,12 @@ mod tests {
         };
         let (_temp, exec, provider) = jsonl_budget_fixture(budget);
         let state_dir = exec.state_dir.clone().expect("State directory");
-        let report = run_with_exhaustion_after_answer(
+        let admission = exec.admit().expect("valid autonomous command");
+        let report = run_with_budget_spent_after_answer(
             exec,
+            admission,
             provider,
-            budget.max_active_ms.expect("active-time limit"),
+            std::time::Duration::from_millis(budget.max_active_ms.expect("active-time limit")),
         )
         .await;
         let first_event: serde_json::Value =

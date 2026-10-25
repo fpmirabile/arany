@@ -653,6 +653,7 @@ pub(super) const MAX_COPY_BYTES: usize = 100_000;
 pub(super) const COPY_TOO_LARGE: &str = "Copy exceeds 97.7 KB; use arany show";
 
 // The escaped display text and what it names in the copy cue.
+#[derive(Clone)]
 pub(super) struct CopyRequest(String, &'static str);
 
 // Bytes of `display_text(text)`, counted without materializing it.
@@ -776,18 +777,9 @@ pub(super) fn native_selection_hint(var: EnvVars<'_>) -> String {
     }
 }
 
-// `terminal` is the owner's non-linear stderr; OSC 52 is never written without it.
-pub(super) async fn copy(
-    request: CopyRequest,
-    terminal: Option<&mut dyn std::io::Write>,
-) -> Result<String, String> {
-    let label = request.1;
-    let plan = destinations(&|name| std::env::var_os(name), terminal.is_some());
-    let local: Vec<_> = plan
-        .iter()
-        .copied()
-        .filter(|destination| *destination != Destination::Osc52)
-        .collect();
+// Terminal output stays with its owner; this operation only contacts local clients.
+pub(super) async fn copy_local(request: &CopyRequest) -> Result<Option<String>, String> {
+    let local = destinations(&|name| std::env::var_os(name), false);
     if !local.is_empty() {
         let text = request.0.clone();
         let outcome = match ClipboardJob::start_with(&WORKER, move |cancelled, cleanup| {
@@ -797,14 +789,21 @@ pub(super) async fn copy(
             Err(error) => Err(error),
         };
         match outcome {
-            Ok(destination) => return Ok(format!("Copied {label} to {destination}")),
+            Ok(destination) => return Ok(Some(format!("Copied {} to {destination}", request.1))),
             Err(CLEANUP_UNCONFIRMED) => {
                 return Err(format!("Copy unavailable: {CLEANUP_UNCONFIRMED}"));
             }
-            Err(_) => {}
+            Err(_) => return Ok(None),
         }
     }
-    let Some(output) = terminal else {
+    Ok(None)
+}
+
+pub(super) fn copy_to_terminal(
+    request: &CopyRequest,
+    output: Option<&mut dyn std::io::Write>,
+) -> Result<String, String> {
+    let Some(output) = output else {
         return Err(
             "Copy unavailable: no native or tmux clipboard worked; OSC 52 unavailable in linear mode"
                 .into(),
@@ -815,8 +814,19 @@ pub(super) async fn copy(
         .and_then(|()| output.flush())
         .map_err(|_| "Copy unavailable: terminal output failed".to_owned())?;
     Ok(format!(
-        "Copied {label}: sent to terminal (OSC 52); it may be ignored"
+        "Copied {}: sent to terminal (OSC 52); it may be ignored",
+        request.1
     ))
+}
+
+pub(super) async fn copy(
+    request: CopyRequest,
+    terminal: Option<&mut dyn std::io::Write>,
+) -> Result<String, String> {
+    if let Some(cue) = copy_local(&request).await? {
+        return Ok(cue);
+    }
+    copy_to_terminal(&request, terminal)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1067,6 +1077,8 @@ pub(super) mod cleanup_tests {
             pointer: Default::default(),
             pointer_modes: None,
             history_area: None,
+            panel_selection: Default::default(),
+            panel_copy: None,
             selection_cue: None,
             bracketed_paste: None,
             #[cfg(unix)]
