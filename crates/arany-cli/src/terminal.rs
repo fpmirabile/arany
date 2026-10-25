@@ -763,7 +763,11 @@ impl OwnedTerminal {
     }
 
     fn terminal(&mut self) -> &mut Terminal<TerminalBackend> {
-        self.terminal.as_mut().expect("owned terminal")
+        self.terminal_with_context("owned terminal")
+    }
+
+    fn terminal_with_context(&mut self, context: &'static str) -> &mut Terminal<TerminalBackend> {
+        self.terminal.as_mut().expect(context)
     }
 
     fn reader(&mut self) -> &mut TerminalReader {
@@ -3044,9 +3048,7 @@ impl AttachedTerminal {
         }
         let area = self
             .owned
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
+            .terminal_with_context("inline terminal")
             .get_frame()
             .area();
         if matches!(state, SnapshotState::Busy) {
@@ -3779,9 +3781,7 @@ impl AttachedTerminal {
             }
             let width = self
                 .owned
-                .terminal
-                .as_mut()
-                .expect("visual terminal")
+                .terminal_with_context("visual terminal")
                 .size()?
                 .width;
             let lines = view::usage_lines(&panel.pages[panel.page], width);
@@ -3866,17 +3866,10 @@ impl AttachedTerminal {
                 .map(|()| true)
                 .map_err(TerminalError::Io);
         }
-        let area = self
-            .owned
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
-            .size()?;
+        let area = self.owned.terminal_with_context("inline terminal").size()?;
         self.draw_snapshot(view, composer, None, SnapshotState::Session, Some(picker))?;
         self.owned
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
+            .terminal_with_context("inline terminal")
             .hide_cursor()?;
         Ok(area.width >= 16 && area.height >= 8)
     }
@@ -4036,9 +4029,7 @@ impl AttachedTerminal {
         }
         let width = self
             .owned
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
+            .terminal_with_context("inline terminal")
             .size()?
             .width;
         let (_, screen_height) = size()?;
