@@ -124,6 +124,10 @@ with a string value, matching the pinned peer SDK's forward compatibility.
 
 ### Stored history and continuation
 
+Serve's [Provider setup refusal](./serve.md#error-model) maps to `-32603` with
+`data.reason:"providerSetupBlocked"` for `session/prompt`, `session/load` and
+`session/resume`, including a Session already loaded on this connection.
+
 Load projects only the strictly reduced committed history returned by serve's
 `thread/resume`: turns in history order, each user message, its Tool items, then
 its committed answer when present. User messages become `user_message_chunk`;
@@ -356,6 +360,7 @@ State storage and all per-action resource limits remain unchanged.
 | Hostile input and recovery | Oversized/malformed lines recover; resource links remain literal mentions within block/UTF-8 bounds; relative cwd, additional directories, unsupported/oversized prompts and ambiguous envelopes refuse; offered fs/terminal and editor MCP never execute; EOF during recovery preserves the committed completion with incompleteUpdates | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Shipped command | TTY refusal, including with `--tools`, exits 2 before State; cleared credentials initialize successfully, auth/new fail auth_required, no Session, EOF exits 0 with empty stderr and schema-valid stdout | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
 | Editor launch directory | A launch directory containing State still permits initialize, profile authentication and Session creation for a different cwd; a session cwd containing State refuses without creating a Session | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
+| Provider setup blocks continuation | Pending and Uncertain setup edits refuse prompt, load and resume with `-32603 providerSetupBlocked`; Events remain unchanged and inference/compaction Provider calls stay at zero | [`setup_edits_block_loaded_session_prompts_without_events_or_provider_calls`](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Stored Session load/resume | A second server over the same State replays committed user/answer and Tool history before its schema-valid response; resume sends no history; neither executes nor changes Events; a later prompt appends a fresh Run to the same Session | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Pinned collaboration admission | New, load and resume retain CLI `single` or a zero child limit; a later prompt requesting delegation spawns no child in committed history | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Load admission and recovery | Unknown Sessions, foreign Workspace identities, relative/State-overlapping cwd, additional roots, active/locked Sessions and oversized history refuse without partial replay; unfinished Runs/intents retain interrupted/uncertain facts without execution | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
