@@ -464,6 +464,8 @@ impl RunLoop<'_> {
             ToolCall::Write { .. }
             | ToolCall::Edit { .. }
             | ToolCall::MultiEdit { .. }
+            | ToolCall::Delete { .. }
+            | ToolCall::Move { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::Command { .. } => {
                 (self.worker_allowance(id)? as usize).div_ceil(WORKER_CHUNK_BYTES)
