@@ -3155,10 +3155,15 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         runtime.reservation_overhead(&read("src/main.rs")),
         std::time::Duration::ZERO
     );
-    assert!(
+    assert_eq!(
         runtime.reservation_overhead(&ToolCall::Mkdir {
             path: "src/new".into()
-        }) > std::time::Duration::ZERO
+        }),
+        std::time::Duration::ZERO
+    );
+    assert!(
+        runtime.reservation_overhead(&ToolCall::GitStatus { path: "src".into() })
+            > std::time::Duration::ZERO
     );
 
     assert_eq!(
@@ -3167,9 +3172,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
             args: vec![],
             cwd: "".into(),
         }),
-        runtime.reservation_overhead(&ToolCall::Mkdir {
-            path: "src/new".into()
-        }) + std::time::Duration::from_secs(5),
+        super::guard::RESERVATION_OVERHEAD + super::selection::PHASE_TIME,
     );
 
     for pin in ["grant", "enforcement"] {

@@ -8426,9 +8426,14 @@ mod goal_replay_tests {
     fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
         use crate::tools::{Attestation, EnforcementCause, FileReceipt, GuardReceipt};
         let (mut view, goal, run, agent) = primary_tool_session(true);
-        let call = ToolCall::Mkdir {
-            path: "src/new".into(),
-        };
+        let path = "src/new";
+        view.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .paths
+            .push(path.into());
+        let call = ToolCall::Mkdir { path: path.into() };
         let mut intent = child_intent(run, agent, call);
         intent.enforcement_digest = FileReceipt::enforcement_digest();
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
@@ -8440,7 +8445,8 @@ mod goal_replay_tests {
             agent_run_id: agent,
             observation,
         };
-        let observed = observation_for(intent.clone(), b"after");
+        let mut observed = observation_for(intent.clone(), b"");
+        observed.output = serde_json::json!({"created":true}).to_string();
         let mut guarded = observed.clone();
         guarded.attestation = Some(Attestation::Guard(GuardReceipt {
             contract_version: 1,
