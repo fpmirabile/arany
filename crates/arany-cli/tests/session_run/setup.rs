@@ -45,6 +45,10 @@ mod offline_https;
 mod checks;
 
 #[cfg(debug_assertions)]
+#[path = "setup/routing.rs"]
+mod routing;
+
+#[cfg(debug_assertions)]
 const SETUP_SHELL: &str = "trap ':' INT; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; printf 'SCRIPT_INPUT_GATE\n'; IFS= read -r gate; [ \"$gate\" = go ] || exit 2; \"$ARANY_TEST_EXE\" --screen-reader --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
 
 #[cfg(debug_assertions)]
@@ -232,6 +236,7 @@ enum SetupPtyMode {
     Manager,
     Configured,
     InlineManager,
+    FullscreenManager,
     Resumed(arany::SessionId),
     ResumedInline(arany::SessionId),
 }
@@ -265,7 +270,10 @@ fn start_setup_pty_with_key(
     if matches!(mode, SetupPtyMode::Configured) {
         enter_conversation_setup(&mut output, &mut input, &mut transcript, &mut answered);
     }
-    if matches!(mode, SetupPtyMode::InlineManager) {
+    if matches!(
+        mode,
+        SetupPtyMode::InlineManager | SetupPtyMode::FullscreenManager
+    ) {
         wait_for(
             &mut output,
             &mut input,
@@ -322,6 +330,7 @@ fn setup_pty_command(
     let arguments = match mode {
         SetupPtyMode::Manager => "--screen-reader --setup".to_owned(),
         SetupPtyMode::InlineManager => "--classic --no-color --setup".to_owned(),
+        SetupPtyMode::FullscreenManager => "--no-color --setup".to_owned(),
         SetupPtyMode::Configured => {
             "--screen-reader --provider custom:local --model model-1".to_owned()
         }
@@ -352,7 +361,9 @@ fn setup_pty_command(
             "TERM",
             if matches!(
                 mode,
-                SetupPtyMode::InlineManager | SetupPtyMode::ResumedInline(_)
+                SetupPtyMode::InlineManager
+                    | SetupPtyMode::FullscreenManager
+                    | SetupPtyMode::ResumedInline(_)
             ) {
                 "xterm-256color"
             } else {
@@ -458,7 +469,7 @@ fn choose_native_account_setup(
         input,
         transcript,
         answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input
         .write_all(b"API accounts\r")
@@ -843,7 +854,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             &mut input,
             &mut transcript,
             &mut answered,
-            b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
         );
         let text = String::from_utf8_lossy(&transcript);
         let shell_pid = text
@@ -1101,7 +1112,7 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input.write_all(b"API accounts\r").expect("open accounts");
     acknowledge_linear_pages(
@@ -1289,7 +1300,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
         &mut transcript,
         &mut answered,
         setup_at,
-        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     input.write_all(b"\x03").expect("cancel setup");
     wait_for(
@@ -1388,7 +1399,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
             &mut input,
             &mut transcript,
             &mut answered,
-            b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
         );
         let shell_pid = String::from_utf8_lossy(&transcript)
             .lines()
@@ -3544,7 +3555,7 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+        b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
     );
     let (shell_pid, before) = {
         let text = String::from_utf8_lossy(&transcript);
@@ -3567,7 +3578,10 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
         "choices keep terminal echo"
     );
     let access_at = transcript.len();
-    assert!(String::from_utf8_lossy(&transcript).contains("1. API accounts or 2. Custom routes"));
+    assert!(
+        String::from_utf8_lossy(&transcript)
+            .contains("1. API accounts or 2. Custom routes or 3. Role routing")
+    );
     input
         .write_all(b"API accounts\r")
         .expect("open API accounts");
@@ -3814,7 +3828,7 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
                 &mut transcript,
                 &mut answered,
                 setup_at,
-                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
             );
             input
                 .write_all(b"API accounts\r")

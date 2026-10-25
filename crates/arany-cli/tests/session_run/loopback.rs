@@ -130,10 +130,21 @@ pub(super) fn send_response_for(
     text: serde_json::Value,
     streaming: bool,
 ) {
+    send_response_for_model(stream, index, "model-1", text, streaming);
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn send_response_for_model(
+    stream: &mut TcpStream,
+    index: usize,
+    model: &str,
+    text: serde_json::Value,
+    streaming: bool,
+) {
     let response = serde_json::json!({
         "id": format!("resp_{}", index + 1),
         "status": "completed",
-        "model": "model-1",
+        "model": model,
         "output": arany::semantic::responses_output(&text),
         "usage": {"input_tokens":20,"output_tokens":10}
     });

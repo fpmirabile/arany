@@ -445,6 +445,7 @@ async fn configure_account(
         &admission.state_dir,
         &admission.workspace,
         &mut journal,
+        &view.defaults,
     )
     .await;
     if let Some(id) = journal.session_id() {
