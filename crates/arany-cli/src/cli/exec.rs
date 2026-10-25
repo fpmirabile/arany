@@ -1548,6 +1548,7 @@ mod tests {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
         let state_dir = temp.path().join("state");
         let (exec, provider) = exec_budget_fixture(state_dir.clone(), workspace, budget);
+        let requests = Arc::clone(&provider.requests);
         let admission = exec.admit().expect("valid autonomous command");
         let report = if let Some(active_ms) = budget.max_active_ms {
             run_with_budget_spent_after_answer(
@@ -1569,6 +1570,7 @@ mod tests {
             SessionId::from_str(first_event["session_id"].as_str().expect("Session ID"))
                 .expect("typed Session ID");
         let (events, view) = arany::test_support::goals::replayed(&state_dir, session_id).await;
+        assert_eq!(requests.lock().expect("Provider requests").len(), 2);
         (report, events, view)
     }
 
@@ -1596,6 +1598,10 @@ mod tests {
 
     #[tokio::test]
     async fn exec_jsonl_keeps_budget_feedback_for_a_finished_run() {
+        let _deadline = arany::test_support::engine::deadline(
+            "JSONL budget feedback",
+            std::time::Duration::from_secs(30),
+        );
         let (report, _, view) = exec_budget_report(GoalBudget {
             max_active_ms: Some(ACTIVE_LIMIT_MS),
             ..GoalBudget::default()
@@ -1603,6 +1609,10 @@ mod tests {
         .await;
         let run = view.runs.last().expect("Finished Run");
         assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(
+            run.assistant_message.as_deref(),
+            Some("The notes remain unchanged")
+        );
         let goal = view.goals.last().expect("Failed Goal");
         assert_eq!(goal.status, GoalStatus::Failed);
         assert_eq!(

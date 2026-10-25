@@ -630,6 +630,7 @@ impl GoalPlanContract {
             | ToolCall::GitSwitch { .. }
             | ToolCall::GitPush { .. }
             | ToolCall::GhPrCreate { .. } => self.allows_path("."),
+            ToolCall::GhPrList { .. } => self.allows_path("."),
         }
     }
 
