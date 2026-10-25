@@ -201,7 +201,7 @@ pub(super) fn stage() {
         &SETUP_SHELL.replace("state-one", "state-scoped"),
         &[
             (
-                b"type a choice name: 1. API accounts or 2. Custom routes; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing; empty Enter selects 1. API accounts\r\nInput:\r\n",
                 b"API accounts\r",
             ),
             (
