@@ -1,4 +1,4 @@
-use super::children::ChildWork;
+use super::children::{ChildKind, ChildWork};
 use super::step::{BoxedStep, Grant, IntentResult};
 use super::stop::StopCause;
 use super::{Action, Admission, RunLoop};
@@ -990,7 +990,7 @@ impl RunLoop<'_> {
                 .get()
                 .and_then(|d| d.get(&assignment.definition))
                 .cloned(),
-            editor: true,
+            kind: ChildKind::Editor,
             source_context,
             turns_remaining: assignment.max_turns,
             steering_notes: Vec::new(),
