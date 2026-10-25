@@ -480,7 +480,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             1 => {
                 row.drain(TOOL_FINISHED..TOOL_FINISHED + 2);
                 drop(row.splice(
-                    TOOL_FINISHED + 1..TOOL_FINISHED + 1,
+                    TOOL_FINISHED + 2..TOOL_FINISHED + 2,
                     [
                         Event::GoalProviderCallReserved {
                             goal_id: goal,
@@ -494,7 +494,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             }
             2 => {
                 drop(row.splice(
-                    TOOL_FINISHED + 3..TOOL_FINISHED + 3,
+                    TOOL_FINISHED + 4..TOOL_FINISHED + 4,
                     [
                         Event::GoalProviderCallReserved {
                             goal_id: goal,
