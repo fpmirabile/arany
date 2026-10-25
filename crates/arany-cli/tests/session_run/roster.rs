@@ -1092,7 +1092,7 @@ mod journey {
             "{}",
             String::from_utf8_lossy(&alternate.stderr)
         );
-        assert_eq!(alternate.stdout, b"research answer\n");
+        assert_eq!(alternate.stdout, b"Answer:\n  research answer\n");
         let manifest = String::from_utf8(alternate.stderr).unwrap();
         assert!(manifest.starts_with("Roster preset: research\nRoles: primary=inspect, child=inspect, review=inspect, compaction=inspect\nEligible child profiles: inspect\n"));
         runtime.block_on(async {

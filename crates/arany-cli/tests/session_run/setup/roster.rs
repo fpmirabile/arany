@@ -239,7 +239,12 @@ fn remove_presets(
     select(&mut pty, presentation, 1, "Profile action");
     select(&mut pty, presentation, 1, "Roster chain");
     let from = pty.transcript.len();
-    pty.input.write_all(b"\x1b").unwrap();
+    pty.input
+        .write_all(match presentation {
+            Presentation::ScreenReader => b"\x03",
+            Presentation::Inline => b"\x1b",
+        })
+        .unwrap();
     presentation.menu(&mut pty, from, "Route profiles");
     select(&mut pty, presentation, 1, "Profile action");
     let from = presentation.choose(&mut pty, 2);

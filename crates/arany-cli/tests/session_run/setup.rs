@@ -3243,27 +3243,30 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
             &mut answered,
             b"TTY_BEFORE:",
         );
-        wait_for(
+        super::slash_completion::wait_for_frame(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"Esc",
+            (0, 16, 8),
+            |screen| {
+                screen.iter().any(|row| row.trim() == "Provider setup")
+                    && screen.iter().any(|row| row.starts_with("> API accounts"))
+            },
         );
+        let feedback_at = transcript.len();
         input.write_all(b"x").expect("non-navigation setup key");
-        wait_for(
+        super::slash_completion::wait_for_frame(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"Use Up/Down",
-        );
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Enter",
+            (feedback_at, 16, 8),
+            |screen| {
+                screen.iter().any(|row| row.starts_with("Use Up/Down"))
+                    && screen.iter().any(|row| row.contains("Enter Esc"))
+                    && screen.iter().any(|row| row.starts_with("> API accounts"))
+            },
         );
         assert!(!state.exists(), "invalid choice created State");
         let accounts_at = transcript.len();
