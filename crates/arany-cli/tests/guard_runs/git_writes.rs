@@ -176,6 +176,62 @@ impl Repo {
         (outcome, asked, calls, engine)
     }
 
+    async fn run_pr_list(
+        &self,
+        human: bool,
+        mut reply: impl FnMut(&arany::ToolApproval) -> arany::ApprovalReply,
+    ) -> (
+        Result<arany::RunOutcome, EngineError>,
+        usize,
+        Arc<ScriptedProvider>,
+        Engine,
+    ) {
+        let engine = engine_support::open(
+            StateRoot::open_existing(&self.state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(ToolCall::GhPrList {
+                repository: "github.com/example/project".into(),
+                state: arany::PrState::Open,
+                base: None,
+                head: None,
+                limit: arany::DEFAULT_PR_LIMIT,
+            }),
+            ProviderOutcome::Answer(Answer {
+                text: "The bounded list result was received".into(),
+            }),
+        ]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let mut input = request(&self.workspace, "List pull requests");
+        input.include_paths.clear();
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: human.then_some(approvals),
+            ..Default::default()
+        };
+        let mut asked = 0;
+        let outcome = {
+            let running = run_with(&engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result,
+                    Some(approval) = inbox.next() => {
+                        asked += 1;
+                        let answer = reply(&approval);
+                        approval.decide(answer);
+                    }
+                }
+            }
+        };
+        (outcome, asked, provider, engine)
+    }
+
     fn settings(&self, document: Value) {
         let permissions = self.state.join("permissions.json");
         std::fs::write(&permissions, serde_json::to_vec(&document).unwrap()).unwrap();
@@ -219,6 +275,298 @@ impl Repo {
 
 fn output(tool: &arany::ToolView) -> Value {
     serde_json::from_str(&tool.observation.as_ref().unwrap().output).unwrap()
+}
+
+fn native_gh_peer(repo: &Repo) -> PathBuf {
+    use arany::test_support::process::BoundedOutput;
+
+    let source = repo._temp.path().join("gh-peer.c");
+    let executable = repo._temp.path().join("gh-peer");
+    let marker = serde_json::to_string(
+        &repo
+            ._temp
+            .path()
+            .join("gh-invocations")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .unwrap();
+    let source_text = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    const char *marker_path = __MARKER__;
+    const char *config = getenv("GH_CONFIG_DIR");
+    char auth_path[4096];
+    char auth[4096];
+    if (argc < 3 || strcmp(argv[1], "pr") || strcmp(argv[2], "list")) return 42;
+    if (!config || snprintf(auth_path, sizeof(auth_path), "%s/hosts.yml", config) >= (int)sizeof(auth_path)) return 43;
+    FILE *file = fopen(auth_path, "r");
+    if (!file) return 44;
+    size_t size = fread(auth, 1, sizeof(auth) - 1, file);
+    fclose(file);
+    auth[size] = '\0';
+    if (!strstr(auth, "oauth_token: synthetic-host-credential-canary")) return 41;
+    file = fopen(marker_path, "a");
+    if (!file || fputc('x', file) == EOF || fclose(file)) return 45;
+    puts("[{\"number\":17,\"title\":\"Review patch\",\"url\":\"https://github.com/example/project/pull/17\",\"author\":{\"login\":\"octocat\"},\"state\":\"OPEN\",\"isDraft\":false,\"baseRefName\":\"main\",\"baseRefOid\":\"base-sha\",\"headRefName\":\"topic\",\"headRefOid\":\"head-sha\",\"reviewDecision\":\"APPROVED\",\"updatedAt\":\"2026-10-25T12:00:00Z\"}]");
+    return 0;
+}
+"#
+    .replace("__MARKER__", &marker);
+    std::fs::write(&source, source_text).unwrap();
+    let output = std::process::Command::new("cc")
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable)
+        .current_dir(repo._temp.path())
+        .bounded_output_for(Duration::from_secs(30), 64 * 1024)
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "native gh fixture compile failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
+async fn host_pr_list_remember_and_replay_journey() {
+    let repo = Repo::new();
+    let executable = native_gh_peer(&repo);
+    let mut tools: Value =
+        serde_json::from_slice(&std::fs::read(repo.state.join("tools.json")).unwrap()).unwrap();
+    tools["write"] = json!(false);
+    tools["commands"] = json!([{
+        "name":"gh",
+        "executable":executable,
+        "sha256":Sha256::digest(std::fs::read(&executable).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "interpreter":false,
+        "inputs":[]
+    }]);
+    std::fs::write(
+        repo.state.join("tools.json"),
+        serde_json::to_vec(&tools).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(repo.state.join("permissions.json")).unwrap();
+
+    refuse_without_human_or_settings(&repo).await;
+    repo.settings(json!({"permissions":{"defaultMode":"default"}}));
+    remember_pr_list(&repo).await;
+    use_remembered_pr_list(&repo).await;
+    revoke_pr_list(&repo).await;
+}
+
+async fn refuse_without_human_or_settings(repo: &Repo) {
+    let (refused, asked, _, engine) = repo
+        .run_pr_list(false, |_| panic!("unavailable channel cannot approve"))
+        .await;
+    let refused = refused.unwrap();
+    assert_eq!(asked, 0);
+    assert!(!repo._temp.path().join("gh-invocations").exists());
+    let (events, view) = repo.reopen(engine, refused.session_id).await;
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::UnavailableApproval
+    );
+    assert_eq!(
+        tool.observation.as_ref().unwrap().disposition,
+        ToolDisposition::Denied
+    );
+    assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        arany::Event::ToolPermissionDecided { verdict, .. }
+            if verdict.source == PermissionSource::UnavailableApproval && !verdict.approved
+    )));
+}
+
+async fn remember_pr_list(repo: &Repo) {
+    const CANARY: &str = "synthetic-host-credential-canary";
+    let (first, asked, provider, engine) = repo
+        .run_pr_list(true, |approval| {
+            assert_eq!(
+                approval.remember_prefix,
+                Some(arany::permissions::TypedGitPrefix::PrList)
+            );
+            arany::ApprovalReply::AllowPrefixInFolder
+        })
+        .await;
+    let first = first.unwrap();
+    assert_eq!(asked, 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let expected_output = json!({
+        "pull_requests": [{
+            "number":17,
+            "title":"Review patch",
+            "url":"https://github.com/example/project/pull/17",
+            "author":"octocat",
+            "state":"OPEN",
+            "draft":false,
+            "base":"main",
+            "base_oid":"base-sha",
+            "head":"topic",
+            "head_oid":"head-sha",
+            "review_decision":"APPROVED",
+            "updated_at":"2026-10-25T12:00:00Z",
+            "truncated_fields":[]
+        }],
+        "possibly_more":false,
+        "truncated":false
+    })
+    .to_string();
+    {
+        let requests = provider.requests.lock().unwrap();
+        let catalog: Value =
+            serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
+        assert_eq!(catalog["git"]["write"], false);
+        assert!(
+            catalog["git"]["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("gh_pr_list"))
+        );
+        assert!(
+            !catalog["git"]["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("git_commit"))
+        );
+        let context = requests[1].input.tools.as_ref().unwrap();
+        let [step] = context.steps.as_slice() else {
+            panic!("one PR-list continuation step");
+        };
+        let [observation] = step.observations.as_slice() else {
+            panic!("one PR-list continuation observation");
+        };
+        assert!(matches!(observation.intent.call, ToolCall::GhPrList { .. }));
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert_eq!(observation.output, expected_output);
+        assert!(!format!("{:?}", *requests).contains(CANARY));
+    }
+    assert!(!format!("{:?}", provider.requests.lock().unwrap()).contains(CANARY));
+    let (events, view) = repo.reopen(engine, first.session_id).await;
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::Human
+    );
+    assert_eq!(
+        tool.observation.as_ref().unwrap().disposition,
+        ToolDisposition::Succeeded
+    );
+    assert_eq!(tool.observation.as_ref().unwrap().output, expected_output);
+    assert!(tool.observation.as_ref().unwrap().attestation.is_some());
+    assert_eq!(
+        std::fs::read(repo._temp.path().join("gh-invocations")).unwrap(),
+        b"x"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.event.payload().unwrap().contains(CANARY))
+    );
+    let shown = observe_process(
+        std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .args(["show", "--state-dir"])
+            .arg(&repo.state)
+            .args(["--output", "jsonl"])
+            .arg(first.session_id.to_string()),
+        repo._temp.path(),
+        256 * 1024,
+    );
+    assert!(shown.status.success() && shown.stderr.is_empty());
+    let shown = String::from_utf8(shown.stdout).unwrap();
+    let shown_payloads: Vec<Value> = shown
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let finished = shown_payloads
+        .iter()
+        .find(|line| line["kind"] == "ToolFinished")
+        .expect("exported ToolFinished");
+    assert_eq!(finished["payload"]["output"], expected_output);
+    let committed = events
+        .iter()
+        .find(|event| matches!(event.event, Event::ToolFinished { .. }))
+        .expect("committed ToolFinished");
+    assert_eq!(
+        finished["payload"],
+        serde_json::from_str::<Value>(&committed.event.payload().unwrap()).unwrap()
+    );
+    assert!(!shown.contains(CANARY));
+    assert_eq!(
+        std::fs::read(repo._temp.path().join("gh-invocations")).unwrap(),
+        b"x"
+    );
+    assert_eq!(repo.saved_rules().len(), 1);
+    assert_eq!(
+        repo.saved_rules()[0].prefix,
+        arany::permissions::TypedGitPrefix::PrList
+    );
+}
+
+async fn use_remembered_pr_list(repo: &Repo) {
+    let (second, asked, _, engine) = repo
+        .run_pr_list(false, |_| panic!("typed allow must pre-approve"))
+        .await;
+    let second = second.unwrap();
+    assert_eq!(asked, 0);
+    assert_eq!(
+        std::fs::read(repo._temp.path().join("gh-invocations")).unwrap(),
+        b"xx"
+    );
+    let (_, view) = repo.reopen(engine, second.session_id).await;
+    assert_eq!(
+        std::fs::read(repo._temp.path().join("gh-invocations")).unwrap(),
+        b"xx"
+    );
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::TypedPrefixRule
+    );
+    assert!(tool.observation.as_ref().unwrap().attestation.is_some());
+}
+
+async fn revoke_pr_list(repo: &Repo) {
+    const CANARY: &str = "synthetic-host-credential-canary";
+    repo.edit(arany::permissions::TypedPrefixEdit::Remove { index: 0 });
+    assert!(repo.saved_rules().is_empty());
+    let (revoked, asked, _, engine) = repo
+        .run_pr_list(false, |_| panic!("headless revoked read must not ask"))
+        .await;
+    let revoked = revoked.unwrap();
+    assert_eq!(asked, 0);
+    assert_eq!(
+        std::fs::read(repo._temp.path().join("gh-invocations")).unwrap(),
+        b"xx"
+    );
+    let (events, view) = repo.reopen(engine, revoked.session_id).await;
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(
+        tool.permission_verdict.as_ref().unwrap().source,
+        PermissionSource::UnavailableApproval
+    );
+    assert_eq!(
+        tool.observation.as_ref().unwrap().disposition,
+        ToolDisposition::Denied
+    );
+    assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.event.payload().unwrap().contains(CANARY))
+    );
 }
 
 #[tokio::test]
@@ -267,23 +615,6 @@ async fn git_writes_commit_branch_and_switch_through_the_guard_and_replay_withou
     );
     assert_eq!(provider_calls, 5);
 
-    assert_eq!(
-        repo.git(&["log", "-1", "--format=%s|%an <%ae>", "main"]),
-        "third|Arany Journey <journey@example.invalid>\n"
-    );
-    assert_eq!(repo.git(&["symbolic-ref", "HEAD"]), "refs/heads/older\n");
-    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), first);
-    assert_eq!(
-        std::fs::read_to_string(repo.workspace.join("src/a.txt")).unwrap(),
-        "alpha\n"
-    );
-    assert_eq!(repo.git(&["status", "--porcelain=v1"]), "");
-    assert_eq!(
-        std::fs::read_dir(&repo.markers).unwrap().count(),
-        0,
-        "repository hooks and monitors never ran"
-    );
-
     let after = tree_snapshot(&repo.workspace);
     let (events, view) = repo.reopen(engine, outcome.session_id).await;
     assert_eq!(
@@ -322,6 +653,24 @@ async fn git_writes_commit_branch_and_switch_through_the_guard_and_replay_withou
             Some(PermissionSource::Human)
         ]
     );
+
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s|%an <%ae>", "main"]),
+        "third|Arany Journey <journey@example.invalid>\n"
+    );
+    assert_eq!(repo.git(&["symbolic-ref", "HEAD"]), "refs/heads/older\n");
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), first);
+    assert_eq!(
+        std::fs::read_to_string(repo.workspace.join("src/a.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert_eq!(repo.git(&["status", "--porcelain=v1"]), "");
+    assert_eq!(
+        std::fs::read_dir(&repo.markers).unwrap().count(),
+        0,
+        "repository hooks and monitors never ran"
+    );
+
     let committed = output(&tools[0]);
     assert_eq!(committed["branch"], "main");
     assert_eq!(
@@ -1042,5 +1391,6 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
             let text = String::from_utf8(shown.stdout).unwrap();
             assert!(text.contains("host") && !text.contains(CANARY));
         }
+        host_pr_list_remember_and_replay_journey().await;
     });
 }
