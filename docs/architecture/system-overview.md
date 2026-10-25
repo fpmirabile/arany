@@ -220,6 +220,8 @@ Guard helper entry points remain reachable from the binary's `main.rs`.
 
 The attached composer, slash handlers and quick selector share the compiled local controls and existing defaults/admission owners. Provider selection, saved-account identity, billing-route choice, catalog discovery and Run authority remain separate operations. Typed busy/defaults rejection can recover in chat, while State/replay/terminal failures retain their fatal boundary. A failed operation is not a rollback or retry grant.
 
+Attached setup keeps entry routing and setup-journal coordination in `cli/attached/setup.rs`. Native account presence lookup, inspection, saved-access resolution and selection live in its private `setup/native.rs` flow; credential storage and key access remain owned by `accounts/credentials/`.
+
 Explicit `--tools` reaches the same private Engine/Policy/Guard admission from attached and headless composition. The CLI supplies the shipped executable identity and private configuration root, not an alternative Tool runtime or per-effect approval service.
 
 ## 5. Session, Run, and collaboration lifecycle
