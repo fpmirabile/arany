@@ -16,6 +16,8 @@ The optional `arany_plan` function records Engine-owned Goal state; it is separa
 
 ## Authority and effect admission
 
+`ToolGrant` is owned by Tools and describes the access a caller supplies for one submission: no grant, the admitted private `tools.json` configuration, or the trusted Workspace grant. The Engine consumes that value when admitting a submission; its variants, validation and authority are unchanged by the ownership boundary. Existing Engine and crate-root import paths remain available.
+
 Each mutation, process, Skill script and MCP call requires typed effects, deterministic restrict-only Policy, a separate Guard and effective-capability attestation. Hooks, prompts, command regexes, classifiers and approval UI are not enforcement boundaries. [In-process reads](#in-process-reads) use the same admitted scope and their own execution-site attestation.
 
 An effect is normalized once into an immutable typed intent identifying actor, Run, Tool, resources, operations, destinations, descendant behavior, use count and finite action limits. Policy, approval, journal and Guard share its digest; names, prefixes, hostnames, remembered approvals and summaries never define authority. Tool effects from primary and child AgentRuns pass one deterministic Policy route. [Provider egress](./provider.md#configuration-and-egress) has its own admission under the Provider contract. The [execution contract](./execution.md#collaboration) owns child grants.
