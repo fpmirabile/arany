@@ -54,6 +54,18 @@ pub(super) fn kitty_image(image: &ImageAttachment, inner: Rect) -> Vec<u8> {
     kitty_image_data(image.base64().as_bytes(), inner)
 }
 
+pub(super) fn inline_image(image: &ImageAttachment, inner: Rect) -> Vec<u8> {
+    format!(
+        "\x1b[s\x1b[{};{}H\x1b]1337;File=inline=1;width={};height={};preserveAspectRatio=1:{}\x1b\\\x1b[u",
+        inner.y + 1,
+        inner.x + 1,
+        inner.width,
+        inner.height,
+        image.base64()
+    )
+    .into_bytes()
+}
+
 fn kitty_image_data(encoded: &[u8], inner: Rect) -> Vec<u8> {
     let mut bytes =
         Vec::with_capacity(encoded.len() + encoded.len().div_ceil(CHUNK_CHARACTERS) * 80);
@@ -170,6 +182,17 @@ mod tests {
     #[test]
     fn kitty_placement_deletion_is_byte_exact() {
         assert_eq!(kitty_delete(), b"\x1b_Ga=d,d=I,i=31,q=2\x1b\\");
+    }
+
+    #[test]
+    fn inline_osc_image_is_byte_exact() {
+        let image = arany::test_support::test_image();
+        let inner = Rect::new(4, 5, 12, 4);
+        let expected = format!(
+            "\x1b[s\x1b[6;5H\x1b]1337;File=inline=1;width=12;height=4;preserveAspectRatio=1:{}\x1b\\\x1b[u",
+            image.base64()
+        );
+        assert_eq!(inline_image(&image, inner), expected.as_bytes());
     }
 
     #[test]
