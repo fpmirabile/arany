@@ -166,15 +166,15 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 
 | Event kind | Current payload version |
 |---|---|
-| `RunStarted` | 22; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 26 |
-| `ToolStarted` | 19 |
-| `AgentSpawned` | 14 |
+| `RunStarted` | 23; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
+| `ToolFinished` | 27 |
+| `ToolStarted` | 20 |
+| `AgentSpawned` | 15 |
 | `AgentFinished` | 10 |
-| `ProviderCallRecorded` | 20; the closed failure reasons include `rate_limited` and `outcome_decode` |
+| `ProviderCallRecorded` | 21; the closed failure reasons include `rate_limited` and `outcome_decode` |
 | `RunFinished` | 9 |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
-| `GoalPlanContractRecorded` | 10 |
+| `GoalPlanContractRecorded` | 11 |
 | `GoalStarted` | 8 |
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
@@ -183,11 +183,11 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 | `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
 | `WorkerHandoverRecorded` | 2 |
-| `HookStarted` | 9 |
-| `HookFinished` | 15 |
+| `HookStarted` | 10 |
+| `HookFinished` | 16 |
 | All other supported Event kinds | 6 |
 
-An additive optional field that is omitted at its default keeps the payload version without a migration step: every existing record keeps its bytes and digests and remains a valid current record, and an older binary rejects a record carrying a non-default value, which then follows the incompatible-history archive path. Search's `regex`, `include`, `case_sensitive`, `offset` and `limit` use this rule; a field that changes the meaning or bytes of an existing record still needs a version bump and migration. A new enum variant is not such a field, because an older binary decodes no record that uses it: the [`glob` operation](./tools.md#glob-file-discovery) adds a Tool call variant, carried by `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished` and the success criteria of `GoalPlanContractRecorded` and of `ProviderCallRecorded` editor delegations, and a worker Tool label carried by the `RunStarted` worker policy and `AgentSpawned` grants, so each of those kinds advanced one payload version with an identity migration step. The [typed Git write](./tools.md#typed-git-writes) operations add three more call variants to the same `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` payloads, and carry their publication receipt inside the existing observation output, so those six kinds advanced once more with identity steps that refuse an older row naming a Git write. The [MultiEdit operation](./tools.md#atomic-single-file-multiedit) adds a call variant and worker Tool label to the same eight enclosing kinds as Glob, so each advances once with an identity migration step that refuses an older row naming `multiedit`. These payload steps add no SQLite or checkpoint schema change. The internal worker-command Guard target and shared-read cache restore reuse these exact payloads; they add no stored fields, variants or version bump. Unsupported prior payload versions still reject without modifying their bytes. Strict replay consumes only the committed intent, receipt, capture and seal; it never reconstructs an image, restores a cache or executes a command. The model-facing worker-command refusal and command-criterion exemption remain as specified above.
+An additive optional field that is omitted at its default keeps the payload version without a migration step: every existing record keeps its bytes and digests and remains a valid current record, and an older binary rejects a record carrying a non-default value, which then follows the incompatible-history archive path. Search's `regex`, `include`, `case_sensitive`, `offset` and `limit` use this rule; a field that changes the meaning or bytes of an existing record still needs a version bump and migration. A new enum variant is not such a field, because an older binary decodes no record that uses it: the [`glob` operation](./tools.md#glob-file-discovery) adds a Tool call variant, carried by `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished` and the success criteria of `GoalPlanContractRecorded` and of `ProviderCallRecorded` editor delegations, and a worker Tool label carried by the `RunStarted` worker policy and `AgentSpawned` grants, so each of those kinds advanced one payload version with an identity migration step. The [typed Git write](./tools.md#typed-git-writes) operations add three more call variants to the same `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` payloads, and carry their publication receipt inside the existing observation output, so those six kinds advanced once more with identity steps that refuse an older row naming a Git write. The [MultiEdit operation](./tools.md#atomic-single-file-multiedit) adds a call variant and worker Tool label to the same eight enclosing kinds as Glob, so each advances once with an identity migration step that refuses an older row naming `multiedit`. Typed delete and move add call variants and worker Tool labels to those same eight kinds; their identity steps are specified under [Journal migration](#journal-migration). These payload steps add no SQLite or checkpoint schema change. The internal worker-command Guard target and shared-read cache restore reuse these exact payloads; they add no stored fields, variants or version bump. Unsupported prior payload versions still reject without modifying their bytes. Strict replay consumes only the committed intent, receipt, capture and seal; it never reconstructs an image, restores a cache or executes a command. The model-facing worker-command refusal and command-criterion exemption remain as specified above.
 
 Current Workspace command results require an explicit selection field; see [Journal migration](#journal-migration) for the payload steps and [command input selection](./tools.md#command-input-selection) for selection and replay behavior.
 
