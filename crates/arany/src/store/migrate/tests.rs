@@ -2903,7 +2903,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         let mut source: Value = serde_json::from_str(GLOBAL_RUNSTARTED).unwrap();
         let config = &mut source["config"];
         config["provider"] = profile.into();
-        match record.kind {
+        match record.kind() {
             ProviderKind::OpenAi | ProviderKind::Anthropic => {
                 config["saved_api_account_id"] = serde_json::json!(uuid::Uuid::now_v7());
             }

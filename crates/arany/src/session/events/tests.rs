@@ -862,6 +862,7 @@ mod account_default_tests {
             serde_json::json!({"kind":"custom","custom_name":"a".repeat(crate::provider::MAX_CUSTOM_PROFILE_NAME_BYTES + 1)}),
             serde_json::json!({"kind":"openai","custom_name":null,"extra":true}),
         ] {
+            assert!(serde_json::from_value::<crate::ProviderRecord>(provider.clone()).is_err());
             let mut payload = serde_json::json!({"config":ordinary,"active_deadline_ms":null});
             payload["config"]["provider"] = provider;
             assert!(

@@ -318,7 +318,7 @@ fn plan_limits_summary(
 
 fn status_route_is_chatgpt(view: &SessionView, run: Option<&arany::RunView>) -> bool {
     let kind = match run {
-        Some(run) => run.config.as_ref().map(|config| config.provider.kind),
+        Some(run) => run.config.as_ref().map(|config| config.provider.kind()),
         None => view
             .defaults
             .provider
@@ -331,7 +331,7 @@ fn status_route_is_chatgpt(view: &SessionView, run: Option<&arany::RunView>) -> 
 fn status_account(view: &SessionView, run: Option<&arany::RunView>) -> Option<uuid::Uuid> {
     match run {
         Some(run) => run.config.as_ref().and_then(|config| {
-            (config.provider.kind == ProviderKind::ChatGpt)
+            (config.provider.kind() == ProviderKind::ChatGpt)
                 .then_some(config.chatgpt_provenance.as_ref()?.account_id)
         }),
         None if view

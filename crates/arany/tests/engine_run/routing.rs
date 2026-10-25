@@ -642,6 +642,52 @@ async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispa
 }
 
 #[tokio::test]
+async fn invalid_custom_names_refuse_primary_fallback_and_roster_admission() {
+    let oversized = "a".repeat(arany::MAX_CUSTOM_PROFILE_NAME_BYTES + 1);
+    for name in ["", "Upper", "bad/name", oversized.as_str()] {
+        for placement in 0..3 {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let primary = route(ScriptedProvider::new(vec![finish("unexpected call")]));
+            let mut invalid = ScriptedProvider::new(vec![finish("unexpected call")])
+                .with_profile(&arany::ProviderKind::custom_profile(name), "model-a");
+            invalid.identity.provenance =
+                arany::Provenance::Custom(arany::CustomProfileProvenance {
+                    endpoint: "https://example.com/responses".into(),
+                    evidence_digest: [7; 32],
+                    capability_evidence_version: 2,
+                });
+            let invalid = route(invalid);
+            let mut bindings = routes(&primary);
+            match placement {
+                0 => bindings = routes(&invalid),
+                1 => bindings.roles.primary.push(invalid.clone()),
+                _ => {
+                    pin_roster(&mut bindings, Some(vec![primary.clone()]));
+                    let roster = bindings.roster.as_mut().unwrap();
+                    roster.profiles.last_mut().unwrap().1 = vec![invalid.clone()];
+                    roster.snapshot.profiles.last_mut().unwrap().routes =
+                        vec![invalid.identity.clone()];
+                    roster.snapshot.selection_digest = roster.snapshot.digest().unwrap();
+                }
+            }
+            let engine = open(&temp.path().join("state"));
+            assert!(
+                matches!(
+                    engine.submit(bindings, input(&workspace), RunControls::default()),
+                    Err(EngineError::InvalidRequest)
+                ),
+                "name {name:?}, placement {placement}"
+            );
+            assert!(primary.requests.lock().unwrap().is_empty());
+            assert!(invalid.requests.lock().unwrap().is_empty());
+            engine.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn roster_disagreeing_with_role_chains_is_refused_before_any_call() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
