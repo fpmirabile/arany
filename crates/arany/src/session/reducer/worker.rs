@@ -1119,14 +1119,31 @@ pub(crate) fn private_failure(t: &ToolView) -> bool {
     let Some(o) = t.observation.as_ref() else {
         return false;
     };
+    let command = matches!(o.intent.call, ToolCall::Command { .. });
+    let recoverable_refusal = recoverable_private_refusal(t);
     o.disposition != ToolDisposition::Succeeded
-        && !(matches!(o.intent.call, ToolCall::Command { .. })
+        && !(recoverable_refusal && !command)
+        && !(command
             && !matches!(
                 o.disposition,
                 ToolDisposition::Uncertain | ToolDisposition::Cancelled
             )
             && o.cache_update != crate::tools::CacheUpdate::Uncertain
-            && (o.disposition != ToolDisposition::Denied || t.permission_verdict.is_some()))
+            && (o.disposition != ToolDisposition::Denied
+                || (t.permission_verdict.is_some() && recoverable_refusal)))
+}
+
+fn recoverable_private_refusal(t: &ToolView) -> bool {
+    use crate::tools::ApprovalCause;
+
+    let Some(observation) = t.observation.as_ref() else {
+        return false;
+    };
+    let cause_is_recoverable = matches!(
+        observation.approval_cause,
+        None | Some(ApprovalCause::Declined | ApprovalCause::ChannelUnavailable)
+    );
+    cause_is_recoverable && t.model_denial_output().is_some()
 }
 
 fn record_command_capture(

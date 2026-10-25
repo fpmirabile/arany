@@ -7,8 +7,8 @@ use crate::cli::provider::select::ProviderArg;
 use crate::presentation::{format_bytes, format_duration};
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
-    InteractiveCommand, MouseMode, NewlineShortcut, PointerSettings, Submission, TerminalInput,
-    TerminalMode, transcript_agents,
+    InteractiveCommand, NewlineShortcut, PointerSettings, Submission, TerminalInput, TerminalMode,
+    transcript_agents,
 };
 use arany::{
     CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionId, SessionView, StateRoot,
@@ -20,7 +20,7 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
-const UI_PREFERENCES_VERSION: u8 = 5;
+const UI_PREFERENCES_VERSION: u8 = 6;
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
     ("KB", 1024),
@@ -42,6 +42,10 @@ pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
         RecordStep {
             from: 4,
             transform: with_newline_default,
+        },
+        RecordStep {
+            from: 5,
+            transform: without_mouse_preference,
         },
     ],
     accepts: |bytes| decode_settings(bytes).is_ok(),
@@ -74,6 +78,19 @@ fn with_newline_default(mut record: Value) -> Option<Value> {
     Some(record)
 }
 
+fn without_mouse_preference(mut record: Value) -> Option<Value> {
+    let preferences = record.get_mut("preferences")?.as_object_mut()?;
+    let mouse = preferences.get("mouse")?.as_str()?;
+    if !["wheel_and_clicks", "wheel_only", "off"].contains(&mouse) {
+        return None;
+    }
+    preferences.remove("mouse")?;
+    record
+        .as_object_mut()?
+        .insert("version".into(), UI_PREFERENCES_VERSION.into());
+    Some(record)
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct UiPreferences {
@@ -94,21 +111,18 @@ pub(super) struct Preferences {
     pub view: TerminalMode,
     pub goal_budget: arany::GoalBudget,
     pub resources: arany::ToolResourceSettings,
-    pub mouse: MouseMode,
     pub copy_on_select: bool,
     pub newline: NewlineShortcut,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
-        let pointer = PointerSettings::default();
         Self {
             completion: CompletionLayout::default(),
             view: TerminalMode::default(),
             goal_budget: arany::GoalBudget::default(),
             resources: arany::ToolResourceSettings::default(),
-            mouse: pointer.mouse,
-            copy_on_select: pointer.copy_on_select,
+            copy_on_select: PointerSettings::default().copy_on_select,
             newline: NewlineShortcut::default(),
         }
     }
@@ -117,7 +131,6 @@ impl Default for Preferences {
 impl Preferences {
     pub(super) fn pointer(self) -> PointerSettings {
         PointerSettings {
-            mouse: self.mouse,
             copy_on_select: self.copy_on_select,
         }
     }
@@ -331,21 +344,6 @@ const SETTINGS: &[Setting] = &[
                 &[8 * 1024_u64.pow(3), 4 * 1024_u64.pow(3), 1024_u64.pow(3), 0],
                 forward,
             );
-        },
-        guidance: None,
-    },
-    Setting {
-        label: "Mouse",
-        hint: "wheel and clicks|wheel only|off",
-        value: |p| p.mouse.label().into(),
-        apply: |p, raw| {
-            p.mouse = MouseMode::ALL
-                .into_iter()
-                .find(|value| value.label() == raw)?;
-            Some(())
-        },
-        cycle: |p, forward| {
-            p.mouse = step(p.mouse, &MouseMode::ALL, forward);
         },
         guidance: None,
     },
@@ -796,9 +794,7 @@ pub(super) async fn settings(
                 composer.set_completion_layout(chosen.completion);
                 composer.set_newline_shortcut(chosen.newline);
                 terminal.set_newline_shortcut(chosen.newline);
-                terminal
-                    .set_pointer(chosen.pointer())
-                    .map_err(|error| error.to_string())?;
+                terminal.set_pointer(chosen.pointer());
                 if !linear && view_changed {
                     terminal
                         .set_mode(chosen.view, composer.input_capacity())
@@ -1884,8 +1880,8 @@ mod tests {
             "3 ",
             "0 64",
             "12 64",
-            "12 on",
-            "13 wheel only",
+            "12 yes",
+            "12 wheel only",
             "13 yes",
             "14 on",
             "x 64",
@@ -1955,7 +1951,6 @@ mod tests {
                 "Build processes/threads: 256 (number)",
                 "Build writable project: 1.0 GB (size, e.g. 1GB)",
                 "Build cache: 8.0 GB (size, e.g. 8GB)",
-                "Mouse: wheel and clicks (wheel and clicks|wheel only|off)",
                 "Copy on select: on (on|off)",
                 "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)",
             ]
@@ -1995,11 +1990,11 @@ mod tests {
         for shortcut in NewlineShortcut::ALL {
             assert!(apply_setting(
                 &mut preferences,
-                &format!("14 {}", shortcut.label().to_ascii_lowercase())
+                &format!("13 {}", shortcut.label().to_ascii_lowercase())
             ));
             assert_eq!(preferences.newline, shortcut);
-            cycle_setting(&mut preferences, 13, true);
-            cycle_setting(&mut preferences, 13, false);
+            cycle_setting(&mut preferences, 12, true);
+            cycle_setting(&mut preferences, 12, false);
             assert_eq!(preferences.newline, shortcut);
         }
         assert!(apply_setting(&mut preferences, "1 combined"));
@@ -2012,15 +2007,10 @@ mod tests {
         assert!(apply_setting(&mut preferences, "5 unlimited"));
         assert!(apply_setting(&mut preferences, "4 100000"));
         assert!(apply_setting(&mut preferences, "7 5m"));
-        assert!(apply_setting(&mut preferences, "12 wheel only"));
-        assert!(apply_setting(&mut preferences, "13 off"));
-        assert_eq!(preferences.mouse, MouseMode::WheelOnly);
+        assert!(apply_setting(&mut preferences, "12 off"));
         assert!(!preferences.copy_on_select);
-        for expected in [(MouseMode::Off, true), (MouseMode::WheelAndClicks, false)] {
-            cycle_setting(&mut preferences, 11, true);
-            cycle_setting(&mut preferences, 12, true);
-            assert_eq!((preferences.mouse, preferences.copy_on_select), expected);
-        }
+        cycle_setting(&mut preferences, 11, true);
+        assert!(preferences.copy_on_select);
         assert_eq!(preferences.completion, CompletionLayout::Combined);
         assert_eq!(preferences.view, TerminalMode::Fullscreen);
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
@@ -2048,7 +2038,6 @@ mod tests {
                 build_project_bytes: 513 * 1024 * 1024,
                 build_cache_bytes: 1025 * 1024 * 1024,
             },
-            mouse: MouseMode::WheelOnly,
             copy_on_select: false,
             newline: NewlineShortcut::AltEnter,
         };
@@ -2240,7 +2229,6 @@ mod tests {
                 ..Preferences::default()
             },
             Preferences {
-                mouse: MouseMode::Off,
                 copy_on_select: false,
                 ..Preferences::default()
             },
@@ -2303,9 +2291,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":5,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"}}"#
+            br#"{"version":6,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
         );
-        // A complete version-3 record upgrades in place, keeping its choices with the pointer defaults.
+        // A complete version-3 record upgrades in place, keeping its choices and adding newer defaults.
         let finite = Preferences {
             goal_budget: arany::GoalBudget {
                 max_provider_calls: Some(64),
@@ -2325,6 +2313,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(decode_settings(&upgraded), Ok(finite));
+        for mouse in ["wheel_and_clicks", "wheel_only", "off"] {
+            let mut legacy: Value = serde_json::from_slice(&original).unwrap();
+            legacy["version"] = 5.into();
+            legacy["preferences"]["mouse"] = mouse.into();
+            root.record(RecordKind::UiPreferences)
+                .replace(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            assert_eq!(
+                restore_settings(&admission).await.unwrap(),
+                combined_classic
+            );
+            let migrated = root
+                .record(RecordKind::UiPreferences)
+                .read()
+                .unwrap()
+                .unwrap();
+            assert_eq!(decode_settings(&migrated), Ok(combined_classic));
+            assert!(!migrated.windows(5).any(|window| window == b"mouse"));
+        }
+        for mouse in [false.into(), Value::Null, "unknown".into()] {
+            let mut legacy: Value = serde_json::from_slice(&original).unwrap();
+            legacy["version"] = 5.into();
+            legacy["preferences"]["mouse"] = mouse;
+            let legacy = serde_json::to_vec(&legacy).unwrap();
+            root.record(RecordKind::UiPreferences)
+                .replace(&legacy)
+                .unwrap();
+            assert!(restore_settings(&admission).await.is_err());
+            assert_eq!(
+                root.record(RecordKind::UiPreferences)
+                    .read()
+                    .unwrap()
+                    .unwrap(),
+                legacy
+            );
+        }
         let mut invalid_shortcut: Value = serde_json::from_slice(&original).unwrap();
         invalid_shortcut["preferences"]["newline"] = "enter".into();
         let invalid_shortcut = serde_json::to_vec(&invalid_shortcut).unwrap();

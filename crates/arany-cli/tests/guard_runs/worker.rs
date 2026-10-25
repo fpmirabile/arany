@@ -119,7 +119,10 @@ pub(super) async fn worker_case(case: &'static str) {
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     // Omitted background must select the foreground path.
     private_file(&state.join("agents/editor.md"), b"---\nname: editor\ndescription: Edit leased notes\ntools: Read, Write, Edit\npermissionMode: acceptEdits\nisolation: worktree\n---\nEdit only the assignment.\n");
-    if case == "no_channel" {
+    if matches!(
+        case,
+        "no_channel" | "approval_unavailable" | "approval_closed" | "approval_reply_closed"
+    ) {
         private_file(
             &state.join("permissions.json"),
             br#"{"permissions":{"defaultMode":"default"}}"#,
@@ -241,10 +244,10 @@ pub(super) async fn worker_case(case: &'static str) {
     };
     let provider = Arc::new(ForegroundWorkerProvider::new(
         &workspace,
-        if case == "subagent_stop" {
-            "success"
-        } else {
-            case
+        match case {
+            "subagent_stop" | "approval_closed" | "approval_reply_closed" => "success",
+            "approval_unavailable" => "no_channel",
+            _ => case,
         },
         budget,
     ));
@@ -258,7 +261,8 @@ pub(super) async fn worker_case(case: &'static str) {
         max_active_children: 3,
     };
     input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
-    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let (approvals, inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let mut inbox = (case != "approval_closed").then_some(inbox);
     let controls = RunControls {
         tools: ToolGrant::Configured,
         approvals: (case != "no_channel").then_some(approvals),
@@ -273,8 +277,22 @@ pub(super) async fn worker_case(case: &'static str) {
     let result = loop {
         tokio::select! {
             result = &mut running => break result,
-            Some(approval) = inbox.next(), if case != "no_channel" => {
+            Some(approval) = async {
+                match inbox.as_mut() {
+                    Some(inbox) => inbox.next().await,
+                    None => std::future::pending().await,
+                }
+            }, if case != "no_channel" => {
                 let private = matches!(approval.intent.target, EffectTarget::WorkerView { .. });
+                if private && case == "approval_reply_closed" {
+                    drop(approval);
+                    inbox.take();
+                    continue;
+                }
+                if private && case == "approval_unavailable" {
+                    approval.decide(arany::ApprovalReply::Unavailable);
+                    continue;
+                }
                 if !injected && (case == "private_loss" && private || case == "publication_loss" && !private) {
                     arany::FaultPlan::lose_guard_receipt(approval.intent.id); injected = true;
                 }
@@ -286,7 +304,10 @@ pub(super) async fn worker_case(case: &'static str) {
                     approval.decide(true);
                     continue;
                 }
-                approval.decide(!(case == "denial" && private || case == "integration_denial" && !private));
+                let declined_worker_write = case == "denial"
+                    && private
+                    && matches!(&approval.intent.call, arany::ToolCall::Write { path, .. } if path == "notes/b");
+                approval.decide(!(declined_worker_write || case == "integration_denial" && !private));
             }
         }
     };
@@ -364,6 +385,53 @@ pub(super) async fn worker_case(case: &'static str) {
         .iter()
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
+    if matches!(case, "approval_closed" | "approval_reply_closed") {
+        result.expect(case);
+        assert_eq!(run.status, RunStatus::Cancelled, "{case}");
+        assert_eq!(
+            child_calls, 1,
+            "{case}: no child continuation after shutdown"
+        );
+        assert_eq!(
+            synthesis_calls, 0,
+            "{case}: no explanation call after shutdown"
+        );
+        assert!(worker.released.is_some(), "{case}: private lease settled");
+        assert!(worker.handover.is_none() && worker.integration.is_none());
+        assert_eq!(
+            worker.outcome.as_ref().unwrap().1.disposition,
+            WorkerDisposition::Cancelled
+        );
+        let tools = &run.agents[1].tools;
+        assert_eq!(tools.len(), 1, "{case}: only the undispatched request");
+        let observation = tools[0].observation.as_ref().unwrap();
+        assert_eq!(
+            observation.approval_cause,
+            Some(arany::ApprovalCause::Cancelled)
+        );
+        assert!(observation.attestation.is_none());
+        let finished = bundle.events.iter().position(|event| matches!(&event.event,
+            Event::ToolFinished { observation, .. } if observation.intent.id == tools[0].intent.id
+        )).unwrap();
+        assert!(
+            bundle.events[finished + 1..].iter().all(|event| !matches!(
+                event.event,
+                Event::GoalProviderCallReserved { .. }
+                    | Event::ToolStarted { .. }
+                    | Event::WorkerHandoverRecorded { .. }
+            )),
+            "{case}: no reservation or effect after channel shutdown"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("notes/a")).unwrap(),
+            b"original a"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("notes/b")).unwrap(),
+            b"original b"
+        );
+        return;
+    }
     if case.starts_with("clear_") {
         let result = result.expect(case);
         assert_eq!(result.run.run.status, RunStatus::Finished, "{case}");
@@ -682,15 +750,114 @@ pub(super) async fn worker_case(case: &'static str) {
         );
     } else {
         let result = result.expect(case);
-        if case == "hook_write_update" {
+        if matches!(
+            case,
+            "no_channel" | "approval_unavailable" | "hook_write_update"
+        ) {
             let tools = &run.agents[1].tools;
-            assert!(tools.iter().all(|tool| {
+            let expected = if matches!(case, "no_channel" | "approval_unavailable") {
+                "channel_unavailable: no operation was dispatched"
+            } else {
+                "hook_denied: no operation was dispatched"
+            };
+            assert_eq!(tools.len(), 3, "{case}: two refused writes then a Read");
+            assert!(tools[..2].iter().all(|tool| {
                 tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Denied
+                    && tool.model_denial_output() == Some(expected)
             }));
-            assert!(tools.iter().all(|tool| tool.hooks.len() == 1));
+            assert_eq!(
+                tools[2].observation.as_ref().unwrap().disposition,
+                arany::ToolDisposition::Succeeded,
+                "{case}: read still works after the refusals"
+            );
+            if case == "hook_write_update" {
+                assert!(tools[..2].iter().all(|tool| tool.hooks.len() == 1));
+                assert!(tools[..2].iter().all(|tool| {
+                    matches!(&tool.intent.call, arany::ToolCall::Write { content, .. } if content == "edited a" || content == "edited b")
+                }));
+            }
+            assert_eq!(child_calls, 7, "{case}: bounded criterion continuations");
+            assert_eq!(
+                bundle
+                    .events
+                    .iter()
+                    .filter(|event| matches!(&event.event,
+                        Event::ProviderCallRecorded { agent_run_id, record, .. }
+                            if *agent_run_id == run.agents[1].id
+                                && record.failure_reason == Some(arany::ProviderFailureReason::CriterionNotMetInView)
+                    ))
+                    .count(),
+                4,
+                "{case}: three continuations then a closed criterion refusal"
+            );
+            assert_eq!(
+                run.status,
+                RunStatus::Failed,
+                "{case}: closed-store settlement"
+            );
+            assert_eq!(
+                run.failure,
+                Some(arany::RunFailure::CriterionUnmet),
+                "{case}"
+            );
+            assert_eq!(result.stopped, bundle.view.run_stop(run), "{case}");
+            let goal = bundle.view.goal(result.run.goal_id).unwrap();
+            assert_eq!(goal.status, arany::GoalStatus::Failed, "{case}");
+            assert!(
+                !goal.success_criterion_satisfied && !goal.budget_closed,
+                "{case}"
+            );
+            assert!(
+                goal.budget_refusal.is_none(),
+                "{case}: criterion failure is not budget exhaustion"
+            );
+            assert!(
+                goal.report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .iter()
+                    .any(|fact| { fact.contains("CriterionUnverified") }),
+                "{case}: the Goal report retains the worker failure"
+            );
+            assert!(
+                run.assistant_message.is_none(),
+                "{case}: no successful answer"
+            );
+            assert!(
+                !bundle.events.iter().any(|event| matches!(&event.event,
+                    Event::MessageCommitted { run_id, .. } if *run_id == run.id
+                )),
+                "{case}: the failed criterion cannot commit an answer"
+            );
+            assert_eq!(synthesis_calls, 1, "{case}: primary reports the failure");
+            assert_eq!(
+                worker.handover, None,
+                "{case}: no handover from denied edits"
+            );
+            assert!(
+                worker.integration.is_none(),
+                "{case}: no publication attempt"
+            );
+            assert!(worker.released.is_some(), "{case}: lease released");
+            let outcome = &worker.outcome.as_ref().unwrap().1;
+            assert_eq!(outcome.disposition, WorkerDisposition::Failed);
+            assert_eq!(
+                outcome.cause,
+                arany::worker::WorkerCause::CriterionUnverified
+            );
             assert_eq!(
                 std::fs::read(workspace.join("notes/a")).unwrap(),
                 b"original a"
+            );
+            assert_eq!(
+                std::fs::read(workspace.join("notes/b")).unwrap(),
+                b"original b"
+            );
+            assert_eq!(
+                render_exec(run, &bundle.events, Output::Text, true),
+                "",
+                "{case}: no fabricated assistant answer"
             );
             return;
         }
@@ -709,6 +876,7 @@ pub(super) async fn worker_case(case: &'static str) {
         if matches!(
             case,
             "success"
+                | "denial"
                 | "hook_write"
                 | "hook_default_timeout"
                 | "hook_stop_block"
@@ -761,6 +929,50 @@ pub(super) async fn worker_case(case: &'static str) {
                 worker.integration.as_ref().unwrap().1.outcome,
                 WorkerIntegrationOutcome::Integrated
             );
+            if case == "denial" {
+                let denied = run.agents[1]
+                    .tools
+                    .iter()
+                    .find(|tool| matches!(&tool.intent.call, arany::ToolCall::Write { path, .. } if path == "notes/b"))
+                    .unwrap();
+                let observation = denied.observation.as_ref().unwrap();
+                assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+                assert_eq!(
+                    observation.approval_cause,
+                    Some(arany::ApprovalCause::Declined)
+                );
+                assert_eq!(
+                    denied.model_denial_output(),
+                    Some("user_declined: no operation was dispatched")
+                );
+                let child_continuation = calls
+                    .iter()
+                    .filter(|call| call.phase == AgentPhase::ChildWork)
+                    .nth(1)
+                    .unwrap();
+                assert_eq!(
+                    child_continuation
+                        .input
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .observations()
+                        .last()
+                        .unwrap()
+                        .output,
+                    "user_declined: no operation was dispatched"
+                );
+                let synthesis = calls
+                    .iter()
+                    .find(|call| call.phase == AgentPhase::RootSynthesis)
+                    .unwrap();
+                assert!(synthesis.input.child_results.iter().any(|report| {
+                    report
+                        .result
+                        .contains("user_declined: no operation was dispatched")
+                        && report.result.contains("Private changes ready")
+                }));
+            }
             assert_eq!(
                 render_exec(run, &bundle.events, Output::Text, true),
                 "Answer:\n  Primary verified published notes\n"
@@ -885,6 +1097,9 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
         "tokens",
         "denial",
         "no_channel",
+        "approval_unavailable",
+        "approval_closed",
+        "approval_reply_closed",
         "integration_denial",
         "private_loss",
         "publication_loss",

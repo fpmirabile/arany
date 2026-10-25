@@ -524,6 +524,52 @@ fn receipt(intent: &EffectIntent) -> GuardReceipt {
     }
 }
 
+fn allow_permission(f: &mut Fixture, intent: &EffectIntent) {
+    use crate::tools::permissions::{
+        Decision, PermissionMode, PermissionSource, PermissionVerdict,
+    };
+
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: intent.agent_run_id,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Allow,
+            mode: Some(PermissionMode::Default),
+            basis: PermissionSource::Rule,
+            source: PermissionSource::Rule,
+            approved: true,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+}
+
+fn deny_permission(f: &mut Fixture, intent: &EffectIntent) {
+    use crate::tools::permissions::{
+        Decision, PermissionMode, PermissionSource, PermissionVerdict,
+    };
+
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: intent.agent_run_id,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Deny,
+            mode: Some(PermissionMode::Default),
+            basis: PermissionSource::Rule,
+            source: PermissionSource::Rule,
+            approved: false,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+}
+
 pub(crate) fn fixture() -> Fixture {
     fixture_with_manifest(
         WorkerManifest {
@@ -534,6 +580,21 @@ pub(crate) fn fixture() -> Fixture {
         },
         vec!["read".into(), "write".into()],
         vec![WorkerTool::Read, WorkerTool::Write],
+        None,
+    )
+}
+
+fn configured_fixture() -> Fixture {
+    fixture_with_manifest(
+        WorkerManifest {
+            entries: vec![WorkerManifestEntry {
+                path: "src".into(),
+                version: WorkerBaseVersion::Directory,
+            }],
+        },
+        vec!["read".into(), "write".into()],
+        vec![WorkerTool::Read, WorkerTool::Write],
+        Some([3; 32]),
     )
 }
 
@@ -611,6 +672,7 @@ fn fixture_with_manifest(
     manifest: WorkerManifest,
     definition_tools: Vec<String>,
     tools: Vec<WorkerTool>,
+    permissions_digest: Option<[u8; 32]>,
 ) -> Fixture {
     let (session, goal, run, primary, child) = (
         SessionId::new(),
@@ -689,7 +751,7 @@ fn fixture_with_manifest(
             host_epoch: None,
             contract_version: 1,
             config_digest: [1; 32],
-            permissions_digest: None,
+            permissions_digest,
             max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
             unguarded_rules_digest: None,
             unguarded: crate::tools::UnguardedGrant::HumanOnly,
@@ -777,6 +839,9 @@ fn fixture_with_manifest(
         EffectTarget::Workspace,
     );
     f.started(&parse);
+    if permissions_digest.is_some() {
+        allow_permission(&mut f, &parse);
+    }
     f.observed(
         &parse,
         ToolDisposition::Succeeded,
@@ -824,6 +889,9 @@ fn fixture_with_manifest(
         EffectTarget::Workspace,
     );
     f.started(&read);
+    if permissions_digest.is_some() {
+        allow_permission(&mut f, &read);
+    }
     f.observed(
         &read,
         ToolDisposition::Succeeded,
@@ -865,6 +933,9 @@ fn fixture_with_manifest(
         EffectTarget::Workspace,
     );
     f.started(&prep);
+    if permissions_digest.is_some() {
+        allow_permission(&mut f, &prep);
+    }
     f.base = f.data(
         &prep,
         WorkerDataPurpose::Base,
@@ -888,7 +959,7 @@ fn fixture_with_manifest(
         request,
         grant,
         policy_digest: [1; 32],
-        permissions_digest: None,
+        permissions_digest,
         base: f.base.clone(),
         data_bytes: WORKER_DATA_BYTES as u32,
     };
@@ -2212,6 +2283,7 @@ fn worker_protocol_no_change_conflict_and_denial_settle_without_publication() {
         },
         vec!["read".into(), "write".into()],
         vec![WorkerTool::Read, WorkerTool::Write],
+        None,
     );
     f.changes.files.clear();
     f.finish_worker();
@@ -3409,6 +3481,7 @@ fn worker_protocol_absent_subtree_accepts_private_mkdir_then_file_creation() {
         },
         vec!["mkdir".into(), "read".into(), "write".into()],
         vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Mkdir],
+        None,
     );
     f.call(
         f.child,
@@ -4131,6 +4204,14 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
 }
 
 fn command_fixture() -> Fixture {
+    command_fixture_with_permissions(None)
+}
+
+fn configured_command_fixture() -> Fixture {
+    command_fixture_with_permissions(Some([3; 32]))
+}
+
+fn command_fixture_with_permissions(permissions_digest: Option<[u8; 32]>) -> Fixture {
     let mut f = fixture_with_manifest(
         WorkerManifest {
             entries: vec![WorkerManifestEntry {
@@ -4140,6 +4221,7 @@ fn command_fixture() -> Fixture {
         },
         vec!["command".into(), "read".into(), "write".into()],
         vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Command],
+        permissions_digest,
     );
     for event in &mut f.events {
         match event {
@@ -4562,6 +4644,461 @@ fn worker_protocol_denied_command_without_a_required_verdict_cannot_continue() {
         None,
     );
     assert!(SessionView::replay(f.session, &f.envelopes()).is_err());
+}
+
+#[test]
+fn worker_protocol_denied_tool_with_a_permission_verdict_reaches_child_continuation() {
+    use crate::tools::permissions::{
+        Decision, PermissionMode, PermissionSource, PermissionVerdict,
+    };
+
+    let mut f = configured_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let denied = f.intent(
+        f.child,
+        ToolCall::Write {
+            path: "src/a".into(),
+            expected_digest: None,
+            content: "new".into(),
+        },
+        f.target(0),
+    );
+    f.started(&denied);
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: f.child,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: denied.digest(),
+            decision: Decision::Deny,
+            mode: Some(PermissionMode::Default),
+            basis: PermissionSource::Rule,
+            source: PermissionSource::Rule,
+            approved: false,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+    f.observed(
+        &denied,
+        ToolDisposition::Denied,
+        None,
+        "permission_rule_denied",
+    );
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let next = f.intent(
+        f.child,
+        ToolCall::Read {
+            path: "src/base".into(),
+            offset: None,
+            limit: Some(32),
+        },
+        f.target(0),
+    );
+    f.started(&next);
+    allow_permission(&mut f, &next);
+
+    let view = SessionView::replay_open(f.session, &f.envelopes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        view.runs[0].agents[1].tools[0].model_denial_output(),
+        Some("permission_rule_denied: no operation was dispatched")
+    );
+}
+
+#[test]
+fn worker_protocol_terminal_private_refusals_reject_child_continuation() {
+    use crate::tools::ApprovalCause;
+
+    for cause in [
+        ApprovalCause::Cancelled,
+        ApprovalCause::Paused,
+        ApprovalCause::ChildTimeout,
+    ] {
+        let mut f = configured_fixture();
+        f.call(
+            f.child,
+            AgentPhase::ChildWork,
+            ProviderCallDisposition::ToolRequested,
+            None,
+        );
+        let intent = f.intent(
+            f.child,
+            ToolCall::Write {
+                path: "src/a".into(),
+                expected_digest: None,
+                content: "new".into(),
+            },
+            f.target(0),
+        );
+        f.started(&intent);
+        deny_permission(&mut f, &intent);
+        f.observed(&intent, ToolDisposition::Denied, None, "refused");
+        let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
+            unreachable!()
+        };
+        observation.approval_cause = Some(cause);
+
+        assert!(
+            f.view().runs[0].agents[1].tools[0]
+                .model_denial_output()
+                .is_some()
+        );
+        refused(
+            &f,
+            Event::GoalProviderCallReserved {
+                goal_id: f.goal,
+                run_id: f.run,
+                agent_run_id: f.child,
+                active_ceiling_ms: 0,
+            },
+            "terminal private refusal continuation",
+        );
+    }
+}
+
+#[test]
+fn worker_protocol_nonterminal_private_refusals_reach_child_continuation() {
+    use crate::tools::ApprovalCause;
+
+    for cause in [ApprovalCause::Declined, ApprovalCause::ChannelUnavailable] {
+        let mut f = configured_fixture();
+        f.call(
+            f.child,
+            AgentPhase::ChildWork,
+            ProviderCallDisposition::ToolRequested,
+            None,
+        );
+        let intent = f.intent(
+            f.child,
+            ToolCall::Write {
+                path: "src/a".into(),
+                expected_digest: None,
+                content: "new".into(),
+            },
+            f.target(0),
+        );
+        f.started(&intent);
+        deny_permission(&mut f, &intent);
+        f.observed(&intent, ToolDisposition::Denied, None, "refused");
+        let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
+            unreachable!()
+        };
+        observation.approval_cause = Some(cause);
+
+        f.view();
+        f.call(
+            f.child,
+            AgentPhase::ChildWork,
+            ProviderCallDisposition::ToolRequested,
+            None,
+        );
+        assert!(SessionView::replay_open(f.session, &f.envelopes()).is_ok());
+    }
+}
+
+#[test]
+fn worker_protocol_configured_command_denial_reaches_child_continuation() {
+    use crate::tools::permissions::{
+        Decision, PermissionMode, PermissionSource, PermissionVerdict,
+    };
+
+    let mut f = configured_command_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let denied = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+        f.target(0),
+    );
+    f.started(&denied);
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: f.child,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: denied.digest(),
+            decision: Decision::Deny,
+            mode: Some(PermissionMode::Default),
+            basis: PermissionSource::Rule,
+            source: PermissionSource::Rule,
+            approved: false,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+    f.observed(
+        &denied,
+        ToolDisposition::Denied,
+        None,
+        "permission_rule_denied",
+    );
+    f.view();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let next = f.intent(
+        f.child,
+        ToolCall::Read {
+            path: "src/base".into(),
+            offset: None,
+            limit: Some(32),
+        },
+        f.target(0),
+    );
+    f.started(&next);
+    allow_permission(&mut f, &next);
+
+    assert!(SessionView::replay_open(f.session, &f.envelopes()).is_ok());
+}
+
+#[test]
+fn worker_protocol_configured_command_refusals_follow_typed_causes() {
+    use crate::tools::ApprovalCause;
+
+    for (cause, can_continue) in [
+        (ApprovalCause::Cancelled, false),
+        (ApprovalCause::Paused, false),
+        (ApprovalCause::ChildTimeout, false),
+        (ApprovalCause::Declined, true),
+        (ApprovalCause::ChannelUnavailable, true),
+    ] {
+        let mut f = configured_command_fixture();
+        f.call(
+            f.child,
+            AgentPhase::ChildWork,
+            ProviderCallDisposition::ToolRequested,
+            None,
+        );
+        let intent = f.intent(
+            f.child,
+            ToolCall::Command {
+                program: "check".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+            f.target(0),
+        );
+        f.started(&intent);
+        deny_permission(&mut f, &intent);
+        f.observed(&intent, ToolDisposition::Denied, None, "refused");
+        let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
+            unreachable!()
+        };
+        observation.approval_cause = Some(cause);
+
+        f.view();
+        if can_continue {
+            f.call(
+                f.child,
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::ToolRequested,
+                None,
+            );
+            assert!(SessionView::replay_open(f.session, &f.envelopes()).is_ok());
+        } else {
+            refused(
+                &f,
+                Event::GoalProviderCallReserved {
+                    goal_id: f.goal,
+                    run_id: f.run,
+                    agent_run_id: f.child,
+                    active_ceiling_ms: 0,
+                },
+                "terminal configured command refusal continuation",
+            );
+        }
+    }
+}
+
+#[test]
+fn worker_protocol_approved_command_execution_denial_stops_child_continuation() {
+    let mut f = configured_command_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+        f.target(0),
+    );
+    f.started(&intent);
+    allow_permission(&mut f, &intent);
+    f.observed(
+        &intent,
+        ToolDisposition::Denied,
+        Some(Attestation::WorkerCommand {
+            receipt: receipt(&intent),
+        }),
+        &serde_json::to_string(&WorkerCommandResult {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_total: Default::default(),
+            stderr_total: Default::default(),
+            private_capture: PrivateCapture::None {},
+        })
+        .unwrap(),
+    );
+    let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
+        unreachable!()
+    };
+    observation.enforcement_cause = Some(crate::tools::EnforcementCause::FilesystemDenied);
+    observation.cache_update = CacheUpdate::Discarded;
+    assert!(observation.valid());
+
+    let view = f.view();
+    let denied = view.runs[0].agents[1].tools.last().unwrap();
+    assert_eq!(denied.model_denial_output(), None);
+    assert!(private_failure(denied));
+    refused(
+        &f,
+        Event::GoalProviderCallReserved {
+            goal_id: f.goal,
+            run_id: f.run,
+            agent_run_id: f.child,
+            active_ceiling_ms: 0,
+        },
+        "approved command execution denial stops child continuation",
+    );
+}
+
+#[test]
+fn worker_protocol_approved_execution_denial_settles_without_child_continuation() {
+    use crate::tools::permissions::{
+        Decision, PermissionMode, PermissionSource, PermissionVerdict,
+    };
+
+    let mut f = configured_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Write {
+            path: "src/a".into(),
+            expected_digest: None,
+            content: "new".into(),
+        },
+        f.target(0),
+    );
+    f.started(&intent);
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: f.child,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Allow,
+            mode: Some(PermissionMode::Default),
+            basis: PermissionSource::Rule,
+            source: PermissionSource::Rule,
+            approved: true,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+    f.observed(
+        &intent,
+        ToolDisposition::Denied,
+        None,
+        "Guard enforcement: protected filesystem path refused",
+    );
+    let Event::ToolFinished { observation, .. } = f.events.last().unwrap() else {
+        unreachable!()
+    };
+    assert!(observation.valid());
+
+    let view = f.view();
+    let denied = view.runs[0].agents[1].tools.last().unwrap();
+    assert_eq!(denied.model_denial_output(), None);
+    assert!(private_failure(denied));
+    refused(
+        &f,
+        Event::GoalProviderCallReserved {
+            goal_id: f.goal,
+            run_id: f.run,
+            agent_run_id: f.child,
+            active_ceiling_ms: 0,
+        },
+        "approved execution denial stops child continuation",
+    );
+
+    let finished = f.push(Event::AgentFinished {
+        run_id: f.run,
+        agent_run_id: f.child,
+        disposition: AgentDisposition::Failed,
+        summary: None,
+        result: None,
+        worker: Some(WorkerOutcome {
+            disposition: WorkerDisposition::Failed,
+            cause: WorkerCause::ToolFailed,
+            data: None,
+            cleanup: Some(WorkerCleanupReceipt {
+                assignment_id: f.child,
+                base_digest: f.base.sha256,
+                revision: 0,
+                enforcement_digest: intent.enforcement_digest,
+                last_intent_digest: Some(intent.digest()),
+            }),
+        }),
+    });
+    let settlement = WorkerSettlement {
+        assignment_id: f.child,
+        handover_sequence: None,
+        reason: WorkerSettlementReason::Failed,
+        cause_sequence: finished,
+    };
+    let discarded = f.push(Event::WorkerHandoverDiscarded {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        record: settlement.clone(),
+    });
+    f.push(Event::WorkerLeaseReleased {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        record: WorkerSettlement {
+            cause_sequence: discarded,
+            ..settlement
+        },
+    });
+    f.close();
+    assert_eq!(f.view().runs[0].agents[1].status, AgentStatus::Failed);
 }
 
 fn set_command_criterion(f: &mut Fixture) {

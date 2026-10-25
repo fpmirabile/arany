@@ -476,9 +476,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 9: Build processes/threads: 256 (number)\r\n\
           Choice 10: Build writable project: 1.0 GB (size, e.g. 1GB)\r\n\
           Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)\r\n\
-          Choice 12: Mouse: wheel and clicks (wheel and clicks|wheel only|off)\r\n\
-          Choice 13: Copy on select: on (on|off)\r\n\
-          Choice 14: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
+          Choice 12: Copy on select: on (on|off)\r\n\
+          Choice 13: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
           Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
           Input:\r\n",
     );
