@@ -2119,11 +2119,16 @@ impl AttachedTerminal {
                 .collect::<Vec<_>>()
                 .join(" or ");
             let mut directions = if paged {
-                format!(
+                let numbered = format!(
                     "type a listed choice number or exact name (1-{}); empty Enter selects {}",
                     choices.len(),
                     selected + 1
-                )
+                );
+                if instruction.is_empty() {
+                    numbered
+                } else {
+                    format!("{instruction}; {numbered}")
+                }
             } else if instruction.is_empty() {
                 format!("Type a choice name: {names}")
             } else {

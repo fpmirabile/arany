@@ -1165,6 +1165,13 @@ impl SessionView {
             }
             _ => {}
         }
+        if matches!(envelope.event, Event::ProviderSetupEditStarted { .. }) {
+            // The setup owner holds the Session lock before sealing crash-left work.
+            current.seal_running_goals();
+            if let Some(previous) = current.runs.last_mut() {
+                previous.interrupt();
+            }
+        }
         rewind::before_event(current, &envelope.event);
         if current
             .runs

@@ -149,35 +149,8 @@ async fn setup_edits_block_loaded_thread_prompts_without_events_or_provider_call
     let thread: arany::SessionId =
         serde_json::from_value(next(&mut output).await["result"]["thread"]["id"].clone()).unwrap();
     let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
-    let operation_id = uuid::Uuid::now_v7();
-    store
-        .append(
-            thread,
-            Event::ProviderSetupEditStarted {
-                operation_id,
-                target: arany::ProviderSetupTarget {
-                    kind: arany::ProviderSetupTargetKind::ChatGptAccount,
-                    identity: uuid::Uuid::now_v7().to_string(),
-                },
-                expected_digest: None,
-            },
-        )
-        .await
-        .unwrap();
     for uncertain in [false, true] {
-        if uncertain {
-            store
-                .append(
-                    thread,
-                    Event::ProviderSetupEditFinished {
-                        operation_id,
-                        resulting_digest: None,
-                        disposition: arany::ProviderSetupDisposition::Uncertain,
-                    },
-                )
-                .await
-                .unwrap();
-        }
+        arany::test_support::record_setup_edit_state(&store, thread, uncertain).await;
         let events = store.load_session(thread).await.unwrap();
         assert_setup_blocked_requests(&input, &mut output, thread, &workspace).await;
         assert_eq!(store.load_session(thread).await.unwrap(), events);

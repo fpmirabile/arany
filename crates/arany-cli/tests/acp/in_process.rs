@@ -270,35 +270,8 @@ async fn setup_edits_block_loaded_session_prompts_without_events_or_provider_cal
     initialize(&mut writer, &mut reader).await;
     let session = session(&mut writer, &mut reader, &workspace).await;
     let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
-    let operation_id = uuid::Uuid::now_v7();
-    store
-        .append(
-            session,
-            Event::ProviderSetupEditStarted {
-                operation_id,
-                target: arany::ProviderSetupTarget {
-                    kind: arany::ProviderSetupTargetKind::ChatGptAccount,
-                    identity: uuid::Uuid::now_v7().to_string(),
-                },
-                expected_digest: None,
-            },
-        )
-        .await
-        .unwrap();
     for uncertain in [false, true] {
-        if uncertain {
-            store
-                .append(
-                    session,
-                    Event::ProviderSetupEditFinished {
-                        operation_id,
-                        resulting_digest: None,
-                        disposition: arany::ProviderSetupDisposition::Uncertain,
-                    },
-                )
-                .await
-                .unwrap();
-        }
+        arany::test_support::record_setup_edit_state(&store, session, uncertain).await;
         let events = store.load_session(session).await.unwrap();
         for (method, params) in [
             (

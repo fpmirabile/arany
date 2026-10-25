@@ -42,7 +42,7 @@ pub use engine::{
     RunOutcome, RunPreview, RunRequest, RunResult, RunSteering, SteeringRefused, ToolGrant,
     budget_refusal_summary, continue_session, create_session, fork_session, list_sessions,
     list_sessions_page, rename_session, resume_session, set_session_defaults,
-    validate_workspace_inputs,
+    start_provider_setup_edit, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;

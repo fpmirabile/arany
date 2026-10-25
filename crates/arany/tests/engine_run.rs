@@ -4605,35 +4605,9 @@ async fn assert_setup_blocked_consumers(
     workspace: &Path,
     session_id: SessionId,
 ) {
-    let operation_id = Uuid::now_v7();
-    store
-        .append(
-            session_id,
-            Event::ProviderSetupEditStarted {
-                operation_id,
-                target: arany::ProviderSetupTarget {
-                    kind: arany::ProviderSetupTargetKind::ChatGptAccount,
-                    identity: Uuid::now_v7().to_string(),
-                },
-                expected_digest: None,
-            },
-        )
-        .await
-        .unwrap();
     for uncertain in [false, true] {
-        if uncertain {
-            store
-                .append(
-                    session_id,
-                    Event::ProviderSetupEditFinished {
-                        operation_id,
-                        resulting_digest: None,
-                        disposition: arany::ProviderSetupDisposition::Uncertain,
-                    },
-                )
-                .await
-                .unwrap();
-        }
+        let operation_id =
+            arany::test_support::record_setup_edit_state(store, session_id, uncertain).await;
         let events = store.load_session(session_id).await.unwrap();
         let view = SessionView::replay(session_id, &events).unwrap().unwrap();
         assert_eq!(view.runs.len(), 2);

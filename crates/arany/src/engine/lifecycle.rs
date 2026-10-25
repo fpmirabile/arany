@@ -91,6 +91,28 @@ pub async fn set_session_defaults(
     .await
 }
 
+pub async fn start_provider_setup_edit(
+    state: StateRoot,
+    workspace: PathBuf,
+    session_id: SessionId,
+    target: crate::session::ProviderSetupTarget,
+    expected_digest: Option<[u8; 32]>,
+) -> Result<uuid::Uuid, EngineError> {
+    let operation_id = uuid::Uuid::now_v7();
+    append_idle_event(
+        state,
+        workspace,
+        session_id,
+        Event::ProviderSetupEditStarted {
+            operation_id,
+            target,
+            expected_digest,
+        },
+    )
+    .await?;
+    Ok(operation_id)
+}
+
 async fn append_idle_event(
     state: StateRoot,
     workspace: PathBuf,

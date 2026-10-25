@@ -46,7 +46,7 @@ pub use ledger::Action;
 use ledger::GoalLedger;
 pub use lifecycle::{
     continue_session, create_session, fork_session, list_sessions, list_sessions_page,
-    rename_session, resume_session, set_session_defaults,
+    rename_session, resume_session, set_session_defaults, start_provider_setup_edit,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 use report::goal_report;

@@ -16,7 +16,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const CAPTURE_BYTES: usize = 64 * 1024;
 const MAX_PAGES: usize = 128;
 const READ_BUFFER_BYTES: usize = 4096;
-const ACCOUNTS: &str = "type a listed choice number or exact name (1-6); empty Enter selects 1";
+const ACCOUNTS: &str = "Credentials belong to this OS user; type a listed choice number or exact name (1-6); empty Enter selects 1";
 const HELPER: &str = r#"#!/bin/sh
 case "$2" in
 read) exit 2 ;;

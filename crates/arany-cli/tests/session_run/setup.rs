@@ -27,7 +27,7 @@ use std::{
 use uuid::Uuid;
 
 const API_ACCOUNTS_PROMPT: &[u8] =
-    b"type a listed choice number or exact name (1-6); empty Enter selects 1\r\nInput:\r\n";
+    b"Credentials belong to this OS user; type a listed choice number or exact name (1-6); empty Enter selects 1\r\nInput:\r\n";
 
 #[path = "setup/offline_https.rs"]
 mod offline_https;
@@ -191,6 +191,9 @@ fn acknowledge_linear_pages(
 }
 
 #[cfg(debug_assertions)]
+const FIRST_ROUTE_KEY_CANARY: &str = "first-route-credential-canary";
+
+#[cfg(debug_assertions)]
 struct SetupPty {
     child: ChildGuard,
     input: ChildStdin,
@@ -325,6 +328,7 @@ fn setup_pty_command(
             "DBUS_SESSION_BUS_ADDRESS",
             format!("unix:path={}", temp.path().join("missing-bus").display()),
         )
+        .env("ARANY_PROVIDER_FIRST_ROUTE_KEY", FIRST_ROUTE_KEY_CANARY)
         .env("SHELL", "/bin/sh")
         .env(
             "TERM",
@@ -377,7 +381,12 @@ fn enter_conversation_setup(
 }
 
 #[cfg(debug_assertions)]
-fn finish_setup_pty(mut pty: SetupPty) -> Output {
+fn finish_setup_pty(pty: SetupPty) -> Output {
+    finish_setup_pty_with_transcript(pty).0
+}
+
+#[cfg(debug_assertions)]
+fn finish_setup_pty_with_transcript(mut pty: SetupPty) -> (Output, Vec<u8>) {
     let result = wait_product(pty.child.take());
     pump(
         &mut pty.output,
@@ -385,7 +394,7 @@ fn finish_setup_pty(mut pty: SetupPty) -> Output {
         &mut pty.transcript,
         &mut pty.answered,
     );
-    result
+    (result, pty.transcript)
 }
 
 fn choose_native_account_setup(
@@ -2281,13 +2290,14 @@ fn fresh_setup_root_saves_its_first_custom_route_without_provider_egress() {
         "save result exercises complete paged acknowledgment"
     );
     pty.input.write_all(b"3\r").expect("leave custom routes");
-    let result = finish_setup_pty(pty);
+    let (result, transcript) = finish_setup_pty_with_transcript(pty);
     assert!(result.status.success(), "fresh custom setup failed");
     let profile = std::fs::read_to_string(state.join("provider-profiles.json"))
         .expect("first custom route record");
     assert!(profile.contains("first-route"));
     assert!(profile.contains("model-synthetic"));
-    assert!(!profile.contains("ARANY_PROVIDER_FIRST_ROUTE_KEY_VALUE"));
+    assert!(!profile.contains(FIRST_ROUTE_KEY_CANARY));
+    assert!(!String::from_utf8_lossy(&transcript).contains(FIRST_ROUTE_KEY_CANARY));
     assert_setup_journal(&state, &workspace);
 }
 
@@ -2487,6 +2497,13 @@ fn assert_setup_journal(state: &Path, workspace: &Path) {
                 .load_session(sessions[0].id)
                 .await
                 .expect("setup Events");
+            assert!(events.iter().all(|envelope| {
+                !envelope
+                    .event
+                    .payload()
+                    .expect("setup Event payload")
+                    .contains(FIRST_ROUTE_KEY_CANARY)
+            }));
             assert!(matches!(
                 events[0].event,
                 arany::Event::SessionStarted { .. }
@@ -2662,7 +2679,7 @@ fn linear_setup_selects_nonfirst_maximum_length_custom_route() {
     let routes_at = pty.transcript.len();
     pty.input.write_all(b"2\r").expect("open custom routes");
     let route_prompt =
-        b"type a listed choice number or exact name (1-4); empty Enter selects 1\r\nInput:\r\n";
+        b"Declarations are saved privately; Select and Check are separate actions; type a listed choice number or exact name (1-4); empty Enter selects 1\r\nInput:\r\n";
     acknowledge_linear_pages(
         &mut pty.output,
         &mut pty.input,

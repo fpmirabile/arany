@@ -25,6 +25,16 @@ fn call_budget_exhausted(goal: &GoalView) -> bool {
 }
 
 impl SessionView {
+    pub(super) fn seal_running_goals(&mut self) {
+        for goal in self
+            .goals
+            .iter_mut()
+            .filter(|goal| goal.status == GoalStatus::Running)
+        {
+            seal_unfinished_goal(goal, &mut self.runs);
+        }
+    }
+
     // The event's fields plus the replay prior; a struct would only forward them.
     #[expect(
         clippy::too_many_arguments,
@@ -63,13 +73,7 @@ impl SessionView {
             return Err(ReplayError::InvalidTransition);
         }
         // A new Goal pauses an unfinished predecessor, such as one a crash left Running.
-        for goal in self
-            .goals
-            .iter_mut()
-            .filter(|goal| goal.status == GoalStatus::Running)
-        {
-            seal_unfinished_goal(goal, &mut self.runs);
-        }
+        self.seal_running_goals();
         self.workspace_identity = Some(workspace_identity);
         self.goals.push(GoalView {
             id: *goal_id,

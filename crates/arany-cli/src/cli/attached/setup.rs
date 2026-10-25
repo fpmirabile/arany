@@ -147,28 +147,16 @@ impl SetupJournal {
                     .map_err(|error| error.to_string())?
             });
         }
-        let operation_id = uuid::Uuid::now_v7();
-        let store = Store::open(
+        arany::start_provider_setup_edit(
             StateRoot::open_existing(&self.state_dir)
                 .map_err(|_| "state directory unavailable or unsafe")?,
+            self.workspace.clone(),
+            self.session_id.expect("setup Session was materialized"),
+            ProviderSetupTarget { kind, identity },
+            expected_digest,
         )
-        .map_err(|_| "state store unavailable")?;
-        let result = store
-            .append(
-                self.session_id.expect("setup Session was materialized"),
-                Event::ProviderSetupEditStarted {
-                    operation_id,
-                    target: ProviderSetupTarget { kind, identity },
-                    expected_digest,
-                },
-            )
-            .await;
-        let close = store.close().await;
-        result.map_err(|_| {
-            SetupError::Presentation("could not journal Provider setup edit".into())
-        })?;
-        close.map_err(|_| SetupError::Presentation("could not close setup journal".into()))?;
-        Ok(operation_id)
+        .await
+        .map_err(|_| SetupError::Presentation("could not journal Provider setup edit".into()))
     }
 
     async fn finish(
