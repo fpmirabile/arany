@@ -11,6 +11,32 @@ use crate::tools::{
     ApprovalMode, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation,
     UnguardedPrompt,
 };
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StepDispatch {
+    ConcurrentRead,
+    Serial,
+}
+
+impl StepDispatch {
+    pub(super) fn decide(
+        calls: usize,
+        intent: &EffectIntent,
+        reservation_overhead: Duration,
+    ) -> Self {
+        if calls > 1
+            && intent.target == crate::worker::EffectTarget::Workspace
+            && intent.call.facts().site == crate::tools::catalog::Site::InProcess
+            && !intent.call.facts().mutates
+            && reservation_overhead.is_zero()
+        {
+            Self::ConcurrentRead
+        } else {
+            Self::Serial
+        }
+    }
+}
 
 #[must_use]
 pub(super) enum Verdict {
@@ -748,6 +774,57 @@ pub(super) fn undispatched(
 mod tests {
     use super::super::hooks::HookStop;
     use super::*;
+
+    #[test]
+    fn step_dispatch_uses_fetched_overhead_and_keeps_effects_serial() {
+        use StepDispatch::{ConcurrentRead, Serial};
+        let mut search = read_intent();
+        search.call = ToolCall::Search {
+            path: "file".into(),
+            query: "fact".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 1,
+        };
+        let mut skill = read_intent();
+        skill.call = ToolCall::Skill {
+            name: "review".into(),
+            resource: None,
+        };
+        let mut mutation = read_intent();
+        mutation.call = ToolCall::Mkdir {
+            path: "directory".into(),
+        };
+        let mut guarded = read_intent();
+        guarded.call = ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        };
+        let mut worker = read_intent();
+        worker.target = crate::worker::EffectTarget::WorkerView {
+            assignment_id: worker.agent_run_id,
+            base_digest: [1; 32],
+            revision: 0,
+            cache_generation: None,
+        };
+        for (calls, intent, overhead, expected) in [
+            (1, read_intent(), Duration::ZERO, Serial),
+            (2, read_intent(), Duration::ZERO, ConcurrentRead),
+            (4, read_intent(), Duration::ZERO, ConcurrentRead),
+            (2, read_intent(), Duration::from_secs(1), Serial),
+            (2, search.clone(), Duration::ZERO, ConcurrentRead),
+            (2, search, Duration::from_secs(1), Serial),
+            (2, skill, Duration::ZERO, ConcurrentRead),
+            (2, mutation, Duration::ZERO, Serial),
+            (2, guarded, Duration::ZERO, Serial),
+            (2, worker, Duration::ZERO, Serial),
+        ] {
+            assert_eq!(StepDispatch::decide(calls, &intent, overhead), expected);
+        }
+    }
 
     #[test]
     fn exhausted_active_time_replaces_unstarted_limits_but_preserves_attested_limits() {

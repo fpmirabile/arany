@@ -1456,13 +1456,6 @@ impl ToolRuntime {
         }
     }
 
-    pub(crate) fn concurrent_read(&self, intent: &EffectIntent) -> bool {
-        intent.target == crate::worker::EffectTarget::Workspace
-            && intent.call.facts().site == Site::InProcess
-            && !intent.call.facts().mutates
-            && self.intent_reservation_overhead(intent).is_zero()
-    }
-
     pub(crate) async fn execute_concurrent_read(
         &self,
         intent: EffectIntent,

@@ -29,8 +29,8 @@ mod skills;
 use ask::{AskOptions, AskSite, Resolution, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
-    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
-    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, StepDispatch,
+    Unguarded, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
 };
 use intent::{
     active_window, execute_cancellable, settle_cancelled, tool_action_bound, tool_action_ms,
@@ -314,10 +314,19 @@ impl RunLoop<'_> {
         step: &mut ToolStep,
         intents: Vec<EffectIntent>,
     ) -> Result<StepEnd, EngineError> {
-        let (reads, serial): (Vec<_>, Vec<_>) = intents
-            .into_iter()
-            .enumerate()
-            .partition(|(_, intent)| step.requests.len() > 1 && runtime.concurrent_read(intent));
+        let mut reads = Vec::new();
+        let mut serial = Vec::new();
+        for (index, intent) in intents.into_iter().enumerate() {
+            let overhead = if step.requests.len() > 1 {
+                runtime.intent_reservation_overhead(&intent)
+            } else {
+                Duration::ZERO
+            };
+            match StepDispatch::decide(step.requests.len(), &intent, overhead) {
+                StepDispatch::ConcurrentRead => reads.push((index, intent)),
+                StepDispatch::Serial => serial.push((index, intent)),
+            }
+        }
         let mut order = Vec::new();
         let mut end = self
             .execute_reads(grant, runtime, step, reads, &mut order)
