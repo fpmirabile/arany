@@ -525,7 +525,7 @@ pub async fn exercise_private_guard_command(
             cwd: ".".into(),
         },
     );
-    intent.target = view.target();
+    view.shape_intent(&mut intent);
     intent.limits.cache_requested_bytes = 64 << 20;
     intent.limits.cache_bytes = 64 << 20;
     intent.limits.cache_candidate_bytes = 0;
@@ -620,7 +620,7 @@ pub async fn exercise_private_guard_command(
         let mut check = runtime.intent(run_id, view.assignment(), ToolCall::Command {
             program: "sh".into(), args: vec!["-c".into(),
                 "test \"$(cat owned/a)\" = private && test -s owned/daemon && test \"$(cat \"$CARGO_TARGET_DIR/marker\")\" = assignment-cache".into()], cwd: ".".into() });
-        check.target = view.target();
+        view.shape_intent(&mut check);
         check.limits.cache_requested_bytes = 64 << 20;
         check.limits.cache_bytes = 64 << 20;
         check.limits.cache_candidate_bytes = 0;
@@ -643,7 +643,7 @@ pub async fn exercise_private_guard_command(
         b"original"
     );
     let mut check = runtime.intent(run_id, sibling.assignment(), ToolCall::Command { program: "sh".into(), args: vec!["-c".into(), "test \"$(cat owned/a)\" = original && test \"$(cat \"$CARGO_TARGET_DIR/marker\")\" = assignment-cache".into()], cwd: ".".into() });
-    check.target = sibling.target();
+    sibling.shape_intent(&mut check);
     check.limits.cache_requested_bytes = 64 << 20;
     check.limits.cache_bytes = 64 << 20;
     check.limits.cache_candidate_bytes = 0;
@@ -734,7 +734,7 @@ pub async fn exercise_private_guard_target(
         ],
     };
     let mut intent = runtime.intent(view.run_id(), view.assignment(), call);
-    intent.target = view.target();
+    view.shape_intent(&mut intent);
     intent.limits.cache_bytes = 0;
     intent.limits.cache_requested_bytes = 0;
     intent.limits.cache_candidate_bytes = 0;
@@ -774,7 +774,7 @@ pub async fn exercise_private_guard_target(
                 limit: None,
             },
         );
-        read.target = actor.target();
+        actor.shape_intent(&mut read);
         let read = actor.read(read, None);
         assert_eq!(read.disposition, ToolDisposition::Succeeded);
         let output: serde_json::Value = serde_json::from_str(&read.output).unwrap();
@@ -816,7 +816,7 @@ pub async fn exercise_private_guard_target(
             ],
         },
     );
-    idle_intent.target = idle.target();
+    idle.shape_intent(&mut idle_intent);
     idle_intent.limits.cache_requested_bytes = 0;
     idle_intent.limits.cache_bytes = 0;
     idle_intent.limits.cache_candidate_bytes = 0;
@@ -851,7 +851,7 @@ pub async fn exercise_private_guard_target(
             ],
         },
     );
-    lost_intent.target = lost.target();
+    lost.shape_intent(&mut lost_intent);
     lost_intent.limits.cache_requested_bytes = 0;
     lost_intent.limits.cache_bytes = 0;
     lost_intent.limits.cache_candidate_bytes = 0;
@@ -890,7 +890,7 @@ pub async fn exercise_private_guard_target(
             },
         },
     );
-    capture.target = view.target();
+    view.shape_intent(&mut capture);
     capture.limits.cache_bytes = 0;
     capture.limits.cache_requested_bytes = 0;
     capture.limits.cache_candidate_bytes = 0;

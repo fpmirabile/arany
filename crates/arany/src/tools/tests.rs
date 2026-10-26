@@ -1867,9 +1867,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         enforcement_digest: [2; 32],
         workspace_device: 1,
         workspace_inode: 2,
-        call: ToolCall::Mkdir {
-            path: "src/new".into(),
-        },
+        call: ToolCall::GitStatus { path: "src".into() },
         limits: ToolLimits::default(),
         use_count: 1,
     };
@@ -3157,10 +3155,15 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         runtime.reservation_overhead(&read("src/main.rs")),
         std::time::Duration::ZERO
     );
-    assert!(
+    assert_eq!(
         runtime.reservation_overhead(&ToolCall::Mkdir {
             path: "src/new".into()
-        }) > std::time::Duration::ZERO
+        }),
+        std::time::Duration::ZERO
+    );
+    assert!(
+        runtime.reservation_overhead(&ToolCall::GitStatus { path: "src".into() })
+            > std::time::Duration::ZERO
     );
 
     assert_eq!(
@@ -3169,9 +3172,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
             args: vec![],
             cwd: "".into(),
         }),
-        runtime.reservation_overhead(&ToolCall::Mkdir {
-            path: "src/new".into()
-        }) + std::time::Duration::from_secs(5),
+        super::guard::RESERVATION_OVERHEAD + super::selection::PHASE_TIME,
     );
 
     for pin in ["grant", "enforcement"] {
@@ -5592,4 +5593,63 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
     }
     assert!(temp.path().join("owned/source").exists());
     assert!(!temp.path().join("owned/new").exists());
+}
+
+#[tokio::test]
+async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let call = ToolCall::Mkdir {
+        path: "directory".into(),
+    };
+    let observed = run_in_process(&runtime, call.clone()).await;
+    assert_eq!(observed.disposition, ToolDisposition::Succeeded);
+    assert!(observed.valid());
+    assert!(
+        matches!(&observed.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.intent_digest == observed.intent.digest())
+    );
+    assert!(temp.path().join("directory").is_dir());
+    assert_eq!(
+        runtime.reservation_overhead(&call),
+        std::time::Duration::ZERO
+    );
+    assert_eq!(
+        runtime.intent_reservation_overhead(&observed.intent),
+        std::time::Duration::ZERO
+    );
+    assert_eq!(
+        runtime.worker_reservation_overhead(&call),
+        super::guard::RESERVATION_OVERHEAD
+    );
+    let mut private_intent = observed.intent.clone();
+    private_intent.target = crate::worker::EffectTarget::WorkerView {
+        assignment_id: private_intent.agent_run_id,
+        base_digest: [1; 32],
+        revision: 0,
+        cache_generation: None,
+    };
+    assert_eq!(
+        runtime.intent_reservation_overhead(&private_intent),
+        super::guard::RESERVATION_OVERHEAD
+    );
+    let call = ToolCall::Mkdir {
+        path: "cancelled".into(),
+    };
+    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+    let cancelled = super::Cancellation::new();
+    cancelled.cancel();
+    assert_eq!(
+        runtime.execute(intent, cancelled).await.disposition,
+        ToolDisposition::Cancelled
+    );
+    assert!(!temp.path().join("cancelled").exists());
+    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call);
+    crate::FaultPlan::fail_file_parent_sync(intent.id);
+    let observed = runtime.execute(intent, super::Cancellation::new()).await;
+    assert_eq!(observed.disposition, ToolDisposition::Uncertain);
+    assert!(observed.valid() && observed.stops_run());
+    assert!(temp.path().join("cancelled").is_dir());
 }

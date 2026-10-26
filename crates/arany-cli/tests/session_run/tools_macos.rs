@@ -831,14 +831,26 @@ async fn native_file_journey_helper() {
         );
         match observation.attestation.as_ref().unwrap() {
             arany::Attestation::InProcess {
+                receipt,
                 policy_digest,
                 workspace_device,
                 workspace_inode,
             } => {
                 assert!(matches!(
                     observation.intent.call,
-                    ToolCall::Read { .. } | ToolCall::Search { .. } | ToolCall::Skill { .. }
+                    ToolCall::Read { .. }
+                        | ToolCall::Search { .. }
+                        | ToolCall::Skill { .. }
+                        | ToolCall::Mkdir { .. }
                 ));
+                if observation.disposition == ToolDisposition::Succeeded
+                    && !matches!(
+                        observation.intent.call,
+                        ToolCall::Read { .. } | ToolCall::Search { .. } | ToolCall::Skill { .. }
+                    )
+                {
+                    assert!(receipt.is_some());
+                }
                 assert_eq!(*policy_digest, observation.intent.policy_digest);
                 assert_eq!(
                     (*workspace_device, *workspace_inode),

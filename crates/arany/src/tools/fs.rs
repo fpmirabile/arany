@@ -1483,27 +1483,147 @@ pub(super) fn fit_rows(
     }
 }
 
+pub(super) fn in_process_mutation(intent: &EffectIntent) -> bool {
+    intent.target == crate::session::worker::EffectTarget::Workspace
+        && intent.call.facts().family == super::catalog::Family::File
+        && intent.call.facts().mutates
+        && intent.enforcement_digest == FileReceipt::enforcement_digest()
+}
+
+#[derive(Clone, Copy, Default)]
+enum MutationPhase {
+    #[default]
+    Preparing,
+    Publishing,
+    Expired,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct MutationControl {
+    intent: Option<uuid::Uuid>,
+    cancellation: Option<super::Cancellation>,
+    deadline: Option<tokio::time::Instant>,
+    phase: std::sync::Arc<std::sync::Mutex<MutationPhase>>,
+}
+
+impl MutationControl {
+    pub(super) fn new(
+        intent: uuid::Uuid,
+        cancellation: super::Cancellation,
+        deadline: tokio::time::Instant,
+    ) -> Self {
+        Self {
+            intent: Some(intent),
+            cancellation: Some(cancellation),
+            deadline: Some(deadline),
+            ..Self::default()
+        }
+    }
+
+    fn sync_parent(&self, parent: &Dir) -> Result<(), ToolError> {
+        crate::fault::file_parent_sync(self.intent)?;
+        parent
+            .try_clone()
+            .map_err(|_| ToolError::Uncertain)?
+            .into_std_file()
+            .sync_all()
+            .map_err(|_| ToolError::Uncertain)
+    }
+
+    fn check_phase(&self, phase: MutationPhase) -> Result<(), ToolError> {
+        if matches!(phase, MutationPhase::Publishing) {
+            return Ok(());
+        }
+        if matches!(phase, MutationPhase::Expired)
+            || self
+                .deadline
+                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
+            return Err(ToolError::Timeout(String::new()));
+        }
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(super::Cancellation::is_cancelled)
+        {
+            return Err(ToolError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn check(&self) -> Result<(), ToolError> {
+        self.check_phase(*self.phase.lock().map_err(|_| ToolError::Uncertain)?)
+    }
+
+    fn commit(&self) -> Result<(), ToolError> {
+        let mut phase = self.phase.lock().map_err(|_| ToolError::Uncertain)?;
+        self.check_phase(*phase)?;
+        *phase = MutationPhase::Publishing;
+        Ok(())
+    }
+
+    pub(super) fn expire(&self) -> ToolError {
+        let Ok(mut phase) = self.phase.lock() else {
+            return ToolError::Uncertain;
+        };
+        match *phase {
+            MutationPhase::Publishing => ToolError::Uncertain,
+            MutationPhase::Preparing | MutationPhase::Expired => {
+                *phase = MutationPhase::Expired;
+                ToolError::Timeout(String::new())
+            }
+        }
+    }
+}
+
+pub(super) fn file_receipt(intent: &EffectIntent, _output: &str) -> Result<FileReceipt, ToolError> {
+    if !matches!(intent.call, ToolCall::Mkdir { .. }) {
+        return Err(ToolError::Configuration);
+    }
+    Ok(FileReceipt {
+        intent_digest: intent.digest(),
+        before: None,
+        after: None,
+        executable: false,
+    })
+}
+
 pub(super) fn native(
     workspace: &Path,
     call: &ToolCall,
     config: &Config,
 ) -> Result<String, ToolError> {
-    let root = open_directory(workspace)?;
+    mutate(
+        &open_directory(workspace)?,
+        call,
+        config,
+        &MutationControl::default(),
+    )
+}
+
+pub(super) fn mutate(
+    root: &Dir,
+    call: &ToolCall,
+    config: &Config,
+    control: &MutationControl,
+) -> Result<String, ToolError> {
+    control.check()?;
     match call {
-        ToolCall::Delete { .. } | ToolCall::Move { .. } => remove_or_move(&root, call),
+        ToolCall::Delete { .. } | ToolCall::Move { .. } => remove_or_move(root, call),
         ToolCall::Write {
             path,
             expected_digest,
             content,
-        } => replace(&root, path, expected_digest.as_deref(), content.as_bytes()),
+        } => replace(root, path, expected_digest.as_deref(), content.as_bytes()),
         ToolCall::Mkdir { path } => {
-            let (parent, leaf) = parent(&root, path)?;
+            let (parent, leaf) = parent(root, path)?;
             let mut builder = DirBuilder::new();
             #[cfg(unix)]
             {
                 use cap_std::fs::DirBuilderExt;
                 builder.mode(0o755);
             }
+            control.commit()?;
             parent.create_dir_with(&leaf, &builder).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     ToolError::Conflict
@@ -1511,10 +1631,7 @@ pub(super) fn native(
                     ToolError::Operation
                 }
             })?;
-            parent
-                .into_std_file()
-                .sync_all()
-                .map_err(|_| ToolError::Uncertain)?;
+            control.sync_parent(&parent)?;
             Ok(json!({"created":true}).to_string())
         }
         ToolCall::Edit {
@@ -1527,9 +1644,9 @@ pub(super) fn native(
             expected_digest,
             ..
         } => {
-            let bytes = read_regular(open_file(&root, path)?, MAX_FILE_BYTES)?;
+            let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
             let replacement = edited_content(&bytes, call)?;
-            replace(&root, path, Some(expected_digest), replacement.as_bytes())
+            replace(root, path, Some(expected_digest), replacement.as_bytes())
         }
         ToolCall::ApplyChangeset {
             source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
@@ -1538,7 +1655,7 @@ pub(super) fn native(
             if !config.allows(call) {
                 return Err(ToolError::Path);
             }
-            apply_changeset(&root, changeset)
+            apply_changeset(root, changeset)
         }
         _ => Err(ToolError::Operation),
     }
@@ -2299,6 +2416,28 @@ pub(super) fn rewind_file(root: &Dir, path: &str) -> Result<Option<FileVersion>,
             let bytes = read_regular(file, MAX_FILE_BYTES)?;
             Ok(Some(FileVersion::from_bytes(&bytes, mode & 0o111 != 0)))
         }
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_prevents_late_publication_and_preserves_started_effects() {
+        let stop = super::super::Cancellation::new();
+        let interval = std::time::Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + interval;
+        let preparing = MutationControl::new(uuid::Uuid::now_v7(), stop.clone(), deadline);
+        let publishing = MutationControl::new(uuid::Uuid::now_v7(), stop.clone(), deadline);
+        preparing.check().unwrap();
+        publishing.commit().unwrap();
+        tokio::time::advance(interval).await;
+        assert!(matches!(preparing.commit(), Err(ToolError::Timeout(_))));
+        assert!(matches!(preparing.check(), Err(ToolError::Timeout(_))));
+        stop.cancel();
+        assert!(publishing.check().is_ok());
+        assert!(matches!(publishing.expire(), ToolError::Uncertain));
     }
 }
 

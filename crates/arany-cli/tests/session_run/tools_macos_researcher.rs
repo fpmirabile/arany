@@ -469,6 +469,7 @@ done
             );
             match observation.attestation.as_ref().unwrap() {
                 Attestation::InProcess {
+                    receipt: _,
                     policy_digest,
                     workspace_device,
                     workspace_inode,

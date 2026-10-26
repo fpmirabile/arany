@@ -53,7 +53,7 @@ pub(crate) use workspace::WORKSPACE_PERMISSIONS;
 pub use workspace::{
     RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
 };
-/// Whether this OS implements native Guard protection for typed file Tools.
+/// Whether this OS implements admitted native Tool protection.
 pub const fn native_protection_supported() -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))
 }
@@ -98,10 +98,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     ApprovalCause, Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause,
-    FileChange, FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS,
-    MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits,
-    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
-    ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
+    FileChange, FileReceipt, FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit,
+    MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
+    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +170,8 @@ pub enum ToolError {
     Pattern(&'static str),
     #[error("Tool operation failed")]
     Operation,
+    #[error("File operation cancelled before publication")]
+    Cancelled,
     #[error("Tool effect completion is uncertain")]
     Uncertain,
     #[error(
@@ -1293,7 +1295,12 @@ impl ToolRuntime {
         agent_run_id: AgentRunId,
         call: ToolCall,
     ) -> EffectIntent {
-        let enforcement_digest = if call.is_process() {
+        let enforcement_digest = if call.facts().family == catalog::Family::File
+            && call.facts().mutates
+            && call.facts().site == Site::InProcess
+        {
+            FileReceipt::enforcement_digest()
+        } else if call.is_process() {
             self.process_enforcement_digest
         } else {
             self.enforcement_digest
@@ -1391,7 +1398,9 @@ impl ToolRuntime {
     }
 
     pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call) {
+        if discovery::possible(call)
+            || call.facts().family == catalog::Family::File && call.facts().mutates
+        {
             guard::RESERVATION_OVERHEAD
         } else {
             self.reservation_overhead(call)
@@ -1500,6 +1509,9 @@ impl ToolRuntime {
             };
         }
         match intent.call.facts().site {
+            Site::InProcess if intent.call.facts().mutates => {
+                self.run_file(intent, cancellation).await
+            }
             Site::InProcess => self.run_read(intent, cancellation).await,
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
@@ -1524,6 +1536,61 @@ impl ToolRuntime {
                     uncertain_observation(intent, error, cache_update)
                 }
             },
+        }
+    }
+
+    async fn run_file(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
+        if !fs::in_process_mutation(&intent) {
+            return unstarted_observation(intent, ToolError::Configuration);
+        }
+        let started = tokio::time::Instant::now();
+        let window = match self.begin_active_action(started).await {
+            Ok(window) => window,
+            Err(error) => return unstarted_observation(intent, error),
+        };
+        let deadline = started + Duration::from_millis(u64::from(intent.limits.runtime_ms));
+        let deadline = window.map_or(deadline, |window| deadline.min(window.payload_deadline));
+        if let Err(error) = self.before_dispatch(window, 0, &cancellation).await {
+            return if cancellation.is_cancelled() {
+                unstarted_observation(intent, ToolError::Cancelled)
+            } else if matches!(error, ToolError::Limit) {
+                unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired")
+            } else {
+                unstarted_observation(intent, error)
+            };
+        }
+        let control = fs::MutationControl::new(intent.id, cancellation, deadline);
+        let Some(Ok(permit)) = self
+            .reads
+            .as_ref()
+            .map(|reads| reads.slots.clone().try_acquire_owned())
+        else {
+            return unattested_limit(
+                intent,
+                LimitCause::ReadCapacity,
+                "In-process file capacity is full; nothing was changed",
+            );
+        };
+        let blocking_control = control.clone();
+        let (runtime, file_intent) = (self.clone(), intent.clone());
+        let writing = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let control = blocking_control;
+            let root = runtime.pinned_root(&file_intent)?;
+            let result = fs::mutate(&root, &file_intent.call, &runtime.config, &control);
+            Ok::<_, ToolError>(result)
+        });
+        let result = match tokio::time::timeout_at(deadline, writing).await {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(error))) => return unstarted_observation(intent, error),
+            Ok(Err(_)) => Err(ToolError::Uncertain),
+            Err(_) => Err(control.expire()),
+        };
+        let observation = self.in_process_observation(intent.clone(), result);
+        crate::fault::guard_cache_report(&observation).await;
+        match crate::fault::guard_result(observation.intent.id, Ok(observation)) {
+            Ok(observation) => observation,
+            Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
         }
     }
 
@@ -1635,7 +1702,9 @@ impl ToolRuntime {
             || !intent.valid()
             || intent.policy_digest != self.config.digest()
             || intent.enforcement_digest
-                != if intent.call.is_process() {
+                != if fs::in_process_mutation(intent) {
+                    FileReceipt::enforcement_digest()
+                } else if intent.call.is_process() {
                     self.process_enforcement_digest
                 } else {
                     self.enforcement_digest
@@ -1734,25 +1803,45 @@ impl ToolRuntime {
                 Err(_) => return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired"),
             },
         };
+        self.in_process_observation(intent, result)
+    }
+
+    fn in_process_observation(
+        &self,
+        intent: EffectIntent,
+        result: Result<String, ToolError>,
+    ) -> ToolObservation {
         let (disposition, output, enforcement_cause, limit_cause) =
             dispatch::outcome(&intent, result);
+        let receipt =
+            if fs::in_process_mutation(&intent) && disposition == ToolDisposition::Succeeded {
+                match fs::file_receipt(&intent, &output) {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => {
+                        return uncertain_observation(intent, error, CacheUpdate::NotApplicable);
+                    }
+                }
+            } else {
+                None
+            };
         let mut observation = ToolObservation {
-            enforcement_cause,
-            limit_cause,
             attestation: Some(Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
+                receipt,
             }),
             intent,
             disposition,
             output,
+            enforcement_cause,
+            limit_cause,
             approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
-            observation.limit_cause = Some(crate::tools::LimitCause::Resource);
+            observation.limit_cause = Some(LimitCause::Resource);
             observation.enforcement_cause = None;
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
@@ -1850,6 +1939,11 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    if matches!(error, ToolError::Cancelled) {
+        let mut observation = cancelled_read(intent);
+        observation.output = "File operation cancelled; nothing in the Workspace changed".into();
+        return observation;
+    }
     if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
         return unattested_limit(
             intent,
@@ -1864,6 +1958,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
             .then_some(EnforcementCause::GuardBootstrap);
     let site = match intent.call.facts().site {
+        Site::InProcess if intent.call.facts().mutates => "File",
         Site::InProcess => "Read",
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
