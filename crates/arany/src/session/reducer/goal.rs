@@ -932,6 +932,7 @@ pub(super) fn apply(
                     .primary()
                     .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
                 || !run.compaction_matches(record)
+                || !crate::session::recent_files_match(std::slice::from_ref(run), record)
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())
@@ -954,6 +955,7 @@ pub(super) fn apply(
                 ))
                 .ok_or(ReplayError::InvalidTransition)?;
             let run = active_run(current, *run_id)?;
+            run.tool_compaction_recent_files = record.recent_files.clone();
             if let CompactionStatus::Succeeded { summary, .. } = &record.status {
                 run.tool_compaction_summary = Some(summary.clone());
                 run.tool_compaction_covered_count = *covered_tool_count;

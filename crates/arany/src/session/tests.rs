@@ -60,6 +60,251 @@ fn old_source_compilers_rebuild_history_instead_of_reusing_the_summary() {
     );
 }
 
+#[test]
+fn recent_file_hints_fit_only_in_spare_optional_history_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
+    let id = SessionId::new();
+    let mut view = SessionView::replay(
+        id,
+        &[EventEnvelope {
+            sequence: 1,
+            session_id: id,
+            run_id: None,
+            agent_run_id: None,
+            event: Event::SessionStarted {
+                title: "Context".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            created_at_ms: 0,
+        }],
+    )
+    .unwrap()
+    .unwrap();
+    view.runs = (0..3)
+        .map(|_| {
+            let mut run = unanswered_run(RunStatus::Failed);
+            run.objective = "x".repeat(MAX_USER_MESSAGE_BYTES);
+            run
+        })
+        .collect();
+    let history_bytes: usize = view
+        .runs
+        .iter()
+        .map(|run| {
+            run.history_user_text().len()
+                + crate::provider::history_unanswered_block(run).len()
+                + 64
+        })
+        .sum();
+    let hint = RecentFile {
+        path: "src/recent.txt".into(),
+        digest: "a".repeat(64),
+    };
+    let rendered_hint = render_recent_files(std::slice::from_ref(&hint)).unwrap();
+    let tool_reserved = MAX_CONTEXT_CONTENT_BYTES - history_bytes - rendered_hint.len() - 1;
+    assert!(tool_reserved > crate::tools::types::MIN_TOOL_CONTEXT_BYTES);
+
+    let compile = |view: &SessionView| {
+        CompiledContext::compile(
+            Some(view),
+            "next",
+            &[],
+            &inputs,
+            CollaborationPolicy::Single,
+            tool_reserved,
+            0,
+            None,
+        )
+    };
+    let without_hint = compile(&view).unwrap_or_else(|_| panic!("history fits without hint"));
+    assert_eq!(without_hint.history.len(), 3);
+    view.runs[0].tool_compaction_recent_files = vec![hint];
+    let with_hint = compile(&view).unwrap_or_else(|_| panic!("optional hint is omitted"));
+    assert_eq!(with_hint.history.len(), 3);
+    assert_eq!(with_hint.history, without_hint.history);
+    assert_eq!(with_hint.summary, None);
+    assert_eq!(
+        with_hint.context_usage.used_bytes,
+        without_hint.context_usage.used_bytes
+    );
+    assert_eq!(
+        with_hint.tool_context_budget_bytes,
+        without_hint.tool_context_budget_bytes
+    );
+}
+
+fn compacted_recent_file_view() -> (SessionView, String) {
+    let fixture = worker_compacted_fixture(true);
+    let events = fixture.envelopes();
+    let mut view = SessionView::replay(fixture.session, &events)
+        .unwrap()
+        .unwrap();
+    let mut record = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::GoalContextCompacted { record, .. } => Some(record.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let mut earlier = unanswered_run(RunStatus::Failed);
+    earlier.accepted_sequence = 2;
+    earlier.tool_compaction_recent_files = vec![RecentFile {
+        path: "src/file.txt".into(),
+        digest: "a".repeat(64),
+    }];
+    let mut covered = unanswered_run(RunStatus::Failed);
+    covered.accepted_sequence = 4;
+    record.covered_run_id = covered.id;
+    record.covered_sequence = 5;
+    record.recent_files = vec![RecentFile {
+        path: "src/file.txt".into(),
+        digest: "b".repeat(64),
+    }];
+    let summary = "Covered Session summary".to_owned();
+    let summary_bytes = summary.len() as u32;
+    record.status = CompactionStatus::Succeeded {
+        summary: summary.clone(),
+        content_digest: crate::validate::digest(summary.as_bytes()),
+        summary_bytes,
+        summary_tokens_estimate: summary_bytes.div_ceil(4),
+    };
+    assert!(record.validate().is_ok());
+    view.runs = vec![earlier, covered];
+    view.compactions = vec![CompactionView {
+        event_sequence: view.last_sequence + 1,
+        record,
+    }];
+    (view, summary)
+}
+
+#[test]
+fn session_compaction_does_not_reappend_a_covered_run_hint() {
+    let (view, summary) = compacted_recent_file_view();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
+    let context = CompiledContext::compile(
+        Some(&view),
+        "next",
+        &[],
+        &inputs,
+        CollaborationPolicy::Single,
+        0,
+        0,
+        None,
+    )
+    .unwrap_or_else(|_| panic!("covered summary fits"));
+    let recent = render_recent_files(&view.compactions[0].record.recent_files).unwrap();
+    assert_eq!(
+        context.summary.as_deref(),
+        Some(format!("{summary}\n\n{recent}").as_str())
+    );
+    assert!(!context.summary.unwrap().contains(&"a".repeat(64)));
+}
+
+#[test]
+fn optional_file_hints_preserve_the_selected_summary_and_history() {
+    let (view, summary) = compacted_recent_file_view();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
+    let compile = |view: &SessionView, tool_reserved| {
+        CompiledContext::compile(
+            Some(view),
+            "next",
+            &[],
+            &inputs,
+            CollaborationPolicy::Single,
+            tool_reserved,
+            0,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("selected summary and history fit"))
+    };
+    for include_history in [false, true] {
+        let mut view = view.clone();
+        if include_history {
+            let mut later = unanswered_run(RunStatus::Failed);
+            later.accepted_sequence = view.compactions[0].record.covered_sequence + 1;
+            view.runs.push(later);
+        }
+        let mut without_files = view.clone();
+        without_files.compactions[0].record.recent_files.clear();
+        let roomy = compile(&without_files, 0);
+        let tool_reserved = MAX_CONTEXT_CONTENT_BYTES - roomy.context_usage.used_bytes as usize;
+        let baseline = compile(&without_files, tool_reserved);
+        let with_files = compile(&view, tool_reserved);
+        assert_eq!(with_files.summary.as_deref(), Some(summary.as_str()));
+        assert_eq!(with_files.history.len(), usize::from(include_history));
+        assert_eq!(with_files.history, baseline.history);
+        assert_eq!(
+            with_files.compaction_event_sequence,
+            baseline.compaction_event_sequence
+        );
+        assert_eq!(
+            with_files.context_usage.used_bytes,
+            baseline.context_usage.used_bytes
+        );
+        assert_eq!(
+            with_files.tool_context_budget_bytes,
+            baseline.tool_context_budget_bytes
+        );
+    }
+}
+
+#[test]
+fn uncovered_run_file_hints_append_with_or_without_a_summary() {
+    let (mut view, summary) = compacted_recent_file_view();
+    view.compactions[0].record.recent_files.clear();
+    let mut later = unanswered_run(RunStatus::Failed);
+    later.accepted_sequence = view.compactions[0].record.covered_sequence + 1;
+    later.tool_compaction_recent_files = vec![RecentFile {
+        path: "src/newer.txt".into(),
+        digest: "c".repeat(64),
+    }];
+    let rendered = render_recent_files(&later.tool_compaction_recent_files).unwrap();
+    view.runs.push(later);
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
+    for prior_summary in [false, true] {
+        let mut view = view.clone();
+        if !prior_summary {
+            view.compactions.clear();
+        }
+        let context = CompiledContext::compile(
+            Some(&view),
+            "next",
+            &[],
+            &inputs,
+            CollaborationPolicy::Single,
+            0,
+            0,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("recent-file hints fit"));
+        let expected = if prior_summary {
+            format!("{summary}\n\n{rendered}")
+        } else {
+            rendered.clone()
+        };
+        assert_eq!(context.summary.as_deref(), Some(expected.as_str()));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
@@ -170,6 +415,7 @@ pub(crate) fn unanswered_run(status: RunStatus) -> RunView {
         finished_sequence: status.is_outcome().then_some(3),
         tools: Vec::new(),
         tool_compaction_summary: None,
+        tool_compaction_recent_files: Vec::new(),
         tool_compaction_covered_count: 0,
         tool_results_cleared_count: 0,
         definitions: Default::default(),

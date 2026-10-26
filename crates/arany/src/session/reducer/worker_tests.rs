@@ -481,6 +481,7 @@ impl Fixture {
                 covered_run_id: self.run,
                 covered_sequence: covered,
                 source_digest,
+                recent_files: Vec::new(),
                 provider: "openai".into(),
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
@@ -3542,6 +3543,52 @@ fn worker_compaction_boundaries_keep_the_preceding_step_with_integration() {
     refused(&f, partial, "prefix before worker integration");
     f.push(whole);
     f.view();
+}
+
+#[test]
+fn recent_files_include_only_integrated_worker_publications() {
+    let mut f = fixture();
+    f.mutation();
+    let data = f.finish_worker();
+    let handover = f.handover(data.clone());
+    let integration = f.integrate(handover, data, ToolDisposition::Succeeded);
+    let view = f.view();
+    let tool_finished = view.runs[0]
+        .tools
+        .last()
+        .unwrap()
+        .finished_sequence
+        .unwrap();
+    assert!(integration > tool_finished);
+    let digest: String = crate::validate::digest(b"new")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        crate::session::recent_files(&view.runs[0], tool_finished),
+        [crate::session::RecentFile {
+            path: "src/a".into(),
+            digest,
+        }]
+    );
+
+    let mut private = fixture();
+    private.mutation();
+    let private_view = private.view();
+    assert!(
+        crate::session::recent_files(&private_view.runs[0], private_view.last_sequence).is_empty()
+    );
+
+    let mut conflict = fixture();
+    conflict.mutation();
+    let data = conflict.finish_worker();
+    let handover = conflict.handover(data.clone());
+    conflict.integrate(handover, data, ToolDisposition::Conflict);
+    let conflict_view = conflict.view();
+    assert!(
+        crate::session::recent_files(&conflict_view.runs[0], conflict_view.last_sequence)
+            .is_empty()
+    );
 }
 
 #[test]

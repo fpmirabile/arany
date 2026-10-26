@@ -92,10 +92,10 @@ pub use session::{
     MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, MAX_USER_MESSAGE_BYTES, PlanUsage, ProposalRefusal,
     ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
-    ProviderSetupTarget, ProviderSetupTargetKind, ReplayError, RunConfig, RunDisposition,
-    RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId,
-    SessionListItem, SessionPage, SessionView, TokenCount, ToolIntentRecord, ToolView, UsageGroup,
-    UsageView, WorkspaceIdentity, escape_status_text,
+    ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
+    RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
+    SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
+    ToolIntentRecord, ToolView, UsageGroup, UsageView, WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};

@@ -36,6 +36,9 @@ pub(super) fn apply(
             if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                 return Err(ReplayError::InvalidSnapshot);
             }
+            if !crate::session::recent_files_match(&current.runs, record) {
+                return Err(ReplayError::InvalidSnapshot);
+            }
             if current.runs.last().is_some_and(|run| {
                 (own_last.is_some()
                     || run
