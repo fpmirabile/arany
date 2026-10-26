@@ -79,6 +79,7 @@ const INITIAL_OBJECTIVE_BYTES: usize = 8 * 1024;
 const INITIAL_ANSWER_BYTES: usize = 24 * 1024;
 const GUIDANCE_BYTES: usize = 20 * 1024;
 const INCLUDE_BYTES: usize = 120 * 1024;
+const PRODUCT_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn compaction_summary() -> String {
     let bytes: usize = 16 * 1024;
@@ -667,14 +668,16 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         bytes
     });
     let shell_pid = pid_ready
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(PRODUCT_START_TIMEOUT)
         .expect("product parent PID");
     let product_pid = product_child_of(shell_pid);
     let product_guard = ProductGuard::new(product_pid, state.clone());
-    assert!(
-        product_guard.is_owned_and_running(),
-        "private product for cleanup"
-    );
+    let deadline = Instant::now() + PRODUCT_START_TIMEOUT;
+    // Linux can expose the executable before its command line during exec.
+    while !product_guard.is_owned_and_running() {
+        assert!(Instant::now() < deadline, "private product for cleanup");
+        thread::yield_now();
+    }
     let future_account = uuid::Uuid::now_v7();
     if matches!(case, CompactionCase::Success) {
         receive_stage(&receiver, "second restored output");
