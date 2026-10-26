@@ -1851,7 +1851,8 @@ fn markdown_cost(kind: MessageKind, text: &str, width: usize) -> (usize, usize) 
         super::markdown::literal(cue, body_width, false)
     });
     let heading = safe_truncate(message_heading(kind), width);
-    let bytes = bytes + cue_bytes + (rows + cue_rows) * width.min(2) + heading.len();
+    let indent_bytes = safe_truncate("  ", width).len();
+    let bytes = bytes + cue_bytes + (rows + cue_rows) * indent_bytes + heading.len();
     (bytes, rows + cue_rows + 2 + usize::from(cue.is_some()))
 }
 
