@@ -1,9 +1,10 @@
 mod controls;
 mod serve_loop;
 
-pub(in crate::cli) use serve_loop::run_configured;
+pub(in crate::cli) use serve_loop::{run_configured, run_embedded};
 
 use super::{
+    embedded,
     items::{self, TurnState, notification},
     threads::{self, Threads},
 };
@@ -28,6 +29,7 @@ pub(in crate::cli) enum ApprovalChannel {
 pub(in crate::cli) enum ClientMessage {
     Message(Message),
     Eof,
+    Control(embedded::Control),
 }
 pub(in crate::cli) type ServerMessage = Message;
 
@@ -196,6 +198,7 @@ struct Inbound {
     pending: VecDeque<ClientMessage>,
     stopping: watch::Sender<bool>,
     ended: bool,
+    local: Option<(arany::RunControls, PathBuf)>,
 }
 
 impl Inbound {
@@ -232,7 +235,7 @@ impl Inbound {
                     stopped = true;
                     continue;
                 },
-                _ = stopping.wait_for(|stopping| *stopping), if !stopped => {
+                _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; }, if !stopped => {
                     if let Some(control) = &control { control.cancel(); }
                     stopped = true;
                     continue;
@@ -243,6 +246,10 @@ impl Inbound {
                         if let Some(control) = &control { control.cancel(); }
                         self.stopping.send_replace(true);
                         stopped = true;
+                        continue;
+                    }
+                    Some(ClientMessage::Control(command)) => {
+                        if let Some((local, state)) = &self.local { embedded::dispatch(command, local, state).await; }
                         continue;
                     }
                     Some(ClientMessage::Message(Message::Request(ref request)))
@@ -376,10 +383,10 @@ pub(super) struct Refused {
 }
 
 impl Refused {
-    fn from_result(result: arany::RunResult) -> Option<Self> {
-        result.continuation_error.map(|error| Self {
+    fn from_result(result: &arany::RunResult) -> Option<Self> {
+        result.continuation_error.as_ref().map(|error| Self {
             run: result.run.run.id,
-            reason: Reason::from(&error),
+            reason: Reason::from(error),
             message: error.to_string(),
         })
     }
@@ -595,12 +602,28 @@ mod tests {
             pending: VecDeque::new(),
             stopping,
             ended: false,
+            local: Some((
+                RunControls {
+                    steering: Some(RunSteering::new()),
+                    ..Default::default()
+                },
+                PathBuf::new(),
+            )),
         };
         let (outbound, mut output) = mpsc::channel(1);
         outbound
             .try_send(response(RequestId::Integer(1), json!({})))
             .unwrap();
         let fill = async {
+            let (reply, paused) = tokio::sync::oneshot::channel();
+            sender
+                .send(ClientMessage::Control(embedded::Control::Pause(reply)))
+                .await
+                .unwrap();
+            assert!(
+                paused.await.unwrap(),
+                "local controls are serviced while output is full"
+            );
             for id in 0..=super::super::INBOUND_CAPACITY {
                 sender
                     .send(ClientMessage::Message(Message::Request(Request {

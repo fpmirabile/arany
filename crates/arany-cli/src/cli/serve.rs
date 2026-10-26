@@ -9,6 +9,7 @@ use tokio::{
 };
 
 mod approvals;
+pub(in crate::cli) mod embedded;
 mod history;
 pub(in crate::cli) mod items;
 mod rewind;
