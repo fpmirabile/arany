@@ -224,7 +224,10 @@ mod goal_workspace_lease_tests {
                     budget: GoalBudget::default(),
                     phase: GoalPhase::Implementation,
                     autonomous: false,
-                    resource_settings: crate::tools::ToolResourceSettings::default(),
+                    resource_settings: crate::tools::ToolResourceSettings {
+                        build_jobs: Some(2),
+                        ..Default::default()
+                    },
                     continues: None,
                 },
             )
@@ -283,6 +286,13 @@ mod goal_workspace_lease_tests {
             .await
             .expect("canonical Events");
         assert_eq!(events.len(), 2, "GoalResumed did not commit");
+        let history = crate::SessionView::replay(session_id, &events)
+            .unwrap()
+            .unwrap();
+        let mut request = resume_request(session_id, goal_id, &workspace);
+        request.goal.resource_settings.build_jobs = Some(u32::MAX);
+        let resumed = resolve_goal_admission(&request, Some(&history), GoalEntry::Resume).unwrap();
+        assert_eq!(resumed.resource_settings.build_jobs, Some(2));
         engine.close().await.expect("close Engine");
     }
 
