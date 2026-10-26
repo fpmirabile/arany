@@ -28,8 +28,10 @@ fn a_forks_boundary_compaction_is_refused_while_its_own_run_is_open() {
     ));
     let open = journal(fork, events.clone());
     assert!(SessionView::replay_open(fork, &open).unwrap().is_some());
+    let mut record = failed_compaction_record(source_run, 1);
+    record.source_digest = crate::session::prefix_digest(&open, record.covered_sequence).unwrap();
     let compacted = Event::ContextCompacted {
-        record: failed_compaction_record(source_run, 1),
+        record,
         active_ms: None,
     };
     let boundary_only = journal(fork, vec![events[0].clone(), compacted.clone()]);
