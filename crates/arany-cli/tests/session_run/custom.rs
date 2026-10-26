@@ -5,6 +5,7 @@ struct RouteCase {
     base_path: &'static str,
     model: &'static str,
     auth: Option<&'static str>,
+    chat: bool,
     credential_env: &'static str,
     key: &'static str,
 }
@@ -13,6 +14,7 @@ const RESPONSES: RouteCase = RouteCase {
     base_path: "",
     model: "model-1",
     auth: None,
+    chat: false,
     credential_env: "ARANY_PROVIDER_LOCAL_KEY",
     key: "test-key",
 };
@@ -21,6 +23,7 @@ const MESSAGES_ROUTES: [RouteCase; 5] = [
         base_path: "/anthropic",
         model: "deepseek-flash",
         auth: Some("x-api-key"),
+        chat: false,
         credential_env: "ARANY_PROVIDER_DEEPSEEK_KEY",
         key: "deepseek-api-canary",
     },
@@ -28,6 +31,7 @@ const MESSAGES_ROUTES: [RouteCase; 5] = [
         base_path: "/anthropic",
         model: "kimi-k3",
         auth: Some("bearer"),
+        chat: false,
         credential_env: "ARANY_PROVIDER_KIMI_API_KEY",
         key: "kimi-api-canary",
     },
@@ -35,6 +39,7 @@ const MESSAGES_ROUTES: [RouteCase; 5] = [
         base_path: "/coding/",
         model: "k3-256k",
         auth: Some("x-api-key"),
+        chat: false,
         credential_env: "ARANY_PROVIDER_KIMI_CODE_KEY",
         key: "kimi-code-canary",
     },
@@ -42,6 +47,7 @@ const MESSAGES_ROUTES: [RouteCase; 5] = [
         base_path: "/api/anthropic",
         model: "glm-5.3",
         auth: Some("bearer"),
+        chat: false,
         credential_env: "ARANY_PROVIDER_GLM_STANDARD_KEY",
         key: "glm-standard-canary",
     },
@@ -49,10 +55,19 @@ const MESSAGES_ROUTES: [RouteCase; 5] = [
         base_path: "/api/anthropic",
         model: "glm-5.3-flash",
         auth: Some("bearer"),
+        chat: false,
         credential_env: "ARANY_PROVIDER_GLM_STANDARD_KEY",
         key: "glm-standard-canary",
     },
 ];
+const CHAT_COMPLETIONS: RouteCase = RouteCase {
+    base_path: "/v1",
+    model: "model-1",
+    auth: Some("bearer"),
+    chat: true,
+    credential_env: "ARANY_PROVIDER_LOCAL_KEY",
+    key: "chat-api-canary",
+};
 
 impl RouteCase {
     fn keys(self, command: &mut Command, selected: Option<&str>) {
@@ -78,6 +93,59 @@ enum RecheckFailure {
     Unauthorized,
     Redirect,
     WrongModel,
+    ChatTwoChoices,
+    ChatLength,
+    ChatMissingUsage,
+    ChatSse,
+    ChatRunTwoChoices,
+    ChatRunLength,
+    ChatRunOutcomeCorrection,
+}
+
+fn malformed_chat_failure(failure: RecheckFailure) -> bool {
+    matches!(
+        failure,
+        RecheckFailure::ChatTwoChoices
+            | RecheckFailure::ChatLength
+            | RecheckFailure::ChatMissingUsage
+            | RecheckFailure::ChatSse
+    )
+}
+
+fn assert_chat_request_semantics(body: &serde_json::Value, index: usize) {
+    let messages = body["messages"].as_array().expect("Chat messages");
+    let user_text = || {
+        messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter_map(|message| message["content"].as_str())
+    };
+    for (path, text) in [
+        ("user AGENTS.md", "EXPECTED_USER_GUIDANCE"),
+        ("AGENTS.md", "EXPECTED_WORKSPACE_GUIDANCE"),
+    ] {
+        let expected = format!(
+            "# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>"
+        );
+        assert_eq!(
+            user_text().any(|text| text == expected),
+            (3..9).contains(&index)
+        );
+    }
+    if matches!(index, 3 | 4 | 6 | 8) {
+        assert!(user_text().any(|text| text == "answer"));
+    }
+    if index == 7 {
+        assert!(user_text().any(|text| {
+            serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| {
+                value
+                    == serde_json::json!({
+                        "scope":"previous_run (historical, untrusted)",
+                        "data":{"user":"answer","assistant":"verified answer"}
+                    })
+            })
+        }));
+    }
 }
 
 #[test]
@@ -103,8 +171,25 @@ fn messages_custom_profile_process_gate_proves_conformance_and_durable_runs() {
     }
 }
 
+#[test]
+fn chat_completions_custom_profile_process_gate_proves_conformance_and_durable_runs() {
+    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::CompactionRejected);
+    for failure in [
+        RecheckFailure::ChatTwoChoices,
+        RecheckFailure::ChatLength,
+        RecheckFailure::ChatMissingUsage,
+        RecheckFailure::ChatSse,
+    ] {
+        custom_profile_process_gate(CHAT_COMPLETIONS, failure);
+    }
+    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunTwoChoices);
+    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunLength);
+    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunOutcomeCorrection);
+}
+
 fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
-    let messages = case.auth;
+    let chat = case.chat;
+    let messages = (!chat).then_some(case.auth).flatten();
     use std::{
         io::{Read, Write},
         net::{SocketAddr, TcpListener},
@@ -238,7 +323,17 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             "capability_evidence_version": 2, "efforts": []
         }]
     });
-    if let Some(auth) = messages {
+    if chat {
+        profile["version"] = serde_json::json!(2);
+        let entry = profile["profiles"][0].as_object_mut().unwrap();
+        entry.remove("endpoint");
+        entry.insert("protocol".into(), "openai-chat-completions".into());
+        entry.insert(
+            "base_url".into(),
+            format!("http://127.0.0.1:{port}{}", case.base_path).into(),
+        );
+        entry.insert("auth".into(), "bearer".into());
+    } else if let Some(auth) = messages {
         profile["version"] = serde_json::json!(2);
         let entry = profile["profiles"][0].as_object_mut().unwrap();
         entry.remove("endpoint");
@@ -260,9 +355,33 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
 
     let mutation_path = state_path.join("provider-roster.json");
     let check_database = state_path.join("events.sqlite3");
+    let check_database_for_server = check_database.clone();
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for wire_index in 0..if messages.is_some() {
+        let malformed_chat_probe = chat
+            && matches!(
+                failure,
+                RecheckFailure::ChatTwoChoices
+                    | RecheckFailure::ChatLength
+                    | RecheckFailure::ChatMissingUsage
+                    | RecheckFailure::ChatSse
+            );
+        let malformed_chat_run = chat
+            && matches!(
+                failure,
+                RecheckFailure::ChatRunTwoChoices | RecheckFailure::ChatRunLength
+            );
+        let corrective_chat_run =
+            chat && matches!(failure, RecheckFailure::ChatRunOutcomeCorrection);
+        for wire_index in 0..if malformed_chat_probe {
+            1
+        } else if malformed_chat_run {
+            4
+        } else if corrective_chat_run {
+            5
+        } else if chat {
+            12
+        } else if messages.is_some() {
             if matches!(failure, RecheckFailure::EffortRejected) {
                 20
             } else if matches!(
@@ -304,7 +423,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             };
             if wire_index < if effort_case { 7 } else { 3 } {
                 let database = rusqlite::Connection::open_with_flags(
-                    &check_database,
+                    &check_database_for_server,
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                 )
                 .expect("journal before received request");
@@ -352,7 +471,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 }
             };
             let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            let path = if messages.is_some() {
+            let path = if chat {
+                "/v1/chat/completions"
+            } else if messages.is_some() {
                 &format!("{}/v1/messages", case.base_path.trim_end_matches('/'))
             } else {
                 "/v1/responses"
@@ -377,7 +498,18 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     .expect("synthetic JSON");
             assert_eq!(body["model"], case.model);
             let compact = matches!(index, 2 | 11 | 13 | 15);
-            if messages.is_some() {
+            if chat {
+                assert_eq!(body["stream"], false);
+                let offers_tools = body["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty());
+                assert_eq!(body.get("parallel_tool_calls").is_some(), offers_tools);
+                if offers_tools {
+                    assert_eq!(body["parallel_tool_calls"], false);
+                }
+                assert!(body.get("store").is_none());
+                assert_chat_request_semantics(&body, index);
+            } else if messages.is_some() {
                 assert_eq!(body.get("output_config").is_some(), index >= 12);
                 assert_eq!(
                     body["output_config"]
@@ -397,7 +529,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 assert!(body.get("text").is_none());
             }
             assert_eq!(
-                body[if messages.is_some() {
+                body[if chat {
+                    "max_completion_tokens"
+                } else if messages.is_some() {
                     "max_tokens"
                 } else {
                     "max_output_tokens"
@@ -408,8 +542,12 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     128
                 }
             );
-            let input: serde_json::Value = crate::semantic::input(&body);
-            if (3..9).contains(&index) {
+            let input: serde_json::Value = if chat {
+                serde_json::json!({})
+            } else {
+                crate::semantic::input(&body)
+            };
+            if !chat && (3..9).contains(&index) {
                 assert_eq!(
                     input["phase"],
                     match index {
@@ -431,7 +569,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                         serde_json::json!([{"user": "answer", "assistant": "verified answer"}])
                     );
                 }
-            } else {
+            } else if !chat {
                 assert!(
                     input
                         .get("workspace_guidance")
@@ -446,6 +584,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             for omitted in MESSAGES_ROUTES
                 .map(|route| route.key)
                 .into_iter()
+                .chain([CHAT_COMPLETIONS.key])
                 .chain(["omitted-native-key"])
             {
                 if omitted != case.key {
@@ -468,7 +607,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     continue;
                 }
             }
-            if index == 9 && messages.is_none() {
+            if index == 9 && messages.is_none() && !chat {
                 write!(
                     stream,
                     "HTTP/1.1 302 Found\r\nLocation: http://{proxy_addr}/v1/responses\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -482,7 +621,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                 continue;
             }
-            if index == 4 {
+            if index == 4 && !corrective_chat_run {
                 std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
@@ -533,10 +672,54 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     "stop_reason":if text.is_object() { "tool_use" } else { "end_turn" },
                     "content":arany::semantic::messages_content(&text),"usage":{"input_tokens":20,"output_tokens":10}});
             }
+            if chat {
+                let (content, calls, finish_reason) = if text.is_object() {
+                    let outcome = &text["outcome"];
+                    let args = serde_json::json!({"children":outcome["children"],"agent":null});
+                    (
+                        serde_json::Value::Null,
+                        serde_json::json!([{"id":format!("call_{}",index + 1),"type":"function","function":{"name":"arany_delegate","arguments":args.to_string()}}]),
+                        "tool_calls",
+                    )
+                } else {
+                    (text.clone(), serde_json::Value::Null, "stop")
+                };
+                response = serde_json::json!({
+                    "id":format!("chatcmpl_{}",index + 1),"model":case.model,
+                    "choices":[{"index":0,"finish_reason":finish_reason,"message":{"role":"assistant","content":content,"tool_calls":calls}}],
+                    "usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}
+                });
+            }
             if index == 9 && matches!(failure, RecheckFailure::WrongModel) {
                 response["model"] = "mistyped-highspeed-fallback".into();
             }
-            let (content_type, response) = if body["stream"] == true {
+            if corrective_chat_run {
+                let has_correction = body["messages"].as_array().unwrap().iter().any(|message| {
+                    message["content"].as_str().is_some_and(|text| {
+                        serde_json::from_str::<serde_json::Value>(text)
+                            .is_ok_and(|value| value["scope"] == "harness_outcome_correction")
+                    })
+                });
+                assert_eq!(has_correction, index == 4);
+                if index == 3 {
+                    response["choices"][0] = serde_json::json!({
+                        "finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                        "tool_calls":[{"id":"call_unoffered","type":"function","function":{"name":"arany_delegate","arguments":"{}"}}]}
+                    });
+                } else if index == 4 {
+                    let database = rusqlite::Connection::open(&check_database_for_server).unwrap();
+                    let payload: String = database.query_row("SELECT payload FROM events WHERE kind='ProviderCallRecorded' ORDER BY sequence DESC LIMIT 1", [], |row| row.get(0)).unwrap();
+                    let record: arany::ProviderCallRecord = serde_json::from_str(&payload).unwrap();
+                    assert_eq!(
+                        record.failure_reason,
+                        Some(arany::ProviderFailureReason::OutcomeContract)
+                    );
+                    response["choices"][0] = serde_json::json!({
+                        "finish_reason":"stop","message":{"role":"assistant","content":"corrected answer"}
+                    });
+                }
+            }
+            let (mut content_type, mut response) = if body["stream"] == true {
                 (
                     "text/event-stream",
                     if messages.is_some() {
@@ -548,6 +731,43 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             } else {
                 ("application/json", response.to_string())
             };
+            if malformed_chat_probe || malformed_chat_run && index == 3 {
+                match failure {
+                    RecheckFailure::ChatTwoChoices | RecheckFailure::ChatRunTwoChoices => {
+                        let mut response_value: serde_json::Value =
+                            serde_json::from_str(&response).unwrap();
+                        let choice = response_value["choices"][0].clone();
+                        response_value["choices"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(choice);
+                        response = response_value.to_string();
+                    }
+                    RecheckFailure::ChatLength => {
+                        let mut response_value: serde_json::Value =
+                            serde_json::from_str(&response).unwrap();
+                        response_value["choices"][0]["finish_reason"] = "length".into();
+                        response = response_value.to_string();
+                    }
+                    RecheckFailure::ChatRunLength => {
+                        let mut response_value: serde_json::Value =
+                            serde_json::from_str(&response).unwrap();
+                        response_value["choices"][0]["finish_reason"] = "length".into();
+                        response = response_value.to_string();
+                    }
+                    RecheckFailure::ChatMissingUsage => {
+                        let mut response_value: serde_json::Value =
+                            serde_json::from_str(&response).unwrap();
+                        response_value.as_object_mut().unwrap().remove("usage");
+                        response = response_value.to_string();
+                    }
+                    RecheckFailure::ChatSse => {
+                        content_type = "text/event-stream";
+                        response = format!("data: {response}\n\n");
+                    }
+                    _ => unreachable!(),
+                }
+            }
             let response = if index == 7 {
                 response.replace(
                     case.key,
@@ -591,6 +811,49 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         Some(case.key),
         Some(proxy_addr),
     );
+    if chat && malformed_chat_failure(failure) {
+        server.join().expect("malformed probe server completed");
+        assert!(!checked.status.success());
+        assert_eq!(checked.stdout, b"");
+        assert_eq!(
+            check_output(
+                &checked.stderr,
+                &state_path,
+                arany::CheckDisposition::Failed
+            ),
+            b"error: custom Provider conformance failed\n"
+        );
+        let database = rusqlite::Connection::open(&check_database).unwrap();
+        let events: Vec<arany::CheckEvent> = database
+            .prepare("SELECT payload FROM provider_check_events ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+            .collect();
+        assert!(matches!(
+            events.last(),
+            Some(arany::CheckEvent::ProviderCheckFinished {
+                disposition: arany::CheckDisposition::Failed,
+                ..
+            })
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, arany::CheckEvent::ProviderCheckCallStarted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            database
+                .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        return;
+    }
     assert!(checked.status.success());
     assert_check_privacy(
         &checked,
@@ -616,11 +879,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     ));
 
     let mut changed_profile = profile.clone();
-    changed_profile["profiles"][0][if messages.is_some() {
+    changed_profile["profiles"][0][if messages.is_some() || chat {
         "base_url"
     } else {
         "endpoint"
-    }] = if messages.is_some() {
+    }] = if messages.is_some() || chat {
         format!("http://127.0.0.1:{port}/other")
     } else {
         format!("http://127.0.0.1:{port}/other/responses")
@@ -758,6 +1021,93 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     );
 
     let success = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
+    if chat
+        && matches!(
+            failure,
+            RecheckFailure::ChatRunTwoChoices
+                | RecheckFailure::ChatRunLength
+                | RecheckFailure::ChatRunOutcomeCorrection
+        )
+    {
+        server.join().expect("Chat Run server completed");
+        let corrected = matches!(failure, RecheckFailure::ChatRunOutcomeCorrection);
+        assert_eq!(success.status.success(), corrected);
+        assert_eq!(
+            success.stdout,
+            if corrected {
+                b"Answer:\n  corrected answer\n".as_slice()
+            } else {
+                b""
+            }
+        );
+        let receipt = std::str::from_utf8(&success.stderr).unwrap();
+        let lines: Vec<_> = receipt.lines().collect();
+        assert_eq!(lines.len(), 4);
+        let recorded_session =
+            SessionId::from_str(lines[0].strip_prefix("Session: ").unwrap()).unwrap();
+        let recorded_run = RunId::from_str(lines[1].strip_prefix("Run: ").unwrap()).unwrap();
+        assert_eq!(
+            lines[2],
+            if corrected {
+                "Status: finished"
+            } else {
+                "Status: failed"
+            }
+        );
+        let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+        let payload: String = connection
+            .query_row(
+                "SELECT payload FROM events WHERE kind='ProviderCallRecorded' ORDER BY sequence LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let record: arany::ProviderCallRecord = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            record.failure_reason,
+            Some(if corrected {
+                arany::ProviderFailureReason::OutcomeContract
+            } else {
+                arany::ProviderFailureReason::ResponseContract
+            })
+        );
+        drop(connection);
+        let store = Store::open_read_only(
+            StateRoot::open_existing(&state_path).expect("state reopen after Chat Run"),
+        )
+        .expect("reopen Chat Run Store");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("replay runtime");
+        let events = runtime
+            .block_on(store.load_session(recorded_session))
+            .unwrap();
+        let view = SessionView::replay(recorded_session, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.runs.len(), 1);
+        assert_eq!(view.runs[0].id, recorded_run);
+        assert_eq!(
+            view.runs[0].status,
+            if corrected {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            }
+        );
+        assert_eq!(
+            view.runs[0].assistant_message.as_deref(),
+            corrected.then_some("corrected answer")
+        );
+        assert_eq!(view.runs[0].agents.len(), 1);
+        let calls = &view.runs[0].agents[0].provider_calls;
+        assert_eq!(calls.len(), if corrected { 2 } else { 1 });
+        if corrected {
+            assert!(calls[1].failure_reason.is_none());
+        }
+        runtime.block_on(store.close()).unwrap();
+        return;
+    }
     assert!(success.status.success());
     let continued_session_id = SessionId::from_str(
         std::str::from_utf8(&success.stderr)
@@ -985,7 +1335,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(
         view.runs[0].agents[0].provider_calls[0].wire_provenance,
-        Some(if messages.is_some() {
+        Some(if chat {
+            arany::ProviderWireProvenance::ChatCompletionsStopStorageUnspecified
+        } else if messages.is_some() {
             arany::ProviderWireProvenance::MessagesEndTurnStorageUnspecified
         } else {
             arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested
@@ -1001,7 +1353,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         .expect("verified custom provenance");
     assert_eq!(
         provenance.endpoint,
-        if messages.is_some() {
+        if chat {
+            format!("http://127.0.0.1:{port}/v1/chat/completions")
+        } else if messages.is_some() {
             format!(
                 "http://127.0.0.1:{port}{}/v1/messages",
                 case.base_path.trim_end_matches('/')
@@ -1049,7 +1403,10 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             .agents
             .iter()
             .flat_map(|agent| &agent.provider_calls)
-            .all(|call| if messages.is_some() {
+            .all(|call| if chat {
+                call.wire_provenance
+                    == Some(arany::ProviderWireProvenance::ChatCompletionsStopStorageUnspecified)
+            } else if messages.is_some() {
                 matches!(
                     call.wire_provenance,
                     Some(
