@@ -1,9 +1,29 @@
-use super::ToolError;
 use super::catalog::string;
 use super::guard::{GuardContext, capture, capture_command, payload, spawn_before};
-use super::types::{CommandResult, ToolCall};
+use super::types::{CommandResult, EffectIntent, ToolCall, ToolLimits};
+use super::{ToolError, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
 use serde_json::{Value, json};
+
+impl ToolRuntime {
+    pub(crate) fn bind_build_jobs(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
+        intent.enforcement_digest = self.build_jobs_digest(intent)?;
+        Ok(())
+    }
+
+    pub(super) fn build_jobs_digest(&self, intent: &EffectIntent) -> Result<[u8; 32], ToolError> {
+        if intent.limits.build_jobs == ToolLimits::default().build_jobs {
+            return Ok(self.process_enforcement_digest);
+        }
+        super::guard::intent_enforcement_digest(
+            true,
+            &self.config.runtime_grants,
+            intent.limits.build_jobs,
+            #[cfg(target_os = "macos")]
+            self.system_programs.as_deref(),
+        )
+    }
+}
 
 pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
 pub(super) const MAX_COMMAND_ARGS: usize = 64;
@@ -99,7 +119,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         site.root,
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
-        site.intent.limits.resource_class,
+        &site.intent.limits,
     )?;
     command.current_dir(site.workspace.join(cwd));
     command.env("ARANY_TOOL_WORKSPACE", site.workspace);

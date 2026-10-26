@@ -10,6 +10,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+pub(super) const DIRECTORY: &str = "spill";
+
 pub(crate) struct SpillAccess {
     current: Arc<Dir>,
     parents: [Dir; 2],
@@ -24,7 +26,7 @@ impl StateRoot {
         history: &[EventEnvelope],
     ) -> Result<SpillAccess, StoreError> {
         self.readmit()?;
-        let root = private_subdirectory(&self.dir, "spill")?;
+        let root = private_subdirectory(&self.dir, DIRECTORY)?;
         checked_child(&self.dir, &root)?;
         let current = Arc::new(private_subdirectory(&root, &run.to_string())?);
         checked_child(&root, &current)?;
@@ -224,7 +226,7 @@ pub(in crate::store) fn sweep(
     root: &StateRoot,
     connection: &rusqlite::Connection,
 ) -> Result<(), StoreError> {
-    let spill = match root.dir.open_dir_nofollow("spill") {
+    let spill = match root.dir.open_dir_nofollow(DIRECTORY) {
         Ok(spill) => spill,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
