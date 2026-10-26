@@ -1350,6 +1350,22 @@ mod unguarded_tests {
             tool_summary(&host_tool(ToolDisposition::Denied, false)),
             "⏺ Unguarded command(sh -c exit 0)\n  ⎿ denied"
         );
+        let mut tool = host_tool(ToolDisposition::Succeeded, true);
+        let reference = "f".repeat(64);
+        let observation = tool.observation.as_mut().unwrap();
+        observation.cache_update = CacheUpdate::Rejected;
+        observation.spill = Some(
+            serde_json::from_value(
+                serde_json::json!({"ref":reference,"bytes":64,"truncated":false}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            format!(
+                "⏺ Unguarded command(sh -c exit 0)\n  ⎿ 0 B · cache not saved (limit) · UNGUARDED\n  Output spill: spill:{reference}; 64 B; truncated: false"
+            )
+        );
     }
 
     #[test]

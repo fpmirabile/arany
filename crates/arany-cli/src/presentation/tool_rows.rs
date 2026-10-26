@@ -93,18 +93,6 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         "⏺ {}\n  ⎿ {result}",
         safe_truncate(&operation, SUMMARY_TEXT_WIDTH)
     );
-    if let Some(spill) = tool
-        .observation
-        .as_ref()
-        .and_then(|observation| observation.spill.as_ref())
-    {
-        summary.push_str(&format!(
-            "\n  Output spill: spill:{}; {}; truncated: {}",
-            safe_truncate(&spill.r#ref, SUMMARY_TEXT_WIDTH),
-            format_bytes(spill.bytes),
-            spill.truncated
-        ));
-    }
     if let Some(label) = tool
         .observation
         .as_ref()
@@ -172,6 +160,18 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · hook outcome unknown");
     } else if failed {
         summary.push_str(" · hook failed (non-blocking)");
+    }
+    if let Some(spill) = tool
+        .observation
+        .as_ref()
+        .and_then(|observation| observation.spill.as_ref())
+    {
+        summary.push_str(&format!(
+            "\n  Output spill: spill:{}; {}; truncated: {}",
+            safe_truncate(&spill.r#ref, SUMMARY_TEXT_WIDTH),
+            format_bytes(spill.bytes),
+            spill.truncated
+        ));
     }
     summary
 }
