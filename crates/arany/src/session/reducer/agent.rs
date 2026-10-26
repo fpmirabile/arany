@@ -215,3 +215,6 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
         _ => Err(ReplayError::InvalidTransition),
     }
 }
+
+#[cfg(test)]
+mod tests;
