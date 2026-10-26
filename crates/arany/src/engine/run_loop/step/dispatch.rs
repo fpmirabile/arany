@@ -3,7 +3,7 @@ use super::hooks::HookFold;
 use super::permission::Permission;
 use super::{ActiveTime, Answer, HookDenial};
 use crate::engine::ledger::ActiveDeadlineCause;
-use crate::engine::run_loop::stop::StopCause;
+use crate::engine::run_loop::stop::{StepEnd, StopCause};
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
 use crate::tools::types::DenialFeedback;
@@ -11,6 +11,32 @@ use crate::tools::{
     ApprovalMode, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation,
     UnguardedPrompt,
 };
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StepDispatch {
+    ConcurrentRead,
+    Serial,
+}
+
+impl StepDispatch {
+    pub(super) fn decide(
+        calls: usize,
+        intent: &EffectIntent,
+        reservation_overhead: Duration,
+    ) -> Self {
+        if calls > 1
+            && intent.target == crate::worker::EffectTarget::Workspace
+            && intent.call.facts().site == crate::tools::catalog::Site::InProcess
+            && !intent.call.facts().mutates
+            && reservation_overhead.is_zero()
+        {
+            Self::ConcurrentRead
+        } else {
+            Self::Serial
+        }
+    }
+}
 
 #[must_use]
 pub(super) enum Verdict {
@@ -46,6 +72,21 @@ impl GuardCompletion {
             Self::Observed
         }
     }
+}
+
+pub(super) fn completion_deadline(
+    disposition: ToolDisposition,
+    elapsed: bool,
+    cause: Option<ActiveDeadlineCause>,
+) -> StepEnd {
+    if !elapsed || disposition != ToolDisposition::Cancelled {
+        return StepEnd::Continue;
+    }
+    StepEnd::Stopped(match cause {
+        Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
+        Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
+        None => StopCause::ToolStopped,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +273,7 @@ pub(super) struct DispatchFacts<'a> {
 // Read after the Ask, or where it would have been.
 pub(super) struct AfterAsk {
     pub(super) approval: Option<Resolution>,
+    pub(super) interrupted: bool,
     pub(super) paused: bool,
     pub(super) can_start_provider_call: bool,
     pub(super) cancelled: bool,
@@ -395,7 +437,11 @@ fn approval_gate(facts: &DispatchFacts<'_>, after: &AfterAsk) -> (bool, Permissi
     };
     let active_time_exhausted =
         active_time_exhausted || after.deadline == Some(ActiveDeadlineCause::Goal);
-    (approved, source, active_time_exhausted)
+    if after.interrupted {
+        (false, facts.unresolved_source(), active_time_exhausted)
+    } else {
+        (approved, source, active_time_exhausted)
+    }
 }
 
 fn host_gate(
@@ -453,16 +499,17 @@ fn dispatch_gate<'a>(
         _ if after.deadline == Some(ActiveDeadlineCause::Delegation) => {
             refused(NotDispatched::DelegationDeadline)
         }
+        DispatchSite::Primary if active_time_exhausted => Err(refuse(
+            NotDispatched::ActiveTime,
+            Some(StopCause::ActiveTime),
+        )),
+        _ if after.interrupted => refused(NotDispatched::ApprovalUnavailable),
         DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
         DispatchSite::Researcher => refused(if source == PermissionSource::UnavailableApproval {
             NotDispatched::ApprovalUnavailable
         } else {
             NotDispatched::ApprovalRefused
         }),
-        DispatchSite::Primary if active_time_exhausted => Err(refuse(
-            NotDispatched::ActiveTime,
-            Some(StopCause::ActiveTime),
-        )),
         // The Guard path reserves its queue wait first, then reads the pause.
         DispatchSite::Primary if approved && after.can_start_provider_call && facts.guard_site => {
             Ok(Dispatch::QueuePause)
@@ -750,6 +797,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deadline_completion_only_converts_timeout_cancelled_outcomes() {
+        for (disposition, cancelled) in [
+            (ToolDisposition::Succeeded, false),
+            (ToolDisposition::Denied, false),
+            (ToolDisposition::Failed, false),
+            (ToolDisposition::Conflict, false),
+            (ToolDisposition::Limit, false),
+            (ToolDisposition::Cancelled, true),
+            (ToolDisposition::Uncertain, false),
+        ] {
+            for elapsed in [false, true] {
+                for (cause, stop) in [
+                    (None, StopCause::ToolStopped),
+                    (Some(ActiveDeadlineCause::Goal), StopCause::ActiveTime),
+                    (
+                        Some(ActiveDeadlineCause::Delegation),
+                        StopCause::DelegationDeadline,
+                    ),
+                ] {
+                    let expected = if elapsed && cancelled {
+                        StepEnd::Stopped(stop)
+                    } else {
+                        StepEnd::Continue
+                    };
+                    assert_eq!(
+                        completion_deadline(disposition, elapsed, cause),
+                        expected,
+                        "{disposition:?}, elapsed={elapsed}, cause={cause:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn step_dispatch_uses_fetched_overhead_and_keeps_effects_serial() {
+        use StepDispatch::{ConcurrentRead, Serial};
+        let mut search = read_intent();
+        search.call = ToolCall::Search {
+            path: "file".into(),
+            query: "fact".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 1,
+        };
+        let mut skill = read_intent();
+        skill.call = ToolCall::Skill {
+            name: "review".into(),
+            resource: None,
+        };
+        let mut mutation = read_intent();
+        mutation.call = ToolCall::Mkdir {
+            path: "directory".into(),
+        };
+        let mut guarded = read_intent();
+        guarded.call = ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        };
+        let mut worker = read_intent();
+        worker.target = crate::worker::EffectTarget::WorkerView {
+            assignment_id: worker.agent_run_id,
+            base_digest: [1; 32],
+            revision: 0,
+            cache_generation: None,
+        };
+        for (calls, intent, overhead, expected) in [
+            (1, read_intent(), Duration::ZERO, Serial),
+            (2, read_intent(), Duration::ZERO, ConcurrentRead),
+            (4, read_intent(), Duration::ZERO, ConcurrentRead),
+            (2, read_intent(), Duration::from_secs(1), Serial),
+            (2, search.clone(), Duration::ZERO, ConcurrentRead),
+            (2, search, Duration::from_secs(1), Serial),
+            (2, skill, Duration::ZERO, ConcurrentRead),
+            (2, mutation, Duration::ZERO, Serial),
+            (2, guarded, Duration::ZERO, Serial),
+            (2, worker, Duration::ZERO, Serial),
+        ] {
+            assert_eq!(StepDispatch::decide(calls, &intent, overhead), expected);
+        }
+    }
+
+    #[test]
     fn exhausted_active_time_replaces_unstarted_limits_but_preserves_attested_limits() {
         for (disposition, attested, exhausted, expected) in [
             (
@@ -899,6 +1032,7 @@ mod tests {
         Batch,
         Paused,
         Cancelled,
+        Interrupted,
         Deadline,
         GoalDeadline,
     }
@@ -944,6 +1078,7 @@ mod tests {
         };
         let after = AfterAsk {
             approval,
+            interrupted: has(Fact::Interrupted),
             paused: has(Fact::Paused),
             can_start_provider_call: !has(Fact::TokensSpent) && !has(Fact::TokensSpentAfterAsk),
             cancelled: has(Fact::Cancelled),
@@ -1090,6 +1225,10 @@ mod tests {
         let (allow_, ask_, deny_) = (Decision::Allow, Decision::Ask, Decision::Deny);
         #[rustfmt::skip]
         let rows = [
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Interrupted], None), None, no(N::ApprovalUnavailable, None), allow_, S::Rule),
+            (decide(Researcher, allow(S::Rule), &none, &[InProcess, Interrupted], None), None, no(N::ApprovalUnavailable, None), allow_, S::Rule),
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Interrupted, GoalDeadline], None), None, no(N::ActiveTime, Some(StopCause::ActiveTime)), allow_, S::Rule),
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Interrupted, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), allow_, S::Rule),
             // Gate refusals, decided before any Ask.
             (decide(Primary, asks(Request), &none, &[PrivilegeTool, Timeout], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool), None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[SettingsChanged], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::SettingsChanged), None), ask_, S::UnavailableApproval),
@@ -1119,6 +1258,9 @@ mod tests {
             (decide(Primary, asks(Auto), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Mode), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), allow_, S::Mode),
             // The primary after its Ask, or where it would have been.
+            (decide(Primary, asks(Request), &none, &[InProcess, Interrupted], None), Some(Request), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[InProcess, Interrupted], ok(true, S::Human)), Some(Request), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[InProcess, Interrupted], None), Some(Request), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Offered], ok(true, S::Human)), Some(Request), Ok(Dispatch::QueuePause), ask_, S::Human),
             (decide(Primary, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::QueuePause), allow_, S::Rule),
             (decide(Primary, allow(S::Rule), &none, &[InProcess], None), None, Ok(Dispatch::Direct), allow_, S::Rule),

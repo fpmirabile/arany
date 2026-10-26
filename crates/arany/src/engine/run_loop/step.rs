@@ -22,17 +22,20 @@ mod dispatch;
 pub(super) mod hooks;
 mod intent;
 mod permission;
+mod reads;
 mod review;
 mod skills;
 
 use ask::{AskOptions, AskSite, Resolution, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
-    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
-    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, StepDispatch,
+    Unguarded, Verdict, completion_deadline, decide_dispatch, decide_queue_pause, not_dispatched,
+    undispatched,
 };
 use intent::{
-    active_window, execute_cancellable, settle_cancelled, tool_action_bound, tool_action_ms,
+    PendingToolRefusal, active_window, execute_cancellable, settle_cancelled, tool_action_bound,
+    tool_action_ms,
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
@@ -290,20 +293,9 @@ impl RunLoop<'_> {
                 self.propose_tool(intent).await?;
             }
         }
-        let mut end = StepEnd::Continue;
-        for intent in intents {
-            match end {
-                StepEnd::Continue => {
-                    end = Box::pin(self.execute_step_call(&grant, runtime, &mut step, intent))
-                        .await?;
-                }
-                StepEnd::Stopped(StopCause::ToolRefused(_)) => {}
-                StepEnd::Stopped(_) => {
-                    let observation = self.finish_undispatched(&grant, runtime, intent).await?;
-                    step.observations.push(observation);
-                }
-            }
-        }
+        let end = self
+            .execute_step_intents(&grant, runtime, &mut step, intents)
+            .await?;
         grant.context_mut()?.steps.push(step);
         if let StepEnd::Stopped(_) = end {
             return Ok(end);
@@ -315,6 +307,61 @@ impl RunLoop<'_> {
             return Ok(StepEnd::Stopped(StopCause::ContextFull));
         }
         Ok(StepEnd::Continue)
+    }
+
+    async fn execute_step_intents(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        intents: Vec<EffectIntent>,
+    ) -> Result<StepEnd, EngineError> {
+        let mut reads = Vec::new();
+        let mut serial = Vec::new();
+        for (index, intent) in intents.into_iter().enumerate() {
+            let overhead = if step.requests.len() > 1 {
+                runtime.intent_reservation_overhead(&intent)
+            } else {
+                Duration::ZERO
+            };
+            match StepDispatch::decide(step.requests.len(), &intent, overhead) {
+                StepDispatch::ConcurrentRead => reads.push((index, intent)),
+                StepDispatch::Serial => serial.push((index, intent)),
+            }
+        }
+        let mut order = Vec::new();
+        let mut end = self
+            .execute_reads(grant, runtime, step, reads, &mut order)
+            .await?;
+        let actor = match grant {
+            Grant::Primary { .. } => self.primary_id,
+            Grant::Researcher { child, .. } => child.agent_run_id,
+        };
+        if self.ledger().view(|view| {
+            view.runs
+                .last()
+                .and_then(|run| run.agents.iter().find(|agent| agent.id == actor))
+                .is_some_and(|agent| agent.tool_refusal.is_some())
+        })? {
+            reads::model_order(step, &order);
+            return Ok(end);
+        }
+        for (index, intent) in serial {
+            let start = step.observations.len();
+            match end {
+                StepEnd::Continue => {
+                    end = Box::pin(self.execute_step_call(grant, runtime, step, intent)).await?;
+                }
+                StepEnd::Stopped(StopCause::ToolRefused(_)) => {}
+                StepEnd::Stopped(_) => {
+                    let observation = self.finish_undispatched(grant, runtime, intent).await?;
+                    step.observations.push(observation);
+                }
+            }
+            order.extend(std::iter::repeat_n(index, step.observations.len() - start));
+        }
+        reads::model_order(step, &order);
+        Ok(end)
     }
 
     async fn prepare_step(
@@ -545,43 +592,39 @@ impl RunLoop<'_> {
         self.reserve_step_call(grant, runtime, step, &initial)
             .await?;
         let source_call = initial.call.clone();
-        let mut next = Some(initial);
-        let mut call = source_call.clone();
+        let narrowable = matches!(grant, Grant::Primary { .. })
+            && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
+        let observed = Box::pin(self.dispatch_intent(grant, runtime, initial, narrowable)).await?;
+        self.complete_step_call(grant, runtime, step, source_call, observed)
+            .await
+    }
+
+    async fn complete_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        source_call: ToolCall,
+        mut observed: IntentResult,
+    ) -> Result<StepEnd, EngineError> {
         let mut narrowings = 0;
         let source_index = step.observations.len();
         loop {
-            let (intent, started) = match next.take() {
-                Some(intent) => (intent, true),
-                None => match self
-                    .prepare_step_intent(grant, runtime, step, call.clone(), &source_call)
-                    .await?
-                {
-                    Ok(intent) => (intent, false),
-                    Err(cause) => return Ok(StepEnd::Stopped(cause)),
-                },
-            };
-            let source_intent_digest = intent.digest();
-            let narrowable = matches!(grant, Grant::Primary { .. })
-                && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
-            // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let observed = if started {
-                Box::pin(self.dispatch_intent(grant, runtime, intent, narrowable)).await?
-            } else {
-                self.run_intent(grant, runtime, intent, &source_call, narrowable)
-                    .await?
-            };
             let (observation, narrowed) = match observed {
                 Ok(observed) => observed,
                 Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
+            let source_intent_digest = observation.intent.digest();
             let changeset = match command_changeset(&observation) {
                 Ok(changeset) => changeset,
                 Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
-            let stop =
-                (observation.stops_run() || self.controls.cancellation.is_cancelled()).then(|| {
-                    Self::observation_stop(&observation, self.controls.cancellation.is_cancelled())
-                });
+            let stop = (observation.stops_run()
+                || step.requests.len() > 1 && observation.disposition == ToolDisposition::Limit
+                || self.controls.cancellation.is_cancelled())
+            .then(|| {
+                Self::observation_stop(&observation, self.controls.cancellation.is_cancelled())
+            });
             step.observations.push(observation);
             if let Some(cause) = stop {
                 return Ok(StepEnd::Stopped(cause));
@@ -590,7 +633,9 @@ impl RunLoop<'_> {
                 step.narrowed_observations
                     .insert(step.observations.len() - 1);
                 narrowings += 1;
-                call = narrowed;
+                observed = self
+                    .replacement_observation(grant, runtime, step, narrowed, &source_call)
+                    .await?;
                 continue;
             }
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
@@ -599,7 +644,7 @@ impl RunLoop<'_> {
             if let StepEnd::Stopped(cause) = self.integration_end(grant, runtime, step)? {
                 return Ok(StepEnd::Stopped(cause));
             }
-            call = ToolCall::ApplyChangeset {
+            let call = ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
                     source_intent_digest,
                     changeset,
@@ -608,8 +653,32 @@ impl RunLoop<'_> {
             if !call.valid() {
                 return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult));
             }
+            observed = self
+                .replacement_observation(grant, runtime, step, call, &source_call)
+                .await?;
         }
         self.post_step_call(grant, runtime, step, source_index + narrowings)
+            .await
+    }
+
+    async fn replacement_observation(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        source: &ToolCall,
+    ) -> Result<IntentResult, EngineError> {
+        let intent = match self
+            .prepare_step_intent(grant, runtime, step, call, source)
+            .await?
+        {
+            Ok(intent) => intent,
+            Err(cause) => return Ok(Err(cause)),
+        };
+        let narrowable = matches!(grant, Grant::Primary { .. })
+            && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
+        self.run_intent(grant, runtime, intent, source, narrowable)
             .await
     }
 
@@ -642,6 +711,9 @@ impl RunLoop<'_> {
             && !source.intent.call.is_internal()
             && step.observations[index + 1..]
                 .iter()
+                .take_while(|integration| matches!(&integration.intent.call,
+                    ToolCall::ApplyChangeset { source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. } }
+                    if *source_intent_digest == source.intent.digest()))
                 .all(|integration| integration.disposition == ToolDisposition::Succeeded)
         {
             let post =
@@ -687,13 +759,14 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         permission: Permission,
         narrowable: bool,
-    ) -> Result<Result<Admission<Verdict>, StopCause>, EngineError> {
+        interrupted: Option<&RunCancellation>,
+    ) -> Result<Result<Admission<Verdict>, PendingToolRefusal>, EngineError> {
         let phase = self
-            .hook_gate(grant, runtime, intent, permission, narrowable)
+            .hook_gate(grant, runtime, intent, permission, narrowable, interrupted)
             .await?;
         let facts = self.dispatch_facts(grant, runtime, &phase).await?;
         let (approval, save) = match self
-            .dispatch_approval(grant, runtime, &phase, &facts)
+            .dispatch_approval(grant, runtime, &phase, &facts, interrupted)
             .await?
         {
             Admission::Reserved(approval) => approval,
@@ -708,7 +781,12 @@ impl RunLoop<'_> {
                 None,
             ),
         };
-        let decided = self.dispatch_decision(grant, &facts, approval);
+        let decided = self.dispatch_decision(
+            grant,
+            &facts,
+            approval,
+            interrupted.is_some_and(RunCancellation::is_cancelled),
+        );
         let mut resolution = self.dispatch_verdict(&phase, decided, save)?;
         if let Err(cause) = self
             .record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
@@ -719,7 +797,7 @@ impl RunLoop<'_> {
             {
                 self.settle_active_pause(pause, None)?;
             }
-            return Ok(Err(StopCause::ToolRefused(cause)));
+            return Ok(Err(cause));
         }
         self.save_remembered_rule(runtime, phase.site, resolution.verdict, resolution.save)
             .map(|verdict| Ok(Admission::Reserved(verdict)))
@@ -732,6 +810,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         permission: Permission,
         narrowable: bool,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<BeforeDispatch, EngineError> {
         let config = runtime.permissions();
         let site = grant.site();
@@ -758,8 +837,15 @@ impl RunLoop<'_> {
                     && goal_allows =>
             {
                 // Boxed like other Tool futures to avoid inflating each agent step.
-                Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent, narrowable))
-                    .await?
+                Box::pin(self.pre_tool_use_hooks(
+                    grant,
+                    runtime,
+                    config,
+                    &intent,
+                    narrowable,
+                    interrupted,
+                ))
+                .await?
             }
             _ => HookFold::none(),
         };
@@ -835,6 +921,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         phase: &BeforeDispatch,
         facts: &DispatchFacts<'_>,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<Admission<(Option<Resolution>, Option<RuleSave>)>, EngineError> {
         let config = runtime.permissions();
         let remember_prefix = remember_candidate(
@@ -844,7 +931,10 @@ impl RunLoop<'_> {
             &phase.hooks,
             &phase.intent.call,
         );
-        let approval = match facts.ask() {
+        let approval = match facts
+            .ask()
+            .filter(|_| !interrupted.is_some_and(RunCancellation::is_cancelled))
+        {
             Some(mode) => Box::pin(self.ask(
                 grant,
                 &phase.intent,
@@ -854,6 +944,7 @@ impl RunLoop<'_> {
                     allow_auto_edits: phase.allow_auto_edits
                         && phase.hooks.restriction != Some(Decision::Ask),
                     remember_prefix,
+                    interrupted: interrupted.cloned(),
                 },
             ))
             .await?
@@ -878,11 +969,13 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         facts: &DispatchFacts<'a>,
         approval: Option<Resolution>,
+        interrupted: bool,
     ) -> dispatch::DispatchDecision<'a> {
         decide_dispatch(
             facts,
             &AfterAsk {
                 approval,
+                interrupted,
                 paused: self.pause_requested(),
                 can_start_provider_call: self.ledger().can_start_provider_call(),
                 cancelled: self.controls.cancellation.is_cancelled(),
@@ -956,7 +1049,7 @@ impl RunLoop<'_> {
         phase: &BeforeDispatch,
         facts: &DispatchFacts<'_>,
         resolution: &DispatchResolution,
-    ) -> Result<Result<(), crate::session::ToolRefusal>, EngineError> {
+    ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
         let unguarded = phase.intent.call.is_unguarded();
         let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
         let primary_host_read =
@@ -999,9 +1092,7 @@ impl RunLoop<'_> {
             .ledger()
             .view(|view| crate::session::validate_tool_started(view, &event))?
         {
-            self.record_tool_refusal(&phase.intent, cause, verdict)
-                .await?;
-            return Ok(Err(cause));
+            return Ok(Err(PendingToolRefusal::new(&phase.intent, cause, verdict)));
         }
         self.append(event).await?;
         Ok(Ok(()))
@@ -1244,15 +1335,8 @@ impl RunLoop<'_> {
         {
             match self.reserve_active_pause()? {
                 Admission::Reserved(pause) => {
-                    let reply = self
-                        .human_reply(
-                            approvals,
-                            intent,
-                            options.unguarded_prompt.clone(),
-                            options.allow_auto_edits,
-                            options.remember_prefix,
-                        )
-                        .await;
+                    let (reply, withdrawal) = self.human_reply(approvals, intent, options).await;
+                    resolution.withdrawal = withdrawal;
                     resolution.source = if reply == ApprovalReply::Unavailable {
                         PermissionSource::UnavailableApproval
                     } else {
@@ -1313,7 +1397,9 @@ impl RunLoop<'_> {
             None => {
                 let review = match site {
                     AskSite::Primary(_) => self.review_tool(objective, intent, None).await?,
-                    AskSite::Delegated { active_deadline } => {
+                    AskSite::Delegated {
+                        active_deadline, ..
+                    } => {
                         self.review_tool(objective, intent, active_deadline.as_ref())
                             .await?
                     }
@@ -1349,13 +1435,16 @@ impl RunLoop<'_> {
             }
             AskSite::Delegated {
                 active_deadline: Some(deadline),
+                ..
             } if deadline.reached() => Some(deadline.cause),
             AskSite::Primary(_)
             | AskSite::Delegated {
                 active_deadline: None,
+                ..
             }
             | AskSite::Delegated {
                 active_deadline: Some(_),
+                ..
             } => None,
         }
     }
@@ -1365,15 +1454,22 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         deadline: Option<&crate::engine::ledger::ActiveDeadline>,
         approvals: &crate::tools::ToolApprovals,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<(ApprovalReply, Option<ApprovalWithdrawal>), EngineError> {
         use crate::tools::ApprovalWaitReply;
 
         let mut cancellation = self.controls.cancellation.clone();
         let activity_started = self.ledger().active_elapsed();
         let wall_started = Instant::now();
-        let mut pending = approvals.begin_local(intent, false, None).await;
+        let mut pending = tokio::select! {
+            biased;
+            () = ask::interrupted(interrupted) => return Ok((ApprovalReply::Unavailable, None)),
+            () = cancellation.cancelled() => return Ok((ApprovalReply::Unavailable, None)),
+            pending = approvals.begin_local(intent, false, None) => pending,
+        };
         let (reply, interrupted) = tokio::select! {
             biased;
+            () = ask::interrupted(interrupted) => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = cancellation.cancelled() => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = self.approval_paused() => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = async {

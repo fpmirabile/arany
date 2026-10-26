@@ -81,9 +81,19 @@ impl<T> From<super::Admission<T>> for RunProgress<T> {
 }
 
 #[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StepEnd {
     Continue,
     Stopped(StopCause),
+}
+
+impl StepEnd {
+    pub(super) fn merge(self, later: Self) -> Self {
+        match (self, later) {
+            (Self::Continue, end) | (end, Self::Continue) => end,
+            (Self::Stopped(first), Self::Stopped(later)) => Self::Stopped(first.merge(later)),
+        }
+    }
 }
 
 #[must_use]
@@ -477,9 +487,25 @@ mod tests {
             assert_eq!(StopCause::from(refusal), expected);
         }
         for (index, cause) in CAUSES.into_iter().enumerate() {
+            assert_eq!(
+                StepEnd::Continue.merge(StepEnd::Continue),
+                StepEnd::Continue
+            );
+            assert_eq!(
+                StepEnd::Continue.merge(StepEnd::Stopped(cause)),
+                StepEnd::Stopped(cause)
+            );
+            assert_eq!(
+                StepEnd::Stopped(cause).merge(StepEnd::Continue),
+                StepEnd::Stopped(cause)
+            );
             assert_eq!(cause.merge(cause), cause);
             for (later_index, later) in CAUSES.into_iter().enumerate() {
                 let merged = cause.merge(later);
+                assert_eq!(
+                    StepEnd::Stopped(cause).merge(StepEnd::Stopped(later)),
+                    StepEnd::Stopped(merged)
+                );
                 assert!(merged.rank() >= cause.rank() && merged.rank() >= later.rank());
                 assert_eq!(
                     merged,
