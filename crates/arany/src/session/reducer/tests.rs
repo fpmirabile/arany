@@ -8895,6 +8895,39 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn reducer_accepts_maximum_summary_from_recorded_compiler_floor() {
+        let (mut view, goal, run) = compacting_session();
+        let Event::GoalContextCompacted { mut record, .. } =
+            covering_compaction(&view, goal, run, 2)
+        else {
+            unreachable!()
+        };
+        let summary = "S".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
+        record.compiler_version = crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION;
+        record.status = crate::session::events::CompactionStatus::Succeeded {
+            content_digest: crate::validate::digest(summary.as_bytes()),
+            summary_bytes: summary.len() as u32,
+            summary_tokens_estimate: summary.len().div_ceil(4) as u32,
+            summary: summary.clone(),
+        };
+
+        apply(
+            &mut view,
+            Event::GoalContextCompacted {
+                goal_id: goal,
+                run_id: run,
+                covered_tool_count: 2,
+                record,
+            },
+        )
+        .expect("recorded compiler floor accepts the current summary byte bound");
+        assert_eq!(
+            view.runs[0].tool_compaction_summary.as_deref(),
+            Some(summary.as_str())
+        );
+    }
+
+    #[test]
     fn goal_compaction_snapshot_binds_its_primary_tool_across_child_tool_finishes() {
         let (view, goal, run) = compacting_session();
         let (primary, child) = (view.runs[0].agents[0].id, AgentRunId::new());

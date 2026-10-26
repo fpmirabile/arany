@@ -110,13 +110,14 @@ impl Engine {
             return Ok(None);
         }
         self.journal
-            .admit(
+            .admit_as(
                 session_id,
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
                 }
                 .max_events_for_admitted(providers),
                 0,
+                crate::store::AdmissionKind::Compaction,
             )
             .await?;
         let source_digest =
