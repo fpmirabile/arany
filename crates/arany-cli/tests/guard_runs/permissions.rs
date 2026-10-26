@@ -4318,7 +4318,15 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
     let verdicts = case
         .events
         .iter()
-        .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
+        .filter(|event| {
+            matches!(
+                event.event,
+                Event::ToolStarted {
+                    verdict: Some(_),
+                    ..
+                }
+            )
+        })
         .count();
     let dispatched = case
         .tools
