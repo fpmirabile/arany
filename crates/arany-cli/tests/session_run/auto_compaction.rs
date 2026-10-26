@@ -75,7 +75,7 @@ enum CompactionCase {
 }
 
 const COMPACTION_SUMMARY_MARKER: &str = "DERIVED_SUMMARY_CANARY";
-const INITIAL_OBJECTIVE_BYTES: usize = 16 * 1024;
+const INITIAL_OBJECTIVE_BYTES: usize = 8 * 1024;
 const INITIAL_ANSWER_BYTES: usize = 24 * 1024;
 const GUIDANCE_BYTES: usize = 20 * 1024;
 const INCLUDE_BYTES: usize = 120 * 1024;

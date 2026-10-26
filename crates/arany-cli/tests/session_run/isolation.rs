@@ -128,9 +128,9 @@ pub fn enter_native_account_isolated_test() -> bool {
             .expect("native account test process");
         if !output.status.success() {
             let relayed =
-                crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr)
-                    || crate::process::relay_native_panic_location(&output.stderr, case);
-            if !relayed {
+                crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr);
+            let panic_relayed = crate::process::relay_native_panic_location(&output.stderr, case);
+            if !relayed && !panic_relayed {
                 crate::process::annotate_native_fixture(&format!(
                     "fixture={case}; stage=isolated_child_exit_without_fixture_annotation; exit={:?}",
                     output.status.code()
