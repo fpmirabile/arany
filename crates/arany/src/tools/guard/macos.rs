@@ -6,8 +6,8 @@ use super::{
 use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
 use crate::tools::executable::EXECUTABLES;
+use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES};
-use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, digest};
 
@@ -969,7 +969,7 @@ impl Task {
             handover: runtime
                 .handover
                 .as_ref()
-                .and_then(|_| super::super::worker::handover_ref(intent)),
+                .and_then(|_| super::transfer::handover_ref(intent)),
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
@@ -998,7 +998,7 @@ impl Task {
             host_authentication: Default::default(),
             handover,
             worker: self.worker.zip(worker_input).map(|(transfer, input)| {
-                Arc::new(super::super::worker::Action {
+                Arc::new(super::transfer::Action {
                     transfer,
                     input: input.into(),
                     output: std::sync::Mutex::new(None),
@@ -1045,7 +1045,7 @@ async fn worker_ready(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<Ready, ToolError> {
     tokio::time::timeout(
-        (PREPARATION_DEADLINE + super::super::worker::transfer_time(intent))
+        (PREPARATION_DEADLINE + super::transfer::transfer_time(intent))
             .min(Duration::from_millis(u64::from(WORKER_PREPARATION_MS))),
         async {
             stdin
@@ -1054,9 +1054,8 @@ async fn worker_ready(
                 .map_err(|_| ToolError::Operation)?;
             let mut bytes = read_line_capped(stdout, 2048).await?;
             if bytes == b"WORKER_READY\n" {
-                let input =
-                    super::super::worker::bulk_input(runtime).ok_or(ToolError::Configuration)?;
-                super::super::worker::send_frame(stdin, input).await?;
+                let input = super::transfer::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+                super::transfer::send_frame(stdin, input).await?;
                 bytes = read_line_capped(stdout, 2048).await?;
             }
             parse_ready(&bytes, intent)
@@ -1199,7 +1198,7 @@ async fn execute_worker(
                 tokio::time::Instant::now(),
                 intent.limits.runtime_ms,
             ) + if runtime.worker.is_some() {
-                super::super::worker::transfer_time(intent)
+                super::transfer::transfer_time(intent)
             } else {
                 Duration::ZERO
             };
@@ -1213,7 +1212,7 @@ async fn execute_worker(
         let deadline = tokio::time::Instant::now()
             + RESERVATION_OVERHEAD
             + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-            + super::super::worker::transfer_overhead(intent);
+            + super::transfer::transfer_overhead(intent);
         let execution = tokio::time::timeout_at(deadline, execution);
         tokio::pin!(execution);
         let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);

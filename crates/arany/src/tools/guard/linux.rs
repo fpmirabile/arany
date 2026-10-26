@@ -4,12 +4,12 @@ use super::{
     encode_task, parse_ready, profile, read_capped, read_line_capped, read_observation,
 };
 use crate::tools::Cancellation;
+use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
 use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
     MAX_CHANGESET_SERIALIZED_BYTES, MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES, ToolCall, ToolLimits,
     ToolObservation, ToolResourceClass,
 };
-use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{ToolError, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, digest};
 use std::io::{Read, Write};
@@ -696,7 +696,7 @@ fn unit_command(
         .saturating_add(u64::from(intent.limits.cache_transfer_ms).saturating_mul(2))
         .saturating_add(u64::from(intent.limits.runtime_ms))
         .saturating_add(
-            u64::try_from(super::super::worker::transfer_overhead(intent).as_millis())
+            u64::try_from(super::transfer::transfer_overhead(intent).as_millis())
                 .expect("bounded worker transfer time"),
         );
     command
@@ -748,7 +748,7 @@ async fn settle_launch(
     result: Result<(ToolObservation, super::CacheCandidate), ToolError>,
     (cache, private, discovery): (
         &mut Option<super::BuildCacheSession>,
-        Option<&super::super::worker::Action>,
+        Option<&super::transfer::Action>,
         bool,
     ),
 ) -> Result<ToolObservation, ToolError> {
@@ -839,7 +839,7 @@ fn action_deadlines(
         capacity_started + RESERVATION_OVERHEAD + selection_time,
         |window| window.preparation_deadline,
     );
-    let bulk = super::super::worker::transfer_time(intent);
+    let bulk = super::transfer::transfer_time(intent);
     let go_deadline = active_window
         .map_or(preparation_deadline + cache_transfer + bulk, |window| {
             window.go_deadline
@@ -855,7 +855,7 @@ fn action_deadlines(
                 + Duration::from_secs(15)
                 + selection_time
                 + cache_transfer.saturating_mul(2)
-                + super::super::worker::transfer_overhead(intent)
+                + super::transfer::transfer_overhead(intent)
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
         },
         |window| window.completion_deadline,
@@ -939,8 +939,8 @@ async fn worker_input<W: tokio::io::AsyncWrite + Unpin, R: tokio::io::AsyncBufRe
     go_deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, ToolError> {
     if ready_bytes == b"WORKER_READY\n" {
-        let input = super::super::worker::bulk_input(runtime).ok_or(ToolError::Configuration)?;
-        tokio::time::timeout_at(go_deadline, super::super::worker::send_frame(stdin, input))
+        let input = super::transfer::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+        tokio::time::timeout_at(go_deadline, super::transfer::send_frame(stdin, input))
             .await
             .map_err(|_| ToolError::Limit)??;
         ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(stdout, 2048))
@@ -988,7 +988,7 @@ fn task_bytes(
         handover: runtime
             .handover
             .as_ref()
-            .and_then(|_| super::super::worker::handover_ref(intent)),
+            .and_then(|_| super::transfer::handover_ref(intent)),
         config: runtime.config.clone(),
         intent: intent.clone(),
         cache,
@@ -2081,7 +2081,7 @@ mod tests {
                 revision: 0,
                 cache_generation: None,
             };
-            runtime.worker = Some(std::sync::Arc::new(crate::tools::worker::Action {
+            runtime.worker = Some(std::sync::Arc::new(crate::tools::guard::transfer::Action {
                 transfer: serde_json::from_value(serde_json::json!({
                     "target":intent.target,"bytes":1,"sha256":vec![1_u8; 32],
                     "grant":{"read_paths":["."],"write_paths":["."],"tools":["list"],

@@ -857,7 +857,7 @@ pub(super) fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) ->
         .intent_reservation_overhead(intent)
         .saturating_add(
             Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
-                .saturating_add(crate::tools::worker::transfer_time(intent))
+                .saturating_add(crate::tools::transfer_time(intent))
                 .saturating_mul(2),
         )
         .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
