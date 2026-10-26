@@ -378,12 +378,13 @@ fn linux_tool_latency_sample() {
 }
 
 pub(super) fn corpus() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
     for operation in [Operation::Read, Operation::Edit] {
-        corpus_row(operation);
+        corpus_row(operation, deadline);
     }
 }
 
-fn corpus_row(operation: Operation) {
+fn corpus_row(operation: Operation, deadline: std::time::Instant) {
     require_release_linux();
     let _gate = process::NATIVE_GATE
         .lock()
@@ -448,7 +449,6 @@ fn corpus_row(operation: Operation) {
             "local disk required; tmpfs is not this workload"
         );
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
     let mut samples = Vec::with_capacity(WARMUPS + MEASURED);
     let mut failure = None;
     let mut attempted = 0;
