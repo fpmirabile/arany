@@ -1265,6 +1265,8 @@ mod tests {
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                tool_refusal: None,
+                tool_refusal_sequence: None,
                 profile: None,
                 assignment: None,
                 definition: None,

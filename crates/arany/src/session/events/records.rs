@@ -578,6 +578,81 @@ pub enum ProposalRefusalCause {
     EditorGrant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolRefusalReason {
+    Payload,
+    Transition,
+    Scope,
+    Lease,
+}
+
+impl std::fmt::Display for ToolRefusalReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Payload => "Invalid Tool intent or permission payload.",
+            Self::Transition => "Tool start violates the committed Session transition.",
+            Self::Scope => "Tool call exceeds the committed Goal phase or plan scope.",
+            Self::Lease => "Tool call conflicts with an active worker lease.",
+        })
+    }
+}
+
+impl Serialize for ToolRefusalReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolRefusalReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        [Self::Payload, Self::Transition, Self::Scope, Self::Lease]
+            .into_iter()
+            .find(|reason| reason.to_string() == text)
+            .ok_or_else(|| serde::de::Error::custom("invalid Tool refusal reason"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+#[error("{cause:?}: {reason}")]
+pub struct ToolRefusal {
+    pub cause: ProposalRefusalCause,
+    pub reason: ToolRefusalReason,
+}
+
+impl ToolRefusal {
+    pub(crate) const INVALID_TRANSITION: Self = Self {
+        cause: ProposalRefusalCause::Phase,
+        reason: ToolRefusalReason::Transition,
+    };
+
+    pub(crate) fn valid(self) -> bool {
+        matches!(
+            (self.cause, self.reason),
+            (
+                ProposalRefusalCause::InvalidArguments,
+                ToolRefusalReason::Payload
+            ) | (
+                ProposalRefusalCause::Phase,
+                ToolRefusalReason::Transition | ToolRefusalReason::Scope
+            ) | (
+                ProposalRefusalCause::PlanScopeExcludesCall,
+                ToolRefusalReason::Scope
+            ) | (ProposalRefusalCause::LeaseOverlap, ToolRefusalReason::Lease)
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPreflightRefusal {
+    pub intent_digest: [u8; 32],
+    pub refusal: ToolRefusal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<crate::tools::permissions::PermissionVerdict>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalRefusal {

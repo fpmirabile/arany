@@ -123,6 +123,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         images: Vec::new(),
         config: None,
         agents: vec![AgentView {
+            tool_refusal: None,
+            tool_refusal_sequence: None,
             profile: None,
             assignment: None,
             definition: None,

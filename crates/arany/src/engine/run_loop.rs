@@ -824,9 +824,12 @@ impl<'a> RunLoop<'a> {
             return Ok(tool_compaction::ContextCapacity::Fits);
         }
         let contract = self.ledger().plan_contract()?;
-        let mut refusal_index = requests
-            .iter()
-            .position(|item| self.check_tool(&item.call, contract.as_ref()).is_err());
+        let mut refusal_index = self.ledger().view(|view| {
+            requests.iter().position(|item| {
+                self.check_tool(view, &item.call, contract.as_ref())
+                    .is_err()
+            })
+        })?;
         if refusal_index.is_none() {
             for (index, item) in requests.iter().enumerate() {
                 if self.primary_lease_allows(&item.call)?.is_err() {
@@ -1268,9 +1271,11 @@ impl<'a> RunLoop<'a> {
             return Ok(Err(ProposalRefusalCause::InvalidArguments));
         }
         let contract = self.ledger().plan_contract()?;
-        Ok(requests
-            .iter()
-            .try_for_each(|request| self.check_tool(&request.call, contract.as_ref())))
+        self.ledger().view(|view| {
+            requests
+                .iter()
+                .try_for_each(|request| self.check_tool(view, &request.call, contract.as_ref()))
+        })
     }
 
     fn model_may_propose(&self, call: &crate::tools::ToolCall) -> bool {
@@ -1311,6 +1316,7 @@ impl<'a> RunLoop<'a> {
 
     fn check_tool(
         &self,
+        view: &crate::session::SessionView,
         call: &crate::tools::ToolCall,
         contract: Option<&crate::session::GoalPlanContract>,
     ) -> Result<(), ProposalRefusalCause> {
@@ -1340,20 +1346,14 @@ impl<'a> RunLoop<'a> {
         if !call.valid() {
             return Err(InvalidArguments);
         }
-        if self.controls.goal_phase != GoalPhase::Implementation && !call.is_goal_plan_prelude() {
-            return Err(Phase);
-        }
-        if let Some(contract) = contract {
-            if !contract.allows_call(call) {
-                return Err(PlanScopeExcludesCall);
-            }
-            if !self
+        crate::session::validate_primary_tool_scope(view, self.run_id, call)?;
+        if let Some(contract) = contract
+            && !self
                 .controls
                 .tools
                 .is_some_and(|tools| tools.allows_goal_contract(contract))
-            {
-                return Err(PlanOutsideGrant);
-            }
+        {
+            return Err(PlanOutsideGrant);
         }
         Ok(())
     }

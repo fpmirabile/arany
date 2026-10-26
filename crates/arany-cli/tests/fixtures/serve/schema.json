@@ -342,6 +342,7 @@
             "ToolFinished",
             "SupervisorVerdictRecorded",
             "ToolProposed",
+            "ToolPreflightRefused",
             "HookStarted",
             "HookFinished",
             "AgentFinished",

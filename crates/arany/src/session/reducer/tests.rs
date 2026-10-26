@@ -4062,6 +4062,8 @@ mod goal_replay_tests {
                     false,
                 )),
                 agents: vec![AgentView {
+                    tool_refusal: None,
+                    tool_refusal_sequence: None,
                     profile: None,
                     assignment: None,
                     definition: None,
@@ -5317,6 +5319,8 @@ mod goal_replay_tests {
                 images: Vec::new(),
                 config: Some(config(CollaborationPolicy::Single, true)),
                 agents: vec![AgentView {
+                    tool_refusal: None,
+                    tool_refusal_sequence: None,
                     profile: None,
                     assignment: None,
                     definition: None,
@@ -5538,6 +5542,8 @@ mod goal_replay_tests {
                     images: Vec::new(),
                     config: Some(config(CollaborationPolicy::Single, true)),
                     agents: vec![AgentView {
+                        tool_refusal: None,
+                        tool_refusal_sequence: None,
                         profile: None,
                         assignment: None,
                         definition: None,
@@ -5718,6 +5724,169 @@ mod goal_replay_tests {
                 &view,
                 child_record(run, child, ProviderCallDisposition::Finished)
             ));
+        }
+    }
+
+    #[test]
+    fn tool_preflight_matches_reducer_rejections_without_changing_the_view() {
+        use crate::session::ProposalRefusalCause::{
+            InvalidArguments, Phase, PlanScopeExcludesCall,
+        };
+        for (case, expected) in [
+            ("valid", Ok(())),
+            ("path", Err(InvalidArguments)),
+            ("policy", Err(Phase)),
+            ("workspace", Err(Phase)),
+            ("phase", Err(Phase)),
+            ("scope", Err(PlanScopeExcludesCall)),
+            ("missing_verdict", Err(Phase)),
+        ] {
+            let (mut view, _, run, agent) = primary_tool_session(false);
+            view.runs[0].agents[0].provider_calls.push(record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::ToolRequested,
+                Some(0),
+            ));
+            let mut intent = read_intent(run, agent, "src/lib.rs");
+            match case {
+                "path" => {
+                    intent.call = ToolCall::Read {
+                        path: "../outside".into(),
+                        offset: None,
+                        limit: None,
+                    }
+                }
+                "policy" => intent.policy_digest = [3; 32],
+                "workspace" => intent.workspace_inode += 1,
+                "phase" => {
+                    view.goals[0].phase = GoalPhase::Research;
+                    intent.call = ToolCall::Mkdir { path: "src".into() };
+                }
+                "scope" => {
+                    view.goals[0].plan_contract =
+                        delegated_session(0).goals[0].plan_contract.clone();
+                    intent.call = ToolCall::Read {
+                        path: "outside.rs".into(),
+                        offset: None,
+                        limit: None,
+                    };
+                }
+                "missing_verdict" => {
+                    view.runs[0]
+                        .config
+                        .as_mut()
+                        .unwrap()
+                        .tool_policy
+                        .as_mut()
+                        .unwrap()
+                        .permissions_digest = Some([4; 32])
+                }
+                _ => (),
+            }
+            let event = tool_started(run, agent, &intent);
+            let original = view.clone();
+            assert_eq!(
+                crate::session::validate_tool_started(&view, &event)
+                    .map_err(|refusal| refusal.cause),
+                expected,
+                "{case}"
+            );
+            assert_eq!(view, original, "preflight must be read-only: {case}");
+            let mut attempted = view.clone();
+            assert_eq!(
+                apply(&mut attempted, event.clone()).is_ok(),
+                expected.is_ok(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_refusal_closes_proposals_but_never_unknown_started_effects() {
+        for stage in ["prepared", "proposed", "reserved", "started"] {
+            let (mut view, _, run, actor) = primary_tool_session(false);
+            view.runs[0].agents[0].provider_calls.push(record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::ToolRequested,
+                Some(0),
+            ));
+            let intent = read_intent(run, actor, "src/lib.rs");
+            let start = tool_started(run, actor, &intent);
+            assert!(crate::session::validate_tool_started(&view, &start).is_ok());
+            if stage != "prepared" {
+                apply(&mut view, tool_proposed(run, actor, &intent)).unwrap();
+            }
+            if stage == "reserved" {
+                apply(
+                    &mut view,
+                    Event::ToolActiveTimeReserved {
+                        run_id: run,
+                        agent_run_id: actor,
+                        intent_digest: intent.digest(),
+                        active_ceiling_ms: 1,
+                    },
+                )
+                .unwrap();
+            }
+            if stage == "started" {
+                apply(&mut view, start.clone()).unwrap();
+            }
+            let refused = Event::ToolPreflightRefused {
+                run_id: run,
+                agent_run_id: actor,
+                record: crate::session::ToolPreflightRefusal {
+                    intent_digest: intent.digest(),
+                    refusal: crate::session::ToolRefusal::INVALID_TRANSITION,
+                    verdict: None,
+                },
+            };
+            if stage == "started" {
+                assert!(rejected(&view, refused));
+                continue;
+            }
+            apply(&mut view, refused.clone()).unwrap();
+            assert!(rejected(&view, refused));
+            assert!(rejected(&view, start));
+            assert!(rejected(
+                &view,
+                Event::AgentFinished {
+                    run_id: run,
+                    agent_run_id: actor,
+                    disposition: AgentDisposition::StoppedByHook,
+                    summary: None,
+                    result: None,
+                    worker: None,
+                }
+            ));
+            apply(
+                &mut view,
+                Event::AgentFinished {
+                    run_id: run,
+                    agent_run_id: actor,
+                    disposition: AgentDisposition::Failed,
+                    summary: None,
+                    result: None,
+                    worker: None,
+                },
+            )
+            .unwrap();
+            apply(
+                &mut view,
+                Event::RunFinished {
+                    run_id: run,
+                    disposition: RunDisposition::Failed,
+                    failure: Some(crate::session::RunFailure::ProposalRefused),
+                    active_ms: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(view.runs[0].status, RunStatus::Failed, "{stage}");
+            assert!(
+                view.runs[0]
+                    .tools
+                    .iter()
+                    .all(|tool| tool.observation.is_none())
+            );
         }
     }
 
@@ -6304,6 +6473,16 @@ mod goal_replay_tests {
             let forged_pass = finished(hook_observation.clone(), HookResult::Passed);
             assert!(forged_pass.payload().is_err());
             let mid = view.clone();
+            assert_refused_pre_hook_stop(
+                mid.clone(),
+                &hook_intent,
+                verdict(
+                    Decision::Deny,
+                    Some(Decision::Deny),
+                    1,
+                    PermissionSource::Hook,
+                ),
+            );
             apply(&mut view, finished(hook_observation.clone(), deny.clone())).unwrap();
             assert!(rejected(&view, started(intent.digest(), &second)));
             for (decision, restriction, hooks, basis) in [
@@ -6430,6 +6609,86 @@ mod goal_replay_tests {
             });
             assert!(!actor_tool(&mut stopped, agent).settled_without_stop());
         }
+    }
+
+    fn assert_refused_pre_hook_stop(
+        mut view: SessionView,
+        hook: &EffectIntent,
+        mut candidate: Event,
+    ) {
+        use crate::tools::permissions::{HookOutcome, HookResult};
+        let Event::ToolStarted {
+            run_id,
+            agent_run_id,
+            intent,
+            ..
+        } = &candidate
+        else {
+            unreachable!()
+        };
+        let (run, actor, digest) = (
+            *run_id,
+            *agent_run_id,
+            EffectIntent::from(intent.clone()).digest(),
+        );
+        let stdout = r#"{"continue":false,"stopReason":"halt"}"#;
+        let mut observation = observation_for(hook.clone(), b"");
+        observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":stdout,"stderr":"","stdout_total":{"bytes":stdout.len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
+        apply(
+            &mut view,
+            Event::HookFinished {
+                run_id: run,
+                agent_run_id: actor,
+                outcome: HookOutcome {
+                    observation,
+                    result: HookResult::Stopped {
+                        reason: Some("halt".into()),
+                    },
+                    boundary_active_ms: None,
+                },
+            },
+        )
+        .unwrap();
+        assert!(crate::session::validate_tool_started(&view, &candidate).is_ok());
+        if let Event::ToolStarted { intent, .. } = &mut candidate {
+            intent.workspace_inode += 1;
+        }
+        let refusal = crate::session::validate_tool_started(&view, &candidate).unwrap_err();
+        apply(
+            &mut view,
+            Event::ToolPreflightRefused {
+                run_id: run,
+                agent_run_id: actor,
+                record: crate::session::ToolPreflightRefusal {
+                    intent_digest: digest,
+                    refusal,
+                    verdict: None,
+                },
+            },
+        )
+        .unwrap();
+        assert!(rejected(&view, candidate));
+        apply(
+            &mut view,
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: actor,
+                disposition: AgentDisposition::StoppedByHook,
+                worker: None,
+                summary: None,
+                result: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            view.runs[0]
+                .agents
+                .iter()
+                .find(|agent| agent.id == actor)
+                .unwrap()
+                .status,
+            AgentStatus::StoppedByHook
+        );
     }
 
     #[test]

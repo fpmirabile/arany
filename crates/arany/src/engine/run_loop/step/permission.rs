@@ -365,64 +365,11 @@ impl RunLoop<'_> {
         &self,
         call: &ToolCall,
     ) -> Result<Result<(), super::super::ProposalRefusalCause>, EngineError> {
-        let allowed = self.ledger().view(|v| {
-            v.runs.last().is_some_and(|r| {
-                let leases = r
-                    .agents
-                    .iter()
-                    .filter_map(|a| a.assignment.as_ref())
-                    .filter(|w| w.released.is_none())
-                    .flat_map(|w| &w.pins.request.lease)
-                    .collect::<Vec<_>>();
-                match call {
-                    ToolCall::ApplyChangeset {
-                        source: crate::worker::ChangesetSource::WorkerHandover { .. },
-                    } => true,
-                    ToolCall::Write { path, .. }
-                    | ToolCall::Edit { path, .. }
-                    | ToolCall::Delete { path, .. }
-                    | ToolCall::MultiEdit {
-                        file_path: path, ..
-                    }
-                    | ToolCall::Mkdir { path } => {
-                        !leases.iter().any(|l| crate::worker::overlaps(l, path))
-                    }
-                    ToolCall::Move {
-                        source,
-                        destination,
-                        ..
-                    } => ![source, destination]
-                        .iter()
-                        .any(|p| leases.iter().any(|l| crate::worker::overlaps(l, p))),
-                    ToolCall::ParseAgentDefinition { .. }
-                    | ToolCall::List { .. }
-                    | ToolCall::Read { .. }
-                    | ToolCall::Search { .. }
-                    | ToolCall::Command { .. }
-                    | ToolCall::CommandUnguarded { .. }
-                    | ToolCall::ApplyChangeset { .. }
-                    | ToolCall::PrepareWorker { .. }
-                    | ToolCall::McpList { .. }
-                    | ToolCall::McpCall { .. }
-                    | ToolCall::GitStatus { .. }
-                    | ToolCall::GitDiff { .. }
-                    | ToolCall::GitLog { .. }
-                    | ToolCall::GitCommit { .. }
-                    | ToolCall::GitBranch { .. }
-                    | ToolCall::GitSwitch { .. }
-                    | ToolCall::GitPush { .. }
-                    | ToolCall::GhPrCreate { .. }
-                    | ToolCall::GhPrList { .. }
-                    | ToolCall::GhPrView { .. }
-                    | ToolCall::Glob { .. }
-                    | ToolCall::Skill { .. } => !call.is_process() || leases.is_empty(),
-                }
-            })
-        })?;
-        Ok(if allowed {
-            Ok(())
-        } else {
-            Err(super::super::ProposalRefusalCause::LeaseOverlap)
+        self.ledger().view(|view| {
+            view.runs
+                .last()
+                .ok_or(super::super::ProposalRefusalCause::Phase)
+                .and_then(|run| crate::session::validate_primary_tool_lease(run, call))
         })
     }
 

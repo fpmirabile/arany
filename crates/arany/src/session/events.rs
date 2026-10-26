@@ -25,7 +25,8 @@ pub use records::{
     DisplayChunk, EffectTarget, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES,
     MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal,
     ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition,
-    RunFailure, SessionDefaults, ToolIntentRecord,
+    RunFailure, SessionDefaults, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal,
+    ToolRefusalReason,
 };
 use validate::bounded;
 
@@ -132,7 +133,7 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 45] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 46] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -168,6 +169,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 45] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolProposed", 1),
+    ("ToolPreflightRefused", 1),
     ("HookStarted", 12),
     ("HookFinished", 18),
     ("ToolFinished", 29),
@@ -376,6 +378,11 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         chunk: DisplayChunk,
+    },
+    ToolPreflightRefused {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: ToolPreflightRefusal,
     },
     ToolProposed {
         run_id: RunId,
@@ -897,6 +904,7 @@ impl Event {
             Self::SupervisorVerdictRecorded { .. } => "SupervisorVerdictRecorded",
             Self::ToolFinished { .. } => "ToolFinished",
             Self::ToolProposed { .. } => "ToolProposed",
+            Self::ToolPreflightRefused { .. } => "ToolPreflightRefused",
             Self::HookStarted { .. } => "HookStarted",
             Self::HookFinished { .. } => "HookFinished",
             Self::AgentFinished { .. } => "AgentFinished",
@@ -1022,6 +1030,11 @@ impl Event {
                 agent_run_id,
                 ..
             }
+            | Self::ToolPreflightRefused {
+                run_id,
+                agent_run_id,
+                ..
+            }
             | Self::ToolProposed {
                 run_id,
                 agent_run_id,
@@ -1059,6 +1072,7 @@ impl Event {
         self.validate()?;
         match self {
             Self::SupervisorVerdictRecorded { verdict, .. } => serialize(verdict),
+            Self::ToolPreflightRefused { record, .. } => serialize(record),
             Self::WorkspaceRewindStarted { record } => serialize(record),
             Self::WorkspaceRewindFinished { record } => serialize(record),
             Self::SessionStarted {
@@ -1494,6 +1508,13 @@ impl Event {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     text: data.text,
                     images: data.images,
+                }
+            }
+            "ToolPreflightRefused" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ToolPreflightRefused {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    record: parse(payload)?,
                 }
             }
             "SupervisorVerdictRecorded" if run_id.is_some() && agent_run_id.is_some() => {

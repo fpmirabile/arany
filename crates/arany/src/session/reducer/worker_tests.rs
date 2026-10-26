@@ -3545,6 +3545,77 @@ fn worker_compaction_boundaries_keep_the_preceding_step_with_integration() {
 }
 
 #[test]
+fn refused_integration_releases_its_handover_without_an_observation_or_budget_stop() {
+    for proposed in [false, true] {
+        let mut f = fixture();
+        f.mutation();
+        let data = f.finish_worker();
+        let handover = f.handover(data.clone());
+        let intent = f.intent(
+            f.primary,
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::WorkerHandover {
+                    assignment_id: f.child,
+                    handover_sequence: handover,
+                    data,
+                },
+            },
+            EffectTarget::Workspace,
+        );
+        if proposed {
+            f.push(Event::ToolProposed {
+                run_id: f.run,
+                agent_run_id: f.primary,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            });
+        }
+        let refusal = f.push(Event::ToolPreflightRefused {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: crate::session::ToolPreflightRefusal {
+                intent_digest: intent.digest(),
+                refusal: crate::session::ToolRefusal::INVALID_TRANSITION,
+                verdict: None,
+            },
+        });
+        let discarded = Event::WorkerHandoverDiscarded {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: WorkerSettlement {
+                assignment_id: f.child,
+                handover_sequence: Some(handover),
+                reason: WorkerSettlementReason::Stopped,
+                cause_sequence: refusal,
+            },
+        };
+        let mut forged = discarded.clone();
+        if let Event::WorkerHandoverDiscarded { record, .. } = &mut forged {
+            record.cause_sequence = handover;
+        }
+        refused(&f, forged, "discard needs the committed refusal sequence");
+        let discarded = f.push(discarded);
+        f.push(Event::WorkerLeaseReleased {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: WorkerSettlement {
+                assignment_id: f.child,
+                handover_sequence: Some(handover),
+                reason: WorkerSettlementReason::Stopped,
+                cause_sequence: discarded,
+            },
+        });
+        let view = f.view();
+        let run = &view.runs[0];
+        let assignment = run.agents[1].assignment.as_ref().unwrap();
+        assert!(assignment.released.is_some() && assignment.integration.is_none());
+        assert!(run.workers.stop.is_none());
+        assert!(run.tools.iter().all(|tool| tool.intent.id != intent.id
+            || tool.started_sequence.is_none() && tool.observation.is_none()));
+    }
+}
+
+#[test]
 fn worker_protocol_background_workers_let_the_primary_continue_before_release() {
     for background in [false, true] {
         let mut f = if background {
