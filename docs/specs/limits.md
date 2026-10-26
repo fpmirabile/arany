@@ -81,3 +81,8 @@
 | <a id="default_command_timeout_ms"></a>[`DEFAULT_COMMAND_TIMEOUT_MS`](#default_command_timeout_ms) | 120000 | ms | `crates/arany/src/tools/types.rs` |
 | <a id="frame_bytes"></a>[`FRAME_BYTES`](#frame_bytes) | 131072 | bytes | `crates/arany/src/tools/mcp.rs` |
 | <a id="mcp_timeout_ms"></a>[`MCP_TIMEOUT_MS`](#mcp_timeout_ms) | 40000 | ms | `crates/arany/src/tools/types.rs` |
+| <a id="max_markdown_parse_bytes"></a>[`MAX_MARKDOWN_PARSE_BYTES`](#max_markdown_parse_bytes) | 32768 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_markdown_depth"></a>[`MAX_MARKDOWN_DEPTH`](#max_markdown_depth) | 32 | containers | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_markdown_events"></a>[`MAX_MARKDOWN_EVENTS`](#max_markdown_events) | 65536 | events | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_markdown_output_bytes"></a>[`MAX_MARKDOWN_OUTPUT_BYTES`](#max_markdown_output_bytes) | 524288 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_markdown_rows"></a>[`MAX_MARKDOWN_ROWS`](#max_markdown_rows) | 4096 | rows | `crates/arany-cli/src/terminal/markdown.rs` |
