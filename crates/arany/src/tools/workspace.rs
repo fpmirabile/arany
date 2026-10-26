@@ -1,7 +1,8 @@
 use super::approval::ApprovalMode;
 use super::config::{Config, Program};
 use super::toolchains::{
-    Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, profile_order, validate_selection,
+    Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, default_profile_selection, discover,
+    profile_order, validate_selection,
 };
 use super::types::MAX_SNAPSHOT_BYTES;
 use super::{ToolError, fs};
@@ -216,11 +217,7 @@ impl WorkspacePermissions {
     }
 
     pub fn runtime_profile_choices(&self) -> Vec<RuntimeProfileOption> {
-        let selected = self
-            .runtime_grants
-            .iter()
-            .filter_map(|grant| grant.token().ok())
-            .collect::<std::collections::BTreeSet<_>>();
+        let selected = default_profile_selection(&self.candidates, &self.runtime_grants);
         let mut profiles = self
             .candidates
             .iter()
@@ -569,16 +566,16 @@ mod tests {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
 
         let mut ordered = [
-            (RuntimeKind::Rust, Some("1.89.0"), "/rust", "z"),
-            (RuntimeKind::Rust, Some("1.88.0"), "/rust", "y"),
+            (RuntimeKind::Rust, Some("1.9.0"), "/rust", "z"),
+            (RuntimeKind::Rust, Some("1.10.0"), "/rust", "y"),
             (RuntimeKind::Node, Some("v22.3.0"), "/a", "x"),
             (RuntimeKind::Node, Some("v22.3.0"), "/b", "v"),
             (RuntimeKind::Node, Some("v22.3.0"), "/b", "w"),
             (RuntimeKind::Python, Some("3.13.0"), "/python", "u"),
             (RuntimeKind::CargoCache, None, "/cache", "t"),
             (RuntimeKind::AppleCompiler, None, "/compiler", "s"),
-            (RuntimeKind::AppleSdk, Some("15.4"), "/sdk", "r"),
-            (RuntimeKind::AppleSdk, Some("15.3"), "/sdk", "q"),
+            (RuntimeKind::AppleSdk, Some("15.9"), "/sdk", "r"),
+            (RuntimeKind::AppleSdk, Some("15.10.0"), "/sdk", "q"),
         ]
         .map(|(kind, version, path, token)| {
             let grant = RuntimeGrant {
@@ -595,7 +592,9 @@ mod tests {
                 grant,
             }
         });
-        ordered[0].token = ordered[0].grant.token().unwrap();
+        for index in [0, 8] {
+            ordered[index].token = ordered[index].grant.token().unwrap();
+        }
         let expected = ordered
             .iter()
             .map(|candidate| candidate.token.clone())
@@ -632,8 +631,38 @@ mod tests {
                     .filter(|choice| choice.selected)
                     .map(|choice| choice.token)
                     .collect::<Vec<_>>(),
-                [ordered[0].token.clone()],
+                [0, 2, 5, 6, 7, 9].map(|index| ordered[index].token.clone()),
                 "saved selection follows its token after shuffle={shift}"
+            );
+            let mut access = access;
+            access.runtime_grants.push(ordered[8].grant.clone());
+            assert!(
+                access
+                    .runtime_profile_choices()
+                    .iter()
+                    .any(|choice| choice.selected && choice.token == ordered[8].token)
+            );
+            access.runtime_grants.clear();
+            assert_eq!(
+                access
+                    .runtime_profile_choices()
+                    .into_iter()
+                    .filter(|choice| choice.selected)
+                    .map(|choice| choice.token)
+                    .collect::<Vec<_>>(),
+                [1, 2, 5, 6, 7, 9].map(|index| ordered[index].token.clone())
+            );
+            access.candidates.retain(|candidate| {
+                !matches!(
+                    candidate.grant.kind,
+                    RuntimeKind::Rust | RuntimeKind::Node | RuntimeKind::Python
+                )
+            });
+            assert!(
+                access
+                    .runtime_profile_choices()
+                    .iter()
+                    .all(|choice| !choice.selected)
             );
         }
     }
@@ -658,6 +687,17 @@ mod tests {
         let channel_alias = home.join(".rustup/toolchains/stable");
         executable(&channel_alias.join("bin/cargo"));
         executable(&channel_alias.join("bin/rustc"));
+        for invalid in [
+            "01.2.3",
+            "1.2",
+            "1.2.3-",
+            "1.2.3/escape",
+            "18446744073709551616.0.0",
+        ] {
+            let path = home.join(".rustup/toolchains").join(invalid);
+            executable(&path.join("bin/cargo"));
+            executable(&path.join("bin/rustc"));
+        }
         let node = home.join(".nvm/versions/node/v22.3.0");
         executable(&node.join("bin/node"));
         let python_alias = home.join(".pyenv/versions/3.13.0");
@@ -724,6 +764,7 @@ mod tests {
             !candidate.label.contains("synthetic credential canary")
                 && candidate.grant.path != home.join(".cargo")
                 && candidate.grant.path != channel_alias
+                && (candidate.grant.kind != RuntimeKind::Rust || candidate.grant == rust.grant)
         }));
         assert!(candidates.iter().any(|candidate| {
             candidate.grant.kind == RuntimeKind::CargoCache && candidate.grant.path == cache
@@ -781,19 +822,23 @@ channel = "stable"
             .unwrap()
             .with_candidates(Ok(candidates.clone()));
         let choices = access.runtime_profile_choices();
-        for candidate in candidates.iter().filter(|candidate| {
-            matches!(
-                candidate.grant.kind,
-                RuntimeKind::AppleCompiler | RuntimeKind::AppleSdk
-            )
-        }) {
-            let choice = choices
+        assert!(
+            choices
                 .iter()
-                .find(|choice| choice.token == candidate.token)
-                .unwrap();
-            assert!(!choice.selected);
-        }
-        assert!(choices.iter().all(|choice| !choice.selected));
+                .any(|choice| choice.selected && choice.path == python_regular)
+        );
+        assert!(access.runtime_grants.is_empty(), "proposals grant nothing");
+        let proposed = choices
+            .iter()
+            .filter(|choice| choice.selected)
+            .map(|choice| choice.token.clone())
+            .collect::<Vec<_>>();
+        access
+            .remember_with(&state, true, ApprovalMode::Request, &proposed)
+            .unwrap();
+        let saved = WorkspacePermissions::load(&workspace, &state).unwrap();
+        assert_eq!(saved.runtime_grants.len(), proposed.len());
+        assert!(saved.candidates.is_empty(), "startup does not rediscover");
         for kind in [
             RuntimeKind::CargoCache,
             RuntimeKind::CargoSource,
@@ -842,6 +887,30 @@ channel = "stable"
             replaced.verify_host(),
             Err(ToolError::ChangedInput)
         ));
+        let newer = home.join(".rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu");
+        executable(&newer.join("bin/cargo"));
+        executable(&newer.join("bin/rustc"));
+        let mut saved = saved.with_candidates(discover(&home));
+        let choices = saved.runtime_profile_choices();
+        assert!(choices.iter().any(|choice| choice.selected
+            && !choice.detected
+            && choice.token == replaced.token().unwrap()));
+        let newer_token = choices
+            .iter()
+            .find(|choice| choice.path == newer)
+            .unwrap()
+            .token
+            .clone();
+        saved
+            .remember_with(&state, true, ApprovalMode::Request, &[newer_token])
+            .unwrap();
+        assert_eq!(
+            WorkspacePermissions::load(&workspace, &state)
+                .unwrap()
+                .runtime_grants[0]
+                .path,
+            newer
+        );
     }
 
     #[test]

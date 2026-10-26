@@ -1204,7 +1204,7 @@ async fn native_offline_rust_build_helper() {
         .expect("physical Apple Command Line Tools compiler candidate");
     let sdk = choices
         .iter()
-        .find(|option| option.group == "macOS SDK" && option.detected)
+        .find(|option| option.group == "macOS SDK" && option.detected && option.selected)
         .expect("physical versioned macOS SDK candidate");
     assert!(rust.detected && compiler.detected && sdk.detected);
     setup_context("Apple runtime baseline probes", || {

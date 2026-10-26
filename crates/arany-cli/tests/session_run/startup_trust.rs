@@ -846,7 +846,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         .unwrap();
                 } else {
                     review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    toggle_and_confirm(&mut output, &mut input, &mut transcript, &mut answered);
+                    input.write_all(b"\x1b[B\r").unwrap();
                 }
                 wait(
                     &mut output,
@@ -1577,6 +1577,14 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
     let account = temp.path().join("account");
     let state = temp.path().join("state");
     std::fs::create_dir(&workspace).unwrap();
+    let node = temp.path().join("fixture-home/.nvm/versions/node/v22.3.0");
+    std::fs::create_dir_all(node.join("bin")).unwrap();
+    std::fs::write(node.join("bin/node"), b"synthetic executable").unwrap();
+    std::fs::set_permissions(
+        node.join("bin/node"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     let probe = |args: &[&str], expect_prompt: bool, choice: Option<&[u8]>| {
         let (master, slave) = crate::process::cloexec_pty(None);
         let mut input = master.try_clone().unwrap();
@@ -1701,6 +1709,11 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
     assert_eq!(
         trusted["workspaces"][0]["path"],
         workspace.to_str().unwrap()
+    );
+    assert_eq!(trusted["version"], 2);
+    assert_eq!(
+        trusted["workspaces"][0]["runtime_grants"][0]["path"],
+        node.to_str().unwrap()
     );
     let identity = std::fs::metadata(&workspace).unwrap();
     assert_eq!(trusted["workspaces"][0]["device"], identity.dev());
