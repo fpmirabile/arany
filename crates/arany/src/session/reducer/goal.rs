@@ -934,6 +934,7 @@ pub(super) fn apply(
                     .primary()
                     .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
                 || !run.compaction_matches(record)
+                || !crate::session::recent_files_match(std::slice::from_ref(run), record)
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())

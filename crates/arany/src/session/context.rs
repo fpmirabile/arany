@@ -212,12 +212,7 @@ impl CompiledContext {
                 continue;
             }
             used += cost.ok_or(ContextTooLarge)?;
-            summary = Some(match summary {
-                Some(summary) => {
-                    format!("{summary}{}{files}", super::COMPACTION_SUMMARY_SEPARATOR)
-                }
-                None => files,
-            });
+            summary = Some(super::join_recent_files(summary, files));
         }
         let mut images = Vec::with_capacity(image_count);
         for (turn_index, (run, _)) in selected.iter().enumerate() {
@@ -279,10 +274,11 @@ mod tests {
         let recent_files_bytes = 31;
         let cost = summary_context_cost(summary_bytes, false).unwrap()
             + summary_context_cost(recent_files_bytes, true).unwrap();
-        assert_eq!(
-            cost,
-            summary_bytes + recent_files_bytes + 2 + SUMMARY_CONTEXT_OVERHEAD_BYTES
+        let joined = super::super::join_recent_files(
+            Some("s".repeat(summary_bytes)),
+            "f".repeat(recent_files_bytes),
         );
+        assert_eq!(cost, joined.len() + SUMMARY_CONTEXT_OVERHEAD_BYTES);
         assert!(fits_history_budget(7, Some(cost), 7 + cost));
         assert!(!fits_history_budget(7, Some(cost), 6 + cost));
         assert_eq!(

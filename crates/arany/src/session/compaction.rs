@@ -13,6 +13,11 @@ pub(crate) fn recent_files(run: &RunView, covered_sequence: u64) -> Vec<RecentFi
     recent_files_across(std::slice::from_ref(run), covered_sequence)
 }
 
+pub(crate) fn recent_files_match(runs: &[RunView], record: &super::CompactionRecord) -> bool {
+    record.recent_files.is_empty()
+        || record.recent_files == recent_files_across(runs, record.covered_sequence)
+}
+
 pub(crate) fn recent_files_across(runs: &[RunView], covered_sequence: u64) -> Vec<RecentFile> {
     let mut recent = Vec::new();
     let mut paths = std::collections::HashSet::new();
@@ -148,6 +153,13 @@ pub(crate) fn render_recent_files(files: &[RecentFile]) -> Option<String> {
             serde_json::to_string(files).expect("typed recent files are serializable")
         )
     })
+}
+
+pub(crate) fn join_recent_files(summary: Option<String>, files: String) -> String {
+    match summary {
+        Some(summary) => format!("{summary}{COMPACTION_SUMMARY_SEPARATOR}{files}"),
+        None => files,
+    }
 }
 
 const RECENT_FILES_HEADING: &str = "Files changed before compaction; Read them for current content";

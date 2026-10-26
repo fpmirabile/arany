@@ -8791,10 +8791,18 @@ mod goal_replay_tests {
     }
 
     fn compacting_session() -> (SessionView, GoalId, RunId) {
+        compacting_session_with_last_tool(ToolCall::Read {
+            path: "src/lib.rs".into(),
+            offset: None,
+            limit: Some(1024),
+        })
+    }
+
+    fn compacting_session_with_last_tool(call: ToolCall) -> (SessionView, GoalId, RunId) {
         let (mut view, goal, run, agent) = primary_tool_session(true);
         let (first, second) = (
             read_intent(run, agent, "src/lib.rs"),
-            read_intent(run, agent, "src/lib.rs"),
+            child_intent(run, agent, call),
         );
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
@@ -9085,7 +9093,11 @@ mod goal_replay_tests {
 
     #[test]
     fn reducer_accepts_maximum_summary_from_recorded_compiler_floor() {
-        let (mut view, goal, run) = compacting_session();
+        let (mut view, goal, run) = compacting_session_with_last_tool(ToolCall::Write {
+            path: "src/lib.rs".into(),
+            expected_digest: None,
+            content: "two".into(),
+        });
         let Event::GoalContextCompacted { mut record, .. } =
             covering_compaction(&view, goal, run, 2)
         else {
@@ -9094,8 +9106,8 @@ mod goal_replay_tests {
         let summary = "S".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
         record.compiler_version = crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION;
         record.recent_files = vec![crate::session::RecentFile {
-            path: "src/main.rs".into(),
-            digest: "a".repeat(64),
+            path: "src/lib.rs".into(),
+            digest: crate::validate::hex_digest(b"two"),
         }];
         record.status = crate::session::events::CompactionStatus::Succeeded {
             content_digest: crate::validate::digest(summary.as_bytes()),
@@ -9132,11 +9144,62 @@ mod goal_replay_tests {
         assert_eq!(
             view.runs[0].tool_compaction_recent_files,
             [crate::session::RecentFile {
-                path: "src/main.rs".into(),
-                digest: "a".repeat(64),
+                path: "src/lib.rs".into(),
+                digest: crate::validate::hex_digest(b"two"),
             }]
         );
         assert_eq!(view.runs[0].tools.len(), 2);
+    }
+
+    #[test]
+    fn goal_compaction_recent_files_must_match_covered_observations() {
+        let (view, goal, run) = compacting_session_with_last_tool(ToolCall::Write {
+            path: "src/lib.rs".into(),
+            expected_digest: None,
+            content: "two".into(),
+        });
+        let Event::GoalContextCompacted { mut record, .. } =
+            covering_compaction(&view, goal, run, 2)
+        else {
+            unreachable!()
+        };
+        record.recent_files = crate::session::recent_files(&view.runs[0], record.covered_sequence);
+        assert_eq!(record.recent_files.len(), 1);
+        for (path, digest) in [
+            ("src/other.rs", crate::validate::hex_digest(b"two")),
+            ("src/lib.rs", "a".repeat(64)),
+        ] {
+            let mut forged = record.clone();
+            forged.recent_files[0] = crate::session::RecentFile {
+                path: path.into(),
+                digest,
+            };
+            assert!(rejected(
+                &view,
+                Event::GoalContextCompacted {
+                    goal_id: goal,
+                    run_id: run,
+                    covered_tool_count: 2,
+                    record: forged,
+                }
+            ));
+        }
+        for files in [Vec::new(), record.recent_files.clone()] {
+            let mut view = view.clone();
+            let mut record = record.clone();
+            record.recent_files = files.clone();
+            apply(
+                &mut view,
+                Event::GoalContextCompacted {
+                    goal_id: goal,
+                    run_id: run,
+                    covered_tool_count: 2,
+                    record,
+                },
+            )
+            .expect("derived hints and historical omission are accepted");
+            assert_eq!(view.runs[0].tool_compaction_recent_files, files);
+        }
     }
 
     #[test]
