@@ -8,6 +8,7 @@ use std::path::PathBuf;
 const FIXTURE: &str = "fn main() {}\n";
 const WARMUPS: usize = 10;
 const MEASURED: usize = 100;
+const CORPUS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REPORT_CAP: u64 = 1024 * 1024;
 const SAMPLE_CAP: u64 = 8 * 1024 * 1024;
 const EVIDENCE_CAP: u64 = 256 * 1024 * 1024;
@@ -378,7 +379,7 @@ fn linux_tool_latency_sample() {
 }
 
 pub(super) fn corpus() {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
+    let deadline = std::time::Instant::now() + CORPUS_TIMEOUT;
     for operation in [Operation::Read, Operation::Edit] {
         corpus_row(operation, deadline);
     }
