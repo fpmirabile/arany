@@ -894,18 +894,18 @@ pub(super) fn reserved_read_pair() -> (SessionView, [EffectIntent; 2]) {
     (view, intents)
 }
 
-pub(super) fn assert_exhausted_crash_receipt(view: &SessionView) {
+pub(super) fn assert_exhausted_crash_receipt(view: &SessionView, ceiling_ms: u64) {
     let mut view = view.clone();
-    view.goals[0].budget.max_active_ms = Some(1000);
+    view.goals[0].budget.max_active_ms = Some(ceiling_ms);
     if let Some(contract) = &mut view.goals[0].plan_contract {
-        contract.budget.max_active_ms = Some(1000);
+        contract.budget.max_active_ms = Some(ceiling_ms);
     }
     let goal = &view.goals[0];
-    assert_eq!(goal.effective_budget().max_active_ms, Some(1000));
+    assert_eq!(goal.effective_budget().max_active_ms, Some(ceiling_ms));
     let usage = goal.resume_usage(&view);
     assert!(!usage.token_usage_unknown);
     assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
-    assert_eq!(usage.active_ms, 1000);
+    assert_eq!(usage.active_ms, ceiling_ms);
     let mut refusal = goal
         .effective_budget()
         .refusal(usage, crate::BudgetAction::Resume)
@@ -934,7 +934,10 @@ pub(super) fn assert_exhausted_crash_receipt(view: &SessionView) {
     }
     apply(&mut view, close.clone()).expect("crash ceiling closes conservatively");
     let goal = &view.goals[0];
-    assert_eq!((goal.active_ms, goal.uncertain_active_ms), (1000, 1000));
+    assert_eq!(
+        (goal.active_ms, goal.uncertain_active_ms),
+        (ceiling_ms, ceiling_ms)
+    );
     assert_eq!(goal.active_ceiling_ms, 0);
     assert_eq!(goal.budget_refusal, Some(refusal));
     assert_eq!(goal.status, GoalStatus::Failed);

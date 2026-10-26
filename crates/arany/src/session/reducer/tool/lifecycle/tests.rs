@@ -727,7 +727,7 @@ fn tool_started_requires_pending_request() {
         },
     )
     .expect("first request is proposed");
-    assert_exhausted_crash_receipt(&view);
+    assert_exhausted_crash_receipt(&view, FIRST_ACTIVE_CEILING_MS);
     assert!(
         rejected(&view, tool_started(run, agent, &first)),
         "all declared intents must be proposed before a start"

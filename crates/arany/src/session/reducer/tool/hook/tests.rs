@@ -1553,6 +1553,7 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
     use crate::tools::permissions::{
         HookEvent, HookInvocation, HookOutcome, HookResult, compact_subject,
     };
+    const ACTIVE_CEILING_MS: u64 = 1000;
     let (mut view, _, run, actor) = primary_tool_session(true);
     let current = &mut view.runs[0];
     current.status = RunStatus::Finished;
@@ -1593,14 +1594,17 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
                 subject_digest: compact_subject("manual", 1),
                 input_digest: [9; 32],
                 intent: intent.clone(),
-                active_ceiling_ms: Some(1000),
+                active_ceiling_ms: Some(ACTIVE_CEILING_MS),
             },
         },
     )
     .unwrap();
-    assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    assert_eq!(
+        view.goals[0].resume_usage(&view).active_ms,
+        ACTIVE_CEILING_MS
+    );
     assert!(!view.runs[0].hooks_settled());
-    assert_exhausted_crash_receipt(&view);
+    assert_exhausted_crash_receipt(&view, ACTIVE_CEILING_MS);
     let mut observation = observation_for(intent, b"");
     observation.disposition = ToolDisposition::Denied;
     observation.attestation = None;
@@ -1618,7 +1622,7 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
     };
     let mut excessive = finished.clone();
     if let Event::HookFinished { outcome, .. } = &mut excessive {
-        outcome.boundary_active_ms = Some(1001);
+        outcome.boundary_active_ms = Some(ACTIVE_CEILING_MS + 1);
     }
     assert!(rejected(&view, excessive));
     apply(&mut view, finished).unwrap();
