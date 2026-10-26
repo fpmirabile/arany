@@ -23,7 +23,7 @@ pub(super) async fn read_completed_response(
                 http_status: Some(response.status().as_u16()),
                 ..StreamCounts::default()
             };
-            crate::diagnostics::subscription_failure(rejection.stage, counts);
+            crate::provider::diagnostics::subscription_failure(rejection.stage, counts);
             rejection.error
         },
     )?;

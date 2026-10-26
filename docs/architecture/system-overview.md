@@ -94,8 +94,12 @@ thread so persistence does not own observer delivery. [Execution](../specs/execu
 their observable contracts.
 Provider-owned diagnostic stage, count, response-shape and Tool argument shape
 types live in `provider/diagnostics.rs`, including argument shape construction
-and Debug formatting; root `diagnostics.rs` retains stream/failure and context
-record formatting and the bounded private sink.
+and Debug formatting. Provider also owns stream/failure/context entry points and
+record construction; the Engine calls its context-exhaustion entry point.
+Root `diagnostics.rs` retains the bounded private sink, including activation,
+locking, sanitization and file admission, without a production Provider dependency
+or re-export. Provider depends on that inert-record sink in one direction only;
+unrelated root Engine/Event/Tool producers remain at root.
 
 ```mermaid
 flowchart LR
@@ -142,7 +146,8 @@ flowchart LR
 
 Provider is the substitutable semantic inference interface. Wire adapters stay
 behind it; SQLite, replay, reducers and Tool dispatch remain concrete owners.
-`ProviderKind` owns native profile names and custom-profile syntax; telemetry
+`ProviderKind` owns native profile names, credential classification, catalog/check
+dispatch and custom-profile syntax; public strings are parsed at those edges. Telemetry
 maps those closed categories to its existing fixed labels.
 The CLI depends on `arany`; the library never depends on CLI, terminal,
 presentation or accounts, and has no ratatui, crossterm or keyring dependency.
@@ -208,7 +213,7 @@ modules.
 | Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
 | Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
 | SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
-| Lossy export, bounded private sink and Provider diagnostic shapes | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md#acceptance-and-evidence-owners) |
+| Lossy export, bounded private sink and Provider stream/failure/context records | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md#acceptance-and-evidence-owners) |
 
 [Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
 shared support. [Library](../../agents/arany.md) and
@@ -223,7 +228,7 @@ Guard helper entry points remain reachable from the binary's `main.rs`.
 
 The attached composer, slash handlers and quick selector share the compiled local controls and existing defaults/admission owners. Provider selection, saved-account identity, billing-route choice, catalog discovery and Run authority remain separate operations. Typed busy/defaults rejection can recover in chat, while State/replay/terminal failures retain their fatal boundary. A failed operation is not a rollback or retry grant.
 
-Attached setup keeps entry routing and setup-journal coordination in `cli/attached/setup.rs`. Its private `setup/error.rs` owns setup error classifications and conversions, re-exported through the existing setup module path. Native account presence lookup, inspection, saved-access resolution and selection live in its private `setup/native.rs` flow; credential storage and key access remain owned by `accounts/credentials/`.
+Attached setup keeps entry routing and setup-journal coordination in `cli/attached/setup.rs`. Its private `setup/error.rs` owns setup error classifications and conversions, including operation-specific native save/removal feedback and diagnostic recording, re-exported through the existing setup module path. Journal disposition and settlement remain with the flows. Native account presence lookup, inspection, saved-access resolution and selection live in its private `setup/native.rs` flow; credential storage and key access remain owned by `accounts/credentials/`.
 
 Explicit `--tools` reaches the same private Engine/Policy/Guard admission from attached and headless composition. The CLI supplies the shipped executable identity and private configuration root, not an alternative Tool runtime or per-effect approval service.
 
@@ -347,7 +352,7 @@ The sole connection opens in a private owner-verified local state directory with
 
 [The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. Clipboard and image rules live in its [paste and attachments](../specs/terminal.md#paste-and-attachments) section; implementation invariants live in tests.
 
-`presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. Tool summaries and approval actions dispatch over the library's closed Tool family and execution site; the CLI owns their per-family rendering, escaping and host disclosures. This is a presentation boundary only: operation facts and authority do not cross into presentation, and the journaled report formatter remains separate. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. Its `Panels` groups selection, copy, cue, picker geometry and help state. None of these presentation types enters the Engine.
+`presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. Tool summaries and approval actions dispatch over the library's closed Tool family and execution site; the CLI owns their per-family rendering, escaping and host disclosures. This is a presentation boundary only: operation facts and authority do not cross into presentation, and the journaled report formatter remains separate. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. Its `Panels` groups selection, copy, cue, picker geometry and help state; private `Transcript` groups the distinct Fullscreen and Classic history indexes, native emission tracking, pager/dump state, Classic adjacency and kept-Tool suppression across release/reacquisition. Linear output, signals, secret echo, clipboard and graphics cleanup retain their separate owners and lifecycle order. None of these presentation types enters the Engine.
 
 The attached Run's private `Drafts` owns offered steering text, linear offers and the held draft, shared by Run input and settlement. Composer owns editing and capacity; the Server owns steering delivery and withdrawal.
 

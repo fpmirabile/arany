@@ -163,7 +163,7 @@ impl SseFramer {
     }
 
     fn limit_error(&self) -> ProviderError {
-        crate::diagnostics::stream_limit(self.bytes, self.events);
+        crate::provider::diagnostics::stream_limit(self.bytes, self.events);
         ProviderError::InvalidStream
     }
 
@@ -485,7 +485,7 @@ pub(super) fn validate_stream_response(
         .content_length()
         .is_some_and(|length| length > super::max_stream_bytes(max_output_tokens) as u64)
     {
-        crate::diagnostics::stream_limit(0, 0);
+        crate::provider::diagnostics::stream_limit(0, 0);
         Stage::ContentLength
     } else if response
         .headers()
