@@ -18,7 +18,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 - Resolve facts from code, configuration, research, and authoritative documentation. Promote the remaining material uncertainty to `Open questions`.
 - A plan is implementation-ready only when every material assumption is resolved or explicit.
 - Each vertical slice is one PR; a feature small enough for one reviewable PR is one slice.
-- When work starts or lands, update its status and next action.
+- Status changes when work starts and when the plan closes; slice progress is recorded under [slice delivery](./PLANNING.md#slice-delivery).
 
 ## Conventions
 
