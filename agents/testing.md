@@ -14,7 +14,7 @@ Load when continuing beta 1, adding or changing behavior, fixing a defect, editi
 
 ## Documentation and instruction changes
 
-Use the [shared documentation checks](../docs/development.md#verification). When changing instruction routing, follow representative tasks from `AGENTS.md` (terminal output, Provider decoding, Session persistence) to their contract, editing rules, and evidence owner. Check inbound links after moving or renaming a heading. These checks establish documentation consistency, not agent quality or platform support.
+Use the [shared documentation checks](../docs/development.md#verification), including the spec budget and generated-bound scan in `scripts/spec-budget.py`. When changing instruction routing, follow representative tasks from `AGENTS.md` (terminal output, Provider decoding, Session persistence) to their contract, editing rules, and evidence owner. Check inbound links after moving or renaming a heading. These checks establish documentation consistency, not agent quality or platform support.
 
 ## Evidence budget
 
