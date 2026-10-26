@@ -219,3 +219,44 @@ fn fifo_include_rejects_without_waiting_for_a_writer() {
         .expect("canonical Event count");
     assert_eq!(count, 0, "FIFO cannot admit a Run");
 }
+
+#[tokio::test]
+async fn private_spill_paths_do_not_grant_workspace_include_authority() {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    let reference = "a".repeat(64);
+    let spill = state_path.join("spill").join(RunId::new().to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&spill)
+        .unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(spill.join(format!("{reference}.txt")))
+        .unwrap();
+    file.write_all(b"PRIVATE_SPILL_INCLUDE_CANARY").unwrap();
+    let engine = engine_support::open(state, EngineConfig::default()).unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![]));
+    for path in [
+        format!("spill:{reference}"),
+        spill
+            .join(format!("{reference}.txt"))
+            .to_string_lossy()
+            .into_owned(),
+    ] {
+        let mut input = request(&workspace, "Read retained output");
+        input.include_paths = vec![path.into()];
+        assert!(run_to_end(&engine, &provider, input).await.is_err());
+    }
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(workspace.read_dir().unwrap().next().is_none());
+    engine.close().await.unwrap();
+}

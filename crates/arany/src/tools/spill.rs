@@ -293,6 +293,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn spill_cut_keeps_a_complete_utf8_prefix_before_the_marker() {
+        let bytes = "🙂".repeat(MAX_SPILL_RESULT_BYTES / "🙂".len() + 1);
+        let observation = command_observation(bytes.as_bytes());
+        assert!(observation.valid());
+        let spill = observation.spill.unwrap();
+        assert!(spill.truncated);
+        assert!(std::str::from_utf8(spill.captured.as_ref().unwrap()).is_ok());
+        assert!(spill.bytes <= MAX_SPILL_RESULT_BYTES as u64);
+    }
+
+    #[test]
+    fn spill_content_never_becomes_changeset_or_hook_input() {
+        let raw = [
+            vec![b'!'; 8192],
+            b"\nPRIVATE_SPILL_HOOK_CANARY\n".to_vec(),
+            vec![b'!'; 8192],
+        ]
+        .concat();
+        let observation = command_observation(&raw);
+        assert!(observation.spill.is_some());
+        let model = super::super::types::model_observation(&observation);
+        let input = super::super::permissions::post_tool_use_input(
+            "session",
+            super::super::permissions::PermissionMode::Default,
+            &observation.intent.call,
+            observation.intent.id,
+            model,
+            super::super::permissions::MAX_HOOK_INPUT_BYTES,
+        )
+        .unwrap();
+        assert!(!input.contains("PRIVATE_SPILL_HOOK_CANARY"));
+        let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        assert_eq!(result["changeset"]["files"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn spill_write_failure_keeps_the_completed_effect_and_inline_excerpt() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+        std::fs::write(state.path().join("spill"), b"blocked").unwrap();
+        let mut runtime = super::super::tests::in_process_runtime(
+            temp.path(),
+            serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        );
+        let mut observation = command_observation(&vec![b'!'; 8192]);
+        let inline = observation.output.clone();
+        runtime.admit_spills(&state, observation.intent.run_id, &[]);
+        runtime
+            .persist_spill(&mut observation, super::super::Cancellation::new())
+            .await;
+        assert!(observation.spill.is_none());
+        assert_eq!(observation.output, inline);
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(observation.attestation.is_some());
+    }
+
     #[tokio::test]
     async fn spill_read_grammar_rejects_traversal_and_unknown_references_stay_attested() {
         let temp = tempfile::tempdir().unwrap();

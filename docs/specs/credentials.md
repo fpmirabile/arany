@@ -4,6 +4,8 @@
 
 This contract owns saved-account scope, protected storage, selected-item startup authorization, replacement and recovery. Behavior is shared across OSes; native storage mechanisms and support evidence can differ. Provider admission belongs to the [Provider contract](./provider.md); OAuth, verified identity, consent and token renewal to the [ChatGPT contract](./chatgpt.md). [The terminal contract](./terminal.md#setup-and-account-choices) owns folder-consent ordering, account choices and interactive cancellation. Editing constraints: [security rules](../../agents/security.md).
 
+Session State stores retained Tool output under private `spill/<run-id>/<intent-digest>.txt`: directories are `0700`, files and the fixed per-Run `writer.lock` are `0600`, outside the Workspace and subject to the [spill retention and Read contract](./tools.md#in-process-reads).
+
 ## Account scope and identity
 
 A saved Provider Account belongs to one effective OS user across that user's Sessions and StateRoots, never the whole machine. On Linux and macOS, account metadata and its replacement lock use the effective user's passwd home, independently of `HOME`, XDG variables and Session `--state-dir`. The native roots are `.local/state/arany` on Linux and `Library/Application Support/dev.Arany.arany` on macOS. Keyring items remain in that user's OS credential store. Session-root configuration retains its separate contract.

@@ -388,6 +388,9 @@ impl Store {
                     let _ = ready_sender.send(connection.map(|_| ()));
                     return;
                 };
+                if !read_only {
+                    let _ = state::spill::sweep(&root, &connection);
+                }
                 if ready_sender.send(Ok(())).is_err() {
                     return;
                 }
