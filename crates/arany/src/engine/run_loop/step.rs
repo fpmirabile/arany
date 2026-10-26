@@ -1222,7 +1222,7 @@ impl RunLoop<'_> {
         let worker_cancellation = RunCancellation::new();
         let mut run_cancellation = self.controls.cancellation.clone();
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
-            .saturating_add(crate::tools::worker::transfer_time(&intent));
+            .saturating_add(crate::tools::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = if intent.call.facts().site == crate::tools::catalog::Site::InProcess {
             0
@@ -1591,78 +1591,6 @@ mod tests {
                 },
                 "review resolution row {index}"
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn cancellation_refuses_buffered_and_late_active_window_requests() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        let permit = sender
-            .clone()
-            .reserve_owned()
-            .await
-            .expect("reserve a slot");
-        let (reply, receipt) = tokio::sync::oneshot::channel();
-        let execution = async move {
-            let _ = receipt.await;
-            "settled"
-        };
-        tokio::pin!(execution);
-        let late = tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            permit.send(ActiveActionRequest {
-                admitted_at: Instant::now(),
-                reply,
-            });
-        });
-        let settled = tokio::time::timeout(
-            Duration::from_secs(5),
-            settle_cancelled(execution.as_mut(), &mut receiver),
-        )
-        .await
-        .expect("the Guard must not wait for a reply nobody sends");
-        assert_eq!(settled, "settled");
-        late.await.expect("late sender");
-        let (again, _) = tokio::sync::oneshot::channel();
-        assert!(
-            sender
-                .send(ActiveActionRequest {
-                    admitted_at: Instant::now(),
-                    reply: again,
-                })
-                .await
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
-        let step = include_str!("step.rs");
-        let ask = include_str!("step/ask.rs");
-        let tools = include_str!("../../tools.rs");
-        let guard = include_str!("../../tools/guard.rs");
-        for (source, start, end) in [
-            (ask, "    pub(super) async fn human_reply(", "\n    }\n}"),
-            (ask, "    async fn resolve_ask(", "\n    }\n}"),
-            (
-                step,
-                "    async fn dispatch_primary(",
-                "    async fn dispatch_effect(",
-            ),
-            (tools, "    async fn run_unguarded(", "    fn pinned_root("),
-            (tools, "    fn pinned_root(", "    async fn run_in_process("),
-            (guard, "fn validate_task(", "fn restore_cache("),
-        ] {
-            let body = source
-                .split_once(start)
-                .unwrap()
-                .1
-                .split_once(end)
-                .unwrap()
-                .0;
-            for clock in ["now_ms(", "SystemTime", "expires_at_ms"] {
-                assert!(!body.contains(clock), "{start} reintroduced {clock}");
-            }
         }
     }
 }

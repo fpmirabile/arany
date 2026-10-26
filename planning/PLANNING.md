@@ -19,7 +19,7 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
 
 ## Slice delivery
 
-The unit of delivery, review and bookkeeping is the slice ID. A slice is at most 600 changed lines unless its plan records an owner exception.
+The unit of delivery, review and bookkeeping is the slice ID. A slice is at most 1,500 changed lines, excluding pure moves and listed deletions, unless its plan records an owner exception.
 
 - A family of IDs is that many slices; narrowing a PR leaves the remaining IDs open. Only the branch under review delivers a slice.
 - A PR names the exact IDs it completes in its `Slices` line and nothing more. An ID delivered in part keeps its ID and stays listed as remaining in the plan.

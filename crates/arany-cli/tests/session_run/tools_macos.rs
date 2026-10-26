@@ -2500,6 +2500,7 @@ int main(void) {
             "closed Goal replay: {case}"
         );
         if case == "overflow" {
+            const EXPECTED_OUTPUT_BYTES: u64 = 1_048_591;
             let contract = replay.goals[0]
                 .plan_contract
                 .as_ref()
@@ -2511,7 +2512,23 @@ int main(void) {
             ));
             let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
             let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
-            assert_eq!(result["stdout_total"]["bytes"], 1048591);
+            assert_eq!(result["stdout_total"]["bytes"], EXPECTED_OUTPUT_BYTES);
+            let spill = observation
+                .spill
+                .as_ref()
+                .expect("macOS retains excerpted output");
+            assert_eq!(spill.bytes, EXPECTED_OUTPUT_BYTES);
+            assert!(!spill.truncated);
+            let file = state_path
+                .join("spill")
+                .join(replay.runs[0].id.to_string())
+                .join(format!("{}.txt", spill.r#ref));
+            let raw = std::fs::read(file).unwrap();
+            assert_eq!(raw.len() as u64, spill.bytes);
+            let padding = raw
+                .strip_prefix(b"payload-started")
+                .expect("retained output starts with the command prefix");
+            assert!(padding.iter().all(|byte| *byte == b' '));
             assert!(
                 result["stdout"]
                     .as_str()

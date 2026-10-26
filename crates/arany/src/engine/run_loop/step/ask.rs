@@ -347,3 +347,37 @@ pub(super) async fn unguarded_gate(
         inactive_rules: runtime.has_inactive_host_rules(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
+        let step = include_str!("../step.rs");
+        let ask = include_str!("ask.rs");
+        let tools = include_str!("../../../tools.rs");
+        let guard = include_str!("../../../tools/guard.rs");
+        for (source, start, end) in [
+            (ask, "    pub(super) async fn human_reply(", "\n    }\n}"),
+            (ask, "    async fn resolve_ask(", "\n    }\n}"),
+            (
+                step,
+                "    async fn dispatch_primary(",
+                "    async fn dispatch_effect(",
+            ),
+            (tools, "    async fn run_unguarded(", "    fn pinned_root("),
+            (tools, "    fn pinned_root(", "    async fn run_in_process("),
+            (guard, "fn validate_task(", "fn restore_cache("),
+        ] {
+            let body = source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0;
+            for clock in ["now_ms(", "SystemTime", "expires_at_ms"] {
+                assert!(!body.contains(clock), "{start} reintroduced {clock}");
+            }
+        }
+    }
+}

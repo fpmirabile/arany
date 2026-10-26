@@ -5,7 +5,7 @@
 - Status: `In progress`
 - Owner: harness maintainers
 - Last updated: 2026-10-26
-- Next action: release independent R1–R5 tracks under the gates below; continue R2 at R2p4, continue R3p2 after R3p1 CI evidence, independent of the remaining R3e, and hold R2c5/R6b for final closeout.
+- Next action: release independent R1–R5 tracks under the gates below; continue R2 at R2p5, continue R3p2 after R3p1 CI evidence, and hold R2c5/R6b for final closeout.
 
 ## Outcome and scope
 
@@ -98,7 +98,7 @@ Use the R1 evidence row for every increment's affected producers; R1c closes onl
 
 ### R2 — Finish U1/U2 with stable setup entry points
 
-R2p1 → R2p2 precede every remaining flow move, as the original U2-before-U1 sequencing required. R2p3 is implemented; continue R2p4 → R2p5 → R2a1–R2a4 → R2b1–R2b4 → R2c1–R2c5 serially: one setup entry-point/test owner at a time. Original U1a/U2a, roster/routing feature setup and Provider prefix construction are already present; do not redo them.
+R2p1 → R2p2 precede every remaining flow move, as the original U2-before-U1 sequencing required. R2p3–R2p4 are implemented; continue R2p5 → R2a1–R2a4 → R2b1–R2b4 → R2c1–R2c5 serially: one setup entry-point/test owner at a time. Original U1a/U2a, roster/routing feature setup and Provider prefix construction are already present; do not redo them.
 
 Each inventory below refers to current `cli/attached/setup.rs`. Private sibling calls may temporarily use narrow imports from setup until their own operation moves; remove superseded helpers/re-exports as the last consumer transfers. No wrapper-only module, duplicate error enum or copied process fixture.
 
@@ -106,7 +106,6 @@ Each inventory below refers to current `cli/attached/setup.rs`. Private sibling 
 |---|---|---|
 | R2p1 / U2b | Finish native operation-specific conversion ownership: move `native_removal_error` (:761–772) and native-save uncertainty message construction (:2045–2059) behind narrow `error.rs` methods; keep journal disposition/settlement in the flow. Audit saved-access/native calls already converted by #463 without rewriting them. Preserve exact text and diagnostic side effects. | ≤200 |
 | R2p2 / U2c | Finish operation-specific mappings through `error.rs`: `chatgpt_removal_error` (:752), `custom_write_error` (:1098), authorization/uncertainty/keyring mappings (:2485–2516) and their focused fallback assertion. Audit existing routing/roster conversions from #463 without redoing them. Keep safe custom-check status vocabulary with its display owner; retain exact messages, logging and cancellation paths. | ≤300 |
-| R2p4 / U1c, save flow | Move `inspect_or_file`, `native_setup`, `settle_native_save` (:491–503,1887–2063) to `native.rs`; preserve lookup → choice → catalog → journal → save/settle. | ≤480 (200/80) |
 | R2p5 / U1c, catalog/default flow | Move `native_catalog_default`, `load_catalog` (:2840–2852,3225–3241) and `setup_account_requires_explicit_effort_for_unreviewed_model` (:3430–3471) to `native.rs`. | ≤250 (85/80) |
 | R2a1 / U1d | Move `ChatGptSetupAccount` and impl (:199–248), `chatgpt_setup`, action enum/action (:1732–1850), `choose_saved_chatgpt` (:2146–2216) to `chatgpt.rs`; preserve menu → selected action → result/default settlement. | ≤600 (260/80) |
 | R2a2 / U1e | Move ChatGPT local removal, saved-ID choice/labels (:674–760,773–815), inspection (:1851–1886), selection (:2217–2257), selected/account defaults (:449–471), and colliding-ID label test (:3419–3427) to `chatgpt.rs`; mappings already transferred by R2p2 are excluded. | ≤570 (245/80) |
@@ -138,12 +137,11 @@ Every R2 PR runs the applicable setup/removal tables and the R2 process owners a
 
 ### R3 — E8b–E8h, focused Engine evidence and Drafts
 
-R3p1 implementation is complete; its exact filtered execution and permission/hook journey evidence remain for CI. R3p2 (Engine evidence) follows it independently of the Drafts series; R3a–R3d are implemented; R3e remains. E8a/J1 prerequisites are present as inventoried above; reserve the step owners and permission/hook evidence against overlapping Engine work. Delivery follows [slice delivery](../PLANNING.md#slice-delivery). R3p1/R3p2 each include `docs/specs/execution.md` and overview §2: corrected permission/cancellation evidence ownership, with unchanged policy. R3a–R3e each include `docs/specs/terminal.md` and overview §8: draft retention/overflow ownership or corrected focused/process evidence links, without new behavior.
+R3p1 implementation is complete; its exact filtered execution and permission/hook journey evidence remain for CI. R3p2 (Engine evidence) follows it independently of the Drafts series; R3a–R3e are implemented, with execution evidence still required by the exit checklist. E8a/J1 prerequisites are present as inventoried above; reserve the step owners and permission/hook evidence against overlapping Engine work. Delivery follows [slice delivery](../PLANNING.md#slice-delivery). R3p1/R3p2 each include `docs/specs/execution.md` and overview §2: corrected permission/cancellation evidence ownership, with unchanged policy. R3a–R3e each include `docs/specs/terminal.md` and overview §8: draft retention/overflow ownership or corrected focused/process evidence links, without new behavior.
 
 | ID / original | Complete increment | Estimate/ceiling |
 |---|---|---|
 | R3p2 / E8c | Move `cancellation_refuses_buffered_and_late_active_window_requests` (step.rs:1660–1699) beside `settle_cancelled` in `step/intent.rs`; move `human_wait_and_dispatch_pins_do_not_consult_the_system_clock` (:1701–1730) to `step/ask.rs`. Correct every source-relative include; retain all six source regions, including `resolve_ask`, and all three forbidden clock patterns. Evidence: R3p1/R3p2 owners above, unchanged two-test/assertion inventory and nonzero old/new exact filters; retain parent cross-flow tables. | ≤260 (≤80/100) |
-| R3e / E8h | Move remaining driver steering/delivery/held/overflow/retention cases (:2648–2760, ≤130 with module glue), removing the superseded inline driver module. Old/new filters must execute nonzero matching cases; process/macOS filters stay unchanged. | ≤320 (130/60) |
 
 Use the corresponding R3 evidence owners and compare test names/assertions before and after each move; R3a–R3e also include existing Run input/approval tests. Update remaining work under [slice delivery](../PLANNING.md#slice-delivery). A lower file length alone does not close this track.
 

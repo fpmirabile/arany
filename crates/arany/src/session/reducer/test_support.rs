@@ -1,0 +1,751 @@
+use super::*;
+use crate::provider::{AgentPhase, OutputTokenBound};
+use crate::session::events::{ChildGrant, CollaborationPolicy, GoalSuccessCriterion};
+use crate::tools::{
+    CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolLimits, ToolObservation,
+    ToolPolicyReceipt,
+};
+
+pub(super) const GOAL_OBJECTIVE: &str = "Goal";
+
+pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> SessionView {
+    let session_id = SessionId::new();
+    let goal_id = GoalId::new();
+    let run_id = RunId::new();
+    let intent = EffectIntent {
+        host: None,
+        host_command: None,
+        target: crate::session::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id,
+        agent_run_id: AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: None,
+            limit: Some(32),
+        },
+        limits: crate::tools::ToolLimits::default(),
+        use_count: 1,
+    };
+    let tool = ToolView {
+        checkpoint: None,
+        active_time_reserved: false,
+        narrowing_source: None,
+        permission_verdict: None,
+        started_sequence: Some(0),
+        hooks: Vec::new(),
+        hook_sequence: None,
+        intent: intent.clone(),
+        observation: disposition.map(|disposition| ToolObservation {
+            spill: None,
+            enforcement_cause: None,
+            limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
+                .then_some(crate::tools::LimitCause::Resource),
+            intent,
+            disposition,
+            output: if disposition == ToolDisposition::Succeeded {
+                "{}".into()
+            } else {
+                String::new()
+            },
+            attestation: None,
+            approval_cause: None,
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+        }),
+        review_call_index: None,
+        finished_sequence: disposition.map(|_| 2),
+    };
+    SessionView {
+        usage: Default::default(),
+        rewinds: Default::default(),
+        id: session_id,
+        title: "Interrupted Goal".into(),
+        title_is_explicit: false,
+        inherited_title: None,
+        workspace_identity: Some(WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        }),
+        defaults: SessionDefaults::default(),
+        host_epoch_floor: 0,
+        created_sequence: 0,
+        last_sequence: 1,
+        lineage: None,
+        runs: vec![RunView {
+            skill: None,
+            failure: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: run_id,
+            objective: "Inspect before planning".into(),
+            images: Vec::new(),
+            config: None,
+            agents: Vec::new(),
+            assistant_message: None,
+            status: RunStatus::Interrupted,
+            accepted_sequence: 1,
+            finished_sequence: None,
+            tools: vec![tool],
+            tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
+            tool_compaction_covered_count: 0,
+            tool_results_cleared_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+        }],
+        compactions: Vec::new(),
+        goals: vec![GoalView {
+            include_paths: Some(Vec::new()),
+            id: goal_id,
+            objective: "Inspect before planning".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            budget: GoalBudget::default(),
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            phase: GoalPhase::Research,
+            autonomous: false,
+            status: GoalStatus::Interrupted,
+            run_ids: vec![run_id],
+            active_run: None,
+            plan_contract: None,
+            success_state: crate::session::GoalSuccessState::NoContract,
+            success_criterion_satisfied: false,
+            awaiting_plan_contract: true,
+            active_ms: 0,
+            uncertain_active_ms: 0,
+            active_deadline: None,
+            provider_calls: 1,
+            unobserved_provider_calls: Vec::new(),
+            compaction_call_reserved: None,
+            uncertain_compaction_calls: 0,
+            known_tokens: 0,
+            known_cached_tokens: 0,
+            token_usage_unknown: false,
+            report: None,
+            started_sequence: 1,
+            finished_sequence: None,
+            active_ceiling_ms: 0,
+            continues: None,
+            budget_closed: false,
+            budget_refusal: None,
+            run_start_usage: Default::default(),
+        }],
+        pending_provider_setup_edit: None,
+        provider_setup_uncertain: false,
+    }
+}
+
+pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
+    RunConfig {
+        supervisor: tools.then(crate::supervisor::SupervisorPolicy::all_off),
+        worker_policy: None,
+        agent_definitions: None,
+        roster: None,
+        providers: None,
+        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
+        model: "gpt-5.4".into(),
+        effort: None,
+        custom_profile_provenance: None,
+        saved_api_account_id: None,
+        chatgpt_provenance: None,
+        output_token_bound: OutputTokenBound::ProviderEnforced,
+        context_window_tokens: None,
+        policy,
+        output_token_cap: 4096,
+        provider_concurrency: 1,
+        workspace_device: 1,
+        workspace_inode: 2,
+        user_instruction_digest: None,
+        instruction_sources: Vec::new(),
+        launch_directory: String::new(),
+        include_digests: Vec::new(),
+        history_run_ids: Vec::new(),
+        excluded_history_runs: 0,
+        context_usage: None,
+        compaction_event_sequence: None,
+        compaction_content_digest: None,
+        tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
+            host_epoch: None,
+            host_prefixes: Vec::new(),
+            permissions_digest: None,
+            contract_version: 1,
+            config_digest: [1; 32],
+            max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
+            unguarded_rules_digest: None,
+            unguarded: crate::tools::UnguardedGrant::HumanOnly,
+            child_unguarded: crate::tools::UnguardedGrant::Denied,
+        })),
+    }
+}
+
+pub(super) fn record(
+    phase: AgentPhase,
+    disposition: ProviderCallDisposition,
+    tokens: Option<u32>,
+) -> ProviderCallRecord {
+    ProviderCallRecord {
+        rate_limits: None,
+        delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
+            vec![crate::session::worker::ChildAssignment::Researcher {
+                objective: "Check the child result".into(),
+                definition: None,
+                profile: None,
+            }]
+        }),
+        phase,
+        disposition,
+        response_id: None,
+        input_tokens: tokens,
+        output_tokens: tokens,
+        wire_provenance: None,
+        refusal: None,
+        failure_reason: None,
+        requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+    }
+}
+
+pub(super) fn journal(session_id: SessionId, mut events: Vec<Event>) -> Vec<EventEnvelope> {
+    for i in 0..events.len() {
+        if matches!(&events[i], Event::ProviderCallRecorded { record, .. } if record.disposition == ProviderCallDisposition::Delegated)
+        {
+            let assignments = events[i + 1..]
+                .iter()
+                .filter_map(|e| match e {
+                    Event::AgentSpawned {
+                        role: AgentRole::Child,
+                        objective: Some(objective),
+                        definition,
+                        profile,
+                        ..
+                    } => Some(crate::session::worker::ChildAssignment::Researcher {
+                        objective: objective.clone(),
+                        definition: definition.clone(),
+                        profile: profile.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !assignments.is_empty()
+                && let Event::ProviderCallRecorded { record, .. } = &mut events[i]
+            {
+                record.delegation = Some(assignments);
+            }
+        }
+    }
+    events
+        .into_iter()
+        .zip(1..)
+        .map(|(event, sequence)| {
+            let (run_id, agent_run_id) = event.scope();
+            EventEnvelope {
+                sequence,
+                session_id,
+                run_id,
+                agent_run_id,
+                event,
+                created_at_ms: 0,
+            }
+        })
+        .collect()
+}
+
+pub(super) fn goal_started(goal_id: GoalId, budget: GoalBudget) -> Event {
+    started_with(goal_id, budget, false, None)
+}
+
+pub(super) fn started_with(
+    goal_id: GoalId,
+    budget: GoalBudget,
+    autonomous: bool,
+    continues: Option<GoalId>,
+) -> Event {
+    Event::GoalStarted {
+        include_paths: Some(Vec::new()),
+        goal_id,
+        objective: GOAL_OBJECTIVE.into(),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
+        budget,
+        resource_settings: crate::tools::ToolResourceSettings::default(),
+        phase: GoalPhase::Implementation,
+        autonomous,
+        continues,
+    }
+}
+
+pub(super) fn start_run(
+    goal_id: GoalId,
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+    config: RunConfig,
+) -> Vec<Event> {
+    let profile = config
+        .roster
+        .as_ref()
+        .map(|roster| roster.providers.primary.clone());
+    vec![
+        Event::GoalRunLinked {
+            goal_id,
+            run_id,
+            phase: GoalPhase::Implementation,
+        },
+        Event::MessageAccepted {
+            skill: None,
+            run_id,
+            text: GOAL_OBJECTIVE.into(),
+            images: Vec::new(),
+        },
+        Event::RunStarted {
+            run_id,
+            config,
+            active_deadline_ms: None,
+        },
+        Event::AgentSpawned {
+            profile,
+            assignment: None,
+            definition: None,
+            run_id,
+            agent_run_id,
+            role: AgentRole::Primary,
+            ordinal: 0,
+            objective: None,
+            grant: None,
+        },
+    ]
+}
+
+pub(super) fn complete_run_and_goal(
+    goal_id: GoalId,
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+) -> Vec<Event> {
+    vec![
+        Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        },
+        Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        },
+        Event::AgentFinished {
+            worker: None,
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        },
+        Event::MessageCommitted {
+            run_id,
+            text: "done".into(),
+        },
+        Event::RunFinished {
+            run_id,
+            disposition: RunDisposition::Finished,
+            failure: None,
+            active_ms: 0,
+        },
+        Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Completed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "done".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+            exhausted: false,
+            budget_refusal: None,
+        },
+    ]
+}
+
+pub(super) fn cancel_run(run_id: RunId, agent_run_id: AgentRunId) -> Vec<Event> {
+    vec![
+        Event::AgentFinished {
+            worker: None,
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Cancelled,
+            summary: None,
+            result: None,
+        },
+        Event::RunFinished {
+            run_id,
+            disposition: RunDisposition::Cancelled,
+            failure: None,
+            active_ms: 0,
+        },
+    ]
+}
+
+pub(super) fn session_with(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
+    let mut all = vec![Event::SessionStarted {
+        title: "Goal".into(),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
+    }];
+    all.extend(events);
+    journal(session_id, all)
+}
+
+pub(super) fn delegated_session(known_tokens: u64) -> SessionView {
+    let session_id = SessionId::new();
+    let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+    let contract = GoalPlanContract {
+        mission: "Plan".into(),
+        resource_class: crate::tools::ToolResourceClass::Default,
+        command_timeout_ms: None,
+        paths: vec!["src/lib.rs".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/lib.rs".into(),
+            content: "ok".into(),
+        },
+        budget: GoalBudget {
+            max_tokens: Some(1000),
+            ..GoalBudget::default()
+        },
+    };
+    SessionView {
+        usage: Default::default(),
+        rewinds: Default::default(),
+        id: session_id,
+        title: "Goal".into(),
+        title_is_explicit: false,
+        inherited_title: None,
+        workspace_identity: Some(WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        }),
+        defaults: SessionDefaults::default(),
+        host_epoch_floor: 0,
+        created_sequence: 0,
+        last_sequence: 1,
+        lineage: None,
+        runs: vec![RunView {
+            skill: None,
+            failure: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: run_id,
+            objective: GOAL_OBJECTIVE.into(),
+            images: Vec::new(),
+            config: Some(config(
+                CollaborationPolicy::Auto {
+                    max_active_children: 1,
+                },
+                false,
+            )),
+            agents: vec![AgentView {
+                tool_refusal: None,
+                tool_refusal_sequence: None,
+                profile: None,
+                assignment: None,
+                definition: None,
+                id: agent_run_id,
+                role: AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+                summary: None,
+                result: None,
+                provider_calls: vec![record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Delegated,
+                    Some(0),
+                )],
+                steering_notes: Vec::new(),
+                grant: None,
+                tools: Vec::new(),
+                status: AgentStatus::Active,
+            }],
+            assistant_message: None,
+            status: RunStatus::Active,
+            accepted_sequence: 1,
+            finished_sequence: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
+            tool_compaction_covered_count: 0,
+            tool_results_cleared_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+        }],
+        compactions: Vec::new(),
+        goals: vec![GoalView {
+            include_paths: Some(Vec::new()),
+            id: goal_id,
+            objective: GOAL_OBJECTIVE.into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            budget: GoalBudget::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
+            status: GoalStatus::Running,
+            run_ids: vec![run_id],
+            active_run: Some(run_id),
+            plan_contract: Some(contract),
+            success_criterion_satisfied: false,
+            awaiting_plan_contract: false,
+            active_ms: 0,
+            uncertain_active_ms: 0,
+            active_deadline: None,
+            compaction_call_reserved: None,
+            uncertain_compaction_calls: 0,
+            success_state: crate::session::GoalSuccessState::NoContract,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            provider_calls: 1,
+            unobserved_provider_calls: Vec::new(),
+            known_tokens,
+            token_usage_unknown: false,
+            report: None,
+            started_sequence: 1,
+            finished_sequence: None,
+            known_cached_tokens: 0,
+            active_ceiling_ms: 0,
+            continues: None,
+            budget_closed: false,
+            budget_refusal: None,
+            run_start_usage: Default::default(),
+        }],
+        pending_provider_setup_edit: None,
+        provider_setup_uncertain: false,
+    }
+}
+
+pub(super) fn apply_child_spawn(
+    view: &mut SessionView,
+    grant: ChildGrant,
+) -> Result<(), ReplayError> {
+    let run_id = view.runs[0].id;
+    let event = Event::AgentSpawned {
+        profile: None,
+        assignment: None,
+        definition: None,
+        run_id,
+        agent_run_id: AgentRunId::new(),
+        role: AgentRole::Child,
+        ordinal: 1,
+        objective: Some("Check the child result".into()),
+        grant: Some(grant),
+    };
+    let (run_id, agent_run_id) = event.scope();
+    view.apply_committed(&EventEnvelope {
+        sequence: 2,
+        session_id: view.id,
+        run_id,
+        agent_run_id,
+        event,
+        created_at_ms: 0,
+    })
+}
+
+pub(super) fn apply(view: &mut SessionView, event: Event) -> Result<(), ReplayError> {
+    let (run_id, agent_run_id) = event.scope();
+    let sequence = view.last_sequence + 1;
+    view.apply_committed(&EventEnvelope {
+        sequence,
+        session_id: view.id,
+        run_id,
+        agent_run_id,
+        event,
+        created_at_ms: 0,
+    })
+}
+
+pub(super) fn child_intent(
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+    call: ToolCall,
+) -> EffectIntent {
+    EffectIntent {
+        host: None,
+        host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
+        target: crate::session::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id,
+        agent_run_id,
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call,
+        limits: ToolLimits::default(),
+        use_count: 1,
+    }
+}
+
+pub(super) fn reserve_child_call(
+    goal_id: GoalId,
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+) -> Event {
+    Event::GoalProviderCallReserved {
+        goal_id,
+        run_id,
+        agent_run_id,
+        active_ceiling_ms: 0,
+    }
+}
+
+pub(super) fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
+    let output = if matches!(
+        intent.call,
+        ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. }
+    ) {
+        let expected = match &intent.call {
+            ToolCall::Write {
+                expected_digest, ..
+            } => expected_digest.clone(),
+            ToolCall::Edit {
+                expected_digest, ..
+            }
+            | ToolCall::MultiEdit {
+                expected_digest, ..
+            } => Some(expected_digest.clone()),
+            _ => unreachable!(),
+        };
+        serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+            sha256: crate::validate::hex_digest(content),
+            bytes: content.len() as u32,
+            executable: false,
+            before: expected.map(|sha256| crate::session::rewind::FileState {
+                sha256,
+                bytes: 0,
+                executable: false,
+            }),
+        })
+        .unwrap()
+    } else if matches!(
+        intent.call,
+        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+    ) {
+        let stdout = String::from_utf8(content.to_vec()).unwrap();
+        serde_json::to_string(&crate::tools::types::CommandResult {
+            selection: Some(Default::default()),
+            exit_code: Some(0),
+            stdout_total: crate::tools::OutputTotal {
+                bytes: stdout.len() as u64,
+                lines: stdout.lines().count() as u64,
+            },
+            stdout,
+            stderr: String::new(),
+            stderr_total: Default::default(),
+            changeset: Default::default(),
+        })
+        .unwrap()
+    } else if matches!(
+        intent.call,
+        ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. }
+    ) {
+        String::from_utf8(content.to_vec()).unwrap()
+    } else {
+        serde_json::json!({ "sha256": crate::validate::hex_digest(content) }).to_string()
+    };
+    ToolObservation {
+        spill: None,
+        enforcement_cause: None,
+        limit_cause: None,
+        attestation: Some(crate::tools::Attestation::for_site(&intent)),
+        intent,
+        disposition: ToolDisposition::Succeeded,
+        output,
+        approval_cause: None,
+        cache_update: CacheUpdate::NotApplicable,
+    }
+}
+
+pub(super) fn primary_tool_session(planned: bool) -> (SessionView, GoalId, RunId, AgentRunId) {
+    let mut view = delegated_session(0);
+    view.runs[0].config = Some(config(CollaborationPolicy::Single, true));
+    view.runs[0].agents[0].provider_calls.clear();
+    if !planned {
+        view.goals[0].plan_contract = None;
+    }
+    let (goal, run, agent) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[0].id);
+    (view, goal, run, agent)
+}
+
+pub(super) fn read_intent(run: RunId, agent: AgentRunId, path: &str) -> EffectIntent {
+    child_intent(
+        run,
+        agent,
+        ToolCall::Read {
+            path: path.into(),
+            offset: None,
+            limit: Some(1024),
+        },
+    )
+}
+
+pub(super) fn tool_proposed(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {
+    Event::ToolProposed {
+        run_id: run,
+        agent_run_id: agent,
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
+    }
+}
+
+pub(super) fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {
+    Event::ToolStarted {
+        verdict: None,
+        run_id: run,
+        agent_run_id: agent,
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
+    }
+}
+
+pub(super) fn requesting_step(run: RunId, agent: AgentRunId, requested_tools: u8) -> Event {
+    Event::ProviderCallRecorded {
+        run_id: run,
+        agent_run_id: agent,
+        record: ProviderCallRecord {
+            requested_tools,
+            ..record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::ToolRequested,
+                Some(0),
+            )
+        },
+    }
+}
