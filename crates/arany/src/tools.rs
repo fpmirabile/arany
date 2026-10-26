@@ -16,6 +16,7 @@ mod git;
 mod glob;
 mod grant;
 mod guard;
+pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
 pub(crate) use mcp::FRAME_BYTES;
 mod output;
@@ -215,7 +216,7 @@ pub(crate) struct ToolRuntime {
     config: Config,
     git_writes_available: bool,
     host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
-    worker: Option<std::sync::Arc<worker::Action>>,
+    worker: Option<std::sync::Arc<guard::transfer::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -629,7 +630,7 @@ impl ToolRuntime {
             ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
             } => {
-                let changes = worker::decode_handover(
+                let changes = guard::transfer::decode_handover(
                     intent,
                     self.handover.as_deref().ok_or(ToolError::ChangedInput)?,
                     &self.config,
@@ -1681,7 +1682,8 @@ impl ToolRuntime {
             let control = blocking_control;
             let root = runtime.pinned_root(&file_intent)?;
             let result = if let Some(bytes) = &runtime.handover {
-                let changeset = worker::decode_handover(&file_intent, bytes, &runtime.config)?;
+                let changeset =
+                    guard::transfer::decode_handover(&file_intent, bytes, &runtime.config)?;
                 fs::apply_worker_changeset(&root, &changeset, &control)
             } else {
                 fs::mutate(&root, &file_intent.call, &runtime.config, &control)
