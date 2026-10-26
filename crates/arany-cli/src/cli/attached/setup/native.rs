@@ -1,14 +1,13 @@
 use super::{
     AUTHORIZE_PROMPT, AUTHORIZE_TITLE, SavedDefaults, SetupError, SetupJournal, SetupSelection,
-    await_operation, await_setup_ack, choose, load_catalog, native_catalog_default, read_api_key,
-    read_workspace_id, review_warning,
+    await_operation, await_setup_ack, choose, read_api_key, read_workspace_id, review_warning,
 };
 use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
 use arany::{
-    Effort, NativeApiCredentials, ProviderKind, ProviderSetupDisposition, ProviderSetupTargetKind,
-    RecordKind, SessionDefaults,
+    Effort, ModelEntry, NativeApiCredentials, ProviderKind, ProviderSetupDisposition,
+    ProviderSetupTargetKind, RecordKind, SessionDefaults, list_native_models_with_credentials,
 };
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -102,8 +101,7 @@ pub(super) async fn select_native_account(
     let credentials = credentials::load_selected(account.id, &account.provider.profile())
         .await
         .map_err(SetupError::recoverable)?;
-    let Some(catalog) =
-        super::load_catalog(terminal, &account.provider.profile(), &credentials).await?
+    let Some(catalog) = load_catalog(terminal, &account.provider.profile(), &credentials).await?
     else {
         return Ok(None);
     };
@@ -453,10 +451,82 @@ pub(super) async fn settle_native_save(
     Ok(())
 }
 
+fn native_catalog_default<'a>(provider: &str, items: &'a [ModelEntry]) -> Option<(&'a str, bool)> {
+    let preferred: &[&str] = match ProviderKind::parse(provider) {
+        Some(ProviderKind::OpenAi) => &["gpt-5.6-luna"],
+        Some(ProviderKind::Anthropic) => &["claude-sonnet-5-5", "claude-sonnet-5"],
+        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => return None,
+    };
+    preferred
+        .iter()
+        .find_map(|id| items.iter().find(|item| item.id == *id))
+        .map(|item| (item.id.as_str(), true))
+        .or_else(|| items.first().map(|item| (item.id.as_str(), false)))
+}
+
+async fn load_catalog(
+    terminal: &mut AttachedTerminal,
+    provider: &str,
+    credentials: &NativeApiCredentials,
+) -> Result<Option<Vec<arany::ModelEntry>>, SetupError> {
+    await_operation(
+        terminal,
+        "Loading models",
+        "Reading the selected account's model catalog; Ctrl+C cancels",
+        list_native_models_with_credentials(provider, credentials),
+    )
+    .await?
+    .transpose()
+    .map_err(SetupError::recoverable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arany::StateRoot;
+
+    #[test]
+    fn setup_account_requires_explicit_effort_for_unreviewed_model() {
+        assert!(
+            SavedAccount::new("openai".into(), "future-model".into(), None, "key".into()).is_err()
+        );
+        assert!(
+            SavedAccount::new(
+                "openai".into(),
+                "future-model".into(),
+                Some(Effort::High),
+                "key".into(),
+            )
+            .is_ok()
+        );
+        for (provider, preference) in [
+            ("openai", "gpt-5.6-luna"),
+            ("anthropic", "claude-sonnet-5-5"),
+        ] {
+            let mut items = vec![ModelEntry::exact_custom("future-model".into())];
+            assert_eq!(
+                native_catalog_default(provider, &items),
+                Some(("future-model", false))
+            );
+            items.push(ModelEntry::exact_custom(preference.into()));
+            assert_eq!(
+                native_catalog_default(provider, &items),
+                Some((preference, true))
+            );
+            assert_eq!(items[0].id, "future-model", "catalog order is unchanged");
+            let (model, _) = native_catalog_default(provider, &items).unwrap();
+            let account = SavedAccount::new(
+                provider.into(),
+                model.into(),
+                Some(Effort::Low),
+                "synthetic-key".into(),
+            )
+            .unwrap();
+            assert_eq!(defaults(&account).effort, Some(Effort::Low));
+            assert!(native_catalog_default(provider, &[]).is_none());
+        }
+        assert!(native_catalog_default("custom:local", &[]).is_none());
+    }
 
     #[test]
     fn saved_account_defaults_pin_only_the_selected_account() {
