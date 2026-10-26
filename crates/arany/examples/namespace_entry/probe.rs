@@ -120,11 +120,11 @@ fn executable_identity(path: &str) -> Result<()> {
 
 fn snapshot(stage: &str) -> Result<()> {
     println!("stage={stage} pid={}", std::process::id());
-    for path in [
-        "/proc/self/attr/current",
-        "/proc/self/uid_map",
-        "/proc/self/gid_map",
-    ] {
+    println!(
+        "/proc/self/attr/current={:?}",
+        bounded_text("/proc/self/attr/current")
+    );
+    for path in ["/proc/self/uid_map", "/proc/self/gid_map"] {
         println!("{path}={:?}", bounded_text(path)?);
     }
     for line in bounded_text("/proc/self/status")?.lines() {
@@ -173,7 +173,7 @@ fn host_evidence() -> Result<bool> {
         && release.lines().any(|line| line == "VERSION_ID=\"24.04\"")
         && restriction.as_ref().is_ok_and(|value| value.trim() == "1")
         && apparmor.as_ref().is_ok_and(|value| value.trim() == "Y")
-        && bounded_text("/proc/self/attr/current")?.trim() == "unconfined")
+        && bounded_text("/proc/self/attr/current").is_ok_and(|value| value.trim() == "unconfined"))
 }
 
 fn compare_entries() -> Result<()> {
@@ -267,17 +267,20 @@ fn entry(in_process: bool, root: &Path) -> Result<()> {
     )?;
     let sentinel = root.join("sentinel");
     fs::write(&sentinel, b"namespace probe")?;
-    assert_eq!(fs::read(&sentinel)?, b"namespace probe");
+    if fs::read(&sentinel)? != b"namespace probe" {
+        return Err("mounted sentinel content mismatch".into());
+    }
     rustix::mount::unmount(root, UnmountFlags::empty())?;
-    assert!(!sentinel.exists());
+    if sentinel.try_exists()? {
+        return Err("sentinel remains visible after unmount".into());
+    }
     println!("actual tmpfs mount/write/read/unmount succeeded");
     clear_capabilities()?;
     verify_clear()?;
-    assert_eq!(
-        rustix::mount::mount("tmpfs", root, "tmpfs", MountFlags::empty(), None),
-        Err(rustix::io::Errno::PERM),
-        "mount forbidden after capability removal"
-    );
+    let mount = rustix::mount::mount("tmpfs", root, "tmpfs", MountFlags::empty(), None);
+    if mount != Err(rustix::io::Errno::PERM) {
+        return Err(format!("expected EPERM after capability removal, observed {mount:?}").into());
+    }
     Err(Command::new("/proc/self/exe")
         .arg("--verify-clear")
         .env_clear()
@@ -315,8 +318,12 @@ fn verify_clear() -> Result<()> {
         .filter(|line| line.starts_with("Cap"))
     {
         let (_, value) = line.split_once(':').ok_or("invalid capability status")?;
-        assert_eq!(u64::from_str_radix(value.trim(), 16)?, 0, "{line}");
+        if u64::from_str_radix(value.trim(), 16)? != 0 {
+            return Err(format!("capability set not cleared: {line}").into());
+        }
     }
-    assert!(thread::no_new_privs()?);
+    if !thread::no_new_privs()? {
+        return Err("no-new-privileges is not set".into());
+    }
     Ok(())
 }
