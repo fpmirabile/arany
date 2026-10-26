@@ -2187,6 +2187,7 @@ mod tests {
     }
 
     const CONTEXT_HEADROOM_BYTES: u32 = 1024;
+    const CONTEXT_WINDOW_TOKENS: u32 = 32 * 1024;
 
     async fn context_headroom_case(
         server: bool,
@@ -2211,8 +2212,9 @@ mod tests {
                     text: "Bounded answer".into(),
                 }),
             ])
-            .with_profile("openai", "gpt-5.4")
-            .with_context_window(32 * 1024),
+            .with_profile("anthropic", "claude-sonnet-5")
+            .with_effort(Effort::Low)
+            .with_context_window(CONTEXT_WINDOW_TOKENS),
         );
         let mut input = arany::test_support::scenario::request(&workspace, "Prior question");
         input.include_paths.clear();
@@ -2220,6 +2222,11 @@ mod tests {
         let seed = run_to_end(&engine, &provider, input)
             .await
             .expect("prior Run");
+        assert_eq!(
+            seed.run.config.as_ref().unwrap().context_window_tokens,
+            Some(CONTEXT_WINDOW_TOKENS),
+            "the headroom fixture must pin an admitted context window"
+        );
         let budget = seed
             .run
             .config
@@ -2234,6 +2241,9 @@ mod tests {
             seed.run.objective.len() + prior_answer.len() + HISTORY_TURN_FRAMING_BYTES;
         let objective = "Q".repeat(budget - history_bytes - CONTEXT_HEADROOM_BYTES as usize);
         let mut command = args(state.clone(), workspace.clone(), &objective);
+        command.provider = Some(ProviderArg::Anthropic);
+        command.model = Some(provider.identity().model.clone());
+        command.effort = provider.identity().effort;
         command.session_id = Some(seed.session_id.to_string());
         command.output = OutputArg::Jsonl;
         drive_context_case(server, command, engine, &provider).await;
