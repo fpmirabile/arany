@@ -4,8 +4,8 @@ use crate::provider::decode::{argument_limit, function_outcome, review_outcome, 
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
-    CompactionRequest, CompactionResponse, Effort, ProviderError, ProviderOutcome, ProviderRequest,
-    ProviderResponse, ProviderTurn, ProviderWireProvenance, ToolUseId, Usage,
+    CompactionRequest, CompactionResponse, Effort, PromptRole, ProviderError, ProviderOutcome,
+    ProviderRequest, ProviderResponse, ProviderTurn, ProviderWireProvenance, ToolUseId, Usage,
 };
 use crate::tools::ToolContext;
 use serde::Deserialize;
@@ -415,8 +415,10 @@ fn run_body_inner(
                     "tools": allowed.into_iter().map(|name| json!({"type":"function", "name":name})).collect::<Vec<_>>()
                 })
             };
-            body["parallel_tool_calls"] =
-                json!(request.input.role != crate::provider::PromptRole::Editor);
+            body["parallel_tool_calls"] = json!(match request.input.role {
+                PromptRole::Primary | PromptRole::Researcher => true,
+                PromptRole::Editor | PromptRole::ReadOnly | PromptRole::ToolReview => false,
+            });
         }
         body["include"] = json!(["reasoning.encrypted_content"]);
     } else {

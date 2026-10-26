@@ -2596,6 +2596,9 @@ fn openai_routes_pin_cached_function_selection_bytes() {
     };
     let catalog = json!({"write":false,"commands":[],"skills":[],"mcp_servers":[]});
     primary.input.tools = Some(crate::provider::test_support::tool_context(catalog.clone()));
+    let mut read_only = primary.clone();
+    read_only.input.role = PromptRole::ReadOnly;
+    read_only.input.tools = None;
     let mut synthesis = primary.clone();
     synthesis.phase = AgentPhase::RootSynthesis;
     let mut researcher = crate::provider::test_support::researcher_request("model-a");
@@ -2610,6 +2613,7 @@ fn openai_routes_pin_cached_function_selection_bytes() {
     let mut snapshots = serde_json::Map::new();
     for (label, request) in [
         ("planning", primary),
+        ("read_only", read_only),
         ("synthesis", synthesis),
         ("researcher", researcher),
         ("spent", spent),

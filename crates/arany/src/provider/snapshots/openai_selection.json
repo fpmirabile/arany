@@ -59,6 +59,20 @@
       "type": "allowed_tools"
     }
   },
+  "read_only": {
+    "parallel_tool_calls": false,
+    "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
+    "tool_choice": {
+      "mode": "auto",
+      "tools": [
+        {
+          "name": "arany_delegate",
+          "type": "function"
+        }
+      ],
+      "type": "allowed_tools"
+    }
+  },
   "researcher": {
     "parallel_tool_calls": true,
     "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
