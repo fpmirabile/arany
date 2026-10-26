@@ -56,4 +56,4 @@ New trust boundary: the proxy is a network reachability policy, not content insp
 
 ## Gates
 
-Low priority: opens after the "Daily use first" items and the higher "Pursue" items. Slice 1 edits `tools/config.rs`, `tools/guard/linux.rs`, `tools/guard/macos/unit.rs`, `guard.rs`, `tools/permissions/`: **after the [command Workspace overlay](../command-workspace-overlay/README.md) plan** (same Linux launcher), after #439 (`permissions.rs`, `config.rs`) and B15b. Slice 2 adds ToolCall variants: after B15b (family rows) and folded Tool-step Events (Event consumers). Slice 3 edits `tools/mcp.rs` and `accounts/`: after #452 (K2 accounts).
+Low priority: opens after the "Daily use first" items and the higher "Pursue" items. Slice 1 edits `tools/config.rs`, `tools/guard/linux.rs`, `tools/guard/macos/unit.rs`, `guard.rs`, `tools/permissions/`: **after the [command Workspace overlay](../command-workspace-overlay/README.md) plan** (same Linux launcher). Permission, Tool-family dispatch, folded Tool-step Events and account-owner prerequisites are implemented; reserve their files for slices 2/3.
