@@ -1556,7 +1556,12 @@ async fn assert_spill_session_scope(
                 ToolDisposition::Failed
             }
         );
-        if !same_session {
+        if same_session {
+            assert_eq!(
+                serde_json::from_str::<Value>(&read.output).unwrap()["text"],
+                "2\tPRIVATE_SPILL_CANARY\n"
+            );
+        } else {
             assert_eq!(read.output, "no spill for this Run");
         }
     }

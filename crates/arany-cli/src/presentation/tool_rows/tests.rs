@@ -1420,13 +1420,26 @@ fn spill_summary_neutralizes_untrusted_reference_text() {
         },
         "",
     );
-    tool.observation.as_mut().unwrap().spill = Some(
-        serde_json::from_value(
-            serde_json::json!({"ref":"reference\u{001b}[31m","bytes":64,"truncated":false}),
-        )
-        .unwrap(),
-    );
-    let summary = tool_summary(&tool);
-    assert!(summary.contains("Output spill: spill:"));
-    assert!(!summary.contains('\u{001b}'));
+    for (bytes, truncated, expected) in [
+        (
+            64,
+            false,
+            r"  Output spill: spill:reference\u{001b}[31m; 64 B; truncated: false",
+        ),
+        (
+            1024,
+            true,
+            r"  Output spill: spill:reference\u{001b}[31m; 1.0 KB; truncated: true",
+        ),
+    ] {
+        tool.observation.as_mut().unwrap().spill = Some(
+            serde_json::from_value(
+                serde_json::json!({"ref":"reference\u{001b}[31m","bytes":bytes,"truncated":truncated}),
+            )
+            .unwrap(),
+        );
+        let summary = tool_summary(&tool);
+        assert_eq!(summary.lines().last().unwrap(), expected);
+        assert!(!summary.contains('\u{001b}'));
+    }
 }
