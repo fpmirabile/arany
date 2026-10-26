@@ -1287,6 +1287,7 @@ mod tests {
             failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
             tool_compaction_covered_count: 0,
             tool_results_cleared_count: 0,
             definitions: Default::default(),

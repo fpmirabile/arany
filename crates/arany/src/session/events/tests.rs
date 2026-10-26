@@ -1180,6 +1180,7 @@ mod subscription_compaction_tests {
             covered_run_id: RunId::new(),
             covered_sequence: 1,
             source_digest: [1; 32],
+            recent_files: Vec::new(),
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             prompt_version: 1,
@@ -1201,6 +1202,13 @@ mod subscription_compaction_tests {
         };
         assert!(record.validate().is_ok());
         let encoded = serde_json::to_value(&record).unwrap();
+        assert!(encoded.get("recent_files").is_none());
+        let mut legacy = encoded.clone();
+        legacy.as_object_mut().unwrap().remove("recent_files");
+        assert_eq!(
+            serde_json::from_value::<CompactionRecord>(legacy).unwrap(),
+            record
+        );
         assert!(encoded["chatgpt_provenance"].is_null());
         assert_eq!(encoded["output_token_bound"], "provider_enforced");
         for field in [
@@ -1256,6 +1264,99 @@ mod subscription_compaction_tests {
             serde_json::from_value::<CompactionRecord>(encoded.clone()).unwrap(),
             record
         );
+        record.recent_files = vec![crate::session::RecentFile {
+            path: "src/main.rs".into(),
+            digest: "a".repeat(64),
+        }];
+        assert!(record.validate().is_ok());
+        let count_boundary: Vec<crate::session::RecentFile> = (0
+            ..crate::session::events::MAX_COMPACTION_RECENT_FILES)
+            .map(|index| crate::session::RecentFile {
+                path: format!("src/file-{index}.rs"),
+                digest: "a".repeat(64),
+            })
+            .collect();
+        record.recent_files = count_boundary;
+        assert!(record.validate().is_ok());
+        let byte_boundary: Vec<crate::session::RecentFile> = (0
+            ..crate::session::events::MAX_COMPACTION_RECENT_FILES)
+            .map(|index| crate::session::RecentFile {
+                path: format!(
+                    "d{index}/{}",
+                    "x".repeat(
+                        424 - (if index + 1 == crate::session::events::MAX_COMPACTION_RECENT_FILES {
+                            1
+                        } else {
+                            0
+                        }) - 3
+                    )
+                ),
+                digest: "a".repeat(64),
+            })
+            .collect();
+        let byte_boundary_size = serde_json::to_vec(&byte_boundary).unwrap().len();
+        assert_eq!(
+            byte_boundary_size,
+            crate::session::events::MAX_COMPACTION_RECENT_FILES_BYTES
+        );
+        assert!(
+            byte_boundary
+                .iter()
+                .all(|file| crate::validate::valid_relative(&file.path, false))
+        );
+        record.recent_files = byte_boundary.clone();
+        assert!(record.validate().is_ok());
+        let count_overflow = (0..=crate::session::events::MAX_COMPACTION_RECENT_FILES)
+            .map(|index| crate::session::RecentFile {
+                path: format!("src/file-{index}.rs"),
+                digest: "a".repeat(64),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            count_overflow
+                .iter()
+                .all(|file| crate::validate::valid_relative(&file.path, false))
+        );
+        let mut byte_overflow = byte_boundary.clone();
+        byte_overflow
+            .last_mut()
+            .expect("recent-file byte boundary")
+            .path
+            .push('x');
+        assert!(
+            serde_json::to_vec(&byte_overflow).unwrap().len()
+                == crate::session::events::MAX_COMPACTION_RECENT_FILES_BYTES + 1
+        );
+        assert!(
+            byte_overflow
+                .iter()
+                .all(|file| crate::validate::valid_relative(&file.path, false))
+        );
+        for invalid in [
+            vec![crate::session::RecentFile {
+                path: "../main.rs".into(),
+                digest: "a".repeat(64),
+            }],
+            vec![crate::session::RecentFile {
+                path: "src/main.rs".into(),
+                digest: "x".repeat(64),
+            }],
+            count_overflow,
+            vec![
+                crate::session::RecentFile {
+                    path: "src/main.rs".into(),
+                    digest: "a".repeat(64),
+                },
+                crate::session::RecentFile {
+                    path: "src/main.rs".into(),
+                    digest: "b".repeat(64),
+                },
+            ],
+            byte_overflow,
+        ] {
+            record.recent_files = invalid;
+            assert!(record.validate().is_err());
+        }
         for (field, value) in [
             ("admission", serde_json::json!("unchecked")),
             ("admission", serde_json::Value::Null),
