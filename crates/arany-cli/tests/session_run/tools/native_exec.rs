@@ -1376,7 +1376,7 @@ impl StallEnd {
     fn expected_outcome(self) -> (RunStatus, usize) {
         match self {
             Self::Cancel => (RunStatus::Cancelled, 2),
-            Self::Deadline => (RunStatus::Finished, 3),
+            Self::Deadline => (RunStatus::Finished, 4),
         }
     }
 }
@@ -1414,6 +1414,11 @@ async fn spill_persistence_stall(end: StallEnd) {
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         arany::test_support::scenario::plan_outcome(proposal_plan_contract(&command).unwrap()),
         crate::tool_outcome(command),
+        crate::tool_outcome(ToolCall::Read {
+            path: "src/current.txt".into(),
+            offset: None,
+            limit: None,
+        }),
         ProviderOutcome::Answer(Answer {
             text: "Completed without spill".into(),
         }),
