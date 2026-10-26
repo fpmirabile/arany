@@ -537,7 +537,9 @@ pub(super) fn decode_run_failure_stage(
     bytes: &[u8],
     scope: &RunScope,
 ) -> crate::provider::diagnostics::SubscriptionFailureStage {
-    decode_run_staged(bytes, scope).1
+    let (result, stage, _) = decode_run_staged(bytes, scope);
+    assert!(result.is_err(), "failure-stage fixture must reject");
+    stage
 }
 
 #[cfg(test)]
@@ -682,8 +684,10 @@ pub(in crate::provider) fn run_body_with_optional_effort(
             body["tools"] = Value::Array(specs);
             body["tool_choice"] = if exhausted {
                 json!({"type": "none"})
-            } else {
+            } else if request.input.role == crate::provider::PromptRole::Editor {
                 json!({"type": "auto", "disable_parallel_tool_use": true})
+            } else {
+                json!({"type": "auto"})
             };
         }
     }
@@ -1059,12 +1063,25 @@ impl Admitted<'_> {
                 });
             }
         }
-        match <[_; 1]>::try_from(requests) {
-            Ok([outcome]) => Ok(outcome),
-            Err(_) => Err(ToolRequestFailure {
-                error: ProviderError::InvalidOutcome,
-                tool_arguments: None,
-            }),
+        step_outcome(requests).map_err(|error| ToolRequestFailure {
+            error,
+            tool_arguments: None,
+        })
+    }
+}
+
+fn step_outcome(outcomes: Vec<ProviderOutcome>) -> Result<ProviderOutcome, ProviderError> {
+    match <[_; 1]>::try_from(outcomes) {
+        Ok([outcome]) => Ok(outcome),
+        Err(outcomes) => {
+            let mut requests = Vec::new();
+            for outcome in outcomes {
+                let ProviderOutcome::Tools(calls) = outcome else {
+                    return Err(ProviderError::InvalidOutcome);
+                };
+                requests.extend(calls);
+            }
+            crate::provider::decode::tools_outcome(requests)
         }
     }
 }

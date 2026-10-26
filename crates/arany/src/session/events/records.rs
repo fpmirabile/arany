@@ -861,11 +861,15 @@ impl ProviderCallRecord {
                     return true;
                 }
                 if reason == crate::provider::ProviderFailureReason::ProposalRefused
-                    && !matches!(
+                    && (!matches!(
                         self.phase,
                         crate::provider::AgentPhase::RootPlan
                             | crate::provider::AgentPhase::RootSynthesis
-                    )
+                            | crate::provider::AgentPhase::ChildWork
+                    ) || self.phase == crate::provider::AgentPhase::ChildWork
+                        && self.refusal.as_ref().is_none_or(|refusal| {
+                            refusal.cause != ProposalRefusalCause::InvalidArguments
+                        }))
                 {
                     return true;
                 }

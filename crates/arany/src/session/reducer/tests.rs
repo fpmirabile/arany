@@ -5446,6 +5446,76 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn researcher_refusal_continuations_reject_effects_and_exhausted_reservations() {
+        use crate::session::{ProposalRefusal, ProposalRefusalCause};
+        for attempts in [3, 8] {
+            let (mut view, goal, run, child) = research_session();
+            for index in 0..attempts {
+                let mut refusal = record(
+                    AgentPhase::ChildWork,
+                    ProviderCallDisposition::Rejected,
+                    Some(0),
+                );
+                refusal.failure_reason =
+                    Some(crate::provider::ProviderFailureReason::ProposalRefused);
+                refusal.refusal = Some(ProposalRefusal {
+                    operation: if attempts == 8 && index % 2 == 1 {
+                        "arany_list"
+                    } else {
+                        "arany_read"
+                    }
+                    .into(),
+                    cause: ProposalRefusalCause::InvalidArguments,
+                });
+                apply(&mut view, reserve_child_call(goal, run, child)).unwrap();
+                let mut widened = refusal.clone();
+                widened.refusal.as_mut().unwrap().cause = ProposalRefusalCause::InvalidPath;
+                assert!(rejected(
+                    &view,
+                    Event::ProviderCallRecorded {
+                        run_id: run,
+                        agent_run_id: child,
+                        record: widened,
+                    }
+                ));
+                apply(
+                    &mut view,
+                    Event::ProviderCallRecorded {
+                        run_id: run,
+                        agent_run_id: child,
+                        record: refusal,
+                    },
+                )
+                .unwrap();
+                assert!(rejected(
+                    &view,
+                    Event::ToolStarted {
+                        run_id: run,
+                        agent_run_id: child,
+                        active_ceiling_ms: 0,
+                        intent: child_intent(
+                            run,
+                            child,
+                            ToolCall::Read {
+                                path: "src/lib.rs".into(),
+                                offset: None,
+                                limit: None,
+                            }
+                        )
+                        .into(),
+                    }
+                ));
+            }
+            assert!(rejected(&view, reserve_child_call(goal, run, child)));
+            view.goals[0].unobserved_provider_calls.push(child);
+            assert!(rejected(
+                &view,
+                child_record(run, child, ProviderCallDisposition::Finished)
+            ));
+        }
+    }
+
+    #[test]
     fn primary_refusal_continuations_validate_phase_and_retry_limits() {
         use crate::session::{ProposalRefusal, ProposalRefusalCause};
         let same = ProposalRefusal {

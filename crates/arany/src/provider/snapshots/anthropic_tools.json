@@ -1776,5 +1776,8 @@
       },
       "name": "arany_glob"
     }
-  ]
+  ],
+  "tool_choice": {
+    "type": "auto"
+  }
 }

@@ -278,6 +278,7 @@ impl HookFacts {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ChildFacts {
     pub(super) has_tools: bool,
+    pub(super) refusal_limit_reached: bool,
     pub(super) turns_left: bool,
     pub(super) tool_calls_left: bool,
     pub(super) before_deadline: bool,
@@ -304,6 +305,7 @@ pub(super) struct GateFacts {
 #[derive(Debug)]
 pub(super) enum ChildDecision {
     ToolStep(Vec<ToolRequest>, ProviderTurn),
+    RefusedTools(Vec<ToolRequest>, ProviderTurn),
     // `stop_hook`: the shell runs SubagentStop, then `decide_child_stop`.
     Finish {
         answer: Answer,
@@ -454,15 +456,24 @@ fn decide_researcher_call(
             outcome: ProviderOutcome::Tools(requests),
             turn,
             ..
-        }) if valid => {
+        }) if valid || requests.len() > usize::from(crate::session::MAX_STEP_TOOL_CALLS) => {
             let budget = !facts.tokens_open || !facts.calls_left;
             if facts.cancelled || facts.paused || abort.is_some() || budget {
                 ChildDecision::End(ChildEnd::Skipped {
                     disposition: researcher_end(facts.actor_hook_stop, true),
                     budget,
                 })
-            } else {
+            } else if valid {
                 ChildDecision::ToolStep(requests, turn)
+            } else if facts.has_tools
+                && facts.turns_left
+                && facts.tool_calls_left
+                && facts.before_deadline
+                && !facts.refusal_limit_reached
+            {
+                ChildDecision::RefusedTools(requests, turn)
+            } else {
+                ChildDecision::End(ChildEnd::Researcher(AgentDisposition::Failed))
             }
         }
         CallResult::Cancelled => {
@@ -1812,7 +1823,8 @@ impl RunLoop<'_> {
                 (None, WorkerCause::ToolFailed)
             }
             ChildDecision::End(ChildEnd::Editor(cause)) => (None, cause),
-            ChildDecision::End(ChildEnd::Researcher(_) | ChildEnd::Skipped { .. }) => {
+            ChildDecision::RefusedTools(..)
+            | ChildDecision::End(ChildEnd::Researcher(_) | ChildEnd::Skipped { .. }) => {
                 return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
             }
         };
@@ -2047,6 +2059,20 @@ impl RunLoop<'_> {
             valid_response,
         } = call;
         let agent_run_id = child.agent_run_id;
+        let refusal = match &result {
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Tools(requests),
+                ..
+            }) if child.tools.is_some()
+                && requests.len() > usize::from(crate::session::MAX_STEP_TOOL_CALLS) =>
+            {
+                super::proposal_refusal(
+                    &result,
+                    crate::session::ProposalRefusalCause::InvalidArguments,
+                )
+            }
+            _ => None,
+        };
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id,
@@ -2055,7 +2081,7 @@ impl RunLoop<'_> {
                 &result,
                 valid_response,
                 None,
-                None,
+                refusal,
                 limits,
             ),
         })
@@ -2106,6 +2132,11 @@ impl RunLoop<'_> {
                     .run_researcher_tool(child, requests, turn, deadline)
                     .await;
             }
+            ChildDecision::RefusedTools(requests, turn) => {
+                return self
+                    .continue_refused_researcher(child, requests, turn)
+                    .await;
+            }
             ChildDecision::End(ChildEnd::Skipped {
                 disposition,
                 budget,
@@ -2128,6 +2159,57 @@ impl RunLoop<'_> {
             }
         };
         Ok(Admission::Reserved(Some(disposition)))
+    }
+
+    async fn continue_refused_researcher(
+        &self,
+        child: &mut ChildWork,
+        requests: Vec<ToolRequest>,
+        turn: ProviderTurn,
+    ) -> Result<Admission<Option<AgentDisposition>>, EngineError> {
+        self.ledger().child_call_finished()?;
+        let refusal = self
+            .ledger()
+            .view(|view| {
+                view.runs
+                    .last()?
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == child.agent_run_id)?
+                    .provider_calls
+                    .last()?
+                    .refusal
+                    .clone()
+            })?
+            .ok_or(EngineError::InvalidHistory)?;
+        let step = ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
+            refusal: Some(refusal),
+            cleared: false,
+            plan: None,
+            turn,
+            requests,
+            observations: Vec::new(),
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: Some(child.tool_calls_remaining),
+            hook_feedback: Default::default(),
+        };
+        let context = child.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let capacity = super::tool_compaction::context_capacity(
+            context.with_step_len(&step),
+            runtime.context_limit_bytes(),
+            0,
+        );
+        if matches!(capacity, super::tool_compaction::ContextCapacity::Fits) {
+            context.steps.push(step);
+            return Ok(Admission::Reserved(None));
+        }
+        self.finish_child(child.agent_run_id, AgentDisposition::Failed, None, false)
+            .await?;
+        Ok(Admission::Reserved(Some(AgentDisposition::Failed)))
     }
 
     async fn run_researcher_tool(
@@ -2311,6 +2393,13 @@ impl RunLoop<'_> {
     fn child_facts(&self, child: &ChildWork, deadline: Instant) -> Result<ChildFacts, EngineError> {
         Ok(ChildFacts {
             has_tools: child.tools.is_some(),
+            refusal_limit_reached: self.ledger().view(|view| {
+                view.runs.last().is_some_and(|run| {
+                    run.agents.iter().any(|agent| {
+                        agent.id == child.agent_run_id && agent.refusal_limit_reached()
+                    })
+                })
+            })?,
             turns_left: child.turns_remaining > 0,
             tool_calls_left: child.tool_calls_remaining > 0,
             before_deadline: Instant::now() < deadline,
@@ -3550,6 +3639,7 @@ mod decision_tests {
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Kind {
         ToolStep,
+        RefusedTools,
         Finish { stop_hook: bool },
         Reprompt(RepromptReason),
         End(ChildEnd),
@@ -3568,6 +3658,7 @@ mod decision_tests {
     fn kind(decision: &ChildDecision) -> Kind {
         match decision {
             ChildDecision::ToolStep(..) => Kind::ToolStep,
+            ChildDecision::RefusedTools(..) => Kind::RefusedTools,
             ChildDecision::Finish { stop_hook, .. } => Kind::Finish {
                 stop_hook: *stop_hook,
             },
@@ -3605,6 +3696,7 @@ mod decision_tests {
 
     const OPEN: ChildFacts = ChildFacts {
         has_tools: true,
+        refusal_limit_reached: false,
         turns_left: true,
         tool_calls_left: true,
         before_deadline: true,
@@ -3638,6 +3730,90 @@ mod decision_tests {
         gate.unmet = true;
         change(&mut gate);
         gate
+    }
+
+    #[test]
+    fn researcher_over_cap_proposals_continue_only_with_refusal_and_budget_room() {
+        for (facts, abort, expected) in [
+            (OPEN, None, Kind::RefusedTools),
+            (
+                with(|facts| facts.refusal_limit_reached = true),
+                None,
+                Kind::End(ChildEnd::Researcher(AgentDisposition::Failed)),
+            ),
+            (
+                with(|facts| facts.turns_left = false),
+                None,
+                Kind::End(ChildEnd::Researcher(AgentDisposition::Failed)),
+            ),
+            (
+                with(|facts| facts.tool_calls_left = false),
+                None,
+                Kind::End(ChildEnd::Researcher(AgentDisposition::Failed)),
+            ),
+            (
+                with(|facts| facts.before_deadline = false),
+                None,
+                Kind::End(ChildEnd::Researcher(AgentDisposition::Failed)),
+            ),
+            (
+                with(|facts| facts.cancelled = true),
+                None,
+                Kind::End(ChildEnd::Skipped {
+                    disposition: AgentDisposition::Cancelled,
+                    budget: false,
+                }),
+            ),
+            (
+                with(|facts| facts.paused = true),
+                None,
+                Kind::End(ChildEnd::Skipped {
+                    disposition: AgentDisposition::Cancelled,
+                    budget: false,
+                }),
+            ),
+            (
+                with(|facts| facts.calls_left = false),
+                None,
+                Kind::End(ChildEnd::Skipped {
+                    disposition: AgentDisposition::Cancelled,
+                    budget: true,
+                }),
+            ),
+            (
+                with(|facts| facts.tokens_open = false),
+                None,
+                Kind::End(ChildEnd::Skipped {
+                    disposition: AgentDisposition::Cancelled,
+                    budget: true,
+                }),
+            ),
+            (
+                OPEN,
+                Some(WaveStop::BUDGET),
+                Kind::End(ChildEnd::Skipped {
+                    disposition: AgentDisposition::Cancelled,
+                    budget: false,
+                }),
+            ),
+        ] {
+            let requests = (0..=crate::session::MAX_STEP_TOOL_CALLS)
+                .map(|index| ToolRequest {
+                    id: crate::provider::ToolUseId::new(format!("call_{index}")).unwrap(),
+                    call: ToolCall::List { path: ".".into() },
+                })
+                .collect();
+            assert_eq!(
+                kind(&decide_child_call(
+                    response(ProviderOutcome::Tools(requests)),
+                    false,
+                    None,
+                    abort,
+                    &facts
+                )),
+                expected
+            );
+        }
     }
 
     #[test]

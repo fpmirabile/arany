@@ -277,29 +277,27 @@ impl SessionView {
         if tools.iter().any(|tool| !tool.hooks_settled()) {
             return Err(ReplayError::InvalidTransition);
         }
-        if run.primary().is_some_and(|agent| {
-            agent.id == *agent_run_id
-                && (agent.refusal_limit_reached()
-                    || agent.outcome_correction_exhausted()
-                    || agent.outcome_correction_pending()
-                        && (!run.hooks_settled()
-                            || run.tools.iter().any(|tool| !tool.settled_without_stop())))
-        }) {
+        if actor.refusal_limit_reached()
+            || run.primary().is_some_and(|agent| {
+                agent.id == *agent_run_id
+                    && (agent.outcome_correction_exhausted()
+                        || agent.outcome_correction_pending()
+                            && (!run.hooks_settled()
+                                || run.tools.iter().any(|tool| !tool.settled_without_stop())))
+            })
+        {
             return Err(ReplayError::InvalidTransition);
         }
-        if let Some(agent) = run.agents.iter().find(|agent| agent.id == *agent_run_id)
-            && let Some(name) = &agent.definition
-        {
-            let registry = super::definition_registry(run)?;
-            let definition = registry.get(name).ok_or(ReplayError::InvalidTransition)?;
-            let own_tool_pending = agent.tools.iter().any(|tool| tool.observation.is_none());
+        if actor.role == AgentRole::Child {
+            let turn_limit = super::agent::child_turn_limit(run, actor)?;
+            let own_tool_pending = actor.tools.iter().any(|tool| tool.observation.is_none());
             if !own_tool_pending
-                && agent
+                && actor
                     .provider_calls
                     .iter()
                     .filter(|call| call.phase == AgentPhase::ChildWork)
                     .count()
-                    >= usize::from(definition.max_turns)
+                    >= usize::from(turn_limit)
             {
                 return Err(ReplayError::InvalidTransition);
             }

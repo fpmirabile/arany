@@ -11,6 +11,16 @@ mod finish;
 mod route_change;
 mod spawn;
 
+pub(super) fn child_turn_limit(run: &RunView, agent: &AgentView) -> Result<u8, ReplayError> {
+    match &agent.definition {
+        Some(name) => super::definition_registry(run)?
+            .get(name)
+            .map(|definition| definition.max_turns)
+            .ok_or(ReplayError::InvalidTransition),
+        None => Ok(crate::session::MAX_CHILD_TURNS),
+    }
+}
+
 pub(super) fn child_tool_requests(agent: &AgentView) -> usize {
     agent
         .provider_calls
