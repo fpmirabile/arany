@@ -428,7 +428,7 @@ mod tests {
             })
             .unwrap(),
             approval_cause: None,
-            cache_update: CacheUpdate::Discarded,
+            cache_update: CacheUpdate::NotApplicable,
         }
     }
 
