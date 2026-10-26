@@ -939,3 +939,49 @@ pub(super) async fn execute_cancellable(
         observation = &mut execution => observation,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_refuses_buffered_and_late_active_window_requests() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let permit = sender
+            .clone()
+            .reserve_owned()
+            .await
+            .expect("reserve a slot");
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _ = receipt.await;
+            "settled"
+        };
+        tokio::pin!(execution);
+        let late = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            permit.send(ActiveActionRequest {
+                admitted_at: Instant::now(),
+                reply,
+            });
+        });
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            settle_cancelled(execution.as_mut(), &mut receiver),
+        )
+        .await
+        .expect("the Guard must not wait for a reply nobody sends");
+        assert_eq!(settled, "settled");
+        late.await.expect("late sender");
+        let (again, _) = tokio::sync::oneshot::channel();
+        assert!(
+            sender
+                .send(ActiveActionRequest {
+                    admitted_at: Instant::now(),
+                    reply: again,
+                })
+                .await
+                .is_err()
+        );
+    }
+}
