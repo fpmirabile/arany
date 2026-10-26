@@ -225,6 +225,8 @@ mod approval_reply_tests {
 mod driver_tests {
     use super::super::super::active::session_with_goal;
     use super::super::*;
+    use crate::terminal::ComposerEdit;
+    use arany::SteeringRefused;
 
     #[test]
     fn end_of_input_waits_for_only_the_current_run_to_settle() {
@@ -336,5 +338,120 @@ mod driver_tests {
                 "{other}"
             );
         }
+    }
+
+    #[test]
+    fn steering_refusals_name_the_retained_draft_without_echoing_text() {
+        assert_eq!(
+            super::super::input::steering_refusal(SteeringRefused::TooLarge, false),
+            "Steering note exceeds 8.0 KB; draft retained"
+        );
+        assert_eq!(
+            super::super::input::steering_refusal(SteeringRefused::Unavailable, true),
+            "Steering note unavailable; draft retained"
+        );
+        assert_eq!(
+            super::super::input::steering_refusal(SteeringRefused::RunFull, true),
+            "No room for more steering notes this Run. Draft retained; press Enter after this Goal to submit"
+        );
+    }
+
+    #[test]
+    fn recorded_note_clears_only_an_unchanged_composer() {
+        let mut seen = 0;
+        let mut composer = Composer::default();
+        for character in "first note".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut offered = Some(composer.text().to_owned());
+        assert!(!settle_recorded_note(
+            0,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert!(settle_recorded_note(
+            1,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert!(
+            composer.is_empty(),
+            "an unchanged offer clears the composer"
+        );
+        assert!(offered.is_none());
+        assert!(!settle_recorded_note(
+            1,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+
+        // An edit after the Engine took the note keeps the user's text as a retained draft.
+        for character in "second".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut offered = Some("second".to_owned());
+        composer.apply(TerminalInput::Character('!'));
+        assert!(settle_recorded_note(
+            2,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert_eq!(composer.text(), "second!");
+    }
+
+    #[test]
+    fn held_linear_draft_waits_aside_and_returns_before_later_text() {
+        let mut composer = Composer::default();
+        for character in "kept".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let held = hold_draft(&mut composer).expect("refused draft is held");
+        assert!(
+            composer.is_empty(),
+            "the invisible draft leaves the composer"
+        );
+        assert!(hold_draft(&mut composer).is_none());
+
+        for character in "later".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(release_held_draft(&mut composer, held));
+        assert_eq!(composer.text(), "kept\nlater");
+    }
+
+    #[test]
+    fn overflowing_release_keeps_the_newer_draft() {
+        let mut composer = Composer::default();
+        composer.insert_paste(&"a".repeat(64 * 1024)).unwrap();
+        let held = hold_draft(&mut composer).expect("refused draft is held");
+        for character in std::iter::repeat_n('b', 4000) {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(!release_held_draft(&mut composer, held));
+        assert_eq!(composer.text(), "b".repeat(4000));
+        assert_eq!(
+            composer.apply(TerminalInput::Character('c')),
+            ComposerEdit::AtCapacity
+        );
+        composer.clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), "a".repeat(64 * 1024));
+        assert!(composer.has_text_pastes());
+    }
+
+    #[test]
+    fn retained_draft_names_the_autonomous_goal_boundary() {
+        assert_eq!(
+            draft_retained_notice(true),
+            "Draft retained; press Enter after this Goal to submit"
+        );
+        assert_eq!(
+            draft_retained_notice(false),
+            "Draft retained; press Enter after this Run to submit"
+        );
     }
 }
