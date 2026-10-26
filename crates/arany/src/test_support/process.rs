@@ -342,7 +342,7 @@ impl Drop for OwnedChild {
 }
 
 pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
-    try_capture(child, duration, cap).expect("bounded subprocess capture")
+    try_capture(child, duration, cap).unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn try_capture(child: &mut Child, duration: Duration, cap: usize) -> io::Result<Output> {
@@ -497,7 +497,7 @@ pub fn capture_terminal(
         "terminal",
         observe,
     )
-    .expect("bounded terminal capture")
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn capture_streams(
