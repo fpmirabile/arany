@@ -423,7 +423,7 @@ async fn run_live(
         input.session_id = Some(session);
         input.title = None;
         input.objective.clear();
-        input.goal = GoalRequest::resume(goal, false);
+        input.goal = GoalRequest::resume(goal, true);
     }
     let session = match input.session_id {
         Some(id) => id,
