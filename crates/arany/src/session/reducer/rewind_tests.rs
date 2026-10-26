@@ -26,6 +26,7 @@ fn fixture() -> (worker_tests::Fixture, SessionView) {
 fn target(view: &SessionView) -> CheckpointTarget {
     view.rewinds.checkpoints[0].clone()
 }
+
 pub(crate) fn started(view: &SessionView, target: CheckpointTarget) -> Event {
     let p = plan(view, &target).unwrap();
     let w = view.workspace_identity.unwrap();
@@ -753,7 +754,16 @@ fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
         unreachable!()
     };
     record.source_digest = [9; 32];
+    let compacted_sequence = events.last().unwrap().sequence;
+    let later = Event::SessionRenamed {
+        title: "After compaction".into(),
+    };
+    events.push(envelope(&view, later));
     assert!(SessionView::replay(f.session, &events).is_err());
+    assert_eq!(
+        crate::session::validate_compactions_with_sequence(&events),
+        Err((compacted_sequence, ReplayError::InvalidSnapshot))
+    );
 }
 
 #[test]

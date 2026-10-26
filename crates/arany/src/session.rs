@@ -33,12 +33,15 @@ pub(crate) const MAX_STEERING_LABEL_BYTES: usize = 8;
 pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
+#[cfg(test)]
+pub(crate) use compaction::validate_compaction_references_with_sequence;
 pub(crate) use compaction::{
     AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, COMPACTION_SUMMARY_SEPARATOR_BYTES,
     CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
     MAX_COMPACTION_RECENT_CONTEXT_BYTES, MAX_COMPACTION_SUMMARY_BYTES, MAX_COMPACTION_TURNS,
     MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, join_recent_files, recent_files,
     recent_files_across, recent_files_match, render_recent_files, validate_compaction_references,
+    validate_compactions_with_sequence, validate_goal_context_compactions_with_sequence,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
