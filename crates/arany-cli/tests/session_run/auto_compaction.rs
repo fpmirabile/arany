@@ -481,7 +481,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let shell = if matches!(case, CompactionCase::Interrupted) {
         "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     } else {
-        "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second"
+        "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second; exit \"$?\""
     };
     let shell = if matches!(case, CompactionCase::Success) {
         shell.replace(
@@ -669,12 +669,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let shell_pid = pid_ready
         .recv_timeout(Duration::from_secs(10))
         .expect("product parent PID");
-    let product_pid = if matches!(case, CompactionCase::Interrupted) {
-        product_child_of(shell_pid)
-    } else {
-        rustix::process::Pid::from_raw(shell_pid.try_into().expect("positive PID"))
-            .expect("product PID")
-    };
+    let product_pid = product_child_of(shell_pid);
     let product_guard = ProductGuard::new(product_pid, state.clone());
     assert!(
         product_guard.is_owned_and_running(),
