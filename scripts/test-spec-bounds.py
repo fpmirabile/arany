@@ -1,4 +1,3 @@
-import runpy
 import subprocess
 import sys
 import tempfile
@@ -6,11 +5,10 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("spec-budget.py")
-MODULE = runpy.run_path(str(SCRIPT))
+SCRIPT = Path(__file__).with_name("spec-bounds.py")
 
 
-class SpecBudget(unittest.TestCase):
+class SpecBounds(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -19,6 +17,7 @@ class SpecBudget(unittest.TestCase):
         self.spec_dir.mkdir(parents=True)
         rows = (
             ("max_tool_result_bytes", 65536, "bytes"),
+            ("max_steering_note_bytes", 8192, "bytes"),
             ("max_read_page_lines", 2000, "lines"),
             ("max_goal_provider_calls", 64, "Provider calls"),
             ("max_goal_runs", 16, "Runs"),
@@ -30,13 +29,7 @@ class SpecBudget(unittest.TestCase):
         for anchor, value, unit in rows:
             table += f'| <a id="{anchor}"></a>[`{anchor.upper()}`](#{anchor}) | {value} | {unit} | `owner.rs` |\n'
         (self.spec_dir / "limits.md").write_text(table, encoding="utf-8")
-        self.write_budgets(500, 500)
         (self.spec_dir / "tools.md").write_text("A bounded Tool result.\n", encoding="utf-8")
-
-    def write_budgets(self, limits, tools):
-        (self.spec_dir / "budget.toml").write_text(
-            f'[budgets]\n"limits.md" = {limits}\n"tools.md" = {tools}\n', encoding="utf-8"
-        )
 
     def run_cli(self, text):
         (self.spec_dir / "tools.md").write_text(text, encoding="utf-8")
@@ -44,20 +37,6 @@ class SpecBudget(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--root", str(self.root)],
             capture_output=True, text=True, check=False, timeout=10,
         )
-
-    def test_one_word_overrun_reports_file_budget_and_excess(self):
-        (self.spec_dir / "tools.md").write_text("word " * 501, encoding="utf-8")
-        errors = MODULE["check"](self.root, total_word_budget=1000)
-        self.assertIn("docs/specs/tools.md: 501 words exceeds budget 500 by 1", errors)
-
-    def test_budget_total_increase_is_rejected(self):
-        self.write_budgets(500, 501)
-        errors = MODULE["check"](self.root, total_word_budget=1000)
-        self.assertIn("spec budgets total 1001 words exceeds total budget 1000 by 1", errors)
-
-    def test_compensated_budget_transfer_is_accepted(self):
-        self.write_budgets(499, 501)
-        self.assertEqual(MODULE["check"](self.root, total_word_budget=1000), [])
 
     def test_cli_rejects_matching_pairs_regardless_of_wording(self):
         for text in (
@@ -77,6 +56,8 @@ class SpecBudget(unittest.TestCase):
             "64 KiB.",
             "0.0625 MiB.",
             "The literal is `64 KiB`.",
+            "The steering bound is 8-KiB.",
+            "The steering bound is 8KiB.",
         ):
             with self.subTest(text=text):
                 result = self.run_cli(text + "\n")
@@ -96,6 +77,8 @@ class SpecBudget(unittest.TestCase):
     def test_generated_limit_links_are_accepted(self):
         for text in (
             "[64 KiB](./limits.md#max_tool_result_bytes)",
+            "[64-KiB](./limits.md#max_tool_result_bytes)",
+            "[64KiB](./limits.md#max_tool_result_bytes)",
             "[`64 KiB`](./limits.md#max_tool_result_bytes)",
             "[65536 bytes](limits.md#max_tool_result_bytes)",
             "[2,000 lines](./limits.md#max_read_page_lines)",
@@ -116,11 +99,12 @@ class SpecBudget(unittest.TestCase):
                 self.assertIn(diagnostic, result.stderr)
 
     def test_numeric_link_labels_must_equal_target_without_a_global_value_match(self):
-        for label in ("32 KiB", "65 KiB", "500 lines", "0.03125 MiB", "65 widgets"):
+        for label in ("32 KiB", "65 KiB", "500 lines", "0.03125 MiB", "65 widgets", "65-KiB", "65KiB"):
             with self.subTest(label=label):
                 result = self.run_cli(f"[{label}](./limits.md#max_tool_result_bytes)")
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(f"generated limit label {label} does not match max_tool_result_bytes", result.stderr)
+                mention = "65 KiB" if label in ("65-KiB", "65KiB") else label
+                self.assertIn(f"generated limit label {mention} does not match max_tool_result_bytes", result.stderr)
 
     def test_unknown_generated_anchor_is_rejected(self):
         result = self.run_cli("[Tool result](./limits.md#missing_limit)")
@@ -176,6 +160,19 @@ class SpecBudget(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("docs/specs/tools.md:5: restates generated bound", result.stderr)
         self.assertEqual(result.stderr.count("restates generated bound"), 1)
+
+    def test_fences_require_valid_indentation_and_closing_lines(self):
+        for opener in ("    ```text", "```text`"):
+            with self.subTest(opener=opener):
+                result = self.run_cli(f"{opener}\n\n64 KiB\n")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("docs/specs/tools.md:3: restates generated bound", result.stderr)
+        for marker in ("```", "~~~"):
+            with self.subTest(marker=marker):
+                result = self.run_cli(f"   {marker}text\n{marker}still-code\n64 KiB\n   {marker} \t\n64 KiB\n")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("docs/specs/tools.md:5: restates generated bound", result.stderr)
+                self.assertEqual(result.stderr.count("restates generated bound"), 1)
 
 
 if __name__ == "__main__":

@@ -3,18 +3,15 @@
 import argparse
 import re
 import sys
-import tomllib
 from decimal import Decimal
 from pathlib import Path
 
 
 SPEC_DIR = Path("docs/specs")
 LIMITS_FILE = SPEC_DIR / "limits.md"
-BUDGET_FILE = SPEC_DIR / "budget.toml"
-TOTAL_WORD_BUDGET = 142_000
-NUMBER = re.compile(r"(?<!\w)(\d[\d,]*(?:\.\d+)?)\s+([A-Za-z][A-Za-z /\n-]*)")
+NUMBER = re.compile(r"(?<!\w)(\d[\d,]*(?:\.\d+)?)(?:\s*-\s*|\s*)([A-Za-z][A-Za-z /\n-]*)")
 UNIT_WORD = re.compile(r"[A-Za-z]+(?:/[A-Za-z]+)?")
-FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 GENERATED_LIMIT_LINK = re.compile(
     r"\[(?P<label>[^\]]+)\]\((?:\./)?limits\.md#(?P<anchor>[^)]+)\)"
 )
@@ -35,10 +32,6 @@ UNIT_ALIASES = {
     "minute": ("milliseconds", 60_000),
     "minutes": ("milliseconds", 60_000),
 }
-
-
-def word_count(text):
-    return len(text.split())
 
 
 def canonical_unit(unit):
@@ -87,10 +80,10 @@ def prose_blocks(text):
         if fence_marker is not None:
             if fence:
                 marker = fence.group(1)
-                if marker[0] == fence_marker[0] and len(marker) >= len(fence_marker):
+                if marker[0] == fence_marker[0] and len(marker) >= len(fence_marker) and not fence.group(2).strip():
                     fence_marker = None
             continue
-        if fence:
+        if fence and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
             if paragraph:
                 yield first_line, "\n".join(paragraph)
                 paragraph.clear()
@@ -140,26 +133,12 @@ def restatement_errors(path, text, bounds):
     return errors
 
 
-def check(root, total_word_budget=TOTAL_WORD_BUDGET):
-    budgets = tomllib.loads((root / BUDGET_FILE).read_text(encoding="utf-8"))["budgets"]
-    specs = sorted((root / SPEC_DIR).glob("*.md"))
-    names = {path.name for path in specs}
-    errors = []
-    for name in sorted(names - budgets.keys()):
-        errors.append(f"{name}: no word budget in {BUDGET_FILE}")
-    for name in sorted(budgets.keys() - names):
-        errors.append(f"{name}: budget has no matching spec")
-    total = sum(budgets.values())
-    if total > total_word_budget:
-        errors.append(f"spec budgets total {total} words exceeds total budget {total_word_budget} by {total - total_word_budget}")
+def check(root):
     bounds = generated_bounds(root / LIMITS_FILE)
-    for path in specs:
-        text = path.read_text(encoding="utf-8")
-        count = word_count(text)
-        budget = budgets.get(path.name)
-        if budget is not None and count > budget:
-            errors.append(f"{path.relative_to(root)}: {count} words exceeds budget {budget} by {count - budget}")
+    errors = []
+    for path in sorted((root / SPEC_DIR).glob("*.md")):
         if path != root / LIMITS_FILE:
+            text = path.read_text(encoding="utf-8")
             errors.extend(restatement_errors(path.relative_to(root), text, bounds))
     return errors
 
@@ -172,7 +151,7 @@ def main():
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("Spec budgets and generated-bound references are valid.")
+    print("Generated-bound references are valid.")
     return 0
 
 

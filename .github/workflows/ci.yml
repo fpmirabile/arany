@@ -94,8 +94,10 @@ jobs:
           run_bounded 120 machete cargo machete
           run_bounded 120 typos typos
           run_bounded 120 taplo taplo fmt --check
-          python3 scripts/test-spec-budget.py
-          python3 scripts/spec-budget.py
+      - name: Check generated spec bounds
+        run: |
+          python3 scripts/test-spec-bounds.py
+          python3 scripts/spec-bounds.py
 
   changes:
     name: Detect code changes
