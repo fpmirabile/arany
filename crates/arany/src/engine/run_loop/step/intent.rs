@@ -4,8 +4,8 @@ use super::dispatch::Verdict;
 use super::dispatch::{NotDispatched, not_dispatched};
 use super::permission::{Permission, effective_permission_mode};
 use super::{
-    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD,
-    TOOL_CLEANUP_OVERHEAD, timeout_limit_cause,
+    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD, StepEnd,
+    TOOL_CLEANUP_OVERHEAD, completion_deadline, timeout_limit_cause,
 };
 use crate::engine::ledger::{
     Action, ActiveDeadlineCause, Admission, NARROWING_EVENTS, duration_ms,
@@ -792,28 +792,33 @@ impl RunLoop<'_> {
                     };
                     tokio::pin!(execution);
                     let mut observation = tokio::select! {
+                        biased;
                         result = &mut execution => result?,
+                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                         () = async {
                             match active_deadline {
                                 Some(deadline) => deadline.elapsed().await,
                                 None => tokio::time::sleep_until(deadline).await,
                             }
                         } => { timed_out = true; cancellation.cancel(); execution.await? },
-                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                     };
-                    if timed_out && observation.disposition == ToolDisposition::Cancelled {
-                        observation.disposition = ToolDisposition::Limit;
-                        observation.limit_cause =
-                            timeout_limit_cause(active_deadline.map(|d| d.cause));
-                    }
+                    let stop = match completion_deadline(
+                        observation.disposition,
+                        timed_out,
+                        active_deadline.map(|deadline| deadline.cause),
+                    ) {
+                        StepEnd::Continue => None,
+                        StepEnd::Stopped(cause) => {
+                            observation.disposition = ToolDisposition::Limit;
+                            observation.limit_cause =
+                                timeout_limit_cause(active_deadline.map(|deadline| deadline.cause));
+                            Some(cause)
+                        }
+                    };
                     Answer {
                         checkpoint: None,
                         observation,
-                        stop: timed_out.then(|| match active_deadline.map(|d| d.cause) {
-                            Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
-                            Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
-                            None => StopCause::ToolStopped,
-                        }),
+                        stop,
                         active_time: None,
                     }
                 }

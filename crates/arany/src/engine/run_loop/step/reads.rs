@@ -553,24 +553,25 @@ async fn execute(
     tokio::pin!(execution);
     let mut timed_out = false;
     let mut observation = tokio::select! {
+        biased;
         observation = &mut execution => observation,
         () = parent.cancelled() => { cancellation.cancel(); execution.await },
         () = batch.cancelled() => { cancellation.cancel(); execution.await },
         () = deadline.elapsed() => { timed_out = true; cancellation.cancel(); execution.await },
     };
-    if timed_out && observation.disposition == ToolDisposition::Cancelled {
-        observation.disposition = ToolDisposition::Limit;
-        observation.limit_cause = timeout_limit_cause(deadline.cause);
-    }
+    let stop = match completion_deadline(observation.disposition, timed_out, deadline.cause) {
+        StepEnd::Continue => None,
+        StepEnd::Stopped(cause) => {
+            observation.disposition = ToolDisposition::Limit;
+            observation.limit_cause = timeout_limit_cause(deadline.cause);
+            Some(cause)
+        }
+    };
     Answer {
         checkpoint: None,
         observation,
         active_time: None,
-        stop: timed_out.then_some(match deadline.cause {
-            Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
-            Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
-            None => StopCause::ToolStopped,
-        }),
+        stop,
     }
 }
 

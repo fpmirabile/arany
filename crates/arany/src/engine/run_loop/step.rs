@@ -30,7 +30,8 @@ use ask::{AskOptions, AskSite, Resolution, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, StepDispatch,
-    Unguarded, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+    Unguarded, Verdict, completion_deadline, decide_dispatch, decide_queue_pause, not_dispatched,
+    undispatched,
 };
 use intent::{
     PendingToolRefusal, active_window, execute_cancellable, settle_cancelled, tool_action_bound,

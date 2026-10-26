@@ -3,7 +3,7 @@ use super::hooks::HookFold;
 use super::permission::Permission;
 use super::{ActiveTime, Answer, HookDenial};
 use crate::engine::ledger::ActiveDeadlineCause;
-use crate::engine::run_loop::stop::StopCause;
+use crate::engine::run_loop::stop::{StepEnd, StopCause};
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
 use crate::tools::types::DenialFeedback;
@@ -72,6 +72,21 @@ impl GuardCompletion {
             Self::Observed
         }
     }
+}
+
+pub(super) fn completion_deadline(
+    disposition: ToolDisposition,
+    elapsed: bool,
+    cause: Option<ActiveDeadlineCause>,
+) -> StepEnd {
+    if !elapsed || disposition != ToolDisposition::Cancelled {
+        return StepEnd::Continue;
+    }
+    StepEnd::Stopped(match cause {
+        Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
+        Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
+        None => StopCause::ToolStopped,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -783,6 +798,41 @@ pub(super) fn undispatched(
 mod tests {
     use super::super::hooks::HookStop;
     use super::*;
+
+    #[test]
+    fn deadline_completion_only_converts_timeout_cancelled_outcomes() {
+        for (disposition, cancelled) in [
+            (ToolDisposition::Succeeded, false),
+            (ToolDisposition::Denied, false),
+            (ToolDisposition::Failed, false),
+            (ToolDisposition::Conflict, false),
+            (ToolDisposition::Limit, false),
+            (ToolDisposition::Cancelled, true),
+            (ToolDisposition::Uncertain, false),
+        ] {
+            for elapsed in [false, true] {
+                for (cause, stop) in [
+                    (None, StopCause::ToolStopped),
+                    (Some(ActiveDeadlineCause::Goal), StopCause::ActiveTime),
+                    (
+                        Some(ActiveDeadlineCause::Delegation),
+                        StopCause::DelegationDeadline,
+                    ),
+                ] {
+                    let expected = if elapsed && cancelled {
+                        StepEnd::Stopped(stop)
+                    } else {
+                        StepEnd::Continue
+                    };
+                    assert_eq!(
+                        completion_deadline(disposition, elapsed, cause),
+                        expected,
+                        "{disposition:?}, elapsed={elapsed}, cause={cause:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn step_dispatch_uses_fetched_overhead_and_keeps_effects_serial() {
