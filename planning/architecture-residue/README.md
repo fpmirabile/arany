@@ -5,7 +5,7 @@
 - Status: `In progress`
 - Owner: harness maintainers
 - Last updated: 2026-10-26
-- Next action: release independent R1–R5 tracks under the gates below; start R3p1 → R3p2, independent of the remaining R3e, and hold R2c5/R6b for final closeout.
+- Next action: release independent R1–R5 tracks under the gates below; start R3p1 → R3p2, and hold R2c5/R6b for final closeout.
 
 ## Outcome and scope
 
@@ -139,13 +139,12 @@ Every R2 PR runs the applicable setup/removal tables and the R2 process owners a
 
 ### R3 — E8b–E8h, focused Engine evidence and Drafts
 
-R3p1 → R3p2 (Engine evidence) are serial with each other and independent of the Drafts series; R3a–R3d are implemented; R3e remains. E8a/J1 prerequisites are present as inventoried above; reserve the step owners and permission/hook evidence against overlapping Engine work. Delivery follows [slice delivery](../PLANNING.md#slice-delivery). R3p1/R3p2 each include `docs/specs/execution.md` and overview §2: corrected permission/cancellation evidence ownership, with unchanged policy. R3a–R3e each include `docs/specs/terminal.md` and overview §8: draft retention/overflow ownership or corrected focused/process evidence links, without new behavior.
+R3p1 → R3p2 (Engine evidence) are serial with each other and independent of the Drafts series; R3a–R3e are implemented, with execution evidence still required by the exit checklist. E8a/J1 prerequisites are present as inventoried above; reserve the step owners and permission/hook evidence against overlapping Engine work. Delivery follows [slice delivery](../PLANNING.md#slice-delivery). R3p1/R3p2 each include `docs/specs/execution.md` and overview §2: corrected permission/cancellation evidence ownership, with unchanged policy. R3a–R3e each include `docs/specs/terminal.md` and overview §8: draft retention/overflow ownership or corrected focused/process evidence links, without new behavior.
 
 | ID / original | Complete increment | Estimate/ceiling |
 |---|---|---|
 | R3p1 / E8b | Move `agent_definition_modes_never_resolve_parent_asks_and_dont_ask_denies_them` (step.rs:1597–1658) and `typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review` (:1732–1770) to `step/permission.rs` tests. Reuse its `allow`/`asks`/`deny`; remove duplicate parent `allow`/`deny` (:1772–1786), with named imports only if re-inventory finds a remaining caller. Evidence: R3p1/R3p2 owners above, unchanged two-test/assertion inventory and nonzero old/new exact filters. | ≤370 (≤135/100) |
 | R3p2 / E8c | Move `cancellation_refuses_buffered_and_late_active_window_requests` (step.rs:1660–1699) beside `settle_cancelled` in `step/intent.rs`; move `human_wait_and_dispatch_pins_do_not_consult_the_system_clock` (:1701–1730) to `step/ask.rs`. Correct every source-relative include; retain all six source regions, including `resolve_ask`, and all three forbidden clock patterns. Evidence: R3p1/R3p2 owners above, unchanged two-test/assertion inventory and nonzero old/new exact filters; retain parent cross-flow tables. | ≤260 (≤80/100) |
-| R3e / E8h | Move remaining driver steering/delivery/held/overflow/retention cases (:2648–2760, ≤130 with module glue), removing the superseded inline driver module. Old/new filters must execute nonzero matching cases; process/macOS filters stay unchanged. | ≤320 (130/60) |
 
 Use the corresponding R3 evidence owners and compare test names/assertions before and after each move; R3a–R3e also include existing Run input/approval tests. Update remaining work under [slice delivery](../PLANNING.md#slice-delivery). A lower file length alone does not close this track.
 
