@@ -1573,7 +1573,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
 
     repo.edit(TypedPrefixEdit::Remove { index: 0 });
     assert!(repo.saved_rules().is_empty());
-    let (outcome, asked, _, engine) = repo
+    let (outcome, asked, calls, engine) = repo
         .run_replying(
             vec![tool_outcome(commit("sixth")), answer()],
             false,
@@ -1585,6 +1585,15 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .await;
     let revoked = outcome.unwrap();
     assert_eq!(asked, 1, "revocation restores the prompt");
+    assert_eq!(calls, 2, "one commit attempt followed by the answer");
+    assert_eq!(revoked.run.tools.len(), 1, "one commit after revocation");
+    let tool = &revoked.run.tools[0];
+    assert_eq!(
+        tool.observation.as_ref().map(|value| value.disposition),
+        Some(ToolDisposition::Succeeded),
+        "commit after revocation: {}",
+        tool_report(tool.observation.as_ref())
+    );
     let (_, view) = repo.reopen(engine, revoked.session_id).await;
     assert_eq!(verdict_of(&view, 0).source, PermissionSource::Human);
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "sixth\n");
