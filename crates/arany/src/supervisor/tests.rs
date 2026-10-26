@@ -247,12 +247,7 @@ fn supervisor_call_equality_excludes_intent_identity_and_hashes_content() {
         };
         observation.intent.call = a.clone();
         observation.intent.id = uuid::Uuid::now_v7();
-        let crate::session::worker::EffectTarget::WorkerView { revision, .. } =
-            &mut observation.intent.target
-        else {
-            unreachable!()
-        };
-        *revision = n.try_into().unwrap();
+        observation.intent.target = crate::worker::EffectTarget::Workspace;
         observation.disposition = ToolDisposition::Failed;
         observation.attestation = None;
         observation.output = "payload".into();
@@ -344,31 +339,6 @@ fn supervisor_footprint_uses_only_leased_base_and_evicts_whole_actor_steps() {
         .as_mut()
         .unwrap();
     worker.pins.request.lease = vec!["src/owned".into()];
-    let base = worker.pins.base.clone();
-    let data = run
-        .workers
-        .data
-        .iter_mut()
-        .find(|d| d.reference == base)
-        .unwrap();
-    data.facts = WorkerDataFacts::Manifest(vec![
-        crate::session::worker::WorkerManifestEntry {
-            path: "src/owned".into(),
-            version: WorkerBaseVersion::File {
-                sha256: "a".repeat(64),
-                bytes: 16 * 1024,
-                executable: false,
-            },
-        },
-        crate::session::worker::WorkerManifestEntry {
-            path: "src/elsewhere".into(),
-            version: WorkerBaseVersion::File {
-                sha256: "b".repeat(64),
-                bytes: 1024 * 1024,
-                executable: false,
-            },
-        },
-    ]);
     let facts = vec![crate::session::worker::WorkerFileFact {
         path: "src/owned".into(),
         before: WorkerBaseVersion::Absent,
@@ -381,7 +351,7 @@ fn supervisor_footprint_uses_only_leased_base_and_evicts_whole_actor_steps() {
     let f = capture_features(&view.runs[0], actor, &facts, 1);
     assert_eq!(
         (f.base_kib, f.changed_kib, f.growth_permille),
-        (Some(16), 64, Some(4000))
+        (None, 64, None)
     );
     assert_eq!((f.files, f.declared_roots, f.files_per_root), (1, 1, 1));
     let mut window: VecDeque<_> = (1..=32).map(|i| step(i, 1, true)).collect();

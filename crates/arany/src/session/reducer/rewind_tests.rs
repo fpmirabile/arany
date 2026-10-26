@@ -630,7 +630,6 @@ fn rewind_compiler_preserves_histories_without_rewinds_byte_for_byte() {
 
 #[test]
 fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_changes() {
-    use crate::session::worker::{WorkerBaseVersion, WorkerDataFacts, WorkerFileFact};
     for (files, bytes, admitted) in [
         (2048, 1, true),
         (2049, 1, false),
@@ -639,25 +638,27 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
         (1, 1024 * 1024 + 1, false),
     ] {
         let (_, mut view) = fixture();
-        for changes in view.runs[0]
-            .workers
-            .data
-            .iter_mut()
-            .filter(|d| matches!(d.facts, WorkerDataFacts::Changes(_)))
-        {
-            changes.facts = WorkerDataFacts::Changes(
-                (0..files)
-                    .map(|i| WorkerFileFact {
-                        path: format!("src/{i:04}"),
-                        before: WorkerBaseVersion::File {
-                            sha256: "a".repeat(64),
-                            bytes,
-                            executable: true,
-                        },
-                        after: WorkerBaseVersion::Absent,
-                    })
-                    .collect(),
-            );
+        let template = view.runs[0].agents[1].tools[0].clone();
+        view.runs[0].agents[1].tools.clear();
+        for index in 0..files {
+            let mut tool = template.clone();
+            tool.finished_sequence = Some(template.finished_sequence.unwrap() + index as u64);
+            let digest = "a".repeat(64);
+            tool.intent.call = ToolCall::Delete {
+                path: format!("src/{index:04}"),
+                expected_digest: digest.clone(),
+            };
+            let observation = tool.observation.as_mut().unwrap();
+            observation.intent = tool.intent.clone();
+            observation.output = serde_json::to_string(&super::super::rewind::RemovedFileResult {
+                removed: FileState {
+                    sha256: digest,
+                    bytes,
+                    executable: true,
+                },
+            })
+            .unwrap();
+            view.runs[0].agents[1].tools.push(tool);
         }
         let result = plan(&view, &target(&view));
         assert_eq!(result.is_ok(), admitted, "{files} files, {bytes} bytes");
@@ -668,22 +669,27 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
         }
     }
     let (_, mut view) = fixture();
-    for changes in &mut view.runs[0].workers.data {
-        if let WorkerDataFacts::Changes(files) = &mut changes.facts {
-            for f in files {
-                f.before = WorkerBaseVersion::File {
-                    sha256: "a".repeat(64),
-                    bytes: 3,
-                    executable: true,
-                };
-                f.after = WorkerBaseVersion::File {
-                    sha256: "a".repeat(64),
-                    bytes: 3,
-                    executable: false,
-                };
-            }
-        }
+    let t = &mut view.runs[0].agents[1].tools[0];
+    let digest = "a".repeat(64);
+    if let ToolCall::Write {
+        expected_digest, ..
+    } = &mut t.intent.call
+    {
+        *expected_digest = Some(digest.clone());
     }
+    let o = t.observation.as_mut().unwrap();
+    o.intent = t.intent.clone();
+    o.output = serde_json::to_string(&super::super::rewind::FilePublicationResult {
+        sha256: digest.clone(),
+        bytes: 3,
+        executable: false,
+        before: Some(FileState {
+            sha256: digest,
+            bytes: 3,
+            executable: true,
+        }),
+    })
+    .unwrap();
     let p = plan(&view, &target(&view)).unwrap();
     assert!(p.files[0].restore_to.as_ref().unwrap().executable);
     assert!(!p.files[0].expected_current.as_ref().unwrap().executable);

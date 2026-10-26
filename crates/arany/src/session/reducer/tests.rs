@@ -7507,7 +7507,7 @@ mod goal_replay_tests {
     }
 
     fn background_primary_tool_session() -> (SessionView, GoalId, RunId, AgentRunId, AgentRunId) {
-        let fixture = super::super::worker_tests::background_fixture();
+        let fixture = super::super::worker_tests::completed_fixture();
         let mut view = SessionView::replay_open(fixture.session, &fixture.envelopes())
             .unwrap()
             .unwrap();

@@ -2671,7 +2671,7 @@ mod payload_version_tests {
 #[test]
 fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
     use crate::session::worker::*;
-    let f = crate::session::worker_command_protocol_fixture();
+    let f = crate::session::worker_protocol_fixture();
     for (kind, pointer, field) in [
         (
             "RunStarted",
@@ -2683,12 +2683,10 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
             "/delegation/0/assignment",
             "commands",
         ),
-        ("AgentSpawned", "/assignment", "cache_generation"),
+        ("AgentSpawned", "/assignment", "permissions_digest"),
         ("AgentSpawned", "/assignment/grant", "commands"),
-        ("ToolStarted", "/intent/target", "cache_generation"),
         ("ToolStarted", "", "verdict"),
-        ("ToolFinished", "/intent/target", "cache_generation"),
-        ("WorkerHandoverRecorded", "", "criterion_evidence"),
+        ("WorkerLeaseReleased", "", "cause_sequence"),
     ] {
         let e = f
             .envelopes()

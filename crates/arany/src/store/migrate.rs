@@ -171,6 +171,16 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!(
+            "AgentSpawned",
+            15,
+            crate::session::pre_shared_editor_payload
+        ),
+        variant_step!(
+            "AgentFinished",
+            10,
+            crate::session::pre_shared_editor_payload
+        ),
         EventStep {
             kind: "RunStarted",
             from: 23,
@@ -356,7 +366,7 @@ const EVENT_FLOOR: [(&str, i64); 46] = [
     ("WorkerStopObserved", 1),
     ("WorkerIntegrationRecorded", 1),
     ("WorkerHandoverDiscarded", 1),
-    ("WorkerLeaseReleased", 1),
+    ("WorkerLeaseReleased", 2),
     ("WorkerVerificationRecorded", 1),
     ("WorkerHandoverRecorded", 2),
     ("ToolResultsCleared", 1),

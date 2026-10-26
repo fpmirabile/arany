@@ -4,7 +4,7 @@ use crate::session::events::{
     AgentRole, AgentRunId, ChildGrant, Event, GoalStatus, ProviderCallDisposition,
     ProviderCallRecord, ReplayError, RunId,
 };
-use crate::tools::{CacheUpdate, EffectIntent, ToolDisposition, ToolObservation};
+use crate::tools::{CacheUpdate, EffectIntent, ToolDisposition};
 
 mod call;
 mod finish;
@@ -148,11 +148,19 @@ impl SessionView {
 
     pub(super) fn finish_child_tool(
         &mut self,
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        observation: &ToolObservation,
+        event: &Event,
         prior: u64,
     ) -> Result<(), ReplayError> {
+        let Event::ToolFinished {
+            run_id,
+            agent_run_id,
+            observation,
+            checkpoint,
+        } = event
+        else {
+            return Err(ReplayError::InvalidTransition);
+        };
+        let (run_id, agent_run_id) = (*run_id, *agent_run_id);
         let goal = active_run_goal(self, run_id).ok_or(ReplayError::InvalidTransition)?;
         let out_of_plan = goal
             .plan_contract
@@ -175,7 +183,10 @@ impl SessionView {
             .iter_mut()
             .find(|agent| agent.id == agent_run_id)
             .ok_or(ReplayError::InvalidTransition)?;
-        if child.role != AgentRole::Child || child.status != AgentStatus::Active {
+        if child.role != AgentRole::Child
+            || child.status != AgentStatus::Active
+            || (checkpoint.is_some() && child.assignment.is_none())
+        {
             return Err(ReplayError::InvalidTransition);
         }
         let tool = child
@@ -188,6 +199,7 @@ impl SessionView {
         if tool.intent != observation.intent || tool.observation.is_some() {
             return Err(ReplayError::InvalidTransition);
         }
+        tool.checkpoint = checkpoint.clone();
         tool.observation = Some(observation.clone());
         tool.finished_sequence = Some(prior);
         Ok(())

@@ -1,5 +1,7 @@
 mod goal;
 mod records;
+mod shared_editors;
+pub(crate) use shared_editors::pre_shared_editor_payload;
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -152,15 +154,15 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 46] = [
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 15),
-    ("AgentFinished", 10),
+    ("AgentSpawned", 16),
+    ("AgentFinished", 11),
     ("ProviderCallRecorded", 24),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
     ("WorkerIntegrationRecorded", 1),
     ("WorkerHandoverDiscarded", 1),
-    ("WorkerLeaseReleased", 1),
+    ("WorkerLeaseReleased", 2),
     ("WorkerVerificationRecorded", 1),
     ("WorkerHandoverRecorded", 2),
     ("ToolResultsCleared", 1),
@@ -463,7 +465,7 @@ pub enum Event {
     WorkerLeaseReleased {
         run_id: RunId,
         agent_run_id: AgentRunId,
-        record: WorkerSettlement,
+        record: WorkerLeaseRelease,
     },
     WorkerVerificationRecorded {
         run_id: RunId,

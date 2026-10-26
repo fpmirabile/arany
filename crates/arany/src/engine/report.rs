@@ -448,7 +448,11 @@ fn push_cache_facts(
         .iter()
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
-        for tool in &task_run.tools {
+        for tool in task_run
+            .tools
+            .iter()
+            .chain(task_run.agents.iter().flat_map(|a| &a.tools))
+        {
             if let Some(observation) = tool.observation.as_ref() {
                 match observation.cache_update {
                     crate::tools::CacheUpdate::Rejected => cache_rejected = true,
@@ -579,7 +583,11 @@ fn push_unresolved_tool_facts(
         .iter()
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
-        for tool in &task_run.tools {
+        for tool in task_run
+            .tools
+            .iter()
+            .chain(task_run.agents.iter().flat_map(|a| &a.tools))
+        {
             let call = &tool.intent.call;
             let label = goal_report_call_label(call);
             let Some(observation) = tool.observation.as_ref() else {
@@ -679,7 +687,11 @@ fn push_success_facts(
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
         push_definition_diagnostics(report, task_run, omitted_facts);
-        for tool in &task_run.tools {
+        for tool in task_run
+            .tools
+            .iter()
+            .chain(task_run.agents.iter().flat_map(|a| &a.tools))
+        {
             let Some(observation) = tool.observation.as_ref() else {
                 continue;
             };

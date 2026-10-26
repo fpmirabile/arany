@@ -1,7 +1,7 @@
 use super::super::agent::names_child;
 use super::super::{
     AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal,
-    current_goal_mut, pending_original_tool_requests, pending_tool_requests,
+    pending_original_tool_requests, pending_tool_requests,
 };
 use crate::session::events::{Event, ProviderCallDisposition, ReplayError, RunConfig};
 use crate::session::{AgentRunId, RunId};
@@ -139,10 +139,10 @@ pub(super) fn finished(
     prior: u64,
 ) -> Result<(), ReplayError> {
     let Event::ToolFinished {
-        checkpoint,
         run_id,
         agent_run_id,
         observation,
+        ..
     } = event
     else {
         return Err(ReplayError::InvalidTransition);
@@ -164,15 +164,14 @@ pub(super) fn finished(
             return Err(ReplayError::InvalidTransition);
         }
     }
-    if names_child(current, *run_id, *agent_run_id) {
-        if checkpoint.is_some() {
-            return Err(ReplayError::InvalidTransition);
-        }
-        current.finish_child_tool(*run_id, *agent_run_id, observation, prior)
+    let child = names_child(current, *run_id, *agent_run_id);
+    if child {
+        current.finish_child_tool(event, prior)?;
     } else {
         validate_primary_finished(current, *run_id, observation)?;
-        apply_primary_finished(current, event, prior)
+        apply_primary_finished(current, event, prior)?;
     }
+    super::super::goal::observe_tool(current, *run_id, observation)
 }
 
 fn validate_primary_finished(
@@ -288,26 +287,6 @@ fn apply_primary_finished(
             let computed = super::super::compute_definition_registry(run).ok();
             run.definitions = super::super::DefinitionCache(computed);
         }
-    }
-    let goal_id = current
-        .goals
-        .iter()
-        .find(|goal| goal.active_run == Some(*run_id))
-        .map(|goal| goal.id)
-        .ok_or(ReplayError::InvalidTransition)?;
-    let goal = current_goal_mut(current, goal_id)?;
-    if let Some(contract) = goal.plan_contract.as_ref() {
-        if matches!(
-            observation.intent.call,
-            crate::tools::ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-            }
-        ) {
-            goal.success_state = contract.initial_success_state();
-        } else {
-            contract.observe_success(&mut goal.success_state, observation);
-        }
-        goal.success_criterion_satisfied = contract.success_state_satisfied(&goal.success_state);
     }
     Ok(())
 }
@@ -425,8 +404,8 @@ fn valid_origin(
             && run.tools.len() == run.parse_count()
             && super::super::definition_registry(run).is_ok()
             && run.provider_sequences.is_empty()
-    } else if let crate::tools::ToolCall::PrepareWorker { preparation } = &intent.call {
-        super::super::worker::base_preparation(run, preparation)
+    } else if matches!(intent.call, crate::tools::ToolCall::PrepareWorker { .. }) {
+        false
     } else if integration {
         super::valid_integration_source(run, intent)
     } else {

@@ -1,5 +1,7 @@
+mod tool;
+
 use super::stop::{PrimaryEnd, RunFacts, RunProgress, RunRefusal, StepEnd, StopCause};
-use super::worker::{WorkerAdmission, WorkerEnd, WorkerSettlementProgress};
+use super::worker::{WorkerAdmission, WorkerCompletion, WorkerEnd};
 use super::{
     Action, ActiveSegment, Admission, CallFailure, CallResult, Grant, HookRefusal, LifecycleHook,
     PrimaryDecision, PrimarySite, RunLoop, call_record, decide_primary_call, primary_admitted,
@@ -94,7 +96,6 @@ struct DelegationSettlement {
     active_segment: Option<ActiveSegment>,
     drained: Drained,
     primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
-    deadline: Instant,
 }
 
 struct ChildQueue {
@@ -245,7 +246,7 @@ impl RepromptReason {
                 "Tool request refused: it was malformed or edits inside a live worker lease."
             }
             Self::CriterionNotMetInView => {
-                "Answer refused: criterion_not_met_in_view. Obtain current passing private evidence before answering; at most three continuations are allowed."
+                "Answer refused: criterion_not_met_in_view. Obtain current passing Workspace Tool evidence before answering."
             }
         }
     }
@@ -319,7 +320,7 @@ pub(super) enum ChildDecision {
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ChildEnd {
-    // An editor ends before handover capture; the cause applies when no stronger fact does.
+    // Stronger stop facts take precedence over the editor's own failure cause.
     Editor(WorkerCause),
     // A researcher ends while its call reservation is held.
     Researcher(AgentDisposition),
@@ -569,9 +570,11 @@ fn wave_stop_after(
     end: Option<AgentDisposition>,
     hook: HookFacts,
 ) -> Option<WaveStop> {
-    if let Some(cause @ StopCause::ToolRefused(_)) = queue_stop {
+    if let Some(cause @ (StopCause::ToolRefused(_) | StopCause::Uncertain)) = queue_stop {
         Some(WaveStop::Abort(cause))
-    } else if let Some(cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline)) = queue_stop
+    } else if let Some(
+        cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline | StopCause::Capacity),
+    ) = queue_stop
     {
         Some(WaveStop::Boundary(cause))
     } else if queue_stop.is_some() {
@@ -778,7 +781,6 @@ impl RunLoop<'_> {
                 active_segment: segment,
                 drained,
                 primary_step: queue.primary_step.take(),
-                deadline,
             },
             queue.capacity_error,
         )
@@ -863,7 +865,6 @@ impl RunLoop<'_> {
             mut active_segment,
             drained,
             primary_step,
-            deadline,
         } = settlement;
         let Drained {
             abort: mut stop,
@@ -896,8 +897,10 @@ impl RunLoop<'_> {
                     pending,
                     WorkerEnd {
                         answer: None,
-                        deadline,
-                        torn_down: stop != WaveStop::BUDGET,
+                        torn_down: !matches!(
+                            stop,
+                            WaveStop::BUDGET | WaveStop::Boundary(StopCause::Capacity)
+                        ),
                         failure: WorkerCause::ToolFailed,
                         step_stop: None,
                     },
@@ -963,7 +966,7 @@ impl RunLoop<'_> {
 
     async fn settle_stopped_children(
         &self,
-        root_request: &mut ProviderRequest,
+        _root_request: &mut ProviderRequest,
         children: &mut [ChildWork],
         pending: VecDeque<usize>,
         end: WorkerEnd,
@@ -973,24 +976,18 @@ impl RunLoop<'_> {
         }
         for index in pending {
             if children[index].kind.is_editor() {
-                let completed = {
-                    let _active_work = self.ledger().active_work();
-                    self.complete_worker(
+                let _active_work = self.ledger().active_work();
+                let completion = self
+                    .complete_worker(
                         &mut children[index],
                         WorkerEnd {
                             answer: None,
                             ..end
                         },
                     )
-                    .await?
-                };
-                match self
-                    .settle_worker_handover(root_request, &children[index], completed)
-                    .await?
-                {
-                    WorkerSettlementProgress::Settled => {}
-                    WorkerSettlementProgress::Exhausted => return Ok(Admission::Exhausted),
-                    WorkerSettlementProgress::ToolRefused(_) => {}
+                    .await?;
+                match completion {
+                    WorkerCompletion::Settled | WorkerCompletion::Uncertain => {}
                 }
             } else {
                 self.finish_child(
@@ -1092,11 +1089,7 @@ impl RunLoop<'_> {
         if !self.ledger().admits(action) {
             return Ok(None);
         }
-        let capacity = if workers {
-            Action::Worker { chunks: 0 }
-        } else {
-            action
-        };
+        let capacity = if workers { Action::Worker } else { action };
         self.journal
             .admit(
                 self.session_id,
@@ -1162,15 +1155,8 @@ impl RunLoop<'_> {
             let mut child = match self.begin_worker(root, editor).await? {
                 WorkerAdmission::Admitted(child) => Some(*child),
                 WorkerAdmission::Refused => None,
-                WorkerAdmission::ToolRefused(refusal) => {
-                    queue.stop = Some(StopCause::ToolRefused(refusal));
-                    return Ok(RunProgress::Ready(None));
-                }
                 WorkerAdmission::Exhausted => {
                     return Ok(RunProgress::Stopped(RunRefusal::Budget));
-                }
-                WorkerAdmission::CapacityExhausted => {
-                    return Ok(RunProgress::Stopped(RunRefusal::Capacity));
                 }
             };
             if let Some(child) = &mut child {
@@ -1642,20 +1628,7 @@ impl RunLoop<'_> {
         if wave.queue.stop.is_none() {
             self.verify_workers().await?;
         }
-        *wave.segments = match self
-            .reserve_active_segment(
-                wave.deadline().saturating_duration_since(Instant::now()),
-                crate::session::BudgetAction::Delegation,
-                self.primary_id,
-            )?
-            .map(Some)
-        {
-            Admission::Reserved(segment) => segment,
-            Admission::Exhausted => {
-                wave.queue.stop.get_or_insert(StopCause::ActiveTime);
-                None
-            }
-        };
+        self.resume_delegation(wave)?;
         Ok(())
     }
 
@@ -1703,7 +1676,7 @@ impl RunLoop<'_> {
                     ..
                 })
             );
-        // The worker-stop boundary commits before a continuation or private Tool.
+        // The stop boundary commits before a continuation or Tool.
         let worker_stopped =
             abort.is_none() && (gate_failed || tools) && self.observe_worker_stop().await?;
         let gate = GateFacts {
@@ -1729,7 +1702,9 @@ impl RunLoop<'_> {
                         .iter()
                         .find(|a| a.id == child.agent_run_id)
                         .and_then(|a| a.assignment.as_ref())
-                        .is_some_and(|w| w.gate_continuations < 3)
+                        .is_some_and(|w| {
+                            w.gate_continuations < crate::worker::MAX_EDITOR_CONTINUATIONS
+                        })
                 })?,
         };
         let facts = self.child_facts(child, deadline)?;
@@ -1740,47 +1715,6 @@ impl RunLoop<'_> {
             abort,
             &facts,
         ))
-    }
-
-    async fn run_editor_tool(
-        &self,
-        child: &mut ChildWork,
-        queue: &mut ChildQueue,
-        requests: Vec<ToolRequest>,
-        turn: ProviderTurn,
-        deadline: Instant,
-    ) -> Result<(Option<StopCause>, bool), EngineError> {
-        let active_deadline = child.active_deadline.clone();
-        let step_stop = match Box::pin(self.execute_step(
-            Grant::Researcher {
-                child,
-                deadline,
-                active_deadline,
-            },
-            requests,
-            turn,
-        ))
-        .await?
-        {
-            StepEnd::Continue => None,
-            StepEnd::Stopped(cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline)) => {
-                queue.stop.get_or_insert(cause);
-                if cause == StopCause::ActiveTime {
-                    self.observe_worker_stop().await?;
-                }
-                Some(cause)
-            }
-            StepEnd::Stopped(cause) => Some(cause),
-        };
-        child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
-        let can_continue = self.ledger().view(|v| {
-            v.runs
-                .last()
-                .and_then(|r| r.agents.iter().find(|a| a.id == child.agent_run_id))
-                .and_then(|a| a.tools.last())
-                .is_some_and(|t| t.observation.is_some() && !crate::session::private_failure(t))
-        })?;
-        Ok((step_stop, can_continue))
     }
 
     async fn apply_editor_call(
@@ -1810,16 +1744,8 @@ impl RunLoop<'_> {
                 }
             }
             ChildDecision::ToolStep(requests, turn) => {
-                let deadline = wave.deadline();
-                let (stop, can_continue) = self
-                    .run_editor_tool(
-                        &mut wave.children[index],
-                        wave.queue,
-                        requests,
-                        turn,
-                        deadline,
-                    )
-                    .await?;
+                let (stop, can_continue) =
+                    self.run_editor_tool(wave, index, requests, turn).await?;
                 step_stop = stop;
                 if step_stop.is_none() && can_continue {
                     wave.queue.pending.push_back(index);
@@ -1898,49 +1824,27 @@ impl RunLoop<'_> {
             failure,
             step_stop,
         } = completion;
-        let deadline = wave.deadline();
-        let completed = {
+        {
             let _active_work = self.ledger().active_work();
-            self.complete_worker(
-                &mut wave.children[index],
-                WorkerEnd {
-                    answer,
-                    deadline,
-                    torn_down: matches!(abort, Some(WaveStop::Abort(_))),
-                    failure,
-                    step_stop,
-                },
-            )
-            .await?
-        };
+            let completion = self
+                .complete_worker(
+                    &mut wave.children[index],
+                    WorkerEnd {
+                        answer,
+                        torn_down: matches!(abort, Some(WaveStop::Abort(_))),
+                        failure,
+                        step_stop,
+                    },
+                )
+                .await?;
+            if let WorkerCompletion::Uncertain = completion {
+                wave.queue.stop = Some(StopCause::Uncertain);
+            }
+        }
         if let Some(s) = wave.segments.take() {
             self.settle_active_segment(s)?;
         }
-        match self
-            .settle_worker_handover(wave.root_request, &wave.children[index], completed)
-            .await?
-        {
-            WorkerSettlementProgress::Settled => {}
-            WorkerSettlementProgress::Exhausted => return Ok(Admission::Exhausted),
-            WorkerSettlementProgress::ToolRefused(refusal) => {
-                wave.queue.stop = Some(StopCause::ToolRefused(refusal));
-                return Ok(Admission::Reserved(AgentDisposition::Finished));
-            }
-        }
-        *wave.segments = match self
-            .reserve_active_segment(
-                wave.deadline().saturating_duration_since(Instant::now()),
-                crate::session::BudgetAction::Delegation,
-                self.primary_id,
-            )?
-            .map(Some)
-        {
-            Admission::Reserved(segment) => segment,
-            Admission::Exhausted => {
-                wave.queue.stop.get_or_insert(StopCause::ActiveTime);
-                None
-            }
-        };
+        self.resume_delegation(wave)?;
         Ok(Admission::Reserved(
             if self.actor_hook_requested_stop(wave.children[index].agent_run_id)? {
                 AgentDisposition::StoppedByHook
@@ -1968,9 +1872,9 @@ impl RunLoop<'_> {
         {
             *abort = Some(match cause {
                 cause @ StopCause::ToolRefused(_) => WaveStop::Abort(cause),
-                cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline) => {
-                    WaveStop::Boundary(cause)
-                }
+                cause @ (StopCause::ActiveTime
+                | StopCause::DelegationDeadline
+                | StopCause::Capacity) => WaveStop::Boundary(cause),
                 _ => WaveStop::BUDGET,
             });
         }
@@ -2447,15 +2351,41 @@ impl RunLoop<'_> {
     }
 
     fn refresh_team_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
-        let (reports, pending, integrations) = self.ledger().view(|v| {
+        let (reports, pending) = self.ledger().view(|v| {
             let run = v.runs.last().expect("Run");
-            let proposals: Vec<_> = run.primary().into_iter().flat_map(|a| &a.provider_calls).filter_map(|c| c.delegation.as_ref()).flatten().collect();
+            let proposals: Vec<_> = run
+                .primary()
+                .into_iter()
+                .flat_map(|a| &a.provider_calls)
+                .filter_map(|c| c.delegation.as_ref())
+                .flatten()
+                .collect();
             let mut order = std::collections::HashMap::new();
             for agent in run.agents.iter().skip(1) {
-                let index = proposals.iter().enumerate().find(|(i, p)| !order.values().any(|v| v == i) && match p {
-                    crate::worker::ChildAssignment::Editor { assignment } => agent.assignment.as_ref().is_some_and(|w| &w.pins.request == assignment.as_ref()),
-                    crate::worker::ChildAssignment::Researcher { objective, definition, profile } => agent.assignment.is_none() && agent.objective.as_ref() == Some(objective) && &agent.definition == definition && &agent.profile == profile,
-                }).map(|(index, _)| index).expect("spawn matches its proposal");
+                let index = proposals
+                    .iter()
+                    .enumerate()
+                    .find(|(i, p)| {
+                        !order.values().any(|v| v == i)
+                            && match p {
+                                crate::worker::ChildAssignment::Editor { assignment } => agent
+                                    .assignment
+                                    .as_ref()
+                                    .is_some_and(|w| &w.pins.request == assignment.as_ref()),
+                                crate::worker::ChildAssignment::Researcher {
+                                    objective,
+                                    definition,
+                                    profile,
+                                } => {
+                                    agent.assignment.is_none()
+                                        && agent.objective.as_ref() == Some(objective)
+                                        && &agent.definition == definition
+                                        && &agent.profile == profile
+                                }
+                            }
+                    })
+                    .map(|(index, _)| index)
+                    .expect("spawn matches its proposal");
                 order.insert(agent.id, index);
             }
             let workers = run.worker_history();
@@ -2464,49 +2394,45 @@ impl RunLoop<'_> {
                 .iter()
                 .skip(1)
                 .filter(|a| a.status != crate::session::AgentStatus::Active)
-                .map(|a| (order[&a.id], ChildResult {
-                    objective: a.objective.clone().unwrap_or_default(),
-                    summary: a
-                        .summary
-                        .clone()
-                        .unwrap_or_else(|| "Worker did not finish".into()),
-                    result: {
-                        let history = workers.iter().find(|w| w.assignment_id == a.id);
-                        let tool_facts = child_tool_facts(&a.tools);
-                        let result = a.result.as_deref().unwrap_or(if history.is_some() {
-                            "Unpublished private work discarded"
-                        } else {
-                            ""
-                        });
-                        let mut report = [
-                            history.map(|history| history.description()).unwrap_or_default(),
-                            tool_facts,
-                            result.to_owned(),
-                        ]
-                        .into_iter()
-                        .filter(|part| !part.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                        let mut end = report.len().min(MAX_CHILD_RESULT_BYTES);
-                        while !report.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        report.truncate(end);
-                        report
-                    },
-                }))
+                .map(|a| {
+                    (
+                        order[&a.id],
+                        ChildResult {
+                            objective: a.objective.clone().unwrap_or_default(),
+                            summary: a
+                                .summary
+                                .clone()
+                                .unwrap_or_else(|| "Worker did not finish".into()),
+                            result: {
+                                let history = workers.iter().find(|w| w.assignment_id == a.id);
+                                let tool_facts = child_tool_facts(&a.tools);
+                                let result = a.result.as_deref().unwrap_or(if history.is_some() {
+                                    "Editor stopped; landed Workspace effects retained"
+                                } else {
+                                    ""
+                                });
+                                let mut report = [
+                                    history
+                                        .map(|history| history.description())
+                                        .unwrap_or_default(),
+                                    tool_facts,
+                                    result.to_owned(),
+                                ]
+                                .into_iter()
+                                .filter(|part| !part.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                                let mut end = report.len().min(MAX_CHILD_RESULT_BYTES);
+                                while !report.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                report.truncate(end);
+                                report
+                            },
+                        },
+                    )
+                })
                 .collect::<Vec<_>>();
-            for tool in &run.tools {
-                if let ToolCall::PrepareWorker { preparation } = &tool.intent.call
-                    && preparation.purpose == crate::worker::WorkerDataPurpose::Base
-                    && !run.agents.iter().any(|a| a.id == preparation.assignment_id)
-                    && let Some(o) = &tool.observation
-                    && o.disposition != crate::tools::ToolDisposition::Succeeded {
-                    let index = proposals.iter().enumerate().find(|(i, p)| matches!(p, crate::worker::ChildAssignment::Editor { .. }) && !order.values().any(|v| v == i)).map(|(i, _)| i).expect("refused capture matches a proposal");
-                    order.insert(preparation.assignment_id, index);
-                    reports.push((index, ChildResult { objective: "Editor base preparation".into(), summary: "Assignment did not start".into(), result: format!("Assignment {}: {:?}; no private work or Workspace publication", preparation.assignment_id, o.disposition) }));
-                }
-            }
             let pending = run
                 .agents
                 .iter()
@@ -2514,71 +2440,17 @@ impl RunLoop<'_> {
                 .filter(|a| a.status == crate::session::AgentStatus::Active)
                 .map(|a| a.id.to_string())
                 .collect::<Vec<_>>();
-            let wave = run.primary().into_iter().flat_map(|a| &a.provider_calls).filter(|c| c.delegation.is_some()).count();
-            let observations = run
-                .live_tool_records()
-                .map(|(_, tool)| tool)
-                .filter(|t| {
-                    matches!(
-                        &t.intent.call,
-                        ToolCall::ApplyChangeset {
-                            source: crate::worker::ChangesetSource::WorkerHandover { assignment_id, .. }
-                        } if run.agents.iter().find(|a| a.id == *assignment_id).and_then(|a| a.assignment.as_ref()).is_some_and(|w| usize::from(w.pins.request.wave) == wave)
-                    )
-                })
-                .filter(|t| t.observation.is_some())
-                .cloned()
-                .collect::<Vec<_>>();
             reports.sort_by_key(|(index, _)| *index);
-            (reports.into_iter().map(|(_, report)| report).collect::<Vec<_>>(), pending, observations)
+            (
+                reports
+                    .into_iter()
+                    .map(|(_, report)| report)
+                    .collect::<Vec<_>>(),
+                pending,
+            )
         })?;
         root.input.child_results = reports;
         if let Some(tools) = root.input.tools.as_mut() {
-            let integrations: Vec<_> = integrations
-                .iter()
-                .filter(|tool| {
-                    !tools
-                        .steps
-                        .iter()
-                        .flat_map(|step| &step.observations)
-                        .any(|observation| observation.intent.id == tool.intent.id)
-                })
-                .collect();
-            if !integrations.is_empty() {
-                if tools
-                    .steps
-                    .last()
-                    .is_none_or(|step| !step.requests.is_empty() || step.cleared)
-                {
-                    tools.steps.push(ToolStep {
-                        narrowed_observations: Default::default(),
-                        refusal_index: None,
-                        refusal: None,
-                        plan: None,
-                        turn: ProviderTurn::scripted(),
-                        requests: Vec::new(),
-                        observations: Vec::new(),
-                        facts: None,
-                        steering_notes: Vec::new(),
-                        calls_remaining: None,
-                        cleared: false,
-                        hook_feedback: Default::default(),
-                    });
-                }
-                let step = tools.steps.last_mut().ok_or(EngineError::InvalidHistory)?;
-                for tool in integrations {
-                    let index = step.observations.len();
-                    let feedback = tool.hook_feedback();
-                    if !feedback.is_empty() {
-                        step.hook_feedback.insert(index, feedback);
-                    }
-                    step.observations.push(
-                        tool.observation
-                            .clone()
-                            .ok_or(EngineError::InvalidHistory)?,
-                    );
-                }
-            }
             let mut catalog: serde_json::Value =
                 serde_json::from_str(tools.catalog()).map_err(|_| EngineError::InvalidRequest)?;
             if let Some(fields) = catalog.as_object_mut() {
@@ -2597,14 +2469,16 @@ impl RunLoop<'_> {
     fn unstarted_stop(&self, queue: &ChildQueue) -> Option<WaveStop> {
         if self.pause_requested() {
             Some(WaveStop::Boundary(StopCause::Paused))
-        } else if let Some(cause @ StopCause::ToolRefused(_)) = queue.stop {
+        } else if let Some(cause @ (StopCause::ToolRefused(_) | StopCause::Uncertain)) = queue.stop
+        {
             Some(WaveStop::Abort(cause))
         } else if let Some(
             cause @ (StopCause::ContextFull
             | StopCause::Cancelled
             | StopCause::HookStop
             | StopCause::ActiveTime
-            | StopCause::DelegationDeadline),
+            | StopCause::DelegationDeadline
+            | StopCause::Capacity),
         ) = queue.stop
         {
             Some(WaveStop::Boundary(cause))
@@ -3070,7 +2944,7 @@ impl RunLoop<'_> {
     }
 
     async fn admit_worker_call(&self, queue: &mut ChildQueue) -> Result<bool, EngineError> {
-        match self.admit_worker_action(0).await {
+        match self.admit_worker_action().await {
             Ok(()) => Ok(true),
             Err(
                 error @ EngineError::Store(
@@ -4257,6 +4131,14 @@ mod decision_tests {
         // (queue stop, cancelled, paused, child end, hook state, wave stop)
         let rows = [
             (
+                Some(StopCause::Uncertain),
+                false,
+                false,
+                Some(Failed),
+                settled,
+                abort(StopCause::Uncertain),
+            ),
+            (
                 Some(StopCause::ToolRefused(
                     crate::session::ToolRefusal::INVALID_TRANSITION,
                 )),
@@ -4360,7 +4242,11 @@ mod decision_tests {
                 "row {index}"
             );
         }
-        for cause in [StopCause::ActiveTime, StopCause::DelegationDeadline] {
+        for cause in [
+            StopCause::ActiveTime,
+            StopCause::DelegationDeadline,
+            StopCause::Capacity,
+        ] {
             assert_eq!(
                 wave_stop_after(Some(cause), false, false, Some(Failed), settled),
                 boundary(cause)

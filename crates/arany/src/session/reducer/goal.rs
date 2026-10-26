@@ -12,6 +12,50 @@ use crate::session::{
     WorkspaceIdentity,
 };
 
+pub(super) fn observe_tool(
+    current: &mut SessionView,
+    run_id: RunId,
+    observation: &crate::tools::ToolObservation,
+) -> Result<(), ReplayError> {
+    let actor = current
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .and_then(|run| {
+            run.agents
+                .iter()
+                .find(|agent| agent.id == observation.intent.agent_run_id)
+        })
+        .ok_or(ReplayError::InvalidTransition)?;
+    if actor.role == AgentRole::Child
+        && (actor.assignment.is_none()
+            || !(observation.intent.call.mutates() || observation.intent.call.is_process()))
+    {
+        return Ok(());
+    }
+    let goal_id = current
+        .goals
+        .iter()
+        .find(|goal| goal.active_run == Some(run_id))
+        .map(|goal| goal.id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let goal = current_goal_mut(current, goal_id)?;
+    if let Some(contract) = goal.plan_contract.as_ref() {
+        if matches!(
+            observation.intent.call,
+            crate::tools::ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+            }
+        ) {
+            goal.success_state = contract.initial_success_state();
+        } else {
+            contract.observe_success(&mut goal.success_state, observation);
+        }
+        goal.success_criterion_satisfied = contract.success_state_satisfied(&goal.success_state);
+    }
+    Ok(())
+}
+
 fn call_budget_exhausted(goal: &GoalView) -> bool {
     let budget = goal.effective_budget();
     budget

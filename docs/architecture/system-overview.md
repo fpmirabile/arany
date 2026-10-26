@@ -80,8 +80,8 @@ step tests retain cross-flow decision tables.
 The Engine composes per-dispatch queue progress, active-action and checkpoint
 senders through consuming ToolRuntime builders; Guard dispatch makes one owned
 copy from its borrowed runtime before consuming that chain.
-The Session reducer owns shared editor-request validation, and the Engine consumes its typed causes. The [execution contract](../specs/execution.md) owns refusal and failure behavior. Editor base capture and primary handover integration use `primary_intent`/`run_intent` directly rather than `execute_step`.
-Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file or command view and its private cache restore, attests private mutation/capture and publishes only the primary's eligible changeset. Editor commands use the shared permission and delegated hook path; the coordinator gates answer on private evidence before handover, while primary verification remains independent. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
+The Session reducer owns shared editor-request validation, and the Engine consumes its typed causes. The [execution contract](../specs/execution.md) owns refusal and failure behavior.
+The Engine coordinator schedules Run-scoped foreground editors through the shared Tool step. Editors mutate the Workspace within their leases, using ordinary typed receipts and checkpoints under the child identity. The reducer owns leases, terminal dispositions, causal release and independent primary verification; it rejects private data and handover transitions. Tools owns admitted-capability file publication, while Guard retains discovery and process enforcement. Journal acknowledgment precedes continuation. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
 The RunLoop owns wave-primary request assembly; the [Execution collaboration contract](../specs/execution.md#collaboration) owns its preparation and admission ordering.
@@ -168,8 +168,8 @@ functions because the host kernel, not runtime configuration, selects them.
 
 Researcher children are direct read-only AgentRuns: without Tools they make one reasoning
 call; with Tools they may make up to 16 read-only Tool calls before reporting.
-Run-scoped foreground/background editors use leased private bases/overlays through the shared Tool step,
-return one handover each and wait for primary integration and fresh criterion verification.
+Run-scoped foreground editors edit the Workspace through the shared Tool step within their leases,
+report once and wait for fresh primary criterion verification.
 Explicit ID reassignment creates a fresh attempt; the reducer projects historical dispositions and lineage,
 while native Guard admission alone owns abandoned-storage containment and cleanup.
 The [researcher contract](../specs/execution.md#researcher-children) owns their
