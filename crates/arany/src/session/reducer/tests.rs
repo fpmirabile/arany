@@ -8757,6 +8757,11 @@ mod goal_replay_tests {
             let intents: Vec<_> = (0..size)
                 .map(|_| read_intent(run, agent, "src/lib.rs"))
                 .collect();
+            if size > 1 {
+                for intent in &intents {
+                    apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
+                }
+            }
             for intent in &intents {
                 apply(&mut view, tool_started(run, agent, intent)).unwrap();
             }
@@ -8835,19 +8840,22 @@ mod goal_replay_tests {
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
         apply(
             &mut view,
-            Event::ToolStarted {
-                verdict: None,
+            Event::ToolProposed {
                 run_id: run,
                 agent_run_id: agent,
                 intent: first.clone().into(),
                 active_ceiling_ms: FIRST_ACTIVE_CEILING_MS,
             },
         )
-        .expect("first request starts");
+        .expect("first request is proposed");
         assert_exhausted_crash_receipt(&view);
         assert!(
+            rejected(&view, tool_started(run, agent, &first)),
+            "all declared intents must be proposed before a start"
+        );
+        assert!(
             rejected(&view, tool_finished(run, agent, &first, b"one")),
-            "all declared intents must start before any observation"
+            "an observation requires a folded start"
         );
         for stage in ["active", "reviewed"] {
             let mut busy = view.clone();
@@ -8858,11 +8866,11 @@ mod goal_replay_tests {
                 tool.review_call_index = Some(0);
             }
             assert!(
-                rejected(&busy, tool_started(run, agent, &second)),
+                rejected(&busy, tool_proposed(run, agent, &second)),
                 "no new intent during {stage} Tool work"
             );
         }
-        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_proposed(run, agent, &second)).expect("second request is proposed");
         let reservation =
             |intent: &EffectIntent, active_ceiling_ms| Event::ToolActiveTimeReserved {
                 run_id: run,
@@ -8871,6 +8879,14 @@ mod goal_replay_tests {
                 active_ceiling_ms,
             };
         apply(&mut view, reservation(&first, FIRST_ACTIVE_CEILING_MS)).expect("first reserved");
+        let started = |intent: &EffectIntent, active_ceiling_ms| Event::ToolStarted {
+            run_id: run,
+            agent_run_id: agent,
+            intent: intent.clone().into(),
+            active_ceiling_ms,
+            verdict: None,
+        };
+        apply(&mut view, started(&first, FIRST_ACTIVE_CEILING_MS)).expect("first starts");
         assert!(
             rejected(&view, reservation(&second, SECOND_ACTIVE_CEILING_MS)),
             "an open action's ceiling cannot be replaced by another intent"
@@ -8878,6 +8894,7 @@ mod goal_replay_tests {
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, reservation(&second, SECOND_ACTIVE_CEILING_MS))
             .expect("second reserved after the first observation");
+        apply(&mut view, started(&second, SECOND_ACTIVE_CEILING_MS)).expect("second starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         assert!(
             rejected(&view, tool_started(run, agent, &third)),
@@ -9027,8 +9044,9 @@ mod goal_replay_tests {
         );
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_proposed(run, agent, &first)).expect("first request is proposed");
+        apply(&mut view, tool_proposed(run, agent, &second)).expect("second request is proposed");
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
-        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, reserve_child_call(goal, run, agent))
             .expect("a pending Tool can reserve its review call");
@@ -9045,6 +9063,7 @@ mod goal_replay_tests {
             rejected(&view, continuation.clone()),
             "the second declared request is unobserved"
         );
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         apply(&mut view, continuation).expect("all declared requests observed");
     }
@@ -9113,9 +9132,11 @@ mod goal_replay_tests {
         );
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_proposed(run, agent, &first)).expect("first request is proposed");
+        apply(&mut view, tool_proposed(run, agent, &second)).expect("second request is proposed");
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
-        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         apply(
             &mut view,
