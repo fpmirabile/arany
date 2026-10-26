@@ -92,7 +92,7 @@ fn unsupported_syntax_controls_limits_and_nonretaining_counts_stay_literal() {
     let over_bytes = "a".repeat(markdown::MAX_MARKDOWN_PARSE_BYTES + 1);
     let over_rows = "line\n".repeat(markdown::MAX_MARKDOWN_ROWS);
     let over_depth = format!("{}answer", "> ".repeat(markdown::MAX_MARKDOWN_DEPTH));
-    for source in [
+    for (case, source) in [
         "```\r\nraw\r\n```\r\n\r\nnext",
         "    x\r\n\r\nnext",
         "**word** `code` [site](https://e.test/a&amp;b)",
@@ -106,12 +106,19 @@ fn unsupported_syntax_controls_limits_and_nonretaining_counts_stay_literal() {
         over_rows.as_str(),
         &over_depth["> ".len()..],
         over_depth.as_str(),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         for width in [0, 1, 2, 3, 16, 40, 80, 120, MAX_ROW_CELLS] {
             let rows = display_rows(MessageKind::Assistant, source, width, None);
             let (bytes, count) = markdown_cost(MessageKind::Assistant, source, width);
-            assert_eq!(bytes, rows.iter().map(|row| row.text.len()).sum::<usize>());
-            assert_eq!(count, rows.len());
+            assert_eq!(
+                bytes,
+                rows.iter().map(|row| row.text.len()).sum::<usize>(),
+                "case {case}, width {width}: rendered byte count"
+            );
+            assert_eq!(count, rows.len(), "case {case}, width {width}: row count");
             assert!(rows.iter().all(|row| row.text.width() <= width
                 && !row.text.contains(['\r', '\u{1b}', '\u{7}', '\u{202e}'])));
             if width == 80 {
