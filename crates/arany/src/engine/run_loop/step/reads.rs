@@ -253,6 +253,7 @@ impl RunLoop<'_> {
         let answer = Answer {
             checkpoint: None,
             observation: ToolObservation {
+                spill: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: crate::tools::types::UNDISPATCHED_STEP_OUTPUT.into(),

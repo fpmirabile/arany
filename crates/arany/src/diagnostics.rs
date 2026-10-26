@@ -797,6 +797,7 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             observation: crate::tools::ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent: crate::tools::EffectIntent {

@@ -8,6 +8,10 @@ pub(super) const DRAIN_BYTES: u64 = 1024 * 1024 * 1024;
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Window {
+    #[serde(skip)]
+    pub(super) captured: Vec<u8>,
+    #[serde(skip)]
+    capture: bool,
     head: Vec<u8>,
     tail: VecDeque<u8>,
     cap: usize,
@@ -23,6 +27,13 @@ impl Window {
         }
     }
 
+    pub(super) fn capturing(cap: usize) -> Self {
+        Self {
+            capture: true,
+            ..Self::new(cap)
+        }
+    }
+
     pub(super) fn from_recorded(text: &str, total: OutputTotal) -> Option<Self> {
         let (head, tail) = recorded_parts(total, text)?;
         if head.len() == text.len() {
@@ -33,6 +44,8 @@ impl Window {
             return Some(window);
         }
         Some(Self {
+            captured: Vec::new(),
+            capture: false,
             head: head.as_bytes().to_vec(),
             tail: tail.bytes().collect(),
             cap: (head.len() + tail.len()).min(total.bytes.saturating_sub(1) as usize),
@@ -44,6 +57,12 @@ impl Window {
     pub(super) fn push(&mut self, bytes: &[u8], ceiling: u64) -> Result<(), ToolError> {
         if self.total.bytes + bytes.len() as u64 > ceiling {
             return Err(ToolError::OutputCeiling);
+        }
+        if self.capture {
+            let keep = bytes
+                .len()
+                .min(super::spill::MAX_SPILL_RESULT_BYTES.saturating_sub(self.captured.len()));
+            self.captured.extend_from_slice(&bytes[..keep]);
         }
         self.total.bytes += bytes.len() as u64;
         self.total.lines += bytes.iter().filter(|&&b| b == b'\n').count() as u64;
@@ -184,6 +203,10 @@ pub(super) fn fit_streams(
         return Err(ToolError::Limit);
     }
     Ok(output)
+}
+
+pub(super) fn excerpted(total: OutputTotal, text: &str) -> bool {
+    recorded_parts(total, text).is_some_and(|(head, _)| head.len() != text.len())
 }
 
 pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {

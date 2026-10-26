@@ -40,6 +40,7 @@ mod goal_recovery_tests {
             hook_sequence: None,
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                     .then_some(crate::tools::LimitCause::Resource),
@@ -3146,6 +3147,7 @@ mod goal_replay_tests {
                 checkpoint: None,
                 intent: intent.clone(),
                 observation: Some(ToolObservation {
+                    spill: None,
                     intent,
                     disposition,
                     enforcement_cause: None,
@@ -3182,6 +3184,7 @@ mod goal_replay_tests {
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
+                spill: None,
                 intent,
                 disposition: ToolDisposition::Uncertain,
                 enforcement_cause: None,
@@ -3213,6 +3216,7 @@ mod goal_replay_tests {
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
+                spill: None,
                 intent,
                 disposition: ToolDisposition::Cancelled,
                 enforcement_cause: None,
@@ -4892,6 +4896,7 @@ mod goal_replay_tests {
             }
         ));
         let mismatched = ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             intent: child_intent(
@@ -5044,6 +5049,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 observation: ToolObservation {
+                    spill: None,
                     enforcement_cause: None,
                     limit_cause: None,
                     intent: outside,
@@ -5266,6 +5272,7 @@ mod goal_replay_tests {
             serde_json::json!({ "sha256": crate::validate::hex_digest(content) }).to_string()
         };
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(crate::tools::Attestation::for_site(&intent)),
@@ -8834,6 +8841,7 @@ mod goal_replay_tests {
         .to_string();
         assert!(output.len() <= budget as usize);
         let observation = ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(crate::tools::Attestation::Host(
@@ -8921,6 +8929,7 @@ mod goal_replay_tests {
             }
         }
         let observation = ToolObservation {
+            spill: None,
             intent,
             disposition: ToolDisposition::Denied,
             output: "host: refused; nothing dispatched.".into(),
@@ -10594,6 +10603,7 @@ mod goal_replay_tests {
         apply(&mut view, start(intent.clone())).unwrap();
         assert!(rejected(&view, reserve_child_call(goal, run, actor)));
         let mut observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "pinned guidance".into(),
@@ -10703,6 +10713,7 @@ mod goal_replay_tests {
         );
         let output = serde_json::json!({"Definition":{"definition":{"version":1,"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"},"notes":[]}}).to_string();
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output,

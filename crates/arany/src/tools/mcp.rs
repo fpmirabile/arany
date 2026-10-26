@@ -189,6 +189,7 @@ pub(super) async fn execute(
     root: &Path,
     cache_enabled: bool,
     result_bytes: usize,
+    captured: &std::sync::Mutex<Option<Vec<u8>>>,
 ) -> Result<String, ToolError> {
     let name = match call {
         ToolCall::McpList { server } | ToolCall::McpCall { server, .. } => server,
@@ -227,7 +228,7 @@ pub(super) async fn execute(
         connection.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
         let tools = connection.catalog(&server.tools).await?;
         if matches!(call, ToolCall::McpList { .. }) {
-            return fit_result(json!({"server":name,"protocol":VERSION,"tools":tools.values().collect::<Vec<_>>()}), result_bytes);
+            return fit_result(json!({"server":name,"protocol":VERSION,"tools":tools.values().collect::<Vec<_>>()}), result_bytes, captured);
         }
         let ToolCall::McpCall { tool, schema_digest, arguments, .. } = call else { return Err(ToolError::Operation); };
         let definition = tools.get(tool).ok_or(ToolError::Configuration)?;
@@ -252,7 +253,7 @@ pub(super) async fn execute(
         if structured.is_some_and(|value| !value.is_object()) { return Err(ToolError::Operation); }
         if !is_error && let Some(output) = definition.get("outputSchema")
             && !structured.is_some_and(|value| compile_schema(output).is_ok_and(|validator| validator.is_valid(value))) { return Err(ToolError::Operation); }
-        fit_result(json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}), result_bytes)
+        fit_result(json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}), result_bytes, captured)
     }).await.unwrap_or(Err(ToolError::Timeout(String::new())));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
@@ -265,11 +266,17 @@ pub(super) async fn execute(
     result
 }
 
-fn fit_result(result: Value, budget: usize) -> Result<String, ToolError> {
+fn fit_result(
+    result: Value,
+    budget: usize,
+    captured: &std::sync::Mutex<Option<Vec<u8>>>,
+) -> Result<String, ToolError> {
     let text = result.to_string();
     if text.len() <= budget {
         return Ok(text);
     }
+    *captured.lock().map_err(|_| ToolError::Operation)? =
+        Some(text.as_bytes()[..text.len().min(super::spill::MAX_SPILL_RESULT_BYTES)].to_vec());
     let mut window = super::output::Window::new(budget);
     window.push(text.as_bytes(), super::output::DRAIN_BYTES)?;
     let mut preview =
@@ -359,7 +366,9 @@ mod tests {
         for is_error in [false, true] {
             let original = json!({"server":"local","tool":"test","is_error":is_error,"content":[{"type":"text","text":format!("HEAD{}TAIL", "\n\"中\\".repeat(20000))}],"structured_content":{"value":"untrusted"}});
             let text = original.to_string();
-            let result = fit_result(original, 4096).unwrap();
+            let captured = Default::default();
+            let result = fit_result(original, 4096, &captured).unwrap();
+            assert_eq!(captured.into_inner().unwrap().unwrap(), text.as_bytes());
             assert!(result.len() <= 4096);
             let value: Value = serde_json::from_str(&result).unwrap();
             assert_eq!(value["is_error"], is_error);
@@ -371,7 +380,12 @@ mod tests {
             assert!(value.get("structured_content").is_none());
         }
         assert_eq!(
-            fit_result(json!({"is_error":false,"content":[]}), 4096).unwrap(),
+            fit_result(
+                json!({"is_error":false,"content":[]}),
+                4096,
+                &Default::default()
+            )
+            .unwrap(),
             "{\"content\":[],\"is_error\":false}"
         );
     }

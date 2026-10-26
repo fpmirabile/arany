@@ -33,6 +33,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let command_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(Attestation::Guard(GuardReceipt {
@@ -87,6 +88,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             use_count: 1,
         };
         let observation = crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
@@ -594,6 +596,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let uncertain_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(Attestation::Guard(GuardReceipt {
@@ -698,6 +701,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let failed_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: failed_intent.clone(),
@@ -798,6 +802,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 use_count: 1,
             };
             let observation = crate::tools::ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent: intent.clone(),
@@ -876,6 +881,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     timeout_intent.limits.cache_candidate_bytes = 0;
     timeout_intent.limits.cache_transfer_ms = 0;
     let timeout_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: Some(crate::tools::LimitCause::RequestedTime),
         intent: timeout_intent.clone(),
@@ -980,6 +986,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
     let mut intent = read_intent(&call);
     intent.run_id = run_id;
     let observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(Attestation::for_site(&intent)),
@@ -1189,6 +1196,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
     run.tools.push(ToolView {
         checkpoint: None,
         observation: Some(crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),

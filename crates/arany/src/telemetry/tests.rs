@@ -770,6 +770,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
                 run_id: segment.run_id,
                 agent_run_id,
                 observation: crate::tools::ToolObservation {
+                    spill: None,
                     attestation: attested.then(|| Attestation::for_site(&intent)),
                     intent,
                     disposition,
