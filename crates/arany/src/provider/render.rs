@@ -392,8 +392,7 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
     use crate::session::ProposalRefusalCause::*;
     let arguments = format!(
-        "Send exactly {} Tool call matching the offered schemas and bounds. The Engine step bound is {} calls.",
-        super::decode::STEP_TOOL_CALLS,
+        "Send 1 to {} Tool calls matching the offered schemas and bounds.",
         crate::session::MAX_STEP_TOOL_CALLS
     );
     let remediation = match refusal.cause {

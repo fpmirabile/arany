@@ -1546,7 +1546,10 @@ fn multi_call_replay_pairs_every_result_on_api_routes() {
                         result["error"]["remediation"]
                             .as_str()
                             .unwrap()
-                            .contains("Send exactly 1 Tool call")
+                            .contains(&format!(
+                                "Send 1 to {} Tool calls",
+                                crate::session::MAX_STEP_TOOL_CALLS
+                            ))
                     );
                 }
             }

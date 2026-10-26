@@ -136,12 +136,9 @@ pub(crate) fn tool_request(
     Ok(ToolRequest { id, call })
 }
 
-pub(super) const STEP_TOOL_CALLS: usize = 1;
-const _: () = assert!(STEP_TOOL_CALLS <= crate::session::MAX_STEP_TOOL_CALLS as usize);
-
 pub(crate) fn tools_outcome(requests: Vec<ToolRequest>) -> Result<ProviderOutcome, ProviderError> {
+    // The Engine refuses over-cap batches with corrective feedback.
     if requests.is_empty()
-        || requests.len() > STEP_TOOL_CALLS
         || requests
             .iter()
             .enumerate()
