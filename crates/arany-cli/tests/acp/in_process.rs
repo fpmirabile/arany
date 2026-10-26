@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 type Reader = BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>;
 type Writer = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+const RPC_WAIT: Duration = Duration::from_secs(60);
 
 fn schema() -> Value {
     serde_json::from_str(include_str!("../fixtures/acp/schema.json")).unwrap()
@@ -70,7 +71,7 @@ async fn next(reader: &mut Reader) -> Value {
     let mut line = String::new();
     // Guarded turns on the macOS debug runner can exceed ten seconds per line.
     assert!(
-        tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
+        tokio::time::timeout(RPC_WAIT, reader.read_line(&mut line))
             .await
             .unwrap()
             .unwrap()
@@ -3285,7 +3286,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     };
     let outcomes = permission_outcomes(case, allow, call, second);
     let provider = Arc::new(ScriptedProvider::new(outcomes).with_profile("openai", "gpt-5.4"));
-    let (mut writer, mut reader, task) = if let Some(guard) = guard {
+    let (mut writer, mut reader, mut task) = if let Some(guard) = guard {
         start_with_guard(&state, provider.clone(), true, guard)
     } else {
         start_configured(&state, provider.clone(), true)
@@ -3303,7 +3304,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     let mut permissions = 0;
     let mut projections = 0;
     loop {
-        let value = next(&mut reader).await;
+        let value = next_permission_update(&mut reader, &mut task, case).await;
         if value["method"] == "session/request_permission" {
             permissions += 1;
             intent = Some(value["params"]["toolCall"]["rawInput"].clone());
@@ -3385,6 +3386,27 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             .unwrap(),
         view
     );
+    if hook_ask {
+        let hook = view.runs[0].tools[0]
+            .hooks
+            .first()
+            .expect("hook invocation");
+        let outcome = hook.outcome.as_ref().expect("hook completion");
+        assert!(
+            matches!(
+                outcome.result,
+                arany::permissions::HookResult::Restricted {
+                    decision: arany::permissions::Decision::Ask,
+                    ..
+                }
+            ),
+            "{case:?}: hook result={:?}, disposition={:?}, enforcement={:?}, failure={:?}",
+            outcome.result,
+            outcome.observation.disposition,
+            outcome.observation.enforcement_cause,
+            arany::test_support::recorded_tool_failure(outcome.observation.intent.id),
+        );
+    }
     assert_permission_continuation(&view, &provider, allow, case);
     assert_eq!(view.runs[0].tools.len(), calls);
     if case == PermissionCase::ModeSwitch {
@@ -3406,13 +3428,6 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         );
         assert_eq!(verdict.hooks, 1);
         assert_eq!(tool.hooks.len(), 1);
-        assert!(matches!(
-            tool.hooks[0].outcome.as_ref().unwrap().result,
-            arany::permissions::HookResult::Restricted {
-                decision: arany::permissions::Decision::Ask,
-                ..
-            }
-        ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
             Event::ToolStarted { verdict: Some(verdict), .. }
@@ -3476,6 +3491,25 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
                 if receipt.intent_digest == intent_digest
         ));
     }
+}
+
+async fn next_permission_update(
+    reader: &mut Reader,
+    task: &mut tokio::task::JoinHandle<Result<(), String>>,
+    case: PermissionCase,
+) -> Value {
+    let mut line = String::new();
+    let count = tokio::time::timeout(RPC_WAIT, reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    if count == 0 {
+        let transport = tokio::time::timeout(RPC_WAIT, task).await;
+        panic!("{case:?}: unexpected ACP EOF; transport={transport:?}");
+    }
+    let value = serde_json::from_str(&line).unwrap();
+    validate(&value);
+    value
 }
 
 fn permission_answer(case: PermissionCase, allow: bool) -> &'static str {
