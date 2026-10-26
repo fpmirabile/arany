@@ -274,9 +274,173 @@ pub(crate) fn failure_record(
     record
 }
 
+pub(crate) fn tool_context_full(
+    request: &crate::provider::ProviderRequest,
+    window_tokens: Option<u32>,
+    tool_allowance_bytes: usize,
+    pending_turn_bytes: usize,
+) {
+    if crate::diagnostics::enabled() {
+        record_local(context_record(
+            request,
+            window_tokens,
+            tool_allowance_bytes,
+            pending_turn_bytes,
+        ));
+    }
+}
+
+fn context_record(
+    request: &crate::provider::ProviderRequest,
+    window_tokens: Option<u32>,
+    tool_allowance_bytes: usize,
+    pending_turn_bytes: usize,
+) -> BoundedRecord {
+    let input = &request.input;
+    let mut components = vec![
+        ("objective", input.objective.len()),
+        (
+            "instructions",
+            input
+                .workspace_guidance
+                .iter()
+                .map(|value| crate::provider::instructions_text(&value.path, &value.text).len())
+                .sum(),
+        ),
+        ("includes", input.includes.iter().map(String::len).sum()),
+        (
+            "history",
+            input
+                .history
+                .iter()
+                .map(|turn| turn.user.len() + turn.assistant.len() + 64)
+                .sum(),
+        ),
+        (
+            "summary",
+            input.context_summary.as_ref().map_or(0, String::len),
+        ),
+        (
+            "tools",
+            input
+                .tools
+                .as_ref()
+                .map_or(0, crate::tools::ToolContext::rendered_len),
+        ),
+        ("pending_turn", pending_turn_bytes),
+        (
+            "images",
+            input
+                .images
+                .iter()
+                .map(|value| value.image.context_bytes())
+                .sum(),
+        ),
+        (
+            "steering",
+            input.steering_notes.iter().map(String::len).sum(),
+        ),
+        (
+            "goal",
+            serde_json::to_string(&(
+                &input.goal_budget,
+                &input.goal_plan_contract,
+                &input.goal_context_facts,
+            ))
+            .map_or(0, |value| value.len()),
+        ),
+    ];
+    let estimated_bytes = components.iter().map(|(_, bytes)| bytes).sum::<usize>();
+    components.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    let mut record = BoundedRecord::default();
+    // Only a bounded model identifier is permitted; all conversation and Tool values stay private.
+    let model = if request.model.len() <= 128
+        && request
+            .model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
+    {
+        request.model.as_str()
+    } else {
+        "unreported"
+    };
+    let _ = writeln!(
+        record,
+        "context cause=ToolContextFull model={model} window_tokens={window_tokens:?} ceiling_bytes={} tool_allowance_bytes={tool_allowance_bytes} estimated_content_bytes={estimated_bytes} estimated_content_tokens={} max_output_tokens={}",
+        crate::session::content_ceiling(window_tokens),
+        estimated_bytes.div_ceil(3),
+        request.max_output_tokens,
+    );
+    for (label, bytes) in components {
+        let _ = writeln!(record, "component={label} bytes={bytes}");
+    }
+    if let Some(context) = &input.tools {
+        let largest_turn = context
+            .steps
+            .iter()
+            .map(|step| step.turn.len())
+            .max()
+            .unwrap_or(0);
+        let largest_result = context
+            .steps
+            .iter()
+            .flat_map(|step| {
+                (0..step.observations.len())
+                    .map(move |index| context.model_result(step, index).to_string().len())
+            })
+            .max()
+            .unwrap_or(0);
+        let _ = writeln!(
+            record,
+            "catalog_bytes={} largest_turn_bytes={largest_turn} largest_result_bytes={largest_result}",
+            context.catalog().len()
+        );
+    }
+    record
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_diagnostic_reports_sizes_without_conversation_values() {
+        let mut input = crate::provider::RunInput::new(
+            crate::provider::PromptRole::Primary,
+            "private-objective-canary".into(),
+        );
+        input.includes.push("private-include-canary".repeat(100));
+        input.tools = Some(crate::tools::ToolContext::new(serde_json::json!({
+            "private-catalog-canary": "private-value-canary"
+        })));
+        input.history.push(crate::provider::HistoryTurn {
+            user: "private-history-canary".into(),
+            assistant: "private-answer-canary".into(),
+        });
+        let request = crate::provider::ProviderRequest {
+            session_id: Default::default(),
+            run_id: Default::default(),
+            agent_run_id: Default::default(),
+            phase: crate::provider::AgentPhase::RootPlan,
+            collaboration: crate::session::CollaborationPolicy::Single,
+            model: "gpt-6-luna".into(),
+            max_output_tokens: 16_384,
+            input,
+        };
+        for window in [None, Some(272_000)] {
+            let record = context_record(&request, window, 16_896, 1234).to_string();
+            assert!(record.contains("model=gpt-6-luna"));
+            assert!(record.contains(&format!("window_tokens={window:?}")));
+            assert!(record.contains("tool_allowance_bytes=16896"));
+            assert!(record.contains("component=pending_turn bytes=1234"));
+            assert!(record.contains("estimated_content_tokens="));
+            assert!(
+                record.find("component=includes").unwrap()
+                    < record.find("component=history").unwrap()
+            );
+            assert!(!record.contains("canary") && !record.contains("private-"));
+        }
+    }
 
     #[test]
     fn stream_limit_record_names_the_reason_stage_and_counts() {

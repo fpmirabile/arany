@@ -875,7 +875,7 @@ impl<'a> RunLoop<'a> {
     }
 
     fn record_context_full(&self, request: &ProviderRequest, pending_turn_bytes: usize) {
-        crate::diagnostics::tool_context_full(
+        crate::provider::diagnostics::tool_context_full(
             request,
             request.input.context_window_tokens,
             self.controls
