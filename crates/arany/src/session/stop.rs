@@ -305,6 +305,8 @@ mod tests {
         };
         crate::session::ToolView {
             checkpoint: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,

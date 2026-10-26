@@ -820,7 +820,24 @@ impl<'a> RunLoop<'a> {
         else {
             return Ok(tool_compaction::ContextCapacity::Fits);
         };
+        if requests.is_empty() {
+            return Ok(tool_compaction::ContextCapacity::Fits);
+        }
+        let contract = self.ledger().plan_contract()?;
+        let mut refusal_index = requests
+            .iter()
+            .position(|item| self.check_tool(&item.call, contract.as_ref()).is_err());
+        if refusal_index.is_none() {
+            for (index, item) in requests.iter().enumerate() {
+                if self.primary_lease_allows(&item.call)?.is_err() {
+                    refusal_index = Some(index);
+                    break;
+                }
+            }
+        }
         let step = crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index,
             refusal: Some(
                 self.primary_refusal()?
                     .0
@@ -1242,10 +1259,18 @@ impl<'a> RunLoop<'a> {
         &self,
         requests: &[crate::tools::ToolRequest],
     ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
-        let [request] = requests else {
+        if requests.is_empty()
+            || requests.len() > usize::from(crate::session::MAX_STEP_TOOL_CALLS)
+            || requests.iter().enumerate().any(|(index, request)| {
+                requests[..index].iter().any(|prior| prior.id == request.id)
+            })
+        {
             return Ok(Err(ProposalRefusalCause::InvalidArguments));
-        };
-        Ok(self.check_tool(&request.call, self.ledger().plan_contract()?.as_ref()))
+        }
+        let contract = self.ledger().plan_contract()?;
+        Ok(requests
+            .iter()
+            .try_for_each(|request| self.check_tool(&request.call, contract.as_ref())))
     }
 
     fn model_may_propose(&self, call: &crate::tools::ToolCall) -> bool {
@@ -1383,6 +1408,8 @@ impl<'a> RunLoop<'a> {
             .as_mut()
             .ok_or(EngineError::InvalidRequest)?;
         tools.steps.push(crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: Some(plan),
             turn,
@@ -1401,8 +1428,10 @@ impl<'a> RunLoop<'a> {
     pub(super) async fn begin_tool_step(
         &self,
         requests: Vec<crate::tools::ToolRequest>,
-    ) -> Result<Option<crate::tools::ToolRequest>, EngineError> {
-        Ok(<[_; 1]>::try_from(requests).ok().map(|[request]| request))
+    ) -> Result<Option<Vec<crate::tools::ToolRequest>>, EngineError> {
+        Ok((!requests.is_empty()
+            && requests.len() <= usize::from(crate::session::MAX_STEP_TOOL_CALLS))
+        .then_some(requests))
     }
 
     // The only primary terminal writer: AgentFinished, MessageCommitted for an answer, RunFinished.
@@ -1725,7 +1754,7 @@ fn call_record(
                 outcome: ProviderOutcome::Tools(requests),
                 ..
             }) if disposition == ProviderCallDisposition::ToolRequested => {
-                u8::try_from(requests.len()).expect("a valid step carries one Tool request")
+                u8::try_from(requests.len()).expect("a valid step carries bounded Tool requests")
             }
             _ => 0,
         },

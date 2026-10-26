@@ -2395,6 +2395,8 @@ fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
                 .unwrap()
                 .steps
                 .push(crate::tools::ToolStep {
+                    narrowed_observations: Default::default(),
+                    refusal_index: None,
                     refusal: None,
                     plan: None,
                     turn: delegated.turn,

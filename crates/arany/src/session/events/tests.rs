@@ -1402,6 +1402,17 @@ mod provider_call_tests {
         record.input_tokens = Some(100);
         record.output_tokens = Some(10);
         assert!(record.validate().is_ok());
+        record.wire_provenance =
+            Some(crate::provider::ProviderWireProvenance::ChatCompletionsStopStorageUnspecified);
+        let encoded = serde_json::to_value(&record).expect("Chat provenance payload");
+        assert_eq!(
+            encoded["wire_provenance"],
+            "chat_completions_stop_storage_unspecified"
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderCallRecord>(encoded).expect("Chat provenance replay"),
+            record
+        );
         record.disposition = ProviderCallDisposition::TimedOut;
         assert!(record.validate().is_err());
         record.disposition = ProviderCallDisposition::Finished;
@@ -2013,7 +2024,13 @@ mod payload_version_tests {
                 narrowed: false,
             },
         };
-        for event in [&started, &verdict] {
+        let reservation = Event::ToolActiveTimeReserved {
+            run_id: run,
+            agent_run_id: agent,
+            intent_digest: [3; 32],
+            active_ceiling_ms: 7_000,
+        };
+        for event in [&started, &verdict, &reservation] {
             let payload = event.payload().expect("payload");
             let version = payload_version(event.kind()).expect("known kind");
             assert_eq!(

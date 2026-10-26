@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: harness maintainers
 - Last updated: 2026-10-25
 
@@ -32,7 +32,7 @@ This plan absorbs two `NEXT_STEPS` items: "Multi-call steps (Stage D)" and "Chat
 
 ## Chosen direction
 
-- Simplest sufficient solution: keep `ProviderOutcome::Tools(Vec<ToolRequest>)` and `ToolStep.requests`; replace the single-element pattern with a validated 1–4 loop; dispatch reads through a `JoinSet` bounded by the existing in-process slot count; no new Event kind, no new Tool trait, no scheduler. The per-call reservation becomes `Action::ToolStep { calls }` deriving `max_events` from the call count, in place of the fixed 7.
+- Simplest sufficient solution: keep `ProviderOutcome::Tools(Vec<ToolRequest>)` and `ToolStep.requests`; replace the single-element pattern with a validated 1–4 loop; dispatch reads through a `JoinSet` bounded by the existing in-process slot count; one bounded `ToolActiveTimeReserved` budget fact before each precommitted primary call, no new Tool trait, no scheduler. The per-call reservation becomes `Action::ToolStep { calls }` deriving `max_events` from the call count, in place of the fixed 7.
 - OS impact: none; concurrency is in-process reads only. Guard dispatch stays serial.
 - Interface change: `Action::max_events` gains the call count; the reducer accepts `ToolFinished` in completion order within a step. Both are internal.
 

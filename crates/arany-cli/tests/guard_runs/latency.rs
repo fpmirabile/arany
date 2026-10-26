@@ -711,9 +711,7 @@ async fn refused_and_failed_reads_never_enter_the_success_distribution() {
             let Ok(ProviderOutcome::Tools(requests)) = responses.front_mut().unwrap() else {
                 panic!("Tool proposal");
             };
-            let mut extra = requests[0].clone();
-            extra.id = arany::ToolUseId::new("call_2").unwrap();
-            requests.push(extra);
+            requests.push(requests[0].clone());
         }
         let recorder = engine_support::record_tool_latency(&engine);
         let requests = Arc::clone(&provider.requests);

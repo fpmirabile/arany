@@ -1398,7 +1398,9 @@ impl ToolRuntime {
     }
 
     pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call) {
+        if discovery::possible(call)
+            || call.facts().family == catalog::Family::File && call.facts().mutates
+        {
             guard::RESERVATION_OVERHEAD
         } else {
             self.reservation_overhead(call)

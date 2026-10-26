@@ -543,6 +543,8 @@ mod tests {
             intent: intent.clone(),
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -681,6 +683,17 @@ mod tests {
             let feedback = run_feedback(&finished).unwrap();
             assert!(feedback.contains("Workspace read stopped before it started"));
             assert!(!feedback.contains("Guard"));
+            let mkdir = arany::ToolCall::Mkdir {
+                path: "src/new".into(),
+            };
+            finished.tools[0].intent.call = mkdir.clone();
+            finished.tools[0].observation.as_mut().unwrap().intent.call = mkdir;
+            assert_eq!(
+                run_feedback(&finished).as_deref(),
+                Some(
+                    "Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run."
+                )
+            );
             let observation = run.tools[0].observation.as_mut().unwrap();
             observation.disposition = arany::ToolDisposition::Succeeded;
             observation.cache_update = arany::CacheUpdate::NotApplicable;
@@ -766,6 +779,8 @@ mod tests {
             intent: child_read,
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
