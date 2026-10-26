@@ -8,6 +8,7 @@ const MASK_ARGUMENT_BYTES: usize = MAX_PATH_BYTES / 2;
 
 #[derive(Default)]
 pub(super) struct Inventory {
+    pub(super) baseline: crate::tools::fs::command::overlay::Baseline,
     masks: BTreeMap<PathBuf, Metadata>,
     protected: BTreeSet<(u64, u64)>,
     aliases: BTreeSet<(u64, u64)>,
@@ -40,6 +41,7 @@ impl Inventory {
         {
             inventory.mask(lower, Path::new(""))?;
         }
+        inventory.baseline.freeze(lower, deadline)?;
         Ok(inventory)
     }
 
@@ -53,6 +55,7 @@ impl Inventory {
         if !metadata.is_dir() && !metadata.is_file() {
             return Err(ToolError::ProtectionUnavailable);
         }
+        self.baseline.mask(path);
         self.masks.retain(|child, _| !child.starts_with(path));
         self.masks.insert(path.to_owned(), metadata);
         Ok(())
@@ -86,6 +89,7 @@ impl Inventory {
             let metadata = directory
                 .symlink_metadata(&name)
                 .map_err(|_| ToolError::ProtectionUnavailable)?;
+            self.baseline.record(text, metadata.clone());
             let protected = name.to_str().is_none_or(crate::validate::forbidden);
             if protected
                 || metadata.mode() & 0o6000 != 0
@@ -102,6 +106,7 @@ impl Inventory {
                 }
             }
         }
+        self.baseline.complete(path)?;
         Ok(())
     }
 

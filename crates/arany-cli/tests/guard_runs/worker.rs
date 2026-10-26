@@ -1434,6 +1434,10 @@ async fn runtime_command_case_agrees_with_closed_output(case: &'static str) {
             && let arany::worker::PrivateCapture::Sealed { data } = result.private_capture
         {
             captures += 1;
+            if case == "command_success" {
+                assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+                assert!(observation.attestation.is_some());
+            }
             assert!(data.seal_sequence < envelope.sequence, "{case}");
             assert!(
                 bundle
@@ -1448,6 +1452,16 @@ async fn runtime_command_case_agrees_with_closed_output(case: &'static str) {
     }
     if case == "command_success" {
         assert_eq!(captures, 2);
+        let worker = bundle.view.runs[0].agents[1].assignment.as_ref().unwrap();
+        let integration = &worker.integration.as_ref().unwrap().1;
+        assert_eq!(integration.outcome, WorkerIntegrationOutcome::Integrated);
+        assert!(bundle.events.iter().any(|event| {
+            event.sequence == integration.finished_sequence
+                && matches!(&event.event, Event::ToolFinished { observation, .. }
+                    if observation.intent.id == integration.tool_id
+                        && observation.disposition == arany::ToolDisposition::Succeeded
+                        && observation.attestation.is_some())
+        }));
     }
 }
 
