@@ -170,44 +170,54 @@ async fn receive_settlement(
 #[tokio::test]
 async fn result_ready_unread_tail_is_delivered_before_finished_under_backpressure() {
     let _deadline = crate::cli::serve::tests::deadline();
-    let SettlingRun {
-        _root,
-        mut server,
-        incoming,
-        mut output,
-        _rpc,
-        result,
-        provider,
-        first_sequence,
-    } = completed_run_with_unread_events().await;
-    let session = result.run.session_id;
-    let (settled, (sequences, resync)) = tokio::join!(
-        server.on_run_finished(Ok(result)),
-        receive_settlement(&incoming, &mut output)
-    );
-    settled.unwrap();
-    let state = server.state.clone();
-    let engine = server.engine.clone();
-    server.on_stop(Ok(())).await.unwrap();
-    Arc::try_unwrap(engine)
-        .ok()
-        .expect("Engine released")
-        .close()
-        .await
-        .unwrap();
-    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-    let events = store.load_session(session).await.unwrap();
-    store.close().await.unwrap();
-    let expected = events
-        .iter()
-        .filter(|event| event.sequence >= first_sequence)
-        .map(|event| event.sequence)
-        .collect::<Vec<_>>();
-    assert!(!expected.is_empty());
-    assert!(
-        resync || sequences == expected,
-        "every committed sequence or an explicit resync must precede Finished"
-    );
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    assert!(provider.responses.lock().unwrap().is_empty());
+    for projection_available in [true, false] {
+        let SettlingRun {
+            _root,
+            mut server,
+            incoming,
+            mut output,
+            _rpc,
+            result,
+            provider,
+            first_sequence,
+        } = completed_run_with_unread_events().await;
+        let session = result.run.session_id;
+        let state = server.state.clone();
+        let (settled, (sequences, resync)) = tokio::join!(
+            async {
+                if !projection_available {
+                    server.drain_run_events().await?;
+                    assert!(server.active.as_ref().unwrap().state.run_id.is_some());
+                    server.state = _root.path().join("unavailable-state");
+                    assert!(threads::load_view(&server.state, session).await.is_err());
+                }
+                server.on_run_finished(Ok(result)).await
+            },
+            receive_settlement(&incoming, &mut output)
+        );
+        settled.unwrap();
+        let engine = server.engine.clone();
+        server.on_stop(Ok(())).await.unwrap();
+        Arc::try_unwrap(engine)
+            .ok()
+            .expect("Engine released")
+            .close()
+            .await
+            .unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let events = store.load_session(session).await.unwrap();
+        store.close().await.unwrap();
+        let expected = events
+            .iter()
+            .filter(|event| event.sequence >= first_sequence)
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty());
+        assert!(
+            resync || sequences == expected,
+            "every committed sequence or an explicit resync must precede Finished"
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert!(provider.responses.lock().unwrap().is_empty());
+    }
 }

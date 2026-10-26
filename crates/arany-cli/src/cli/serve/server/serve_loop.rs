@@ -833,9 +833,6 @@ impl ServerLoop {
                     refused,
                 };
                 if let Some(native) = native {
-                    if turn.state.run_id.is_some() {
-                        complete(turn, state, outbound, opt_out, &ending).await?;
-                    }
                     native
                         .output
                         .send(embedded::Event::finished(
