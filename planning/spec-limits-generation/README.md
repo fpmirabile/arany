@@ -2,9 +2,9 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`; S1/S2 exports implemented; S3/S4 remain
 - Owner: harness maintainers
-- Last updated: 2026-10-25
+- Last updated: 2026-10-26
 
 ## Outcome and scope
 
@@ -13,6 +13,8 @@ One observable capability: every public numeric bound in `docs/specs/` is render
 Included: a `limits` export in the binary, a committed generated file, a CI spec-budget check and the prose edits that replace restated numbers with links. Excluded: changing any bound's value, moving behavior between specs, or deleting scenario rows; the budget forbids growth, it does not demand cuts beyond the restated numbers.
 
 ## Research
+
+S1/S2 exports exist in [limits.rs](../../crates/arany/src/limits.rs) and [limits.md](../../docs/specs/limits.md), covering Tool, Session, execution, Goal and Provider bounds. S3/S4 remain; implementation status is not a claim that checks ran.
 
 - Size on `main` at `f0b7a348`: `docs/specs/*.md` total 136,847 words (`wc -w`); `tools.md` 43,202, `terminal.md` 21,092, `execution.md` 16,981, `provider.md` 9,272, `goals.md` 8,129, `session.md` 7,028. The [architecture overview](../../docs/architecture/system-overview.md) adds 8,659.
 - Hand-restated bounds: a regex over `N (KiB|MiB|GiB|bytes|seconds|ms|entries|files|tokens|lines|rows|chars)` finds 218 numeric bound mentions in `tools.md`, 82 in `execution.md`, 51 in `terminal.md`, 23 in `serve.md`, 21 each in `provider.md` and `session.md`, 20 in `goals.md`. Only seven specs have a dedicated limits section (`tools.md` [Limits and failure behavior](../../docs/specs/tools.md#limits-and-failure-behavior), `execution.md` [Persistence bounds](../../docs/specs/execution.md#persistence-bounds), `terminal.md` Public limits and compatibility, `serve.md`, `acp.md`, `credentials.md`, `telemetry.md` Export bounds); the rest state bounds inline.
@@ -40,16 +42,15 @@ No trust boundary changes. The export reads compiled constants only. The budget 
 
 ## Risks and mitigations
 
-- Specs reference a generated file while in-flight PRs still restate numbers → the restatement scan starts in warn-only mode in S1 and turns blocking in S3 after the follow-up families below have merged their same-PR spec edits.
+- Specs still restate generated bounds → S3 introduces the blocking restatement scan after the remaining architecture-residue spec edits, replacing restatements with links without dropping scenarios.
 - A bound has several owners in code (the 4096-byte path ceiling appears at 24 inline sites per the code-health survey) → the table lists one named constant per row; a row whose owner does not exist yet is added only after that constant is extracted (S2 does this for the limits it moves).
 - Budgets freeze needed clarifications → budgets are per file and a PR may lower one file's budget to raise another's by the same amount in the same PR; the total never rises.
 
 ## Vertical slices
 
-1. **Limits export for the Tool domain.** `LimitsTable` with the Tool-family rows (`MAX_TOOL_RESULT_BYTES`, `MAX_TOOL_ARGUMENT_BYTES`, `MAX_READ_PAGE_LINES`, `MAX_READ_LINE_CHARS`, catalog, snapshot, process-profile and MCP bounds that already have constants); `arany generate-limits` subcommand; committed `docs/specs/limits.md`; `generate_limits_matches_committed` beside the schema test; `tools.md` [Limits and failure behavior](../../docs/specs/tools.md#limits-and-failure-behavior) rows for those bounds become links to the generated rows. Files: `crates/arany/src/limits.rs` (new, small), `crates/arany-cli/src/cli/generate_schema.rs` (sibling subcommand), `crates/arany-cli/tests/generate_schema.rs`, `docs/specs/limits.md`, `docs/specs/tools.md`, `docs/specs/README.md`. ≤600 changed lines.
-2. **Session, execution, Goal and Provider rows.** Add `MAX_CONTEXT_CONTENT_BYTES`, `MAX_USER_MESSAGE_BYTES`, `MAX_SESSION_EVENTS`, `MAX_STEP_TOOL_CALLS`, compaction constants, `MAX_PROVIDER_REQUEST_BYTES`, Goal budget defaults and the persistence-bounds rows; replace the restated numbers in `execution.md` [Persistence bounds](../../docs/specs/execution.md#persistence-bounds), `session.md`, `goals.md` and `provider.md` with links. Where a bound has no single constant, extract it beside its owner first (one `pub(crate) const`, no behavior change). ≤600.
-3. **Spec budget check in CI.** `scripts/spec-budget.py` reads `docs/specs/budget.toml` (one word budget per spec, initialized to the current count rounded up to the next 500) and fails on growth or on a bare number next to a unit that matches a generated row; `scripts/test-spec-budget.py` pins the rules; the documentation lane in `ci.yml` runs both. `docs/development.md` verification section names the check; `agents/testing.md` documentation checks link it. ≤400.
-4. **Split `tools.md` under budget.** Move the native sections ([macOS enforcement](../../docs/specs/tools.md#macos-enforcement-and-compatibility), [Linux enforcement](../../docs/specs/tools.md#linux-enforcement-and-compatibility), [Shared native capacity](../../docs/specs/tools.md#shared-native-capacity-and-settings), [Local storage inventory](../../docs/specs/tools.md#local-storage-inventory), [Persistent Workspace build cache](../../docs/specs/tools.md#persistent-workspace-build-cache)) to `docs/specs/tools-native.md` as a pure move with inbound links, `AGENTS.md` routing row and documentation map updated; `budget.toml` splits the `tools.md` budget accordingly. Prose moves count once toward the ≤600 ceiling only for link rewrites; the moved text itself is excluded by the budget script's move detection (identical paragraphs).
+**S3: Spec budget check in CI.** `scripts/spec-budget.py` reads `docs/specs/budget.toml` (one word budget per spec, initialized to the current count rounded up to the next 500) and fails on growth or on a bare number next to a unit that matches a generated row; `scripts/test-spec-budget.py` pins the rules; the documentation lane in `ci.yml` runs both. `docs/development.md` verification section names the check; `agents/testing.md` documentation checks link it. ≤400.
+
+**S4: Split `tools.md` under budget.** Move the native sections ([macOS enforcement](../../docs/specs/tools.md#macos-enforcement-and-compatibility), [Linux enforcement](../../docs/specs/tools.md#linux-enforcement-and-compatibility), [Shared native capacity](../../docs/specs/tools.md#shared-native-capacity-and-settings), [Local storage inventory](../../docs/specs/tools.md#local-storage-inventory), [Persistent Workspace build cache](../../docs/specs/tools.md#persistent-workspace-build-cache)) to `docs/specs/tools-native.md` as a pure move with inbound links, `AGENTS.md` routing row and documentation map updated; `budget.toml` splits the `tools.md` budget accordingly. Prose moves count once toward the ≤600 ceiling only for link rewrites; the moved text itself is excluded by the budget script's move detection (identical paragraphs).
 
 ## Exit criteria
 
@@ -60,4 +61,4 @@ No trust boundary changes. The export reads compiled constants only. The budget 
 
 ## Gates
 
-No code owner conflict. Prose conflicts: slices 1 and 2 edit the limits sections that the architecture follow-ups P5, T2, C3 and J1–K2 (landed) also edit in their same-PR documentation; land slice 1 now and rebase slice 2 after K1/K2 to avoid conflicting `execution.md` rows. Slice 3's blocking mode waits for the follow-up families that are still open at that time to merge their spec edits. Slice 4 waits for C3 (the last follow-up that edits the native `tools.md` sections).
+S3 blocking prose scanning follows the remaining same-PR spec edits in [architecture-residue R1–R5](../architecture-residue/README.md#gates-and-order-against-active-plans). S4 follows S3; reserve native Tools sections and inbound links against active overlay/editor/egress work.
