@@ -1366,6 +1366,21 @@ impl SpillFixture {
 const SPILL_JOURNEY_WAIT: Duration = Duration::from_secs(120);
 const SPILL_SETTLE_WAIT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy, Debug)]
+enum StallEnd {
+    Cancel,
+    Deadline,
+}
+
+impl StallEnd {
+    fn expected_outcome(self) -> (RunStatus, usize) {
+        match self {
+            Self::Cancel => (RunStatus::Cancelled, 2),
+            Self::Deadline => (RunStatus::Finished, 3),
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(
     not(arany_ci),
@@ -1383,12 +1398,12 @@ fn spill_persistence_stall_preserves_completed_effects_and_reopens() {
         .enable_all()
         .build()
         .unwrap();
-    for cancelled in [true, false] {
-        reactor.block_on(spill_persistence_stall(cancelled));
+    for end in [StallEnd::Cancel, StallEnd::Deadline] {
+        reactor.block_on(spill_persistence_stall(end));
     }
 }
 
-async fn spill_persistence_stall(cancelled: bool) {
+async fn spill_persistence_stall(end: StallEnd) {
     let SpillFixture {
         _temp,
         workspace,
@@ -1421,35 +1436,33 @@ async fn spill_persistence_stall(cancelled: bool) {
             entered = tokio::time::timeout(SPILL_JOURNEY_WAIT, &mut entered) => entered.unwrap().unwrap(),
             outcome = &mut run => panic!("Run settled before spill persistence gate: {:?}", outcome.map(|result| result.run.status)),
         }
-        if cancelled {
-            cancellation.cancel();
-        } else {
-            let timeout = arany::limits::LIMITS
-                .rows
-                .iter()
-                .find(|limit| limit.name == "SPILL_PERSIST_TIMEOUT_MS")
-                .unwrap()
-                .value;
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_millis(timeout)).await;
-            tokio::time::resume();
+        match end {
+            StallEnd::Cancel => {
+                cancellation.cancel();
+            }
+            StallEnd::Deadline => {
+                let timeout = arany::limits::LIMITS
+                    .rows
+                    .iter()
+                    .find(|limit| limit.name == "SPILL_PERSIST_TIMEOUT_MS")
+                    .unwrap()
+                    .value;
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_millis(timeout)).await;
+                tokio::time::resume();
+            }
         }
         tokio::time::timeout(SPILL_SETTLE_WAIT, &mut run)
             .await
             .expect("spill persistence cannot hold the Run")
             .unwrap()
     };
-    assert_eq!(
-        outcome.run.status,
-        if cancelled {
-            RunStatus::Cancelled
-        } else {
-            RunStatus::Finished
-        }
-    );
+    let (expected_status, expected_requests) = end.expected_outcome();
+    assert_eq!(outcome.run.status, expected_status, "{end:?}");
     assert_eq!(
         provider.requests.lock().unwrap().len(),
-        if cancelled { 2 } else { 3 }
+        expected_requests,
+        "{end:?}"
     );
     assert_excerpt_only_success(&outcome.run);
     engine.close().await.unwrap();
