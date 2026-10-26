@@ -824,8 +824,11 @@ impl RunLoop<'_> {
                 }
             },
         };
-        answer.observation.spill = None;
+        runtime
+            .persist_spill(&mut answer.observation, self.controls.cancellation.clone())
+            .await;
         self.finish_answer(&answer).await?;
+        runtime.retain_spill(&answer.observation);
         if let Some((candidate, data)) = candidate {
             self.worker
                 .lock()

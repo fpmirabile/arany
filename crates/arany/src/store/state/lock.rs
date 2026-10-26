@@ -413,7 +413,7 @@ fn lock_named_namespace(dir: &Dir, name: &str) -> Result<NamespaceLock, StoreErr
 }
 
 #[cfg(unix)]
-fn open_private_lock_file(
+pub(super) fn open_private_lock_file(
     dir: &Dir,
     name: &str,
     before_create: impl FnOnce() -> Result<(), StoreError>,

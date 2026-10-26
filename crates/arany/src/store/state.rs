@@ -18,6 +18,7 @@ pub(crate) mod checkpoints;
 #[cfg(unix)]
 mod inventory;
 mod lock;
+pub(crate) mod spill;
 #[cfg(test)]
 pub(crate) use build_cache::capture_archive;
 pub(crate) use build_cache::{

@@ -1244,6 +1244,9 @@ fn inspect(
             offset,
             limit,
         } => {
+            if super::spill::read_reference(path).is_some() {
+                return Err(ToolError::SpillUnavailable);
+            }
             let Some(Entry::File { content, .. }) = image.entries.get(path) else {
                 return Err(ToolError::Path);
             };
