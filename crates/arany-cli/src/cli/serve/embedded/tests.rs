@@ -85,13 +85,15 @@ async fn assert_cancelled_connection(headless: bool) {
     let state = root.path().join("state");
     let mut view = controls.view(session).await.unwrap();
     assert_eq!(view.runs.last().unwrap().status, RunStatus::Active);
-    if !headless {
-        let run = view.runs.last().unwrap();
-        let target = arany::ChildSteeringTarget {
-            session_id: session,
-            run_id: run.id,
-            agent_run_id: run.agents[0].id,
-        };
+    let run = view.runs.last().unwrap();
+    let target = arany::ChildSteeringTarget {
+        session_id: session,
+        run_id: run.id,
+        agent_run_id: run.agents[0].id,
+    };
+    if headless {
+        assert_unavailable_controls(&controls, target).await;
+    } else {
         assert_pending_controls(&controls, target).await;
         assert_burst_bound(&controls, &mut view, &state).await;
     }
@@ -177,6 +179,25 @@ async fn assert_server_loss(headless: bool) {
         .close()
         .await
         .unwrap();
+}
+
+async fn assert_unavailable_controls(controls: &Controls, target: arany::ChildSteeringTarget) {
+    assert!(!controls.pause().await.unwrap());
+    assert_eq!(
+        controls.offer_note("primary note".into()).await.unwrap(),
+        Err(arany::SteeringRefused::Unavailable)
+    );
+    assert_eq!(
+        controls
+            .offer_child_note(target, "child note".into())
+            .await
+            .unwrap(),
+        Err(arany::SteeringRefused::Unavailable)
+    );
+    assert_eq!(controls.withdraw_note().await.unwrap(), None);
+    assert_eq!(controls.withdraw_child_note(target).await.unwrap(), None);
+    assert_eq!(controls.delivered_notes().await.unwrap(), 0);
+    controls.set_mode(ApprovalMode::AutoEdits).await.unwrap();
 }
 
 async fn assert_pending_controls(controls: &Controls, target: arany::ChildSteeringTarget) {

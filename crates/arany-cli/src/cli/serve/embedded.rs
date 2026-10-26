@@ -76,36 +76,38 @@ pub(in crate::cli) enum Control {
 
 impl Control {
     pub(super) fn apply(self, state: &RunControls) {
-        let steering = || state.steering.as_ref().expect("embedded steering");
+        let steering = state.steering.as_ref();
         match self {
             Self::Cancel(reply) => {
                 let _ = reply.send(state.cancellation.cancel());
             }
             Self::Pause(reply) => {
-                let _ = reply.send(steering().pause());
+                let _ = reply.send(steering.is_some_and(arany::RunSteering::pause));
             }
             Self::Mode(mode, reply) => {
-                state
-                    .approvals
-                    .as_ref()
-                    .expect("embedded approvals")
-                    .set_mode(mode);
+                if let Some(approvals) = &state.approvals {
+                    approvals.set_mode(mode);
+                }
                 let _ = reply.send(());
             }
             Self::Offer(target, text, reply) => {
-                let _ = reply.send(match target {
-                    Some(target) => steering().offer_child_note(target, text),
-                    None => steering().offer_note(text),
-                });
+                let _ = reply.send(
+                    steering
+                        .ok_or(arany::SteeringRefused::Unavailable)
+                        .and_then(|steering| match target {
+                            Some(target) => steering.offer_child_note(target, text),
+                            None => steering.offer_note(text),
+                        }),
+                );
             }
             Self::Withdraw(target, reply) => {
-                let _ = reply.send(match target {
-                    Some(target) => steering().withdraw_child_note(target),
-                    None => steering().withdraw_note(),
-                });
+                let _ = reply.send(steering.and_then(|steering| match target {
+                    Some(target) => steering.withdraw_child_note(target),
+                    None => steering.withdraw_note(),
+                }));
             }
             Self::Delivered(reply) => {
-                let _ = reply.send(steering().delivered_notes());
+                let _ = reply.send(steering.map_or(0, arany::RunSteering::delivered_notes));
             }
             Self::View(_, _) => unreachable!("view requests use strict replay"),
         }
