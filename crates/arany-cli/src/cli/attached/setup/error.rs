@@ -1,3 +1,4 @@
+use crate::accounts::credentials::CredentialError;
 use crate::terminal::{ShutdownSignal, TerminalError};
 use std::fmt::Display;
 
@@ -9,6 +10,29 @@ pub(in crate::cli::attached) enum SetupError {
 }
 
 impl SetupError {
+    pub(super) fn native_removal(error: CredentialError) -> Self {
+        match error {
+            CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown => {
+                Self::Presentation(
+                    "Native account removal is uncertain; restart setup and inspect saved access before continuing."
+                        .into(),
+                )
+            }
+            _ => Self::recoverable_unrecorded(error),
+        }
+    }
+
+    pub(super) fn native_save(error: CredentialError) -> Self {
+        match error {
+            CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown => {
+                Self::Presentation(
+                    "Native account storage is uncertain; restart setup and inspect saved access before continuing".into(),
+                )
+            }
+            _ => Self::recoverable(error),
+        }
+    }
+
     pub(super) fn recoverable(error: impl Display) -> Self {
         arany::record_development_failure(arany::DevelopmentFailure::Setup);
         Self::recoverable_unrecorded(error)

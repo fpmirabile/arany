@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready` (implementation gated on [in-process file mutations](../in-process-file-mutations/README.md) completing)
+- Status: `Ready`
 - Owner: harness maintainers
 - Last updated: 2026-10-25
 
@@ -51,7 +51,7 @@ Disclosure widens by design: the payload reads every unprotected Workspace file 
 
 1. **Overlay execution with upper-layer changesets (Linux).** Overlay mount in the payload builder with masked protected names, mountinfo attestation, upper-layer walk into `CommandChangeset`, selection process bypassed on Linux, enforcement digest bump; cache still the tmpfs/archive view. Same-PR docs: `tools.md` §Commands (Linux paragraph), §Command input selection (macOS-only heading), §Command changesets, §Limits (Linux/macOS rows), §Linux enforcement; overview §2 line 79 and §6. ≤600.
 2. **Build cache as a bind mount.** `/cache` binds a per-Workspace directory under the StateRoot; delete the archive, candidate, staging, lease and `cache_update` publication machinery (`store/state/build_cache.rs`, `guard.rs` `BuildCacheSession`/`BuildCacheTransfer`/`publish_cache_candidate`) on Linux; macOS keeps the archive path behind `cfg`; storage report rows; `/cache clear` on a directory. Same-PR docs: `tools.md` §Persistent Workspace build cache (rewritten, macOS archive paragraph retained), `terminal.md` storage report. ≤600 (deletions dominate; split the macOS `cfg` separation into 2b if needed).
-3. **CPU and jobs defaults like the peers.** Build class `cpu.max` = all controller cores, `CARGO_BUILD_JOBS` unset by default with a `/settings` range 1–cores, default class unchanged; digest-bound defaults updated; `guarded_offline_cargo_tests_use_selected_runtime_and_registry` measures `cargo test -p arany --lib` inside the Guard and records the result in the latency corpus. Same-PR docs: `tools.md` §Limits process-profile rows and the `CARGO_BUILD_JOBS` sentence, `goals.md` Build settings, `terminal.md` `/settings` rows; `NEXT_STEPS` item 5 keeps only the test-IPC gap, item 6 only the network proxy. ≤400.
+3. **CPU and jobs defaults like the peers.** Build class `cpu.max` = all controller cores, `CARGO_BUILD_JOBS` unset by default with a `/settings` range 1–cores, default class unchanged; digest-bound defaults updated; `guarded_offline_cargo_tests_use_selected_runtime_and_registry` measures `cargo test -p arany --lib` inside the Guard and records the result in the latency corpus. Same-PR docs: `tools.md` §Limits process-profile rows and the `CARGO_BUILD_JOBS` sentence, `goals.md` Build settings, `terminal.md` `/settings` rows; `NEXT_STEPS` "`cargo test` here inside the Guard" keeps only the test-IPC gap and "Development command environment" only the network proxy. ≤400.
 
 ## Exit criteria
 
@@ -62,4 +62,4 @@ Disclosure widens by design: the payload reads every unprotected Workspace file 
 
 ## Gates
 
-Opens only after [in-process file mutations](../in-process-file-mutations/README.md) slice 2 has merged (it deletes the Linux file-worker code in `guard/linux.rs` and `guard.rs` that slice 1 here would otherwise conflict with, and publication then runs in process). Slice 1 edits `guard/linux.rs`, `guard.rs`, `tools/fs.rs`, `tools/process.rs`: no open PR touches them at `04b80ac1`; reserve `fs.rs` against the in-process plan. Slice 2 edits `store/state/build_cache.rs`, `store/state.rs`, `guard.rs`, `presentation/storage.rs`: **after #446** (spec-limits S1 edits `store/state.rs` and `store.rs`). Slice 3 edits `tools/config.rs`, `tools/process.rs`, `cli/attached/controls.rs` (`/settings`) and `guard.rs`: after #438 (B13 exec feedback) only if it is still open and touches `controls.rs`; otherwise none.
+Primary publication already runs [in process](../../docs/specs/tools.md#in-process-file-operations). Slice 1 edits `guard/linux.rs`, `guard.rs`, `tools/fs.rs`, `tools/process.rs`: no open PR touches them at `04b80ac1`. Slice 2 edits `store/state/build_cache.rs`, `store/state.rs`, `guard.rs`, `presentation/storage.rs`: **after #446** (spec-limits S1 edits `store/state.rs` and `store.rs`). Slice 3 edits `tools/config.rs`, `tools/process.rs`, `cli/attached/controls.rs` (`/settings`) and `guard.rs`: after #438 (B13 exec feedback) only if it is still open and touches `controls.rs`; otherwise none.

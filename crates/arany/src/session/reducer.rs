@@ -21,6 +21,9 @@ pub(crate) mod rewind_tests;
 mod run;
 mod session;
 mod tool;
+pub(crate) use tool::{
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
+};
 mod usage;
 pub use usage::{PlanUsage, TokenCount, UsageGroup, UsageView};
 
@@ -210,6 +213,8 @@ pub(crate) mod worker_tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentView {
+    pub tool_refusal_sequence: Option<u64>,
+    pub tool_refusal: Option<super::ToolPreflightRefusal>,
     pub profile: Option<String>,
     pub assignment: Option<WorkerView>,
     pub definition: Option<String>,
@@ -657,15 +662,12 @@ fn all_children_finished(run: &RunView) -> bool {
 
 impl ToolView {
     fn undispatched_suffix(&self) -> bool {
-        !self.active_time_reserved
-            && self.hooks.is_empty()
-            && self.review_call_index.is_none()
-            && self.observation.as_ref().is_some_and(|observation| {
-                observation.attestation.is_none()
-                    && observation.approval_cause.is_none()
-                    && observation.disposition == crate::tools::ToolDisposition::Denied
-                    && observation.output == crate::tools::types::UNDISPATCHED_STEP_OUTPUT
-            })
+        self.observation.as_ref().is_some_and(|observation| {
+            observation.attestation.is_none()
+                && observation.approval_cause.is_none()
+                && observation.disposition == crate::tools::ToolDisposition::Denied
+                && observation.output == crate::tools::types::UNDISPATCHED_STEP_OUTPUT
+        })
     }
 
     // The journaled acceptance: the verdict says the Engine narrowed this Tool and the hook result names the call.
@@ -832,27 +834,36 @@ impl RunView {
     pub fn stopping_tool(&self) -> Option<&ToolView> {
         self.tools
             .iter()
-            .enumerate()
             .rev()
-            .find_map(|(index, tool)| {
-                tool.observation
-                    .as_ref()
-                    .is_some_and(|observation| {
+            .find(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.stops_run()
+                        || tool.active_time_reserved
+                            && observation.disposition == crate::tools::ToolDisposition::Limit
+                        || matches!(
+                            observation.approval_cause,
+                            Some(
+                                crate::tools::ApprovalCause::Paused
+                                    | crate::tools::ApprovalCause::Cancelled
+                                    | crate::tools::ApprovalCause::ChildTimeout
+                            )
+                        )
+                })
+            })
+            .or_else(|| {
+                self.tools
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, tool)| {
                         (tool.active_time_reserved
+                            && tool.observation.is_some()
+                            && !tool.undispatched_suffix()
                             && self.tools[index + 1..]
                                 .iter()
                                 .all(ToolView::undispatched_suffix))
-                            || observation.stops_run()
-                            || matches!(
-                                observation.approval_cause,
-                                Some(
-                                    crate::tools::ApprovalCause::Paused
-                                        | crate::tools::ApprovalCause::Cancelled
-                                        | crate::tools::ApprovalCause::ChildTimeout
-                                )
-                            )
+                        .then_some(tool)
                     })
-                    .then_some(tool)
             })
     }
 
@@ -1375,7 +1386,8 @@ impl SessionView {
             | Event::WorkerVerificationRecorded { .. } => {
                 worker::apply(current, &envelope.event, prior)?
             }
-            Event::ToolStarted { .. }
+            Event::ToolPreflightRefused { .. }
+            | Event::ToolStarted { .. }
             | Event::ToolActiveTimeReserved { .. }
             | Event::ToolFinished { .. }
             | Event::ToolProposed { .. }

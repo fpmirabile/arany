@@ -9,6 +9,43 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 pub(crate) const MAX_SESSION_EVENTS: usize = 10_000;
+const MAX_EVENT_KIND_BYTES: usize = 32;
+const INVALID_KIND_MARKER: &str = "[invalid kind]";
+
+#[derive(Debug)]
+pub struct InspectedEvent {
+    pub sequence: u64,
+    pub kind: String,
+    pub event: Result<EventEnvelope, crate::session::ReplayError>,
+}
+
+#[derive(Debug)]
+pub struct SessionInspection {
+    pub events: Vec<InspectedEvent>,
+    pub failure: Option<InspectionFailure>,
+    pub prefix_view: Option<SessionView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InspectionFailure {
+    pub sequence: u64,
+    pub cause: InspectionCause,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InspectionCause {
+    Replay(crate::session::ReplayError),
+    JournalSequenceGap,
+}
+
+impl std::fmt::Display for InspectionCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Replay(cause) => cause.fmt(formatter),
+            Self::JournalSequenceGap => formatter.write_str("invalid journal sequence"),
+        }
+    }
+}
 const MAX_FORK_DEPTH: usize = 8;
 pub(crate) const MAX_DISCOVERED_SESSIONS: usize = 65_536;
 pub(crate) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
@@ -70,6 +107,266 @@ pub(super) fn load_session(
     session_id: SessionId,
 ) -> Result<Vec<EventEnvelope>, StoreError> {
     resolve_view(connection, session_id, 0, &mut 0).map(|(events, _)| events)
+}
+
+pub(super) fn inspect_session(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<SessionInspection, StoreError> {
+    let (events, mut failure) = scan_inspected_events(connection, session_id)?;
+    let replay_limit = failure.as_ref().map_or(u64::MAX, |f| f.sequence);
+    if let Some(replay_failure) = replay_failure(connection, session_id, &events, replay_limit)?
+        && failure
+            .as_ref()
+            .is_none_or(|current| replay_failure.sequence < current.sequence)
+    {
+        failure = Some(replay_failure);
+    }
+    let prefix_view = project_inspected_prefix(connection, session_id, &events, &failure)?;
+    Ok(SessionInspection {
+        events,
+        failure,
+        prefix_view,
+    })
+}
+
+fn scan_inspected_events(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<(Vec<InspectedEvent>, Option<InspectionFailure>), StoreError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND {MAX_EVENT_KIND_BYTES} THEN kind ELSE '{INVALID_KIND_MARKER}' END, event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
+        MAX_LIST_SCAN_EVENTS + 1
+    ))?;
+    let mut rows = statement.query([session_id.to_string()])?;
+    let mut failure = None;
+    let mut events = Vec::new();
+    let mut expected = 1_i64;
+    let mut scanned = 0;
+    while let Some(row) = rows.next()? {
+        scanned += 1;
+        if scanned > MAX_LIST_SCAN_EVENTS {
+            return Err(StoreError::ReplayLimit);
+        }
+        let sequence: i64 = row.get(0)?;
+        let sequence_for_report = u64::try_from(sequence).unwrap_or_default();
+        if sequence != expected && failure.is_none() {
+            failure = Some(InspectionFailure {
+                sequence: sequence_for_report,
+                cause: InspectionCause::JournalSequenceGap,
+            });
+        }
+        expected = sequence.checked_add(1).ok_or(StoreError::InvalidHistory)?;
+        let selected: bool = row.get(11)?;
+        let kind = inspected_kind(row);
+        let raw = match raw_row(row) {
+            Ok(raw) => raw,
+            Err(_) => {
+                if failure.is_none() {
+                    failure = Some(InspectionFailure {
+                        sequence: sequence_for_report,
+                        cause: InspectionCause::Replay(crate::session::ReplayError::InvalidPayload),
+                    });
+                }
+                if selected {
+                    push_inspected_event(
+                        &mut events,
+                        sequence_for_report,
+                        kind,
+                        Err(crate::session::ReplayError::InvalidPayload),
+                    )?;
+                }
+                continue;
+            }
+        };
+        let event = raw.decode_inspected();
+        if let Err(cause) = &event
+            && failure.is_none()
+        {
+            failure = Some(InspectionFailure {
+                sequence: sequence_for_report,
+                cause: InspectionCause::Replay(*cause),
+            });
+        }
+        if selected {
+            push_inspected_event(&mut events, sequence_for_report, kind, event)?;
+        }
+    }
+    Ok((events, failure))
+}
+
+fn push_inspected_event(
+    events: &mut Vec<InspectedEvent>,
+    sequence: u64,
+    kind: String,
+    event: Result<EventEnvelope, crate::session::ReplayError>,
+) -> Result<(), StoreError> {
+    if events.len() == MAX_SESSION_EVENTS {
+        return Err(StoreError::ReplayLimit);
+    }
+    events.push(InspectedEvent {
+        sequence,
+        kind,
+        event,
+    });
+    Ok(())
+}
+
+fn inspected_kind(row: &Row<'_>) -> String {
+    let bytes = match row.get_ref(7) {
+        Ok(rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes)) => {
+            bytes
+        }
+        _ => return INVALID_KIND_MARKER.into(),
+    };
+    if !(1..=MAX_EVENT_KIND_BYTES).contains(&bytes.len()) {
+        return INVALID_KIND_MARKER.into();
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .unwrap_or_else(|_| INVALID_KIND_MARKER.into())
+}
+
+fn project_inspected_prefix(
+    connection: &Connection,
+    session_id: SessionId,
+    events: &[InspectedEvent],
+    failure: &Option<InspectionFailure>,
+) -> Result<Option<SessionView>, StoreError> {
+    let prefix: Vec<_> = events
+        .iter()
+        .take_while(|item| failure.as_ref().is_none_or(|f| item.sequence < f.sequence))
+        .filter_map(|item| item.event.as_ref().ok().cloned())
+        .collect();
+    let mut total_events = prefix.len();
+    match replay_through(
+        connection,
+        session_id,
+        &prefix,
+        0,
+        &mut total_events,
+        true,
+        None,
+    ) {
+        Ok(view) => Ok(view),
+        Err(error) => inspection_rejection(error).map(|_| None),
+    }
+}
+
+fn replay_failure(
+    connection: &Connection,
+    session_id: SessionId,
+    events: &[InspectedEvent],
+    before_sequence: u64,
+) -> Result<Option<InspectionFailure>, StoreError> {
+    let decoded = decoded_prefix(events, before_sequence);
+    let mut failures = compaction_failures(&decoded);
+    if let Some(failure) = canonical_replay_failure(connection, session_id, &decoded)? {
+        failures.push(failure);
+    }
+    Ok(failures.into_iter().min_by_key(|failure| failure.sequence))
+}
+
+fn decoded_prefix(events: &[InspectedEvent], before_sequence: u64) -> Vec<EventEnvelope> {
+    events
+        .iter()
+        .take_while(|item| item.sequence < before_sequence)
+        .filter_map(|item| item.event.as_ref().ok().cloned())
+        .collect()
+}
+
+fn compaction_failures(events: &[EventEnvelope]) -> Vec<InspectionFailure> {
+    let mut failures = Vec::new();
+    for result in [
+        crate::session::validate_compactions_with_sequence(events),
+        crate::session::validate_goal_context_compactions_with_sequence(events),
+    ] {
+        if let Err((sequence, cause)) = result {
+            failures.push(InspectionFailure {
+                sequence,
+                cause: InspectionCause::Replay(cause),
+            });
+        }
+    }
+    failures
+}
+
+fn canonical_replay_failure(
+    connection: &Connection,
+    session_id: SessionId,
+    events: &[EventEnvelope],
+) -> Result<Option<InspectionFailure>, StoreError> {
+    if events.is_empty() {
+        return Ok(None);
+    }
+    let mut total_events = events.len();
+    let replayed = replay_through(
+        connection,
+        session_id,
+        events,
+        0,
+        &mut total_events,
+        true,
+        None,
+    );
+    let error = match replayed {
+        Ok(_) => return Ok(None),
+        Err(error) => inspection_rejection(error)?,
+    };
+    let index = first_rejecting_prefix(connection, session_id, events)?;
+    let mut total_events = index;
+    let prefix_replay = replay_through(
+        connection,
+        session_id,
+        &events[..index],
+        0,
+        &mut total_events,
+        false,
+        None,
+    );
+    let cause = match prefix_replay {
+        Err(error) => inspection_rejection(error)?,
+        Ok(_) => error,
+    };
+    Ok(Some(InspectionFailure {
+        sequence: events[index - 1].sequence,
+        cause: InspectionCause::Replay(cause),
+    }))
+}
+
+fn inspection_rejection(error: StoreError) -> Result<crate::session::ReplayError, StoreError> {
+    match error {
+        StoreError::InvalidHistory => Ok(crate::session::ReplayError::InvalidTransition),
+        StoreError::InvalidSnapshot => Ok(crate::session::ReplayError::InvalidSnapshot),
+        other => Err(other),
+    }
+}
+
+fn first_rejecting_prefix(
+    connection: &Connection,
+    session_id: SessionId,
+    events: &[EventEnvelope],
+) -> Result<usize, StoreError> {
+    let (mut low, mut high) = (1, events.len());
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let mut total_events = middle;
+        if let Err(error) = replay_through(
+            connection,
+            session_id,
+            &events[..middle],
+            0,
+            &mut total_events,
+            false,
+            None,
+        ) {
+            inspection_rejection(error)?;
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    Ok(low)
 }
 
 pub(super) fn session_for_run(
@@ -700,7 +997,8 @@ fn fork_projection(
     if depth + 1 > MAX_FORK_DEPTH {
         return Err(StoreError::ReplayLimit);
     }
-    let source_events = load_session_events(connection, fork.source_session_id)?;
+    let source_events =
+        load_session_events_through(connection, fork.source_session_id, fork.source_sequence)?;
     *total_events = total_events
         .checked_add(source_events.len())
         .ok_or(StoreError::ReplayLimit)?;
@@ -722,14 +1020,10 @@ fn fork_projection(
     if prefix_digest(&source_events, fork.source_sequence)? != fork.prefix_digest {
         return Err(StoreError::InvalidHistory);
     }
-    let through: Vec<_> = source_events
-        .into_iter()
-        .filter(|envelope| envelope.sequence <= fork.source_sequence)
-        .collect();
     let source = replay_through(
         connection,
         fork.source_session_id,
-        &through,
+        &source_events,
         depth + 1,
         total_events,
         false,
@@ -788,6 +1082,37 @@ fn load_session_events(
             }
             selected.push(decode_event(row)?);
         }
+    }
+    Ok(selected)
+}
+
+fn load_session_events_through(
+    connection: &Connection,
+    session_id: SessionId,
+    sequence: u64,
+) -> Result<Vec<EventEnvelope>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence,
+            length(CAST(session_id AS BLOB)),
+            length(CAST(kind AS BLOB)),
+            length(CAST(payload AS BLOB)),
+            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+         FROM events WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence LIMIT ?3",
+    )?;
+    let mut rows = statement.query(rusqlite::params![
+        session_id.to_string(),
+        i64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
+        (MAX_SESSION_EVENTS + 1) as i64,
+    ])?;
+    let mut selected = Vec::new();
+    while let Some(row) = rows.next()? {
+        if selected.len() == MAX_SESSION_EVENTS {
+            return Err(StoreError::ReplayLimit);
+        }
+        selected.push(decode_event(row)?);
+    }
+    if selected.last().map(|event| event.sequence) != Some(sequence) {
+        return Err(StoreError::InvalidHistory);
     }
     Ok(selected)
 }
@@ -918,28 +1243,38 @@ pub(super) fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
 }
 
 impl RawRow {
-    pub(super) fn decode(self) -> Result<EventEnvelope, StoreError> {
-        if self.id_bytes != 36 || !(1..=32).contains(&self.kind_bytes) {
-            return Err(StoreError::InvalidHistory);
+    fn decode_inspected(self) -> Result<EventEnvelope, crate::session::ReplayError> {
+        if self.id_bytes != 36
+            || !(1..=MAX_EVENT_KIND_BYTES as i64).contains(&self.kind_bytes)
+            || self.created_at_ms < 0
+        {
+            return Err(crate::session::ReplayError::InvalidPayload);
         }
-        let id = SessionId::from_str(&self.session_id).map_err(|_| StoreError::InvalidHistory)?;
-        let run_id = match &self.run_id {
-            None => None,
-            Some(raw) if raw.len() == 36 => {
-                Some(RunId::from_str(raw).map_err(|_| StoreError::InvalidHistory)?)
-            }
-            _ => return Err(StoreError::InvalidHistory),
-        };
-        let agent_run_id = match &self.agent_run_id {
-            None => None,
-            Some(raw) if raw.len() == 36 => {
-                Some(AgentRunId::from_str(raw).map_err(|_| StoreError::InvalidHistory)?)
-            }
-            _ => return Err(StoreError::InvalidHistory),
-        };
+        let id = SessionId::from_str(&self.session_id)
+            .map_err(|_| crate::session::ReplayError::InvalidPayload)?;
+        if self.run_id.as_ref().is_some_and(|raw| raw.len() != 36)
+            || self
+                .agent_run_id
+                .as_ref()
+                .is_some_and(|raw| raw.len() != 36)
+        {
+            return Err(crate::session::ReplayError::InvalidPayload);
+        }
+        let run_id = self
+            .run_id
+            .as_deref()
+            .map(RunId::from_str)
+            .transpose()
+            .map_err(|_| crate::session::ReplayError::InvalidPayload)?;
+        let agent_run_id = self
+            .agent_run_id
+            .as_deref()
+            .map(AgentRunId::from_str)
+            .transpose()
+            .map_err(|_| crate::session::ReplayError::InvalidPayload)?;
         if !(1..=event_payload_limit(&self.kind, self.version) as i64).contains(&self.payload_bytes)
         {
-            return Err(StoreError::InvalidHistory);
+            return Err(crate::session::ReplayError::InvalidPayload);
         }
         let event = Event::decode(
             &self.kind,
@@ -948,17 +1283,19 @@ impl RawRow {
             run_id,
             agent_run_id,
         )?;
-        if self.created_at_ms < 0 {
-            return Err(StoreError::InvalidHistory);
-        }
         Ok(EventEnvelope {
-            sequence: u64::try_from(self.sequence).map_err(|_| StoreError::InvalidHistory)?,
+            sequence: u64::try_from(self.sequence)
+                .map_err(|_| crate::session::ReplayError::InvalidPayload)?,
             session_id: id,
             run_id,
             agent_run_id,
             event,
             created_at_ms: self.created_at_ms,
         })
+    }
+
+    pub(super) fn decode(self) -> Result<EventEnvelope, StoreError> {
+        self.decode_inspected().map_err(StoreError::from)
     }
 }
 
@@ -1002,4 +1339,93 @@ pub(super) fn supervisor_corpus(
     )?
     .ok_or(crate::supervisor::CorpusError::NotFound)?;
     corpus.finish(&view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_event_decode_requires_text_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = Connection::open(temp.path().join("events.sqlite3")).unwrap();
+        let session = SessionId::new();
+        let event = Event::SessionRenamed {
+            title: "Title".into(),
+        };
+        for (kind, accepted) in [
+            (rusqlite::types::Value::Text(event.kind().into()), true),
+            (
+                rusqlite::types::Value::Blob(event.kind().as_bytes().to_vec()),
+                false,
+            ),
+        ] {
+            let result = connection
+                .query_row(
+                    "SELECT 1, 36, length(CAST(?1 AS BLOB)), length(CAST(?2 AS BLOB)), ?3, NULL, NULL, ?1, ?4, ?2, 0",
+                    rusqlite::params![kind, event.payload().unwrap(), session.to_string(), event.version()],
+                    |row| Ok(decode_event(row)),
+                )
+                .unwrap();
+            if accepted {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(StoreError::InvalidHistory)));
+            }
+        }
+    }
+
+    #[test]
+    fn strict_event_decode_rejects_noncanonical_envelope_id_lengths() {
+        let session_id = SessionId::new();
+        let run_id = RunId::new();
+        let agent_run_id = AgentRunId::new();
+        let event = Event::AgentSpawned {
+            run_id,
+            agent_run_id,
+            role: crate::session::AgentRole::Primary,
+            ordinal: 0,
+            objective: None,
+            grant: None,
+            definition: None,
+            profile: None,
+            assignment: None,
+        };
+        let payload = event.payload().unwrap();
+        let canonical = RawRow {
+            sequence: 1,
+            id_bytes: 36,
+            kind_bytes: event.kind().len() as i64,
+            payload_bytes: payload.len() as i64,
+            session_id: session_id.to_string(),
+            run_id: Some(run_id.to_string()),
+            agent_run_id: Some(agent_run_id.to_string()),
+            kind: event.kind().into(),
+            version: event.version(),
+            payload: payload.clone(),
+            created_at_ms: 0,
+        };
+        assert!(canonical.decode().is_ok());
+        for malformed_run in [true, false] {
+            let mut raw = RawRow {
+                sequence: 1,
+                id_bytes: 36,
+                kind_bytes: event.kind().len() as i64,
+                payload_bytes: payload.len() as i64,
+                session_id: session_id.to_string(),
+                run_id: Some(run_id.to_string()),
+                agent_run_id: Some(agent_run_id.to_string()),
+                kind: event.kind().into(),
+                version: event.version(),
+                payload: payload.clone(),
+                created_at_ms: 0,
+            };
+            if malformed_run {
+                raw.run_id = Some(run_id.to_string().replace('-', ""));
+            } else {
+                raw.agent_run_id = Some(agent_run_id.to_string().replace('-', ""));
+            }
+            assert!(raw.decode_inspected().is_err());
+        }
+    }
 }

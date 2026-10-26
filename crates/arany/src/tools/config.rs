@@ -372,9 +372,7 @@ impl Config {
             }
         };
         let path = path.expect("file operation has path");
-        if matches!(call, ToolCall::Read { .. })
-            && path.strip_prefix("spill:").is_some_and(valid_digest)
-        {
+        if matches!(call, ToolCall::Read { .. }) && super::spill::read_reference(path).is_some() {
             return true;
         }
         (path.is_empty() || path == ".") && !call.mutates() || self.in_workspace_scope(path)

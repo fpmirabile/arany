@@ -1,5 +1,6 @@
 use super::{
-    Effort, MAX_RESPONSE_BYTES, NativeApiCredentials, ProviderError, resolve_native_effort,
+    Effort, MAX_RESPONSE_BYTES, NativeApiCredentials, ProviderError, ProviderKind,
+    resolve_native_effort,
 };
 #[cfg(test)]
 use reqwest::redirect::Policy;
@@ -117,10 +118,11 @@ async fn list_selected_models(
     credentials: &NativeApiCredentials,
     journal: Option<&mut crate::CheckJournal>,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
-    let endpoint = match profile {
-        "openai" => OPENAI_MODELS,
-        "anthropic" => ANTHROPIC_MODELS,
-        _ => return Err(ProviderError::Rejected),
+    let kind = ProviderKind::parse(profile).ok_or(ProviderError::Rejected)?;
+    let endpoint = match kind {
+        ProviderKind::OpenAi => OPENAI_MODELS,
+        ProviderKind::Anthropic => ANTHROPIC_MODELS,
+        ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
     };
     credentials.require_profile(profile)?;
     let client = super::http_client(Duration::from_secs(20))
@@ -128,16 +130,17 @@ async fn list_selected_models(
         .build()
         .map_err(|_| ProviderError::Unavailable)?;
     let endpoint = Url::parse(endpoint).map_err(|_| ProviderError::Unavailable)?;
-    list_at(&client, profile, endpoint, credentials, journal).await
+    list_at(&client, kind, endpoint, credentials, journal).await
 }
 
 async fn list_at(
     client: &Client,
-    profile: &str,
+    kind: ProviderKind,
     endpoint: Url,
     credentials: &NativeApiCredentials,
     mut journal: Option<&mut crate::CheckJournal>,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
+    let profile = kind.native_name().ok_or(ProviderError::Rejected)?;
     credentials.require_profile(profile)?;
     let key = credentials.api_key();
     let mut entries = Vec::new();
@@ -145,7 +148,7 @@ async fn list_at(
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
         let mut url = endpoint.clone();
-        if profile == "anthropic" {
+        if kind == ProviderKind::Anthropic {
             url.query_pairs_mut().append_pair("limit", "1000");
             if let Some(after) = cursor.as_deref() {
                 url.query_pairs_mut().append_pair("after_id", after);
@@ -155,16 +158,16 @@ async fn list_at(
             .get(url.clone())
             .header(header::ACCEPT, "application/json")
             .header(header::ACCEPT_ENCODING, "identity");
-        let request = match profile {
-            "openai" => request.bearer_auth(key),
-            "anthropic" => {
+        let request = match kind {
+            ProviderKind::OpenAi => request.bearer_auth(key),
+            ProviderKind::Anthropic => {
                 let mut key = HeaderValue::from_str(key).map_err(|_| ProviderError::Rejected)?;
                 key.set_sensitive(true);
                 request
                     .header("x-api-key", key)
                     .header("anthropic-version", "2023-06-01")
             }
-            _ => return Err(ProviderError::Rejected),
+            ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
         };
         let request = match credentials.anthropic_workspace_id() {
             Some(id) => request.header("anthropic-workspace-id", id),
@@ -199,13 +202,13 @@ async fn list_at(
                 );
             }
             let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
-            let kind = content_types
+            let content_type = content_types
                 .next()
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.split(';').next())
                 .map(str::trim);
             if content_types.next().is_some()
-                || !kind.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
+                || !content_type.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
             {
                 return Err(ProviderError::InvalidOutcome);
             }
@@ -216,7 +219,7 @@ async fn list_at(
             {
                 return Err(ProviderError::InvalidOutcome);
             }
-            let (rows, next) = if profile == "openai" {
+            let (rows, next) = if kind == ProviderKind::OpenAi {
                 let page: OpenAiPage =
                     serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
                 (page.data, None)
@@ -246,7 +249,7 @@ async fn list_at(
                     return Err(ProviderError::InvalidOutcome);
                 }
                 let mut entry = ModelEntry::native(profile, row.id);
-                if profile == "anthropic" {
+                if kind == ProviderKind::Anthropic {
                     entry.context_window_tokens = row
                         .max_input_tokens
                         .and_then(super::admitted_context_window);
@@ -335,10 +338,20 @@ mod tests {
             list_native_models_with_credentials("openai", &credentials).await,
             Err(ProviderError::Rejected)
         ));
-        assert!(matches!(
-            list_native_models_with_api_key("other", "synthetic-key").await,
-            Err(ProviderError::Rejected)
-        ));
+        for profile in ["", "other", "OpenAI", "chatgpt", "custom:local"] {
+            assert!(matches!(
+                NativeApiCredentials::from_env(profile),
+                Err(ProviderError::Rejected)
+            ));
+            assert!(matches!(
+                list_native_models_with_api_key(profile, "synthetic-key").await,
+                Err(ProviderError::Rejected)
+            ));
+            assert!(matches!(
+                list_native_models_with_credentials(profile, &credentials).await,
+                Err(ProviderError::Rejected)
+            ));
+        }
         for key in ["", "bad key", "bad\nkey"] {
             assert!(matches!(
                 list_native_models_with_api_key("openai", key).await,
@@ -412,7 +425,8 @@ mod tests {
         let credentials =
             NativeApiCredentials::new(profile, "fixture-key".into(), workspace.map(str::to_owned))
                 .unwrap();
-        let result = list_at(&client, profile, endpoint, &credentials, None).await;
+        let kind = ProviderKind::parse(profile).unwrap();
+        let result = list_at(&client, kind, endpoint, &credentials, None).await;
         (result, server.await.expect("fixture server"))
     }
 

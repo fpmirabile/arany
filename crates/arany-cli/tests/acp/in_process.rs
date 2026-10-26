@@ -3468,9 +3468,12 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             std::fs::read(workspace.join("new.txt")).unwrap(),
             b"Written"
         );
+        let intent_digest: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&tool.intent).unwrap()).into();
         assert!(matches!(
-            tool.observation.as_ref().unwrap().attestation,
-            Some(arany::Attestation::Guard(_))
+            &tool.observation.as_ref().unwrap().attestation,
+            Some(arany::Attestation::InProcess { receipt: Some(receipt), .. })
+                if receipt.intent_digest == intent_digest
         ));
     }
 }

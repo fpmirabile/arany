@@ -23,8 +23,8 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             offset,
             limit,
         } => {
-            (if let Some(reference) = path.strip_prefix("spill:") {
-                valid_digest(reference)
+            (if path.starts_with(super::spill::READ_PREFIX) {
+                super::spill::read_reference(path).is_some()
             } else {
                 valid_relative(path, false)
             }) && offset.is_none_or(|n| n >= 1)
@@ -101,7 +101,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "read" => vec![
             (
                 "path",
-                json!({"type":"string", "description":"Workspace file path, or spill:<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output."}),
+                json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
             ),
             (
                 "offset",
@@ -1582,16 +1582,49 @@ impl MutationControl {
     }
 }
 
-pub(super) fn file_receipt(intent: &EffectIntent, _output: &str) -> Result<FileReceipt, ToolError> {
-    if !matches!(intent.call, ToolCall::Mkdir { .. }) {
-        return Err(ToolError::Configuration);
-    }
-    Ok(FileReceipt {
+pub(super) fn file_receipt(intent: &EffectIntent, output: &str) -> Result<FileReceipt, ToolError> {
+    let mut receipt = FileReceipt {
         intent_digest: intent.digest(),
         before: None,
         after: None,
         executable: false,
-    })
+    };
+    let decode = |digest: &str| {
+        let mut bytes = [0; 32];
+        if !valid_digest(digest) {
+            return Err(ToolError::Uncertain);
+        }
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+                .map_err(|_| ToolError::Uncertain)?;
+        }
+        Ok(bytes)
+    };
+    match &intent.call {
+        ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. } => {
+            let result: crate::session::rewind::FilePublicationResult =
+                serde_json::from_str(output).map_err(|_| ToolError::Uncertain)?;
+            receipt.before = result
+                .before
+                .as_ref()
+                .map(|before| decode(&before.sha256))
+                .transpose()?;
+            receipt.after = Some(decode(&result.sha256)?);
+            receipt.executable = result.executable;
+        }
+        ToolCall::Delete { .. } | ToolCall::Move { .. } => {
+            let result: crate::session::rewind::RemovedFileResult =
+                serde_json::from_str(output).map_err(|_| ToolError::Uncertain)?;
+            receipt.before = Some(decode(&result.removed.sha256)?);
+            if matches!(intent.call, ToolCall::Move { .. }) {
+                receipt.after = receipt.before;
+            }
+            receipt.executable = result.removed.executable;
+        }
+        ToolCall::Mkdir { .. } | ToolCall::ApplyChangeset { .. } => {}
+        _ => return Err(ToolError::Configuration),
+    }
+    Ok(receipt)
 }
 
 pub(super) fn native(
@@ -1615,12 +1648,15 @@ pub(super) fn mutate(
 ) -> Result<String, ToolError> {
     control.check()?;
     match call {
-        ToolCall::Delete { .. } | ToolCall::Move { .. } => remove_or_move(root, call),
+        ToolCall::Delete { .. } | ToolCall::Move { .. } => remove_or_move(root, call, control),
         ToolCall::Write {
             path,
             expected_digest,
             content,
-        } => replace(root, path, expected_digest.as_deref(), content.as_bytes()),
+        } => {
+            let bytes = content.as_bytes();
+            replace(root, path, expected_digest.as_deref(), bytes, control)
+        }
         ToolCall::Mkdir { path } => {
             let (parent, leaf) = parent(root, path)?;
             let mut builder = DirBuilder::new();
@@ -1652,7 +1688,8 @@ pub(super) fn mutate(
         } => {
             let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
             let replacement = edited_content(&bytes, call)?;
-            replace(root, path, Some(expected_digest), replacement.as_bytes())
+            let bytes = replacement.as_bytes();
+            replace(root, path, Some(expected_digest), bytes, control)
         }
         ToolCall::ApplyChangeset {
             source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
@@ -1661,7 +1698,7 @@ pub(super) fn mutate(
             if !config.allows(call) {
                 return Err(ToolError::Path);
             }
-            apply_changeset(root, changeset)
+            apply_changeset(root, changeset, control)
         }
         _ => Err(ToolError::Operation),
     }
@@ -1725,7 +1762,11 @@ pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, To
     }
 }
 
-fn remove_or_move(root: &Dir, call: &ToolCall) -> Result<String, ToolError> {
+fn remove_or_move(
+    root: &Dir,
+    call: &ToolCall,
+    control: &MutationControl,
+) -> Result<String, ToolError> {
     let (source, destination, expected) = match call {
         ToolCall::Delete {
             path,
@@ -1764,7 +1805,7 @@ fn remove_or_move(root: &Dir, call: &ToolCall) -> Result<String, ToolError> {
         after: None,
     });
     worker_publication_paths(root, &files)?;
-    apply_files(root, &files)?;
+    apply_files_controlled(root, &files, control)?;
     serde_json::to_string(&crate::session::rewind::RemovedFileResult { removed })
         .map_err(|_| ToolError::Uncertain)
 }
@@ -1880,23 +1921,35 @@ fn verify_change_parent(root: &Dir, parent: &ChangeParent) -> Result<(), ToolErr
     Ok(())
 }
 
-fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, ToolError> {
+fn apply_changeset(
+    root: &Dir,
+    changeset: &CommandChangeset,
+    control: &MutationControl,
+) -> Result<String, ToolError> {
     if !changeset.valid() {
         return Err(ToolError::Path);
     }
-    apply_files(root, &changeset.files)
+    apply_files_controlled(root, &changeset.files, control)
 }
 
 pub(super) fn apply_worker_changeset(
-    workspace: &Path,
+    workspace: &Dir,
     changeset: &crate::session::worker::WorkerChangeset,
+    control: &MutationControl,
 ) -> Result<String, ToolError> {
-    let root = open_directory(workspace)?;
-    worker_publication_paths(&root, &changeset.files)?;
-    apply_files(&root, &changeset.files)
+    worker_publication_paths(workspace, &changeset.files)?;
+    apply_files_controlled(workspace, &changeset.files, control)
 }
 
 pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
+    apply_files_controlled(root, files, &MutationControl::default())
+}
+
+fn apply_files_controlled(
+    root: &Dir,
+    files: &[FileChange],
+    control: &MutationControl,
+) -> Result<String, ToolError> {
     check_change_directory(root, root)?;
     let mut parents = Vec::new();
     let mut directories = BTreeMap::<String, std::sync::Arc<Dir>>::new();
@@ -1960,6 +2013,7 @@ pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, To
                         use cap_std::fs::DirBuilderExt;
                         builder.mode(0o700);
                     }
+                    control.commit()?;
                     parent
                         .directory
                         .create_dir_with(part, &builder)
@@ -1971,14 +2025,7 @@ pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, To
                             }
                         })?;
                     affected = true;
-                    // Reopen "." readably first: a path-only capability handle cannot prove durability through fsync.
-                    parent
-                        .directory
-                        .try_clone()
-                        .map_err(|_| ToolError::Uncertain)?
-                        .into_std_file()
-                        .sync_all()
-                        .map_err(|_| ToolError::Uncertain)?;
+                    control.sync_parent(&parent.directory)?;
                     let live = Dir::from_std_file(open_file(&parent.directory, part)?);
                     check_change_directory(root, &live)?;
                     created.insert(path.clone(), identity(&live)?);
@@ -2008,6 +2055,7 @@ pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, To
                     change.before.is_none(),
                     &bytes,
                     mode,
+                    control,
                     || {
                         verify_change_parent(root, &parent)?;
                         check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())
@@ -2015,18 +2063,13 @@ pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, To
                     },
                 )?;
             } else {
+                control.commit()?;
                 parent
                     .directory
                     .remove_file(&parent.leaf)
                     .map_err(|_| ToolError::Operation)?;
                 affected = true;
-                parent
-                    .directory
-                    .try_clone()
-                    .map_err(|_| ToolError::Uncertain)?
-                    .into_std_file()
-                    .sync_all()
-                    .map_err(|_| ToolError::Uncertain)?;
+                control.sync_parent(&parent.directory)?;
             }
             affected = true;
             Ok(())
@@ -2047,6 +2090,7 @@ fn replace(
     path: &str,
     expected: Option<&str>,
     bytes: &[u8],
+    control: &MutationControl,
 ) -> Result<String, ToolError> {
     let (parent, leaf) = parent(root, path)?;
     let inspect = || match open_file(&parent, &leaf) {
@@ -2083,7 +2127,8 @@ fn replace(
         Err(_) => Err(ToolError::Conflict),
     };
     let (before, mode) = inspect()?;
-    replace_file(&parent, &leaf, expected.is_none(), bytes, mode, || {
+    let create = expected.is_none();
+    replace_file(&parent, &leaf, create, bytes, mode, control, || {
         if inspect()? == (before.clone(), mode) {
             Ok(())
         } else {
@@ -2105,8 +2150,10 @@ fn replace_file(
     create: bool,
     bytes: &[u8],
     mode: u32,
+    control: &MutationControl,
     verify: impl Fn() -> Result<(), ToolError>,
 ) -> Result<(), ToolError> {
+    control.check()?;
     let temporary = format!(".arany-write-{}", uuid::Uuid::now_v7());
     let mut options = OpenOptions::new();
     options
@@ -2132,6 +2179,7 @@ fn replace_file(
                 .map_err(|_| ToolError::Operation)?;
         }
         verify()?;
+        control.commit()?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             if create {
@@ -2148,12 +2196,7 @@ fn replace_file(
                     .rename(&temporary, parent, leaf)
                     .map_err(|_| ToolError::Operation)?;
             }
-            parent
-                .try_clone()
-                .map_err(|_| ToolError::Uncertain)?
-                .into_std_file()
-                .sync_all()
-                .map_err(|_| ToolError::Uncertain)?;
+            control.sync_parent(parent)?;
             Ok(())
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -2441,9 +2484,18 @@ mod mutation_tests {
         tokio::time::advance(interval).await;
         assert!(matches!(preparing.commit(), Err(ToolError::Timeout(_))));
         assert!(matches!(preparing.check(), Err(ToolError::Timeout(_))));
+        let temp = tempfile::tempdir().unwrap();
+        let root = open_directory(temp.path()).unwrap();
+        assert!(matches!(
+            replace(&root, "file", None, b"content", &preparing),
+            Err(ToolError::Timeout(_))
+        ));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
         stop.cancel();
         assert!(publishing.check().is_ok());
         assert!(matches!(publishing.expire(), ToolError::Uncertain));
+        replace(&root, "file", None, b"content", &publishing).unwrap();
+        assert_eq!(std::fs::read(temp.path().join("file")).unwrap(), b"content");
     }
 }
 

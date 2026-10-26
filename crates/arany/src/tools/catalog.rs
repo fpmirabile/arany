@@ -78,6 +78,7 @@ const fn read_row(
 
 const fn write_row(name: &'static str, order: u8, description: &'static str) -> OperationFacts {
     OperationFacts {
+        site: Site::InProcess,
         mutates: true,
         asks_approval: true,
         goal_success: true,
@@ -113,14 +114,11 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         2,
         "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
     ),
-    OperationFacts {
-        site: Site::InProcess,
-        ..write_row(
-            "mkdir",
-            8,
-            "Create a new directory whose parent already exists. Does not edit an existing file.",
-        )
-    },
+    write_row(
+        "mkdir",
+        8,
+        "Create a new directory whose parent already exists. Does not edit an existing file.",
+    ),
     write_row(
         "write",
         9,
@@ -891,7 +889,20 @@ mod tests {
             .collect();
         assert_eq!(
             in_process,
-            ["list", "read", "search", "mkdir", "skill", "glob"]
+            [
+                "list",
+                "read",
+                "search",
+                "mkdir",
+                "write",
+                "edit",
+                "apply_changeset",
+                "skill",
+                "glob",
+                "multiedit",
+                "delete",
+                "move"
+            ]
         );
         assert!(
             ALL.iter()

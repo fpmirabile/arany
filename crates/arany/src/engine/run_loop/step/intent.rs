@@ -4,8 +4,8 @@ use super::dispatch::Verdict;
 use super::dispatch::{NotDispatched, not_dispatched};
 use super::permission::{Permission, effective_permission_mode};
 use super::{
-    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD,
-    TOOL_CLEANUP_OVERHEAD, timeout_limit_cause,
+    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD, StepEnd,
+    TOOL_CLEANUP_OVERHEAD, completion_deadline, timeout_limit_cause,
 };
 use crate::engine::ledger::{
     Action, ActiveDeadlineCause, Admission, NARROWING_EVENTS, duration_ms,
@@ -46,6 +46,30 @@ pub(super) fn sizing_deadline_refusal(cause: Option<ActiveDeadlineCause>) -> Siz
     match cause {
         Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
         Some(ActiveDeadlineCause::Delegation) | None => SizingRefusal::DelegationDeadline,
+    }
+}
+
+pub(super) struct PendingToolRefusal {
+    agent_run_id: crate::session::AgentRunId,
+    intent_id: uuid::Uuid,
+    pub(super) record: Box<crate::session::ToolPreflightRefusal>,
+}
+
+impl PendingToolRefusal {
+    pub(super) fn new(
+        intent: &EffectIntent,
+        refusal: crate::session::ToolRefusal,
+        verdict: Option<PermissionVerdict>,
+    ) -> Self {
+        Self {
+            agent_run_id: intent.agent_run_id,
+            intent_id: intent.id,
+            record: Box::new(crate::session::ToolPreflightRefusal {
+                intent_digest: intent.digest(),
+                refusal,
+                verdict,
+            }),
+        }
     }
 }
 
@@ -270,6 +294,27 @@ impl RunLoop<'_> {
         call: ToolCall,
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
+        let intent = match self
+            .size_step_intent(grant, runtime, step, call, post_call)
+            .await?
+        {
+            Ok(intent) => intent,
+            Err(cause) => return Ok(Err(cause)),
+        };
+        Ok(self
+            .validate_step_intent(runtime, &intent)
+            .await?
+            .map(|()| intent))
+    }
+
+    pub(super) async fn size_step_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        post_call: &ToolCall,
+    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
         let sized = self
             .sized_intent(grant, runtime, step, call.clone(), post_call)
             .await?;
@@ -292,6 +337,52 @@ impl RunLoop<'_> {
             Err(refusal @ SizingRefusal::Cancelled) => Ok(Err(refusal.into())),
             Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
         }
+    }
+
+    pub(super) async fn validate_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), StopCause>, EngineError> {
+        match self.preflight_step_intent(runtime, intent)? {
+            Ok(()) => Ok(Ok(())),
+            Err(record) => {
+                let cause = record.record.refusal;
+                self.record_tool_refusal(record).await?;
+                Ok(Err(StopCause::ToolRefused(cause)))
+            }
+        }
+    }
+
+    pub(super) fn preflight_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
+        let mut event = Event::ToolProposed {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        self.ledger().view(|view| {
+            crate::session::validate_tool_started(view, &event)
+                .map_err(|refusal| PendingToolRefusal::new(intent, refusal, None))
+        })
+    }
+
+    pub(super) async fn record_tool_refusal(
+        &self,
+        pending: PendingToolRefusal,
+    ) -> Result<(), EngineError> {
+        self.append(Event::ToolPreflightRefused {
+            run_id: self.run_id,
+            agent_run_id: pending.agent_run_id,
+            record: *pending.record,
+        })
+        .await?;
+        self.commit_approval_withdrawal(pending.intent_id)
     }
 
     pub(super) async fn sized_intent(
@@ -614,6 +705,17 @@ impl RunLoop<'_> {
         Ok(Ok(()))
     }
 
+    pub(super) async fn finish_answer(&self, answer: &Answer) -> Result<(), EngineError> {
+        self.append(Event::ToolFinished {
+            checkpoint: answer.checkpoint.clone(),
+            run_id: self.run_id,
+            agent_run_id: answer.observation.intent.agent_run_id,
+            observation: answer.observation.clone(),
+        })
+        .await?;
+        self.commit_approval_withdrawal(answer.observation.intent.id)
+    }
+
     pub(super) async fn dispatch_intent(
         &self,
         grant: &Grant<'_>,
@@ -622,15 +724,20 @@ impl RunLoop<'_> {
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
         let agent_run_id = intent.agent_run_id;
-        let intent_id = intent.id;
         let permission = self.permission(grant, runtime, &intent.call);
         let mut narrowed = None;
         let mut candidate = None;
-        let Admission::Reserved(verdict) = self
-            .before_dispatch(grant, runtime, intent, permission, narrowable)
+        let verdict = match self
+            .before_dispatch(grant, runtime, intent, permission, narrowable, None)
             .await?
-        else {
-            return Ok(Err(StopCause::ActiveTime));
+        {
+            Ok(Admission::Reserved(verdict)) => verdict,
+            Ok(Admission::Exhausted) => return Ok(Err(StopCause::ActiveTime)),
+            Err(record) => {
+                let cause = record.record.refusal;
+                self.record_tool_refusal(record).await?;
+                return Ok(Err(StopCause::ToolRefused(cause)));
+            }
         };
         if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
             self.worker
@@ -685,28 +792,33 @@ impl RunLoop<'_> {
                     };
                     tokio::pin!(execution);
                     let mut observation = tokio::select! {
+                        biased;
                         result = &mut execution => result?,
+                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                         () = async {
                             match active_deadline {
                                 Some(deadline) => deadline.elapsed().await,
                                 None => tokio::time::sleep_until(deadline).await,
                             }
                         } => { timed_out = true; cancellation.cancel(); execution.await? },
-                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                     };
-                    if timed_out && observation.disposition == ToolDisposition::Cancelled {
-                        observation.disposition = ToolDisposition::Limit;
-                        observation.limit_cause =
-                            timeout_limit_cause(active_deadline.map(|d| d.cause));
-                    }
+                    let stop = match completion_deadline(
+                        observation.disposition,
+                        timed_out,
+                        active_deadline.map(|deadline| deadline.cause),
+                    ) {
+                        StepEnd::Continue => None,
+                        StepEnd::Stopped(cause) => {
+                            observation.disposition = ToolDisposition::Limit;
+                            observation.limit_cause =
+                                timeout_limit_cause(active_deadline.map(|deadline| deadline.cause));
+                            Some(cause)
+                        }
+                    };
                     Answer {
                         checkpoint: None,
                         observation,
-                        stop: timed_out.then(|| match active_deadline.map(|d| d.cause) {
-                            Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
-                            Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
-                            None => StopCause::ToolStopped,
-                        }),
+                        stop,
                         active_time: None,
                     }
                 }
@@ -715,15 +827,8 @@ impl RunLoop<'_> {
         runtime
             .persist_spill(&mut answer.observation, self.controls.cancellation.clone())
             .await;
-        self.append(Event::ToolFinished {
-            checkpoint: answer.checkpoint.clone(),
-            run_id: self.run_id,
-            agent_run_id,
-            observation: answer.observation.clone(),
-        })
-        .await?;
+        self.finish_answer(&answer).await?;
         runtime.retain_spill(&answer.observation);
-        self.commit_approval_withdrawal(intent_id)?;
         if let Some((candidate, data)) = candidate {
             self.worker
                 .lock()
