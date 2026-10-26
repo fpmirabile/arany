@@ -1,5 +1,5 @@
 use super::{EngineError, STORE_ACTION_OVERHEAD};
-use crate::journal::Journal;
+use crate::journal::{Journal, JournalWriter};
 use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
     AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal, Event, EventEnvelope, GoalBudget,
@@ -486,7 +486,17 @@ impl GoalLedger {
         session_id: SessionId,
         event: Event,
     ) -> Result<Arc<EventEnvelope>, EngineError> {
-        let (committed, fed) = journal
+        let writer = journal.writer().await;
+        self.append_committed_in(&writer, session_id, event).await
+    }
+
+    pub(super) async fn append_committed_in(
+        &self,
+        writer: &JournalWriter<'_>,
+        session_id: SessionId,
+        event: Event,
+    ) -> Result<Arc<EventEnvelope>, EngineError> {
+        let (committed, fed) = writer
             .append_then(session_id, event, |envelope| self.committed(envelope))
             .await?;
         fed?;

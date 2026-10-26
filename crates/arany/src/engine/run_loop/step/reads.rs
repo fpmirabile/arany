@@ -256,9 +256,31 @@ impl RunLoop<'_> {
                 biased;
                 result = batch.calls.join_next(), if !batch.calls.is_empty() => {
                     let (index, answer) = result.ok_or(EngineError::CoordinatorFailed)?.map_err(|_| EngineError::CoordinatorFailed)?;
-                    self.settle_read(grant, step, (index, answer, None), batch).await?;
+                    if matches!(read_end(&answer, self.controls.cancellation.is_cancelled()), StepEnd::Stopped(_)) {
+                        interrupted.cancel();
+                    }
+                    let verdict = {
+                        // Admission may hold the journal writer until its commit and verdict settle.
+                        let settling = self.settle_read(grant, step, (index, answer, None), batch);
+                        tokio::pin!(settling);
+                        tokio::select! {
+                            biased;
+                            verdict = &mut admission => {
+                                completed = true;
+                                settling.await?;
+                                Some(verdict)
+                            }
+                            settled = &mut settling => {
+                                settled?;
+                                None
+                            }
+                        }
+                    };
                     if matches!(batch.end, StepEnd::Stopped(_)) {
                         interrupted.cancel();
+                    }
+                    if let Some(verdict) = verdict {
+                        break verdict;
                     }
                 }
                 () = cancellation.cancelled(), if !interrupted.is_cancelled() => {
@@ -366,27 +388,9 @@ impl RunLoop<'_> {
         batch: &mut ReadBatch<'_>,
     ) -> Result<(), EngineError> {
         self.finish_answer(&answer).await?;
-        let mut stop = answer.stop;
-        if answer.observation.disposition == ToolDisposition::Limit {
-            stop = Some(stop.map_or(StopCause::ToolStopped, |cause| {
-                cause.merge(StopCause::ToolStopped)
-            }));
-        }
-        if answer.active_time.is_some_and(|time| time.exhausted) {
-            stop = Some(stop.map_or(StopCause::ActiveTime, |cause| {
-                cause.merge(StopCause::ActiveTime)
-            }));
-        }
-        if answer.observation.stops_run() || self.controls.cancellation.is_cancelled() {
-            let observed = Self::observation_stop(
-                &answer.observation,
-                self.controls.cancellation.is_cancelled(),
-            );
-            stop = Some(stop.map_or(observed, |cause| cause.merge(observed)));
-        }
-        if let Some(cause) = stop {
-            batch.end = batch.end.merge(StepEnd::Stopped(cause));
-        }
+        batch.end = batch
+            .end
+            .merge(read_end(&answer, self.controls.cancellation.is_cancelled()));
         let observation = step.observations.len();
         if narrowed.is_some() {
             step.narrowed_observations.insert(observation);
@@ -432,6 +436,39 @@ impl RunLoop<'_> {
         }
         Ok(())
     }
+}
+
+fn read_end(answer: &Answer, cancelled: bool) -> StepEnd {
+    let observed = (answer.observation.stops_run() || cancelled)
+        .then(|| RunLoop::observation_stop(&answer.observation, cancelled));
+    decide_read_end(
+        answer.stop,
+        answer.observation.disposition,
+        answer
+            .active_time
+            .as_ref()
+            .is_some_and(|time| time.exhausted),
+        observed,
+    )
+}
+
+fn decide_read_end(
+    stop: Option<StopCause>,
+    disposition: ToolDisposition,
+    exhausted: bool,
+    observed: Option<StopCause>,
+) -> StepEnd {
+    [
+        stop,
+        (disposition == ToolDisposition::Limit).then_some(StopCause::ToolStopped),
+        exhausted.then_some(StopCause::ActiveTime),
+        observed,
+    ]
+    .into_iter()
+    .flatten()
+    .fold(StepEnd::Continue, |end, cause| {
+        end.merge(StepEnd::Stopped(cause))
+    })
 }
 
 fn post_hook_progress(end: StepEnd, cancelled: bool, paused: bool) -> StepEnd {
@@ -517,6 +554,58 @@ pub(super) fn model_order(step: &mut ToolStep, order: &[usize]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_completions_stop_admission_with_the_settled_cause() {
+        use StopCause::{ActiveTime, Cancelled, HookStop, ToolStopped, Uncertain};
+        use ToolDisposition::{Failed, Limit, Succeeded};
+        let rows = [
+            (None, Succeeded, false, None, StepEnd::Continue),
+            (None, Limit, false, None, StepEnd::Stopped(ToolStopped)),
+            (
+                Some(Uncertain),
+                Limit,
+                false,
+                None,
+                StepEnd::Stopped(Uncertain),
+            ),
+            (None, Limit, true, None, StepEnd::Stopped(ActiveTime)),
+            (
+                None,
+                Failed,
+                false,
+                Some(ToolStopped),
+                StepEnd::Stopped(ToolStopped),
+            ),
+            (
+                None,
+                Succeeded,
+                false,
+                Some(Cancelled),
+                StepEnd::Stopped(Cancelled),
+            ),
+            (
+                Some(Cancelled),
+                Failed,
+                false,
+                Some(Uncertain),
+                StepEnd::Stopped(Uncertain),
+            ),
+            (
+                Some(HookStop),
+                Succeeded,
+                true,
+                None,
+                StepEnd::Stopped(HookStop),
+            ),
+        ];
+        for (stop, disposition, exhausted, observed, expected) in rows {
+            assert_eq!(
+                decide_read_end(stop, disposition, exhausted, observed),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn deferred_hooks_continue_after_tool_limits_and_respect_terminal_stops() {
