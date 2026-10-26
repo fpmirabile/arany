@@ -353,14 +353,34 @@ async fn multiedit_guard_publication_denials_late_failure_and_closed_replay() {
 #[tokio::test]
 async fn typed_mutations_cancelled_approval_and_lost_receipt_never_retry() {
     for call in [multiedit(), removal(false), removal(true)] {
-        for lost in [false, true] {
-            cancelled_or_lost_mutation(call.clone(), lost).await;
+        for fault in [
+            MutationFailure::Cancelled,
+            MutationFailure::ReceiptLost,
+            MutationFailure::ParentSync,
+        ] {
+            cancelled_or_lost_mutation(call.clone(), fault).await;
         }
     }
+    cancelled_or_lost_mutation(
+        removal(true),
+        MutationFailure::ParentSyncWithDestinationParent,
+    )
+    .await;
 }
 
-async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
+#[derive(Clone, Copy, Debug)]
+enum MutationFailure {
+    Cancelled,
+    ReceiptLost,
+    ParentSync,
+    ParentSyncWithDestinationParent,
+}
+
+async fn cancelled_or_lost_mutation(call: arany::ToolCall, fault: MutationFailure) {
     let fixture = Fixture::new(None, true);
+    if matches!(fault, MutationFailure::ParentSyncWithDestinationParent) {
+        std::fs::create_dir(fixture.workspace.join("notes/nested")).unwrap();
+    }
     let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(call.clone())]));
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let cancellation = RunCancellation::new();
@@ -387,14 +407,18 @@ async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
                 result = &mut running => break result,
                 Some(approval) = inbox.next() => {
                     asked += 1;
-                    if lost { arany::FaultPlan::lose_guard_receipt(approval.intent.id); }
-                    else { cancellation.cancel(); }
+                    match fault {
+                        MutationFailure::ReceiptLost => arany::FaultPlan::lose_guard_receipt(approval.intent.id),
+                        MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent => arany::FaultPlan::fail_file_parent_sync(approval.intent.id),
+                        MutationFailure::Cancelled => { cancellation.cancel(); }
+                    }
                     approval.decide(true);
                 }
             }
         }
     };
-    if lost {
+    let published = !matches!(fault, MutationFailure::Cancelled);
+    if published {
         assert!(matches!(
             outcome,
             Err(EngineError::Tool(arany::ToolError::Uncertain))
@@ -408,40 +432,72 @@ async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
         assert_eq!(requests.len(), 1, "no continuation or automatic retry");
         requests[0].session_id
     };
-    assert_stopped_mutation(fixture, session, &call, lost).await;
+    assert_stopped_mutation(fixture, session, &call, fault).await;
 }
 
 async fn assert_stopped_mutation(
     fixture: Fixture,
     session: SessionId,
     call: &arany::ToolCall,
-    lost: bool,
+    fault: MutationFailure,
 ) {
-    let removed = lost
+    let published = !matches!(fault, MutationFailure::Cancelled);
+    let move_sync_failed = matches!(
+        fault,
+        MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent
+    ) && matches!(call, arany::ToolCall::Move { .. });
+    let removed = published
+        && !move_sync_failed
         && matches!(
             call,
             arany::ToolCall::Delete { .. } | arany::ToolCall::Move { .. }
         );
-    assert_eq!(fixture.workspace.join("notes/facts.txt").exists(), !removed);
+    assert_eq!(
+        fixture.workspace.join("notes/facts.txt").exists(),
+        !removed,
+        "{fault:?}"
+    );
     if !removed {
         assert_eq!(
             std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
-            if lost {
+            if published && !move_sync_failed {
                 b"done".as_slice()
             } else {
                 b"Fact".as_slice()
             }
         );
     }
+    let destination_published = matches!(call, arany::ToolCall::Move { .. })
+        && matches!(
+            fault,
+            MutationFailure::ReceiptLost | MutationFailure::ParentSyncWithDestinationParent
+        );
     assert_eq!(
         fixture.workspace.join("notes/nested/moved.txt").exists(),
-        lost && matches!(call, arany::ToolCall::Move { .. })
+        destination_published,
+        "{fault:?}"
     );
+    if matches!(call, arany::ToolCall::Move { .. }) {
+        assert_eq!(fixture.workspace.join("notes/nested").is_dir(), published);
+    }
+    if destination_published {
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/nested/moved.txt")).unwrap(),
+            b"Fact"
+        );
+    }
     let (_, view) = fixture.reopen(session).await;
     assert_eq!(view.runs[0].tools.len(), 1);
     let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
-    if lost {
+    if published {
         assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
+        assert_eq!(
+            observation.attestation.is_some(),
+            matches!(
+                fault,
+                MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent
+            )
+        );
     } else {
         assert!(observation.attestation.is_none());
     }
@@ -449,21 +505,29 @@ async fn assert_stopped_mutation(
 
 #[tokio::test]
 async fn multiedit_crash_prefixes_keep_pre_go_and_committed_publication_facts() {
-    for finished in [false, true] {
+    for stage in ["started", "published", "finished"] {
+        let finished = stage == "finished";
         let fixture = Fixture::new(None, true);
         let session = fixture
             .engine
             .create_session(fixture.workspace.clone(), None)
             .await
             .unwrap();
-        let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(
-            session,
-            if finished {
-                |e| matches!(e, Event::ToolFinished { .. })
-            } else {
-                |e| matches!(e, Event::ToolStarted { .. })
-            },
-        );
+        let gate = if stage == "published" {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::ToolFinished { .. })
+            });
+            None
+        } else {
+            Some(arany::FaultPlan::gate_goal_append_acknowledgment(
+                session,
+                if finished {
+                    |e| matches!(e, Event::ToolFinished { .. })
+                } else {
+                    |e| matches!(e, Event::ToolStarted { .. })
+                },
+            ))
+        };
         let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(multiedit())]));
         let mut input = request(&fixture.workspace, "Make one atomic edit");
         input.session_id = Some(session);
@@ -481,15 +545,17 @@ async fn multiedit_crash_prefixes_keep_pre_go_and_committed_publication_facts() 
                 },
             );
             tokio::pin!(running);
-            tokio::select! {
-                result = &mut running => panic!("acknowledgment gate was not reached: {result:?}"),
-                entered = entered => entered.unwrap(),
+            if let Some((entered, release)) = gate {
+                tokio::select! {
+                    result = &mut running => panic!("acknowledgment gate was not reached: {result:?}"),
+                    entered = entered => entered.unwrap(),
+                }
+                drop(release);
             }
-            drop(release);
             assert!(running.await.is_err());
         }
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
-        let bytes = if finished {
+        let bytes = if stage != "started" {
             b"done".as_slice()
         } else {
             b"Fact".as_slice()
@@ -1772,7 +1838,7 @@ async fn late_approval_keeps_file_and_executable_preconditions() {
             assert_eq!(observed.disposition, arany::ToolDisposition::Conflict);
             assert!(matches!(
                 observed.attestation,
-                Some(arany::Attestation::Guard(_))
+                Some(arany::Attestation::InProcess { .. })
             ));
         } else {
             assert!(observed.attestation.is_none(), "{case}");

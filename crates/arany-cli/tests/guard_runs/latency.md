@@ -1,7 +1,7 @@
 # Linux Tool latency corpus
 
-The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports the Read
-row offline. Guarded Edit and command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
+The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports Read and
+in-process Edit rows offline. Command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
 This is measurement evidence for [Tools](../../../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners)
 and [Execution](../../../../docs/specs/execution.md#committed-event-stream), not a
 new runtime deadline, CLI reporting feature or native support claim.
@@ -24,7 +24,7 @@ The recorder is opt-in under `test-support`, disabled by default and absent from
 production builds. Its timed callbacks do no I/O or async sends and retain only
 scoped identities, closed operation/outcome values, sequences and timing.
 
-Each serial invocation has 10 labeled warm-ups followed by 100 measured Reads,
+Each operation has 10 labeled warm-ups followed by 100 measured samples,
 without outlier removal or replacement attempts. Every sample uses a fresh private
 State and Workspace, a fresh current-thread Engine runtime, identical short
 history and the existing 53,248-byte, 4,096-line fixture. Setup reads the complete
@@ -57,12 +57,13 @@ owns the rationale and peer comparison.
 ## Bounds and retained evidence
 
 The recorder allows one pending measurement and at most 330 retained attempts;
-overlap, unmatched completion and overflow invalidate capture. Slice 1 attempts
-at most 110 Reads, two scripted calls per successful Run (a finite four-call Goal
+overlap, unmatched completion and overflow invalidate capture. Each row attempts
+at most 110 Read or Edit operations, two scripted calls per successful Run (a finite four-call Goal
 ceiling), one 53,248-byte Workspace file, the ordinary 64 KiB Tool result bound,
 32,768 Goal tokens, 120 seconds active time and one Run. The report records the
-effective Tool limits and default resource settings. There is no checkpoint or
-publication for Read.
+effective Tool limits and default resource settings. Read has no checkpoint or publication. Edit replaces a unique final function,
+checks its FileReceipt and checkpoint, and audits closed replay and fresh show.
+The two rows retain independent reports and the same per-row bounds.
 
 The parent serially supervises each helper for at most 120 seconds and the whole
 invocation for 30 minutes. Existing bounded process owners kill and reap helpers
