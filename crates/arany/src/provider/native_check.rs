@@ -99,6 +99,7 @@ pub async fn check_native_model(
         account_id,
     } = request;
     let (profile, model) = (profile.as_str(), model.as_str());
+    let kind = ProviderKind::parse(profile).ok_or(NativeCheckError::InvalidSelection)?;
     let fingerprint = fingerprint_credentials(profile, model, effort, &credentials, account_id)?;
     let target = CheckTarget::Native {
         profile: profile.into(),
@@ -127,8 +128,8 @@ pub async fn check_native_model(
             return Err(NativeCheckError::ModelUnavailable);
         };
         context_window_tokens = model_entry.context_window_tokens;
-        match profile {
-            "openai" => {
+        match kind {
+            ProviderKind::OpenAi => {
                 let provider = OpenAiProvider::for_conformance(
                     model.to_owned(),
                     effort,
@@ -137,13 +138,13 @@ pub async fn check_native_model(
                 .map_err(|_| NativeCheckError::ConformanceFailed)?;
                 probe(&provider, &mut journal).await?;
             }
-            "anthropic" => {
+            ProviderKind::Anthropic => {
                 let provider =
                     AnthropicProvider::for_conformance(model.to_owned(), effort, credentials)
                         .map_err(|_| NativeCheckError::ConformanceFailed)?;
                 probe(&provider, &mut journal).await?;
             }
-            _ => return Err(NativeCheckError::InvalidSelection),
+            ProviderKind::ChatGpt | ProviderKind::Custom => return Err(NativeCheckError::InvalidSelection),
         }
         let refreshed = revalidate.await?;
         if fingerprint_credentials(profile, model, effort, &refreshed, account_id)? != fingerprint { return Err(NativeCheckError::EvidenceUnavailable); }
@@ -487,10 +488,13 @@ fn fingerprint_with_workspace(
     account_id: Option<Uuid>,
     workspace_id: Option<&str>,
 ) -> Result<[u8; 32], NativeCheckError> {
-    let protocol = match profile {
-        "openai" => "https://api.openai.com/v1/responses;json_schema",
-        "anthropic" => "https://api.anthropic.com/v1/messages;output_config.format",
-        _ => return Err(NativeCheckError::InvalidSelection),
+    let kind = ProviderKind::parse(profile).ok_or(NativeCheckError::InvalidSelection)?;
+    let protocol = match kind {
+        ProviderKind::OpenAi => "https://api.openai.com/v1/responses;json_schema",
+        ProviderKind::Anthropic => "https://api.anthropic.com/v1/messages;output_config.format",
+        ProviderKind::ChatGpt | ProviderKind::Custom => {
+            return Err(NativeCheckError::InvalidSelection);
+        }
     };
     if !valid_model_id(model) || !valid_saved_api_account_id(profile, account_id) {
         return Err(NativeCheckError::InvalidSelection);
@@ -555,6 +559,27 @@ mod tests {
             probe_fingerprint_contract().as_bytes(),
             b"three-probes-1024-output-tokens"
         );
+        for (profile, expected) in [
+            (
+                "openai",
+                "ab5711964b206551d053f3da1da3ff2b306abf194db749ac9a9423fda885d39b",
+            ),
+            (
+                "anthropic",
+                "edfe554165083886b3c64b717790aa15ca2f238306a850fc47f6a22237a1c9a8",
+            ),
+        ] {
+            let digest = fingerprint(
+                profile,
+                "example-model",
+                Effort::High,
+                "synthetic-native-key",
+                None,
+            )
+            .unwrap();
+            let actual: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(actual, expected, "{profile}");
+        }
     }
 
     async fn reject_superseded_native_evidence(root: StateRoot, key: &str, checked_at_ms: i64) {
@@ -1094,10 +1119,12 @@ mod tests {
             )
             .unwrap()
         );
-        assert!(matches!(
-            fingerprint("custom", "x", Effort::High, key, None),
-            Err(NativeCheckError::InvalidSelection)
-        ));
+        for profile in ["", "other", "OpenAI", "chatgpt", "custom", "custom:local"] {
+            assert!(matches!(
+                fingerprint(profile, "x", Effort::High, key, None),
+                Err(NativeCheckError::InvalidSelection)
+            ));
+        }
         assert!(matches!(
             fingerprint("openai", "bad\nmodel", Effort::High, key, None),
             Err(NativeCheckError::InvalidSelection)

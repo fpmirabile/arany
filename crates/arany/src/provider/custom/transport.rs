@@ -242,7 +242,7 @@ impl CustomTransport {
         counts: crate::provider::diagnostics::StreamCounts,
     ) {
         if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
-            crate::diagnostics::messages_failure(stage, counts);
+            crate::provider::diagnostics::messages_failure(stage, counts);
         }
     }
 

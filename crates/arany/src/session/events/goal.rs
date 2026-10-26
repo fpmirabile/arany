@@ -579,6 +579,9 @@ impl GoalPlanContract {
     pub(crate) fn allows_call(&self, call: &crate::tools::ToolCall) -> bool {
         use crate::tools::ToolCall;
         match call {
+            ToolCall::Read { path, .. } if crate::tools::spill::read_reference(path).is_some() => {
+                true
+            }
             ToolCall::ParseAgentDefinition { .. }
             | ToolCall::PrepareWorker { .. }
             | ToolCall::ApplyChangeset {

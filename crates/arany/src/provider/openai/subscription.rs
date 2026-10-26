@@ -1,8 +1,8 @@
 use super::limits;
 use super::responses::StreamDecoder;
 use super::{OPENAI_ENDPOINT, wire};
-use crate::diagnostics::subscription_failure;
 use crate::provider::conversation::Conversation;
+use crate::provider::diagnostics::subscription_failure;
 use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage};
 use crate::provider::{
     AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
@@ -596,7 +596,7 @@ async fn admit_stream_headers(
     if response.content_length().is_some_and(|length| {
         length > crate::provider::max_stream_bytes(call.max_output_tokens) as u64
     }) {
-        crate::diagnostics::stream_limit(0, 0);
+        crate::provider::diagnostics::stream_limit(0, 0);
         return Err(failure(
             Stage::ContentLength,
             ProviderError::InvalidStream,
