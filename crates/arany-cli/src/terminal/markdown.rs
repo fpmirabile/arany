@@ -114,18 +114,9 @@ fn layout(
             columns += replacement.map_or(size, UnicodeWidthStr::width);
             row_bytes += replacement.map_or_else(|| escaped_terminal_bytes(grapheme), str::len);
             if capture {
-                let mut mapped = byte..byte + grapheme.len();
-                if let Some(heading) = heading {
-                    if byte == heading.content.start {
-                        mapped.start = heading.envelope.start;
-                    }
-                    if mapped.end == heading.content.end {
-                        mapped.end = heading.envelope.end;
-                    }
-                }
                 cells.push(Cell {
                     byte,
-                    source: mapped,
+                    source: source_range(heading, byte, grapheme.len()),
                     text: replacement.map_or_else(|| escape_terminal(grapheme), str::to_owned),
                     style: heading.map_or(Modifier::empty(), |_| Modifier::BOLD),
                 });
@@ -135,6 +126,18 @@ fn layout(
         start = end + 1;
     }
     Ok((rows, bytes, count))
+}
+fn source_range(heading: Option<&Heading>, byte: usize, len: usize) -> Range<usize> {
+    let mut mapped = byte..byte + len;
+    if let Some(heading) = heading {
+        if byte == heading.content.start {
+            mapped.start = heading.envelope.start;
+        }
+        if mapped.end == heading.content.end {
+            mapped.end = heading.envelope.end;
+        }
+    }
+    mapped
 }
 type Layout = (Vec<Row>, usize, usize);
 pub(super) fn project(source: &str, width: usize, capture: bool) -> (Layout, Option<&'static str>) {

@@ -1,6 +1,6 @@
 # Beta dependency supply-chain inventory
 
-Status: **current locked inventory and point-in-time advisory/license/source checks; redistribution gate open**. Inventory figures re-measured offline on 2026-10-17 against the current lock (including the workspace crate split and `schemars` 1.2.2) for `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin` and `aarch64-apple-darwin` from the current [manifest](../../Cargo.toml), [lockfile](../../Cargo.lock) and cached published manifests. Counts describe selected dependencies, not source-code clearance, legal advice, native macOS proof or artifact provenance.
+Status: **dated locked inventory with scoped dependency additions and point-in-time advisory/license/source checks; redistribution gate open**. Inventory figures re-measured offline on 2026-10-17 against the then-current lock (including the workspace crate split and `schemars` 1.2.2) for `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin` and `aarch64-apple-darwin` from the current [manifest](../../Cargo.toml), [lockfile](../../Cargo.lock) and cached published manifests. Counts describe selected dependencies, not source-code clearance, legal advice, native macOS proof or artifact provenance.
 
 ## Scope and reproducible evidence
 
@@ -74,6 +74,30 @@ that clears the backend without a cursor query; initial acquisition still uses
 Crossterm. This decision favors upstream maintenance over a vendored repair;
 it does not establish arbitrary acquisition-fault or native macOS behavior.
 [Native terminal checks](../../NEXT_STEPS.md#beta-2-and-broader-release) remain open.
+
+### Terminal Markdown dependency
+
+`arany-cli` selects `pulldown-cmark =0.10.3` with default features disabled.
+The selected closure adds MIT `pulldown-cmark 0.10.3` and MIT OR Apache-2.0
+`unicase 2.10.0`; `bitflags 2.13.2` and `memchr 2.8.3` were already locked.
+These are one additional direct and one additional transitive identity on each
+supported target, amending the dated graph figures above. Their cached published
+archive checksums match the lockfile. Both license expressions fit the existing
+allowlist; no additional license exception is needed.
+
+With SIMD disabled, the inspected parser library forbids unsafe code. Its
+`build.rs` still runs as compiler-host code, but with `gen-tests` disabled its
+entrypoint calls an empty function. The parser's optional `html`, `getopts`,
+`serde` and `gen-tests` features are unselected. `unicase` declares no build
+script or dependencies, its `nightly` feature is unselected, and its inspected
+source contains no unsafe blocks. This does not clear existing transitive unsafe
+code or establish advisory, whole-source or redistribution clearance.
+
+The parser runs only in terminal presentation under the
+[Markdown source, event, depth, output and row bounds](../specs/terminal.md#conversation-progress-and-history).
+Construction precedes event limits and has no hard RSS or deadline guarantee;
+source Markdown, Engine policy and protocol text remain outside this projection.
+Fresh advisory/license/source policy remains with the release-policy gate below.
 
 ## License and advisory status
 

@@ -400,13 +400,7 @@ impl History {
                     &message_text(view, message, &self.notices),
                     width,
                 );
-                let offset = if heading {
-                    0
-                } else {
-                    rows.iter()
-                        .rposition(|row| row.source_byte <= byte)
-                        .unwrap_or(0)
-                };
+                let offset = if heading { 0 } else { row_of_byte(&rows, byte) };
                 self.top = message.start + offset;
             }
         }
@@ -415,8 +409,7 @@ impl History {
                 let message = self.messages.iter().find(|entry| entry.source == source)?;
                 let text = message_text(view, message, &self.notices);
                 let rows = message_rows(message.kind, &text, width);
-                let offset = rows.partition_point(|row| row.source_byte <= byte);
-                Some(message.start + offset.saturating_sub(1))
+                Some(message.start + row_of_byte(&rows, byte))
             });
         }
         self.height = height;
@@ -896,21 +889,8 @@ impl History {
         for message in self.messages.iter().rev() {
             let text = message_text(view, message, &self.notices);
             if let Some(byte) = text.find(query) {
-                let offset = if matches!(
-                    message.kind,
-                    MessageKind::Supervisor
-                        | MessageKind::Tool
-                        | MessageKind::ToolDetails
-                        | MessageKind::Assistant
-                        | MessageKind::AgentResult
-                ) {
-                    message_rows(message.kind, &text, self.width)
-                        .iter()
-                        .rposition(|row| row.source_byte <= byte)
-                        .unwrap_or(0)
-                } else {
-                    message_row_count(&text[..byte], self.width).saturating_sub(2)
-                };
+                let rows = message_rows(message.kind, &text, self.width);
+                let offset = row_of_byte(&rows, byte);
                 self.show_match(message.start + offset, (message.source, byte));
                 return true;
             }
@@ -942,10 +922,7 @@ impl History {
             text.match_indices(query.as_str())
                 .map(|(byte, _)| {
                     (
-                        message.start
-                            + rows
-                                .partition_point(|row| row.source_byte <= byte)
-                                .saturating_sub(1),
+                        message.start + row_of_byte(&rows, byte),
                         (message.source, byte),
                     )
                 })
@@ -1660,6 +1637,11 @@ fn line_bounds(text: &str, byte: usize) -> (usize, usize) {
             .find('\n')
             .map_or(text.len(), |index| byte + index),
     )
+}
+
+fn row_of_byte(rows: &[MessageRow], byte: usize) -> usize {
+    rows.partition_point(|row| row.source_byte <= byte)
+        .saturating_sub(1)
 }
 
 // The source bytes one rendered body row shows, excluding its line break.
@@ -3438,3 +3420,6 @@ mod tests {
 
 #[cfg(test)]
 mod markdown_tests;
+
+#[cfg(test)]
+mod find_tests;
