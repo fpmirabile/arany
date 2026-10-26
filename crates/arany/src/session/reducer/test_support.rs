@@ -964,3 +964,76 @@ pub(super) fn recorded_supervisor_verdict(view: &SessionView, actor: AgentRunId)
         },
     }
 }
+
+pub(super) fn compacting_session() -> (SessionView, GoalId, RunId) {
+    compacting_session_with_last_tool(ToolCall::Read {
+        path: "src/lib.rs".into(),
+        offset: None,
+        limit: Some(1024),
+    })
+}
+
+pub(super) fn compacting_session_with_last_tool(call: ToolCall) -> (SessionView, GoalId, RunId) {
+    let (mut view, goal, run, agent) = primary_tool_session(true);
+    let (first, second) = (
+        read_intent(run, agent, "src/lib.rs"),
+        child_intent(run, agent, call),
+    );
+    apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+    apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+    apply(&mut view, tool_proposed(run, agent, &first)).expect("first request is proposed");
+    apply(&mut view, tool_proposed(run, agent, &second)).expect("second request is proposed");
+    apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+    apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+    apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+    apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+    apply(
+        &mut view,
+        Event::GoalCompactionCallReserved {
+            goal_id: goal,
+            run_id: run,
+            active_ceiling_ms: 0,
+        },
+    )
+    .expect("compaction call reserved");
+    (view, goal, run)
+}
+
+pub(super) fn covering_compaction(
+    view: &SessionView,
+    goal: GoalId,
+    run: RunId,
+    count: u32,
+) -> Event {
+    let covered = &view.runs[0].tools[count as usize - 1];
+    Event::GoalContextCompacted {
+        goal_id: goal,
+        run_id: run,
+        covered_tool_count: count,
+        record: crate::session::events::CompactionRecord {
+            rate_limits: None,
+            covered_run_id: run,
+            covered_sequence: covered.finished_sequence.expect("observed Tool"),
+            source_digest: [0; 32],
+            recent_files: Vec::new(),
+            provider: "openai".into(),
+            model: "gpt-5.4".into(),
+            prompt_version: 1,
+            schema_version: 1,
+            compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
+            source_bytes: 1,
+            source_tokens_estimate: 1,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            response_id: None,
+            wire_provenance: None,
+            chatgpt_provenance: None,
+            output_token_bound: OutputTokenBound::ProviderEnforced,
+            status: crate::session::events::CompactionStatus::Failed {
+                reason: crate::session::events::CompactionFailure::ProviderUnavailable,
+            },
+        },
+    }
+}
