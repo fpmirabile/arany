@@ -454,6 +454,17 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     .parse::<u32>()
     .expect("shell PID");
     let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let process_limit = arany::ToolResourceSettings::default().build_processes;
+    let build_jobs = match std::thread::available_parallelism()
+        .ok()
+        .and_then(|cores| u32::try_from(cores.get()).ok())
+    {
+        Some(cores) => format!(
+            "automatic; {} effective (cores {cores}, process limit {process_limit})",
+            cores.min(process_limit)
+        ),
+        None => "automatic; Build unavailable".into(),
+    };
     let settings_at = transcript.len();
     input
         .write_all(b"/settings\r")
@@ -464,7 +475,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
+        format!("Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
           Choice 1: Slash menu: tabs (tabs|combined)\r\n\
           Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
           Choice 3: Goal provider calls: unlimited (number or unlimited)\r\n\
@@ -478,8 +489,9 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)\r\n\
           Choice 12: Copy on select: on (on|off)\r\n\
           Choice 13: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
+          Choice 14: Build jobs: {build_jobs} (automatic or 1..cores)\r\n\
           Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
-          Input:\r\n",
+          Input:\r\n").as_bytes(),
     );
     for rejected in [
         &b"combined\r"[..],
@@ -1943,7 +1955,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         tabs_at,
     );
     input
-        .write_all(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(13)).as_bytes())
+        .write_all(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(12)).as_bytes())
         .expect("save tabs and Ctrl+Enter in the settings window");
     wait_for_caret(
         &mut output,

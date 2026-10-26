@@ -1918,6 +1918,36 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
+    for jobs in [0, 1, 2, intent.limits.max_processes + 1] {
+        let mut build = intent.clone();
+        build.call = ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["build".into()],
+            cwd: String::new(),
+        };
+        build.limits.resource_class = ToolResourceClass::Build;
+        build.limits.cache_bytes = 0;
+        build.limits.cache_candidate_bytes = 0;
+        let historical = build.digest();
+        build.limits.build_jobs = jobs;
+        assert_eq!(build.digest() == historical, jobs == 1);
+        assert_eq!(
+            build.valid(),
+            (1..=build.limits.max_processes).contains(&jobs)
+        );
+        let decoded: EffectIntent =
+            serde_json::from_slice(&serde_json::to_vec(&build).unwrap()).unwrap();
+        assert_eq!(decoded, build);
+        let mut receipt = GuardReceipt {
+            contract_version: 1,
+            intent_digest: build.digest(),
+            enforcement_digest: build.enforcement_digest,
+            limits: build.limits.clone(),
+        };
+        assert!(receipt.valid_for(&build));
+        receipt.limits.build_jobs += 1;
+        assert!(!receipt.valid_for(&build));
+    }
     let mut profile_mismatch = observation.clone();
     let Some(Attestation::Guard(receipt)) = &mut profile_mismatch.attestation else {
         unreachable!()

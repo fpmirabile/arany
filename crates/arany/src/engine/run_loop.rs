@@ -1369,6 +1369,7 @@ impl<'a> RunLoop<'a> {
         use ProposalRefusalCause::*;
         let existing = self.ledger().plan_contract()?;
         let budget = self.ledger().effective_budget()?;
+        let settings = self.ledger().requested_command_resources()?.2;
         let contract = &plan.contract;
         let cause = if self.controls.tools.is_none() {
             Some(NotOffered)
@@ -1376,7 +1377,11 @@ impl<'a> RunLoop<'a> {
             .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES)
         {
             Some(ArgumentBytes)
-        } else if existing.is_some() || contract.validate().is_err() {
+        } else if existing.is_some()
+            || contract.validate().is_err()
+            || contract.resource_class == crate::tools::ToolResourceClass::Build
+                && settings.build_jobs.is_none()
+        {
             Some(PlanInvalid)
         } else if !contract.budget.is_within(&budget) {
             Some(PlanBudgetOutsideGoal)

@@ -1167,6 +1167,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                     None,
                     ComposerHints::new(Palette { color: false }, "\\ then Enter"),
                     &[HistoryRow {
+                        spans: Vec::new(),
                         slash_cells: 0,
                         text: "You:".into(),
                         speaker: MessageKind::User,
@@ -1502,6 +1503,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
     };
     let rows = vec![
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "You:".into(),
             speaker: MessageKind::User,
@@ -1510,6 +1512,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         },
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "  committed objective".into(),
             speaker: MessageKind::User,
@@ -1518,6 +1521,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         },
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "Arany:".into(),
             speaker: MessageKind::Assistant,
@@ -1572,6 +1576,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         let mut wide = Terminal::new(TestBackend::new(80, 12)).expect("wide terminal");
         let mut feedback_rows = rows.clone();
         feedback_rows.push(HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "Arany · error:".into(),
             speaker: MessageKind::Error,
@@ -1580,6 +1585,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         });
         feedback_rows.push(HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "  Retry /setup; your draft is retained".into(),
             speaker: MessageKind::Error,
@@ -1694,6 +1700,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
     conversation[1].text = "  e\u{301}👩‍💻".into();
     conversation.extend([
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "  continued".into(),
             speaker: MessageKind::User,
@@ -1702,6 +1709,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         },
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: String::new(),
             speaker: MessageKind::User,
@@ -1711,6 +1719,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         },
         rows[2].clone(),
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "  You: is quoted".into(),
             speaker: MessageKind::Assistant,
@@ -4352,6 +4361,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
 fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
     let rows = [
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "  selected text".into(),
             speaker: MessageKind::Assistant,
@@ -4360,6 +4370,7 @@ fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
             selected: Some((2, 10)),
         },
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "  body".into(),
             speaker: MessageKind::User,
@@ -4368,6 +4379,7 @@ fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
             selected: Some((2, 6)),
         },
         HistoryRow {
+            spans: Vec::new(),
             slash_cells: 0,
             text: "Arany:".into(),
             speaker: MessageKind::Assistant,
