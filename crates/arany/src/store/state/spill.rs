@@ -219,7 +219,11 @@ pub(in crate::store) fn sweep(
         if std::time::Instant::now() >= deadline {
             return Ok(());
         }
-        let name = entry?.file_name();
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
         let Some(run) = name.to_str().and_then(|name| name.parse::<RunId>().ok()) else {
             continue;
         };
@@ -257,7 +261,11 @@ pub(in crate::store) fn sweep(
                 return Ok(());
             }
             remaining -= 1;
-            let name = entry?.file_name();
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
             let Some(reference) = name.to_str().and_then(|name| name.strip_suffix(".txt")) else {
                 continue;
             };
@@ -385,18 +393,32 @@ mod tests {
         let orphan = "b".repeat(64);
         assert!(fixture_write(&access, &kept, b"committed output").unwrap());
         assert!(fixture_write(&access, &orphan, b"uncommitted output").unwrap());
+        let spill = root.path().join("spill");
+        let stray_file = RunId::new();
+        let stray_link = RunId::new();
+        std::fs::write(spill.join(stray_file.to_string()), b"not a directory").unwrap();
+        symlink(run.to_string(), spill.join(stray_link.to_string())).unwrap();
+        let run_directory = spill.join(run.to_string());
+        let nested = run_directory.join(format!("{}.txt", "c".repeat(64)));
+        let linked = run_directory.join(format!("{}.txt", "d".repeat(64)));
+        let fifo = run_directory.join(format!("{}.txt", "e".repeat(64)));
+        std::fs::create_dir(&nested).unwrap();
+        symlink(format!("{kept}.txt"), &linked).unwrap();
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
         let connection = rusqlite::Connection::open(root.path().join("events.sqlite3")).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE events(session_id TEXT, run_id TEXT, kind TEXT, payload TEXT)",
             )
             .unwrap();
-        connection
-            .execute(
-                "INSERT INTO events VALUES (?1, ?2, 'RunStarted', '{}')",
-                [session.to_string(), run.to_string()],
-            )
-            .unwrap();
+        for run in [run, stray_file, stray_link] {
+            connection
+                .execute(
+                    "INSERT INTO events VALUES (?1, ?2, 'RunStarted', '{}')",
+                    [session.to_string(), run.to_string()],
+                )
+                .unwrap();
+        }
         connection
             .execute(
                 "INSERT INTO events VALUES (?1, ?2, 'ToolFinished', ?3)",
@@ -413,5 +435,17 @@ mod tests {
         sweep(&root, &connection).unwrap();
         assert!(access.read(&kept).is_ok());
         assert!(access.read(&orphan).is_err());
+        assert!(nested.is_dir());
+        assert!(std::fs::symlink_metadata(linked).unwrap().is_symlink());
+        assert!(std::fs::symlink_metadata(fifo).is_ok());
+        assert_eq!(
+            std::fs::read(spill.join(stray_file.to_string())).unwrap(),
+            b"not a directory"
+        );
+        assert!(
+            std::fs::symlink_metadata(spill.join(stray_link.to_string()))
+                .unwrap()
+                .is_symlink()
+        );
     }
 }
