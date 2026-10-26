@@ -32,7 +32,11 @@ pub(in crate::cli) fn deadline() -> impl Drop {
         if receiver.recv_timeout(Duration::from_secs(30))
             == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         {
-            eprintln!("{name} exceeded its 30-second deadline");
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "{name} exceeded its 30-second deadline"
+            );
             std::process::abort();
         }
     });
