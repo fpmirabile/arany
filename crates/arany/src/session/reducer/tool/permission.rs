@@ -7,10 +7,11 @@ use crate::tools::permissions::{
 
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     match event {
-        Event::ToolPermissionDecided {
+        Event::ToolStarted {
             run_id,
             agent_run_id,
-            verdict,
+            verdict: Some(verdict),
+            ..
         } => {
             let host_valid = valid_host_approval(current, *run_id, *agent_run_id, verdict);
             let run = active_run(current, *run_id)?;

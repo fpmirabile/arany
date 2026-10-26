@@ -50,9 +50,10 @@ pub(crate) fn record_admission(
     count: usize,
     slots: usize,
     kind: AdmissionKind,
+    observations: usize,
 ) {
     #[cfg(any(test, feature = "test-support"))]
-    crate::test_support::admissions::record(session, count, slots, kind);
+    crate::test_support::admissions::record(session, count, slots, kind, observations);
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]

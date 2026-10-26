@@ -1163,6 +1163,7 @@ fn host_admission_tool(
             approval_cause: None,
             cache_update: crate::CacheUpdate::NotApplicable,
         }),
+        started_sequence: Some(0),
         active_time_reserved: false,
         narrowing_source: None,
         permission_verdict: Some(crate::permissions::PermissionVerdict {

@@ -207,7 +207,7 @@ impl Action {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
-                7 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
             Self::Child {
                 in_flight,

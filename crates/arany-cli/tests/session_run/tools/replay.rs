@@ -212,6 +212,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         },
         record(ProviderCallDisposition::ToolRequested),
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: primary,
             intent: intent.into(),
@@ -282,6 +283,11 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
                         agent_run_id,
                         ..
                     }
+                    | Event::ToolProposed {
+                        run_id,
+                        agent_run_id,
+                        ..
+                    }
                     | Event::ToolStarted {
                         run_id,
                         agent_run_id,
@@ -340,7 +346,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         })
         .collect();
     for observation in &observations {
-        batch.push(Event::ToolStarted {
+        batch.push(Event::ToolProposed {
             run_id: run,
             agent_run_id: primary,
             intent: observation.intent.clone().into(),
@@ -348,6 +354,13 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         });
     }
     let mut premature = batch[..TOOL_STARTED + 2].to_vec();
+    premature.push(Event::ToolStarted {
+        run_id: run,
+        agent_run_id: primary,
+        intent: observations[0].intent.clone().into(),
+        active_ceiling_ms: 0,
+        verdict: None,
+    });
     premature.push(Event::ToolFinished {
         checkpoint: None,
         run_id: run,
@@ -369,6 +382,15 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     );
     for order in [[0, 1, 2, 3], [2, 0, 3, 1]] {
         let mut completed = batch.clone();
+        for observation in &observations {
+            completed.push(Event::ToolStarted {
+                run_id: run,
+                agent_run_id: primary,
+                intent: observation.intent.clone().into(),
+                active_ceiling_ms: 0,
+                verdict: None,
+            });
+        }
         for index in order {
             completed.push(Event::ToolFinished {
                 checkpoint: None,
@@ -438,7 +460,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             (&command.intent, COMMAND_ACTIVE_CEILING_MS),
             (&read, QUEUED_READ_ACTIVE_CEILING_MS),
         ] {
-            accounting.push(Event::ToolStarted {
+            accounting.push(Event::ToolProposed {
                 run_id: run,
                 agent_run_id: primary,
                 intent: intent.clone().into(),
@@ -469,6 +491,13 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             replay(duplicate).is_err(),
             "one active-time refresh per intent"
         );
+        accounting.push(Event::ToolStarted {
+            run_id: run,
+            agent_run_id: primary,
+            intent: command.intent.clone().into(),
+            active_ceiling_ms: COMMAND_ACTIVE_CEILING_MS,
+            verdict: None,
+        });
         if after_first {
             accounting.push(Event::ToolFinished {
                 checkpoint: None,
@@ -654,6 +683,22 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         record.output_tokens = Some(1);
     }
     let mut reviewed = all.clone();
+    let Event::ToolStarted {
+        run_id,
+        agent_run_id,
+        intent,
+        active_ceiling_ms,
+        ..
+    } = &all[TOOL_STARTED]
+    else {
+        unreachable!()
+    };
+    reviewed[TOOL_STARTED] = Event::ToolProposed {
+        run_id: *run_id,
+        agent_run_id: *agent_run_id,
+        intent: intent.clone(),
+        active_ceiling_ms: *active_ceiling_ms,
+    };
     reviewed.splice(
         TOOL_FINISHED..TOOL_FINISHED,
         [
@@ -664,6 +709,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
                 active_ceiling_ms: 0,
             },
             review.clone(),
+            all[TOOL_STARTED].clone(),
         ],
     );
     let view = replay(reviewed.clone()).unwrap().unwrap();
@@ -682,7 +728,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             1 => {
                 row.drain(TOOL_FINISHED..TOOL_FINISHED + 2);
                 drop(row.splice(
-                    TOOL_FINISHED + 1..TOOL_FINISHED + 1,
+                    TOOL_FINISHED + 2..TOOL_FINISHED + 2,
                     [
                         Event::GoalProviderCallReserved {
                             goal_id: goal,
@@ -696,7 +742,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             }
             2 => {
                 drop(row.splice(
-                    TOOL_FINISHED + 3..TOOL_FINISHED + 3,
+                    TOOL_FINISHED + 4..TOOL_FINISHED + 4,
                     [
                         Event::GoalProviderCallReserved {
                             goal_id: goal,
@@ -709,7 +755,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
                 ));
             }
             3 => {
-                row.remove(NEXT_CALL_RECORDED + 2);
+                row.remove(NEXT_CALL_RECORDED + 3);
             }
             4 | 5 => {
                 if let Event::ProviderCallRecorded { record, .. } = &mut row[TOOL_FINISHED + 1] {
@@ -923,6 +969,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     let mut integrated = prefix[..TOOL_STARTED].to_vec();
     integrated.extend([
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: primary,
             intent: command_intent.clone(),
@@ -934,6 +981,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             command_result.clone(),
         ),
         Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: primary,
             intent: integration_intent.clone(),
@@ -950,45 +998,53 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.runs[0].tools.len(), 2);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 3);
+    let add_review = |row: &mut Vec<Event>, started: usize| {
+        let start = row[started].clone();
+        let Event::ToolStarted {
+            run_id,
+            agent_run_id,
+            intent,
+            active_ceiling_ms,
+            ..
+        } = &start
+        else {
+            unreachable!()
+        };
+        row.splice(
+            started..=started,
+            [
+                Event::ToolProposed {
+                    run_id: *run_id,
+                    agent_run_id: *agent_run_id,
+                    intent: intent.clone(),
+                    active_ceiling_ms: *active_ceiling_ms,
+                },
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: primary,
+                    active_ceiling_ms: 0,
+                },
+                review.clone(),
+                start,
+            ],
+        );
+    };
     let mut reviewed_integration = integrated.clone();
-    reviewed_integration.splice(
-        COMMAND_FINISHED..COMMAND_FINISHED,
-        [
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-                active_ceiling_ms: 0,
-            },
-            review.clone(),
-        ],
-    );
-    reviewed_integration.splice(
-        INTEGRATION_FINISHED + 2..INTEGRATION_FINISHED + 2,
-        [
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-                active_ceiling_ms: 0,
-            },
-            review.clone(),
-        ],
-    );
+    add_review(&mut reviewed_integration, INTEGRATION_STARTED);
+    add_review(&mut reviewed_integration, COMMAND_STARTED);
     let view = replay(reviewed_integration).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 5);
     let mut duplicate_review = integrated.clone();
+    add_review(&mut duplicate_review, INTEGRATION_STARTED);
+    assert!(
+        replay(duplicate_review.clone()).is_ok(),
+        "integration admits one review even when its command had none"
+    );
     duplicate_review.splice(
-        INTEGRATION_STARTED + 1..INTEGRATION_STARTED + 1,
+        INTEGRATION_STARTED + 3..INTEGRATION_STARTED + 3,
         [
-            Event::GoalProviderCallReserved {
-                goal_id: goal,
-                run_id: run,
-                agent_run_id: primary,
-                active_ceiling_ms: 0,
-            },
-            review.clone(),
             Event::GoalProviderCallReserved {
                 goal_id: goal,
                 run_id: run,
@@ -1000,7 +1056,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     );
     assert!(
         replay(duplicate_review).is_err(),
-        "integration admits one review even when its command had none"
+        "integration rejects a duplicate review before dispatch"
     );
     let interrupted = replay(integrated[..INTEGRATION_FINISHED].to_vec())
         .unwrap()

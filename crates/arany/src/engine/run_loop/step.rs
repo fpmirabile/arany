@@ -286,9 +286,10 @@ impl RunLoop<'_> {
             Ok(intents) => intents,
             Err(cause) => return Ok(StepEnd::Stopped(cause)),
         };
-        for intent in &intents {
-            self.commit_intent(&grant, runtime, intent, &intent.call)
-                .await?;
+        if intents.len() > 1 {
+            for intent in &intents {
+                self.propose_tool(intent).await?;
+            }
         }
         let end = self
             .execute_step_intents(&grant, runtime, &mut step, intents)
@@ -456,7 +457,11 @@ impl RunLoop<'_> {
                         .saturating_add(2 * hook_occurrences),
                     action
                         .tool_observations()
-                        .saturating_add(intents.len())
+                        .saturating_add(
+                            intents
+                                .len()
+                                .saturating_mul(intent::MAX_INTENT_RECORDS_PER_TOOL),
+                        )
                         .saturating_add(hook_occurrences),
                 )
                 .await?;
@@ -472,33 +477,33 @@ impl RunLoop<'_> {
     ) -> Result<ToolObservation, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
         let mode = effective_permission_mode(runtime.permissions(), grant);
-        if mode.is_some()
+        let records_permission = mode.is_some()
             || intent.call.is_unguarded()
             || intent.call.is_host()
-            || intent.call.is_git() && intent.call.facts().mutates
-        {
-            self.append(Event::ToolPermissionDecided {
-                run_id: self.run_id,
-                agent_run_id: intent.agent_run_id,
-                verdict: PermissionVerdict {
-                    host: None,
-                    intent_digest: intent.digest(),
-                    mode,
-                    decision: permission.decision,
-                    basis: permission.basis,
-                    source: if permission.decision == Decision::Ask {
-                        PermissionSource::UnavailableApproval
-                    } else {
-                        permission.basis
-                    },
-                    approved: false,
-                    hook_restriction: None,
-                    hooks: 0,
-                    narrowed: false,
+            || intent.call.is_git() && intent.call.facts().mutates;
+        self.append(Event::ToolStarted {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, &intent)?,
+            verdict: records_permission.then(|| PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                mode,
+                decision: permission.decision,
+                basis: permission.basis,
+                source: if permission.decision == Decision::Ask {
+                    PermissionSource::UnavailableApproval
+                } else {
+                    permission.basis
                 },
-            })
-            .await?;
-        }
+                approved: false,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+        })
+        .await?;
         let timeout = self.ledger().command_timeout_limit(&intent.call)?;
         let observation = if let Some((requested, maximum)) = timeout {
             not_dispatched(intent, &NotDispatched::TimeoutLimit { requested, maximum })
@@ -1004,13 +1009,10 @@ impl RunLoop<'_> {
         let primary_host_read =
             matches!(grant, Grant::Primary { .. }) && phase.intent.call.is_host_pr_read();
         let mode = effective_permission_mode(runtime.permissions(), grant);
-        if mode.is_none()
-            && !unguarded
-            && !primary_host_read
-            && !(matches!(grant, Grant::Primary { .. }) && git_write)
-        {
-            return Ok(());
-        }
+        let records_permission = mode.is_some()
+            || unguarded
+            || primary_host_read
+            || matches!(grant, Grant::Primary { .. }) && git_write;
         let approved = matches!(resolution.verdict, Verdict::Dispatch { .. });
         // An approving review that did not lead to dispatch is not an AI approval.
         let source = if !approved && resolution.source == PermissionSource::AiReview {
@@ -1018,10 +1020,12 @@ impl RunLoop<'_> {
         } else {
             resolution.source
         };
-        self.append(Event::ToolPermissionDecided {
+        self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: phase.intent.agent_run_id,
-            verdict: PermissionVerdict {
+            intent: phase.intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, &phase.intent)?,
+            verdict: records_permission.then(|| PermissionVerdict {
                 host: phase
                     .host_permission
                     .verdict(approved, unguarded, resolution.save),
@@ -1034,7 +1038,7 @@ impl RunLoop<'_> {
                 hook_restriction: phase.hooks.restriction,
                 hooks: phase.hooks.count,
                 narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
-            },
+            }),
         })
         .await
     }

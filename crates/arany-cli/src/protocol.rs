@@ -78,7 +78,7 @@ event_kinds!(
     ToolActiveTimeReserved,
     ToolFinished,
     SupervisorVerdictRecorded,
-    ToolPermissionDecided,
+    ToolProposed,
     HookStarted,
     HookFinished,
     AgentFinished,

@@ -127,6 +127,7 @@ impl RunLoop<'_> {
         chain: &[Resolver<'_>],
         site: AskSite,
     ) -> Result<Admission<Resolution>, EngineError> {
+        self.propose_tool(intent).await?;
         let initial_mode = self.terminal_mode();
         let mut resolution = Resolution {
             approved: false,

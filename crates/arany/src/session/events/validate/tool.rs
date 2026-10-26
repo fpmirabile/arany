@@ -14,7 +14,7 @@ impl Event {
                     Ok(())
                 }
             }
-            Self::ToolStarted {
+            Self::ToolProposed {
                 run_id,
                 agent_run_id,
                 intent,
@@ -102,7 +102,28 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
-            Self::ToolPermissionDecided { verdict, .. } => {
+            Self::ToolStarted {
+                run_id,
+                agent_run_id,
+                intent,
+                active_ceiling_ms,
+                verdict,
+            } => {
+                Self::ToolProposed {
+                    run_id: *run_id,
+                    agent_run_id: *agent_run_id,
+                    intent: intent.clone(),
+                    active_ceiling_ms: *active_ceiling_ms,
+                }
+                .validate_tool()?;
+                let Some(verdict) = verdict else {
+                    return Ok(());
+                };
+                if verdict.intent_digest
+                    != crate::tools::EffectIntent::from(intent.clone()).digest()
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
                 use crate::tools::permissions::{
                     Decision, MAX_HOOKS_PER_OCCURRENCE, PermissionSource,
                 };

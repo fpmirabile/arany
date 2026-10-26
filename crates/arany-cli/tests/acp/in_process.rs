@@ -2704,7 +2704,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         .await
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
-    let events:Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+    let events:Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
         "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
     })).collect();
     adapter
@@ -3411,7 +3411,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
-            Event::ToolPermissionDecided { verdict, .. }
+            Event::ToolStarted { verdict: Some(verdict), .. }
                 if verdict.source == arany::permissions::PermissionSource::UnavailableApproval
                     && !verdict.approved
         )));
@@ -4069,7 +4069,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .await
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
-    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
         "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
     })).collect();
     let recover = adapter.request().await;

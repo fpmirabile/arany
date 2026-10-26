@@ -62,7 +62,6 @@ pub(super) fn apply(
             };
             record_run_ceiling(current, *run_id, ceiling)?;
         }
-        Event::ToolPermissionDecided { .. } => permission::apply(current, event)?,
         Event::HookStarted {
             run_id,
             agent_run_id,
@@ -73,18 +72,19 @@ pub(super) fn apply(
             agent_run_id,
             outcome,
         } => hook::finished(current, *run_id, *agent_run_id, outcome, prior)?,
-        Event::ToolStarted {
+        Event::ToolProposed {
             run_id,
             agent_run_id,
             intent,
             active_ceiling_ms,
-        } => lifecycle::started(
+        } => lifecycle::proposed(
             current,
             *run_id,
             *agent_run_id,
             &intent.clone().into(),
             *active_ceiling_ms,
         )?,
+        Event::ToolStarted { .. } => lifecycle::started(current, event, prior)?,
         Event::ToolFinished { .. } => lifecycle::finished(current, event, prior)?,
         _ => return Err(ReplayError::InvalidTransition),
     }
@@ -532,13 +532,15 @@ pub(super) fn before_lifecycle_event(
         hook.outcome
             .as_ref()
             .is_some_and(|outcome| outcome.observation.stops_run())
-    }) && matches!(
+    }) && (matches!(
         event,
         Event::GoalProviderCallReserved { .. }
-            | Event::ToolStarted { .. }
+            | Event::ToolProposed { .. }
+            | Event::ToolActiveTimeReserved { .. }
             | Event::HookStarted { .. }
             | Event::AgentSpawned { .. }
-    ) {
+    ) || matches!(event, Event::ToolStarted { verdict, .. } if verdict.as_ref().is_none_or(|verdict| verdict.approved)))
+    {
         return Err(ReplayError::InvalidTransition);
     }
     if matches!(
