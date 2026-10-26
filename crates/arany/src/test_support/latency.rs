@@ -405,24 +405,11 @@ impl Sample {
             return Err(LatencyError::MissingFinish);
         }
         if self.successful() {
-            let finishes: Vec<_> = events
-                .iter()
-                .filter(scoped)
-                .filter(|event| {
-                    event.sequence > provider.sequence
-                        && calls
-                            .get(self.call_index + 1)
-                            .is_none_or(|next| event.sequence < next.sequence)
-                        && matches!(&event.event, Event::ToolFinished { .. })
-                })
-                .collect();
-            if finishes.len() != self.requested_tools
-                || finishes.iter().any(|event| !matches!(&event.event,
-                    Event::ToolFinished { observation, .. } if observation.disposition == ToolDisposition::Succeeded))
-                || finishes.last().map(|event| event.sequence) != self.finished_sequence
-            {
-                return Err(LatencyError::MismatchedFinishOrPermission);
-            }
+            self.audit_step(
+                events,
+                provider.sequence,
+                calls.get(self.call_index + 1).map(|event| event.sequence),
+            )?;
         }
         let interval = |start: &EventEnvelope| {
             finished.and_then(|end| end.created_at_ms.checked_sub(start.created_at_ms))
@@ -438,6 +425,79 @@ impl Sample {
             started_to_finish_ms: started_delta.filter(|delta| *delta >= 0),
             clock_invalid,
         })
+    }
+
+    fn audit_step(
+        &self,
+        events: &[EventEnvelope],
+        provider: u64,
+        next: Option<u64>,
+    ) -> Result<(), LatencyError> {
+        if !(1..=usize::from(crate::session::MAX_STEP_TOOL_CALLS)).contains(&self.requested_tools) {
+            return Err(LatencyError::MismatchedFinishOrPermission);
+        }
+        let mut starts = Vec::with_capacity(self.requested_tools);
+        let mut finishes = Vec::with_capacity(self.requested_tools);
+        for event in events.iter().filter(|event| {
+            event.session_id == self.session_id
+                && event.run_id == Some(self.run_id)
+                && event.agent_run_id == Some(self.agent_run_id)
+                && event.sequence > provider
+                && next.is_none_or(|next| event.sequence < next)
+        }) {
+            match &event.event {
+                Event::ToolStarted { .. } if starts.len() < self.requested_tools => {
+                    starts.push(event)
+                }
+                Event::ToolFinished { .. } if finishes.len() < self.requested_tools => {
+                    finishes.push(event)
+                }
+                Event::ToolStarted { .. } | Event::ToolFinished { .. } => {
+                    return Err(LatencyError::MismatchedFinishOrPermission);
+                }
+                _ => {}
+            }
+        }
+        if starts.len() != self.requested_tools
+            || finishes.len() != self.requested_tools
+            || finishes.last().map(|event| event.sequence) != self.finished_sequence
+        {
+            return Err(LatencyError::MismatchedFinishOrPermission);
+        }
+        for (index, finish) in finishes.iter().enumerate() {
+            let Event::ToolFinished { observation, .. } = &finish.event else {
+                unreachable!("filtered Tool finishes");
+            };
+            let digest = observation.intent.digest();
+            let matching = starts
+                .iter()
+                .filter(|start| {
+                    matches!(
+                        &start.event,
+                        Event::ToolStarted { intent, verdict: Some(verdict), .. }
+                        if start.sequence < finish.sequence
+                            && intent.id == observation.intent.id
+                            && crate::EffectIntent::from(intent.clone()) == observation.intent
+                            && verdict.approved
+                            && verdict.intent_digest == digest
+                    )
+                })
+                .count();
+            let repeated = finishes[..index].iter().any(|prior| {
+                matches!(
+                    &prior.event, Event::ToolFinished { observation: prior, .. }
+                        if prior.intent.id == observation.intent.id
+                )
+            });
+            if observation.disposition != ToolDisposition::Succeeded
+                || operation(&observation.intent.call) != self.operation
+                || matching != 1
+                || repeated
+            {
+                return Err(LatencyError::MismatchedFinishOrPermission);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -691,6 +751,85 @@ mod tests {
                     "{name}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn multi_read_audit_rejects_unpaired_or_unpermitted_siblings() {
+        #[derive(Debug)]
+        enum Damage {
+            MissingStart,
+            MissingVerdict,
+            RefusedVerdict,
+            WrongVerdict,
+            RepeatedStart,
+            RepeatedFinish,
+            UnmatchedFinish,
+            LateStart,
+            ChangedIntent,
+        }
+        let events = read_step_history();
+        let (recorder, acknowledged) = read_step_recorder(&events);
+        for event in &events {
+            recorder.committed(event, acknowledged);
+        }
+        let sample = recorder.samples().unwrap().pop().unwrap();
+        sample.audit(&events).unwrap();
+        for damage in [
+            Damage::MissingStart,
+            Damage::MissingVerdict,
+            Damage::RefusedVerdict,
+            Damage::WrongVerdict,
+            Damage::RepeatedStart,
+            Damage::RepeatedFinish,
+            Damage::UnmatchedFinish,
+            Damage::LateStart,
+            Damage::ChangedIntent,
+        ] {
+            let mut history = events.to_vec();
+            let Event::ToolStarted {
+                intent, verdict, ..
+            } = &mut history[2].event
+            else {
+                unreachable!()
+            };
+            match damage {
+                Damage::MissingStart => {
+                    history.remove(2);
+                }
+                Damage::MissingVerdict => *verdict = None,
+                Damage::RefusedVerdict => verdict.as_mut().unwrap().approved = false,
+                Damage::WrongVerdict => verdict.as_mut().unwrap().intent_digest = [9; 32],
+                Damage::RepeatedStart => {
+                    history.insert(3, events[2].clone());
+                }
+                Damage::RepeatedFinish => {
+                    let Event::ToolFinished {
+                        observation: original,
+                        ..
+                    } = &events[4].event
+                    else {
+                        unreachable!()
+                    };
+                    let Event::ToolFinished { observation, .. } = &mut history[3].event else {
+                        unreachable!()
+                    };
+                    observation.intent = original.intent.clone();
+                }
+                Damage::UnmatchedFinish => {
+                    let Event::ToolFinished { observation, .. } = &mut history[3].event else {
+                        unreachable!()
+                    };
+                    observation.intent.id = Uuid::now_v7();
+                }
+                Damage::LateStart => history[2].sequence = events[3].sequence,
+                Damage::ChangedIntent => intent.workspace_inode += 1,
+            }
+            assert_eq!(
+                sample.audit(&history),
+                Err(LatencyError::MismatchedFinishOrPermission),
+                "{damage:?}"
+            );
         }
     }
 

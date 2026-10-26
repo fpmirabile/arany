@@ -7049,8 +7049,34 @@ mod goal_replay_tests {
             apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
         }
         let reads = [first, second];
+        for intent in &reads {
+            use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+            apply(
+                &mut view,
+                verdict_event(
+                    intent,
+                    Some(PermissionMode::Default),
+                    Decision::Allow,
+                    PermissionSource::Mode,
+                    PermissionSource::Mode,
+                    true,
+                ),
+            )
+            .unwrap();
+        }
+        let open = view.runs[0]
+            .tools
+            .iter()
+            .chain(view.runs[0].agents.iter().flat_map(|agent| &agent.tools))
+            .filter(|tool| {
+                tool.intent.agent_run_id == agent
+                    && tool.started_sequence.is_some()
+                    && tool.observation.is_none()
+            })
+            .count();
+        assert_eq!(open, reads.len());
         for index in if reverse { [1, 0] } else { [0, 1] } {
-            observe_in_process_read(&mut view, &reads[index]);
+            finish_in_process_read(&mut view, &reads[index]);
         }
         (view, goal, reads)
     }
@@ -7124,21 +7150,8 @@ mod goal_replay_tests {
         }
     }
 
-    fn observe_in_process_read(view: &mut SessionView, intent: &EffectIntent) {
-        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+    fn finish_in_process_read(view: &mut SessionView, intent: &EffectIntent) {
         let (run, agent) = (intent.run_id, intent.agent_run_id);
-        apply(
-            view,
-            verdict_event(
-                intent,
-                Some(PermissionMode::Default),
-                Decision::Allow,
-                PermissionSource::Mode,
-                PermissionSource::Mode,
-                true,
-            ),
-        )
-        .unwrap();
         let mut finished = tool_finished(run, agent, intent, b"Fact");
         let Event::ToolFinished { observation, .. } = &mut finished else {
             unreachable!()

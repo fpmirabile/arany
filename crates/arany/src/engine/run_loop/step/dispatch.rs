@@ -437,12 +437,8 @@ fn approval_gate(facts: &DispatchFacts<'_>, after: &AfterAsk) -> (bool, Permissi
     };
     let active_time_exhausted =
         active_time_exhausted || after.deadline == Some(ActiveDeadlineCause::Goal);
-    if after.interrupted && facts.permission.approval.is_some() {
-        (
-            false,
-            PermissionSource::UnavailableApproval,
-            active_time_exhausted,
-        )
+    if after.interrupted {
+        (false, facts.unresolved_source(), active_time_exhausted)
     } else {
         (approved, source, active_time_exhausted)
     }
@@ -503,16 +499,17 @@ fn dispatch_gate<'a>(
         _ if after.deadline == Some(ActiveDeadlineCause::Delegation) => {
             refused(NotDispatched::DelegationDeadline)
         }
+        DispatchSite::Primary if active_time_exhausted => Err(refuse(
+            NotDispatched::ActiveTime,
+            Some(StopCause::ActiveTime),
+        )),
+        _ if after.interrupted => refused(NotDispatched::ApprovalUnavailable),
         DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
         DispatchSite::Researcher => refused(if source == PermissionSource::UnavailableApproval {
             NotDispatched::ApprovalUnavailable
         } else {
             NotDispatched::ApprovalRefused
         }),
-        DispatchSite::Primary if active_time_exhausted => Err(refuse(
-            NotDispatched::ActiveTime,
-            Some(StopCause::ActiveTime),
-        )),
         // The Guard path reserves its queue wait first, then reads the pause.
         DispatchSite::Primary if approved && after.can_start_provider_call && facts.guard_site => {
             Ok(Dispatch::QueuePause)
@@ -1228,6 +1225,10 @@ mod tests {
         let (allow_, ask_, deny_) = (Decision::Allow, Decision::Ask, Decision::Deny);
         #[rustfmt::skip]
         let rows = [
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Interrupted], None), None, no(N::ApprovalUnavailable, None), allow_, S::Rule),
+            (decide(Researcher, allow(S::Rule), &none, &[InProcess, Interrupted], None), None, no(N::ApprovalUnavailable, None), allow_, S::Rule),
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Interrupted, GoalDeadline], None), None, no(N::ActiveTime, Some(StopCause::ActiveTime)), allow_, S::Rule),
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Interrupted, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), allow_, S::Rule),
             // Gate refusals, decided before any Ask.
             (decide(Primary, asks(Request), &none, &[PrivilegeTool, Timeout], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool), None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[SettingsChanged], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::SettingsChanged), None), ask_, S::UnavailableApproval),
