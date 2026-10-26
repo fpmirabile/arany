@@ -34,10 +34,11 @@ pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
-    AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, CompactionInputError,
-    MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
-    MAX_COMPACTION_TURNS, MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction,
-    validate_compaction_references,
+    AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, COMPACTION_SUMMARY_SEPARATOR_BYTES,
+    CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
+    MAX_COMPACTION_RECENT_CONTEXT_BYTES, MAX_COMPACTION_SUMMARY_BYTES, MAX_COMPACTION_TURNS,
+    MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, join_recent_files, recent_files,
+    recent_files_across, recent_files_match, render_recent_files, validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
@@ -53,8 +54,9 @@ pub use events::{
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
     ProviderCallRecord, ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind,
-    ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults, SessionId,
-    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, WorkspaceIdentity,
+    RecentFile, ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults,
+    SessionId, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason,
+    WorkspaceIdentity,
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,

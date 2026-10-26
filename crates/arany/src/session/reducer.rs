@@ -300,6 +300,7 @@ pub struct RunView {
     pub failure: Option<super::RunFailure>,
     pub tools: Vec<ToolView>,
     pub tool_compaction_summary: Option<String>,
+    pub tool_compaction_recent_files: Vec<super::RecentFile>,
     pub tool_compaction_covered_count: u32,
     pub tool_results_cleared_count: u32,
     pub definitions: DefinitionCache,
