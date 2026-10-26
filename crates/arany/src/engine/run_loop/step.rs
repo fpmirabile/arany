@@ -1037,11 +1037,11 @@ impl RunLoop<'_> {
         };
         let runtime = &runtime;
         let (observation, segment, exhausted, checkpoint) =
-            if intent.call.facts().site == crate::tools::catalog::Site::Guard {
-                let Some(queue_pause) = queue_pause else {
-                    return Err(EngineError::CoordinatorFailed);
-                };
-                Box::pin(self.dispatch_guard(runtime, intent, queue_pause)).await?
+            if matches!(intent.call.facts().site, crate::tools::catalog::Site::Guard)
+                || intent.call.facts().mutates
+                    && intent.call.facts().site == crate::tools::catalog::Site::InProcess
+            {
+                Box::pin(self.dispatch_effect(runtime, intent, queue_pause)).await?
             } else {
                 match self.reserve_active_segment(
                     tool_action_bound(runtime, &intent),
@@ -1074,11 +1074,11 @@ impl RunLoop<'_> {
         })
     }
 
-    async fn dispatch_guard(
+    async fn dispatch_effect(
         &self,
         runtime: &ToolRuntime,
         intent: EffectIntent,
-        queue_pause: ActivePause,
+        queue_pause: Option<ActivePause>,
     ) -> Result<
         (
             ToolObservation,
@@ -1088,7 +1088,7 @@ impl RunLoop<'_> {
         ),
         EngineError,
     > {
-        let mut queue_pause = Some(queue_pause);
+        let mut queue_pause = queue_pause;
         let mut active_time_exhausted = false;
         let (active_sender, mut active_receiver) =
             tokio::sync::mpsc::channel::<ActiveActionRequest>(1);
@@ -1106,7 +1106,11 @@ impl RunLoop<'_> {
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
             .saturating_add(crate::tools::worker::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);
-        let runtime_ms = intent.limits.runtime_ms;
+        let runtime_ms = if intent.call.facts().site == crate::tools::catalog::Site::InProcess {
+            0
+        } else {
+            intent.limits.runtime_ms
+        };
         let actor = intent.agent_run_id;
         let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
         let mut active_segment = None;
@@ -1583,7 +1587,7 @@ mod tests {
             (
                 step,
                 "    async fn dispatch_primary(",
-                "    async fn dispatch_guard(",
+                "    async fn dispatch_effect(",
             ),
             (tools, "    async fn run_unguarded(", "    fn pinned_root("),
             (tools, "    fn pinned_root(", "    async fn run_in_process("),

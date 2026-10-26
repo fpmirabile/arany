@@ -1064,7 +1064,7 @@ impl RunLoop<'_> {
         Ok(match clock {
             HookClock::Pause(pause) => {
                 let (observation, segment, exhausted, _) =
-                    Box::pin(self.dispatch_guard(runtime, hook_intent, pause)).await?;
+                    Box::pin(self.dispatch_effect(runtime, hook_intent, Some(pause))).await?;
                 (observation, segment, exhausted)
             }
             HookClock::Deadline(deadline) => {

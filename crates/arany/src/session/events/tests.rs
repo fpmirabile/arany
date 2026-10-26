@@ -1803,6 +1803,7 @@ mod payload_version_tests {
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(crate::tools::Attestation::InProcess {
+                receipt: None,
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
@@ -2095,6 +2096,7 @@ mod payload_version_tests {
         assert!(read.valid());
         let mut drifted = read.clone();
         drifted.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
             policy_digest: [1; 32],
             workspace_device: 1,
             workspace_inode: 3,

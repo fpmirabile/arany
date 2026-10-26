@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: harness maintainers
 - Last updated: 2026-10-25
 
@@ -50,8 +50,9 @@ Trust boundary: the effect is Arany's compiled code writing bytes the Engine val
 
 ## Vertical slices
 
-1. **In-process File effects on both platforms, with the guarantee rewording.** `run_file`, `Site::InProcess` for the six mutations and `ApplyChangeset`, `FileReceipt`, reducer site rule, helper arm removed, labels, latency Edit row. Same-PR docs: `AGENTS.md` (approved sentence), `docs/architecture/system-overview.md` §1 item 10, §2 lines 168-172, §6 "Local effect ownership", §11; `docs/specs/tools.md` "In-process file operations" (renamed section with the mutation rules moved from the macOS section), Limits rows, Enforcement failure causes (pre-GO causes not applicable to File effects); `docs/specs/execution.md` attestation sentence. ≤600 (the macOS/Linux profile deletions go to slice 2 to stay under the ceiling).
-2. **Delete the native file-worker paths.** Linux `private_file_worker_filter` and its unit; macOS file profile, CPU-expiry handling and per-mutation disk-image branches in `unit.rs`/`storage.rs`; file-profile enforcement digest; related tests. Same-PR docs: `tools.md` macOS and Linux enforcement sections (file-worker paragraphs removed, command rows unchanged), Limits rows "non-spawning macOS file worker". ≤600.
+1. **S1a: admit the in-process file publisher through Mkdir.** Ship the admitted-handle runtime, bounded blocking lifecycle, absolute deadline and cancellation gates, FileReceipt and reducer site rules, File diagnostics and historical replay evidence. Mkdir runs in process on both platforms; other mutations, changeset integration and rewind keep their current Guard paths. Include the owner-approved AGENTS.md sentence and owning spec/overview edits scoped to this increment. Keep existing Guard and private-worker evidence meaningful. ≤600 changed lines.
+2. **S1b: publish the remaining Workspace mutations in process.** Move Write, Edit, MultiEdit, Delete, Move, ApplyChangeset, handover integration and rewind onto the admitted publisher; retain private-worker Guard execution. Remove the primary file helper arm, extend the mutation/failure/receipt/checkpoint corpus, add the Edit latency row and complete the owning spec/overview edits. ≤600 changed lines.
+3. **S2: delete the native file-worker paths.** Linux `private_file_worker_filter` and its unit; macOS file profile, CPU-expiry handling and per-mutation disk-image branches in `unit.rs`/`storage.rs`; file-profile enforcement digest; related tests. Same-PR docs: `tools.md` macOS and Linux enforcement sections (file-worker paragraphs removed, command rows unchanged), Limits rows "non-spawning macOS file worker". ≤600.
 
 ## Exit criteria
 

@@ -155,6 +155,15 @@ pub(crate) async fn autonomous_continuation(session: SessionId) {
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn file_parent_sync(intent: Option<uuid::Uuid>) -> Result<(), ToolError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if intent.is_some_and(FaultPlan::file_parent_sync_fails) {
+        return Err(ToolError::Uncertain);
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_result(
     intent: uuid::Uuid,
     result: Result<ToolObservation, ToolError>,
@@ -304,6 +313,7 @@ mod injection {
         CheckpointStall(SessionId),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
+        FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
         GuardCacheReport(
             uuid::Uuid,
@@ -535,6 +545,14 @@ mod injection {
         pub(crate) fn record_publication_fails(state: &std::path::Path, record: &str) -> bool {
             take(|fault| matches!(fault, Fault::RecordPublication(path, name) if path == state && *name == record))
                 .is_some()
+        }
+
+        pub fn fail_file_parent_sync(intent: uuid::Uuid) {
+            plan().push(Fault::FileParentSync(intent));
+        }
+
+        pub(crate) fn file_parent_sync_fails(intent: uuid::Uuid) -> bool {
+            take(|fault| matches!(fault, Fault::FileParentSync(id) if *id == intent)).is_some()
         }
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {

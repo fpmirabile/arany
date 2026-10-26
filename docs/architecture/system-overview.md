@@ -31,7 +31,7 @@ The full product contract is successful when it proves all of these together:
 7. bounded instruction discovery follows the [Session admission contract](../specs/session.md#workspace-admission-and-authority);
 8. `exec` and `show` expose the same committed facts without terminal initialization; and
 9. cancellation reaches the primary and every admitted child without fabricating completion; and
-10. explicitly enabled primary Tools use typed one-use intents, restrict-only Policy, native Guard enforcement, bounded continuation and durable non-executing replay.
+10. explicitly enabled primary Tools use typed one-use intents, restrict-only Policy, native Guard enforcement for programs and capability-scoped file publication, bounded continuation and durable non-executing replay.
 
 Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The primary-only [host-command exception](../specs/tools.md#primary-host-commands) requires explicit human or admitted user-owned rule authority and a pinned, supervised command, never automatic fallback. Engine owns live epochs and journaled scope/reuse validation; Tools owns executable admission and supervision. Host effects cannot be published as Guard changesets or rewound, and the same user can modify Arany state and journal.
 
@@ -166,10 +166,12 @@ The [researcher contract](../specs/execution.md#researcher-children) owns their
 catalog, budgets, ordering and failure rules; children never inherit a broader
 grant than their parent.
 
-List, Read, Search and Glob use the admitted directory capability in process.
+Exact Read, exact-file Search and Skill text use the admitted directory capability
+in process.
 Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
-execution site. Mutations, typed Git reads, Skill loading and MCP stay behind
-the separate Guard. The [Tool contract](../specs/tools.md#in-process-reads) owns
+execution site. Mkdir uses the same admitted handle in process with a journaled File receipt.
+Other Workspace mutations and changeset publication retain Guard execution until S1b. Typed Git reads,
+Discovery, Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-reads) owns
 path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforcement-and-compatibility)
 and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
 native launch, supervision and recovery. Short-lived same-binary Guard and

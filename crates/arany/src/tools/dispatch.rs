@@ -131,6 +131,10 @@ pub(super) fn outcome(
             ToolDisposition::Denied,
             "File path is unavailable or outside the admitted regular-file boundary".into(),
         ),
+        Err(ToolError::Cancelled) => (
+            ToolDisposition::Cancelled,
+            "File operation cancelled; nothing in the Workspace changed".into(),
+        ),
         Err(ToolError::Uncertain) => (
             ToolDisposition::Uncertain,
             "Filesystem change may have occurred; inspect current state before another attempt"

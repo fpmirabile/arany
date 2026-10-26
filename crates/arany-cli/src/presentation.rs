@@ -450,8 +450,18 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                         && observation.attestation.is_none()
                 })
             }) {
-                if tool.intent.call.site() == arany::Site::InProcess {
+                if tool.intent.call.site() == arany::Site::InProcess
+                    && matches!(
+                        tool.intent.call,
+                        arany::ToolCall::Read { .. }
+                            | arany::ToolCall::Search { .. }
+                            | arany::ToolCall::Skill { .. }
+                    )
+                {
                     return Some("Error: A Workspace read stopped before it started because the admitted Workspace or its intent no longer verified. Nothing was read; earlier completed actions remain. Use /agents to inspect this Run.".into());
+                }
+                if tool.intent.call.site() == arany::Site::InProcess {
+                    return Some("Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run.".into());
                 }
                 return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
             }

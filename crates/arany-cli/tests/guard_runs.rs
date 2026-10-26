@@ -3752,7 +3752,7 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
 }
 
 #[tokio::test]
-async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly() {
+async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -3834,16 +3834,28 @@ async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly
         let observation = view.runs[0].tools[index].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
         assert_eq!(observation.output, text);
-        assert!(matches!(
-            observation.attestation,
-            Some(arany::Attestation::Guard(_))
-        ));
     }
     for step in &view.runs[0].tools[3..] {
         assert_eq!(
             step.observation.as_ref().unwrap().disposition,
             arany::ToolDisposition::Succeeded
         );
+    }
+    for step in &view.runs[0].tools {
+        let observation = step.observation.as_ref().unwrap();
+        if matches!(observation.intent.call, arany::ToolCall::Mkdir { .. }) {
+            assert!(matches!(
+                &observation.attestation,
+                Some(arany::Attestation::InProcess { receipt, .. })
+                    if receipt.is_some()
+                        == (observation.disposition == arany::ToolDisposition::Succeeded)
+            ));
+        } else {
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Guard(_))
+            ));
+        }
     }
     store.close().await.unwrap();
 }
