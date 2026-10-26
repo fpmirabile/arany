@@ -702,17 +702,7 @@ fn unit_command(
     command
         .arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms))
         .args(BWRAP_BOOTSTRAP);
-    let native = matches!(
-        intent.call,
-        ToolCall::Write { .. }
-            | ToolCall::Delete { .. }
-            | ToolCall::Move { .. }
-            | ToolCall::Edit { .. }
-            | ToolCall::MultiEdit { .. }
-            | ToolCall::Mkdir { .. }
-            | ToolCall::ApplyChangeset { .. }
-    ) || intent.call.is_git()
-        || super::super::discovery::possible(&intent.call);
+    let native = intent.call.is_git() || super::super::discovery::possible(&intent.call);
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| !preparation && seed_dir.symlink_metadata(folder).is_ok())
@@ -2006,31 +1996,72 @@ mod tests {
     }
 
     #[test]
-    fn discovery_launch_mounts_workspace_read_only_but_keeps_workers_private() {
+    fn native_launch_mounts_workspace_only_for_git_and_discovery() {
         let calls = [
-            serde_json::json!({"operation":"list","path":"."}),
-            serde_json::json!({"operation":"search","path":".","query":"needle"}),
-            serde_json::json!({"operation":"glob","pattern":"**/*.rs"}),
+            (
+                serde_json::json!({"operation":"list","path":"."}),
+                Some("--ro-bind"),
+            ),
+            (
+                serde_json::json!({"operation":"search","path":".","query":"needle"}),
+                Some("--ro-bind"),
+            ),
+            (
+                serde_json::json!({"operation":"glob","pattern":"**/*.rs"}),
+                Some("--ro-bind"),
+            ),
+            (
+                serde_json::json!({"operation":"git_status","path":"."}),
+                Some("--ro-bind"),
+            ),
+            (
+                serde_json::json!({"operation":"git_commit","message":"synthetic","paths":["selected.txt"],"staged":false}),
+                Some("--bind"),
+            ),
+            (
+                serde_json::json!({"operation":"mkdir","path":"synthetic"}),
+                None,
+            ),
+            (
+                serde_json::json!({"operation":"write","path":"selected.txt","expected_digest":null,"content":"synthetic"}),
+                None,
+            ),
+            (
+                serde_json::json!({"operation":"edit","path":"selected.txt","expected_digest":"0".repeat(64),"old":"before","new":"after"}),
+                None,
+            ),
+            (
+                serde_json::json!({"operation":"multiedit","file_path":"selected.txt","expected_digest":"0".repeat(64),"edits":[{"old_string":"before","new_string":"after","replace_all":false}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"operation":"delete","path":"selected.txt","expected_digest":"0".repeat(64)}),
+                None,
+            ),
+            (
+                serde_json::json!({"operation":"move","source":"selected.txt","destination":"moved.txt","expected_digest":"0".repeat(64)}),
+                None,
+            ),
         ];
-        for call in calls {
+        for (call, workspace_mode) in calls {
             for private in [false, true] {
-                let arguments = discovery_launch_arguments(call.clone(), private);
+                let arguments = native_launch_arguments(call.clone(), private);
                 let mounts = arguments
                     .windows(3)
                     .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--bind"))
                     .filter(|args| args[2] == "/workspace")
                     .collect::<Vec<_>>();
-                if private {
-                    assert!(mounts.is_empty(), "{arguments:?}");
-                } else {
+                if let Some(mode) = workspace_mode.filter(|_| !private) {
                     assert_eq!(mounts.len(), 1, "{arguments:?}");
-                    assert_eq!(mounts[0][0], "--ro-bind");
+                    assert_eq!(mounts[0][0], mode);
+                } else {
+                    assert!(mounts.is_empty(), "{arguments:?}");
                 }
             }
         }
     }
 
-    fn discovery_launch_arguments(call: serde_json::Value, private: bool) -> Vec<String> {
+    fn native_launch_arguments(call: serde_json::Value, private: bool) -> Vec<String> {
         let fixture = tempfile::tempdir().unwrap();
         let seed = crate::tools::fs::open_directory(fixture.path()).unwrap();
         let mut runtime = crate::tools::tests::in_process_runtime(
@@ -2266,12 +2297,12 @@ mod tests {
     }
 
     #[test]
-    fn private_file_worker_filter_refuses_exec_and_threads() {
+    fn preparation_filter_refuses_exec_and_threads() {
         use crate::test_process::BoundedOutput;
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "tools::guard::linux::tests::private_file_worker_filter_helper",
+                "tools::guard::linux::tests::preparation_filter_helper",
                 "--ignored",
                 "--nocapture",
             ])
@@ -2279,13 +2310,13 @@ mod tests {
             .current_dir("/")
             .bounded_output_for(Duration::from_secs(5), 4096)
             .unwrap();
-        assert!(output.status.success(), "private file filter: {output:?}");
-        crate::test_process::assert_single_test_completed(&output.stdout, "private file filter");
+        assert!(output.status.success(), "preparation filter: {output:?}");
+        crate::test_process::assert_single_test_completed(&output.stdout, "preparation filter");
     }
 
     #[test]
-    #[ignore = "isolated private file filter helper"]
-    fn private_file_worker_filter_helper() {
+    #[ignore = "isolated preparation filter helper"]
+    fn preparation_filter_helper() {
         assert!(
             std::process::Command::new("/usr/bin/true")
                 .status()
