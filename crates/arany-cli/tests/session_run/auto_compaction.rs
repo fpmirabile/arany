@@ -75,6 +75,10 @@ enum CompactionCase {
 }
 
 const COMPACTION_SUMMARY_MARKER: &str = "DERIVED_SUMMARY_CANARY";
+const INITIAL_OBJECTIVE_BYTES: usize = 16 * 1024;
+const INITIAL_ANSWER_BYTES: usize = 24 * 1024;
+const GUIDANCE_BYTES: usize = 20 * 1024;
+const INCLUDE_BYTES: usize = 120 * 1024;
 
 fn compaction_summary() -> String {
     let bytes: usize = 16 * 1024;
@@ -82,6 +86,31 @@ fn compaction_summary() -> String {
         COMPACTION_SUMMARY_MARKER.repeat(bytes.div_ceil(COMPACTION_SUMMARY_MARKER.len()));
     summary.truncate(bytes);
     summary
+}
+
+fn assert_large_workspace_inputs(input: &serde_json::Value) {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        input["workspace_guidance"][0]["text"]
+            .as_str()
+            .unwrap()
+            .len(),
+        GUIDANCE_BYTES
+    );
+    assert_eq!(input["includes"].as_array().unwrap().len(), 2);
+    for (index, path, letter) in [(0, "a.txt", "A"), (1, "b.txt", "B")] {
+        let text = letter.repeat(INCLUDE_BYTES);
+        let digest: String = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let expected =
+            format!("File: \"{path}\"\nSHA-256: {digest}\nContent (untrusted data):\n{text}");
+        assert!(
+            input["includes"][index].as_str().unwrap() == expected,
+            "include {index} identity, digest and content"
+        );
+    }
 }
 
 fn synthetic_server(
@@ -145,33 +174,22 @@ fn synthetic_server(
             }
             2 => {}
             3 | 4 => {
-                assert_eq!(input["objective"].as_str().unwrap().len(), 8192);
+                assert_eq!(
+                    input["objective"].as_str().unwrap().len(),
+                    INITIAL_OBJECTIVE_BYTES
+                );
                 assert_eq!(
                     input["workspace_guidance"][0]["text"]
                         .as_str()
                         .unwrap()
                         .len(),
-                    20 * 1024
+                    GUIDANCE_BYTES
                 );
-                assert_eq!(input["includes"].as_array().unwrap().len(), 2);
-                use sha2::{Digest, Sha256};
-                for (index, path, letter) in [(0, "a.txt", "A"), (1, "b.txt", "B")] {
-                    let text = letter.repeat(120 * 1024);
-                    let digest: String = Sha256::digest(text.as_bytes())
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect();
-                    let expected = format!(
-                        "File: \"{path}\"\nSHA-256: {digest}\nContent (untrusted data):\n{text}"
-                    );
-                    assert!(
-                        input["includes"][index].as_str().unwrap() == expected,
-                        "include {index} identity, digest and content"
-                    );
-                }
+                assert!(input["includes"].as_array().is_none_or(Vec::is_empty));
             }
             5 => {
                 assert_eq!(input["objective"], "second");
+                assert_large_workspace_inputs(&input);
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .expect("history runtime");
@@ -192,13 +210,22 @@ fn synthetic_server(
                         .await
                         .expect("committed view")
                         .expect("Session");
+                    assert_eq!(view.runs.len(), 2);
+                    assert!(
+                        view.runs[1]
+                            .config
+                            .as_ref()
+                            .expect("pinned second Run")
+                            .auto_compaction_due(),
+                        "the attached Run selects enough history to trigger automatic compaction"
+                    );
                     let tool_history = arany::test_support::history_tool_block(&view.runs[0]);
                     store.close().await.expect("close Store");
                     tool_history
                 });
                 let expected_history = format!(
                     "{expected_tool_history}\nFinal answer (untrusted data):\n{}",
-                    "A".repeat(24 * 1024)
+                    "A".repeat(INITIAL_ANSWER_BYTES)
                 );
                 assert_eq!(input["history"][0]["assistant"], expected_history);
             }
@@ -207,6 +234,7 @@ fn synthetic_server(
             }
             7 if matches!(case, CompactionCase::Success) => {
                 assert_eq!(input["objective"], "third");
+                assert_large_workspace_inputs(&input);
                 use sha2::{Digest, Sha256};
                 let digest: String = Sha256::digest(b"committed before compaction")
                     .iter()
@@ -312,7 +340,7 @@ fn synthetic_server(
                 serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
             }
             2 => serde_json::json!(r#"synthetic summary"#),
-            4 => serde_json::json!("A".repeat(24 * 1024)),
+            4 => serde_json::json!("A".repeat(INITIAL_ANSWER_BYTES)),
             5 => {
                 let result = if matches!(case, CompactionCase::Success) {
                     format!(
@@ -345,9 +373,57 @@ fn receive_stage(receiver: &mpsc::Receiver<&'static str>, expected: &str) {
     assert_eq!(
         receiver
             .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|error| panic!("attached output stage {expected}: {error}")),
+            .unwrap_or_else(|error| {
+                crate::process::annotate_native_fixture(&format!(
+                    "fixture=auto_compaction; stage={}; receive={error:?}",
+                    expected.replace(' ', "_")
+                ));
+                panic!("attached output stage {expected}: {error}");
+            }),
         expected
     );
+}
+
+fn commit_initial_write(
+    workspace: &std::path::Path,
+    state: &std::path::Path,
+    case: CompactionCase,
+) -> SessionId {
+    let mut initial = Command::new(env!("CARGO_BIN_EXE_arany"));
+    initial
+        .current_dir(workspace)
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .args(["exec", "--tools", "--state-dir"])
+        .arg(state)
+        .arg("--workspace")
+        .arg(workspace)
+        .args(["--provider", "custom:local", "--model", "model-1"]);
+    if matches!(case, CompactionCase::Success) {
+        initial.args(["--profile", "coding"]);
+    }
+    let initial = initial
+        .arg("Q".repeat(INITIAL_OBJECTIVE_BYTES))
+        .bounded_output_for(Duration::from_secs(30), 256 * 1024)
+        .expect("initial Write Run");
+    assert!(initial.status.success(), "initial Write Run succeeds");
+    assert!(initial.stderr.is_empty());
+    assert_eq!(
+        std::fs::read(workspace.join("src/recent.txt")).expect("published file"),
+        b"committed before compaction"
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("initial Session runtime");
+    runtime.block_on(async {
+        let sessions = arany::list_sessions(
+            StateRoot::open_existing(state).expect("State reopen"),
+            workspace.to_path_buf(),
+        )
+        .await
+        .expect("initial Session");
+        assert_eq!(sessions.len(), 1);
+        sessions[0].id
+    })
 }
 
 fn run_attached_auto_compaction(case: CompactionCase) {
@@ -355,10 +431,10 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     std::fs::create_dir(workspace.join("src")).expect("Write parent directory");
-    std::fs::write(workspace.join("AGENTS.md"), "G".repeat(20 * 1024)).expect("guidance");
+    std::fs::write(workspace.join("AGENTS.md"), "G".repeat(GUIDANCE_BYTES)).expect("guidance");
     // Attached Runs reserve steering context, so includes stay below the old budget edge.
-    std::fs::write(workspace.join("a.txt"), "A".repeat(120 * 1024)).expect("first include");
-    std::fs::write(workspace.join("b.txt"), "B".repeat(120 * 1024)).expect("second include");
+    std::fs::write(workspace.join("a.txt"), "A".repeat(INCLUDE_BYTES)).expect("first include");
+    std::fs::write(workspace.join("b.txt"), "B".repeat(INCLUDE_BYTES)).expect("second include");
     std::fs::write(workspace.join("private.txt"), "OMITTED_CANARY").expect("omitted input");
     let state = temp.path().join("state");
     StateRoot::admit(&state).expect("state root");
@@ -430,10 +506,12 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     );
     assert_eq!(checked.stderr, b"");
 
+    let session_id = commit_initial_write(&workspace, &state, case);
+
     let shell = if matches!(case, CompactionCase::Interrupted) {
-        "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --tools --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
+        "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     } else {
-        "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --tools --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\""
+        "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second"
     };
     let shell = if matches!(case, CompactionCase::Success) {
         shell.replace(
@@ -448,7 +526,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_FIRST_OBJECTIVE", "Q".repeat(8192))
+        .env("ARANY_TEST_SESSION", session_id.to_string())
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .env("SHELL", "/bin/sh")
         .env("TERM", "dumb")
@@ -472,14 +550,12 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
-        let mut first_reported = false;
         let mut maintenance_start = None;
         let mut compaction_reported = false;
         let mut manual_reported = false;
         let mut admission_reported = false;
         let mut second_output_paused = false;
         let mut third_reported = false;
-        let mut source_mismatch_reported = false;
         let mut continuation_reported = false;
         let mut retention_count = 0;
         let mut clear_count = 0;
@@ -535,19 +611,6 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                     .expect("stage receiver");
                 third_reported = true;
             }
-            if !first_reported
-                // The receipt is emitted before terminal input is reacquired.
-                && crate::process::pty_text_matches(&bytes, b"Status: finished\r\n")
-                    .next()
-                    .is_some_and(|receipt| {
-                        crate::process::pty_text_matches(&bytes[receipt.end..], b"Input:\r\n")
-                            .next()
-                            .is_some()
-                    })
-            {
-                sender.send("first receipt").expect("stage receiver");
-                first_reported = true;
-            }
             // Keep large answer bodies out of repeated maintenance-notice scans.
             let warning = b"Notice: Context threshold reached; attempting automatic compaction";
             let Some(start) = maintenance_start.or_else(|| {
@@ -571,16 +634,6 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             {
                 sender.send("compaction receipt").expect("stage receiver");
                 compaction_reported = true;
-            }
-            let mismatch = b"Notice: Error: Automatic compaction unavailable: saved account requires a native Provider; history retained\r\nInput:\r\n";
-            if matches!(case, CompactionCase::Success)
-                && !source_mismatch_reported
-                && crate::process::pty_text_matches(maintenance, mismatch)
-                    .next()
-                    .is_some()
-            {
-                sender.send("wrong account source").expect("stage receiver");
-                source_mismatch_reported = true;
             }
             let continuation =
                 b"Notice: Draft: 10 characters; Enter retains until compaction ends\r\n";
@@ -643,7 +696,6 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         }
         bytes
     });
-    receive_stage(&receiver, "first receipt");
     let shell_pid = pid_ready
         .recv_timeout(Duration::from_secs(10))
         .expect("product parent PID");
@@ -658,7 +710,6 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         product_guard.is_owned_and_running(),
         "private product for cleanup"
     );
-    input.write_all(b"second\n").expect("second objective");
     let future_account = uuid::Uuid::now_v7();
     if matches!(case, CompactionCase::Success) {
         receive_stage(&receiver, "second restored output");
@@ -879,11 +930,12 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         };
         assert_eq!(tty("TTY_BEFORE:"), tty("TTY_AFTER:"));
     }
-    let session_id = transcript
+    let receipt_session_id = transcript
         .lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix("Session: "))
         .find_map(|value| value.parse::<SessionId>().ok())
         .expect("Session receipt");
+    assert_eq!(receipt_session_id, session_id);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("read-only replay runtime");

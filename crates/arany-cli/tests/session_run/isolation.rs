@@ -159,6 +159,9 @@ pub fn enter_native_account_isolated_test() -> bool {
 
 fn native_account_test_case(test: &str) -> &'static str {
     match test {
+        "auto_compaction::attached_context_threshold_preserves_history_after_success_failure_or_interruption" => {
+            "auto_compaction"
+        }
         "tools::native_exec::shipped_exec_continues_after_guarded_command_and_replays_closed_events" => {
             "shipped_exec"
         }

@@ -70,7 +70,8 @@ pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
                 || !(message.starts_with(b"fixture=shipped_exec;")
                     || message.starts_with(b"fixture=direct_cancellation;")
                     || message.starts_with(b"fixture=tool_group;")
-                    || message.starts_with(b"fixture=inline_approval;"))
+                    || message.starts_with(b"fixture=inline_approval;")
+                    || message.starts_with(b"fixture=auto_compaction;"))
                 || !message.iter().all(|byte| {
                     byte.is_ascii_alphanumeric()
                         || matches!(
