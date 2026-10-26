@@ -489,6 +489,7 @@ impl Default for Transcript {
 enum InputRead {
     Input(TerminalInput),
     PanelCopy(PanelCopyResult),
+    GraphicsReady,
 }
 
 async fn wait_panel_copy(panel_copy: &mut Option<PanelCopy>) -> PanelCopyResult {
@@ -703,12 +704,15 @@ fn graphics_probe_allowed(mode: TerminalMode) -> bool {
 #[cfg(unix)]
 fn graphics_protocol(
     kitty_supported: bool,
+    sixel_cell: Option<graphics::sixel::CellPixels>,
     tmux: bool,
     term_program: Option<&str>,
     lc_terminal: Option<&str>,
 ) -> Option<GraphicsProtocol> {
     if kitty_supported {
         Some(GraphicsProtocol::Kitty)
+    } else if !tmux && let Some(cell) = sixel_cell {
+        Some(GraphicsProtocol::Sixel(cell))
     } else if !tmux
         && (matches!(term_program, Some("iTerm.app" | "WezTerm")) || lc_terminal == Some("iTerm2"))
     {
@@ -725,6 +729,7 @@ fn detected_graphics_protocol(input: &TerminalReader, probe: bool) -> Option<Gra
     }
     graphics_protocol(
         input.kitty_graphics_supported(),
+        input.sixel_cell_pixels(),
         std::env::var_os("TMUX").is_some(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         std::env::var("LC_TERMINAL").ok().as_deref(),
@@ -908,6 +913,7 @@ impl AttachedTerminal {
             graphics_hover_changed: false,
             graphics_placement: None,
             hovered_image_digest: None,
+            sixel_preview: graphics::SixelPreview::default(),
             linear: mode_label.map(LinearState::new),
             #[cfg(unix)]
             secret_echo: None,
@@ -1494,6 +1500,7 @@ pub struct AttachedTerminal {
     graphics_hover_changed: bool,
     graphics_placement: Option<GraphicsPlacement>,
     hovered_image_digest: Option<[u8; 32]>,
+    sixel_preview: graphics::SixelPreview,
     linear: Option<LinearState>,
     #[cfg(unix)]
     secret_echo: Option<SecretEcho>,
@@ -1522,6 +1529,7 @@ pub struct AttachedTerminal {
 enum GraphicsProtocol {
     Kitty,
     ITerm2,
+    Sixel(graphics::sixel::CellPixels),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1858,6 +1866,7 @@ impl AttachedTerminal {
                 self.clipboard_paste = Some(paste);
                 InputRead::Input(TerminalInput::Paste)
             },
+            () = self.sixel_preview.wait() => InputRead::GraphicsReady,
             result = wait_panel_copy(&mut self.panels.panel_copy) => {
                 InputRead::PanelCopy(result)
             },
@@ -1875,12 +1884,14 @@ impl AttachedTerminal {
                 self.clipboard_paste = Some(paste);
                 InputRead::Input(TerminalInput::Paste)
             },
+            () = self.sixel_preview.wait() => InputRead::GraphicsReady,
             result = wait_panel_copy(&mut self.panels.panel_copy) => {
                 InputRead::PanelCopy(result)
             },
         };
         let input = match input {
             InputRead::Input(input) => input,
+            InputRead::GraphicsReady => return Ok(TerminalInput::PanelSelectionChanged),
             InputRead::PanelCopy(result) => {
                 let mut stderr = io::stderr();
                 let terminal_output = self
@@ -1900,6 +1911,7 @@ impl AttachedTerminal {
             self.pointer_position = Some(ratatui::layout::Position::new(column, row));
             let hovered = hovered_image_at(&self.image_chip_areas, column, row);
             if transition_hover(&mut self.hovered_image, hovered) {
+                self.sixel_preview.clear();
                 self.hovered_image_digest = None;
                 self.graphics_hover_changed = true;
             } else {
@@ -2113,7 +2125,7 @@ impl AttachedTerminal {
     // `[` in the pager: leave capture and the alternate screen, then append the bounded transcript.
     fn dump_to_scrollback(&mut self, view: &SessionView) -> Result<(), TerminalError> {
         let text = history::scrollback_transcript(view);
-        self.hovered_image = None;
+        self.clear_graphics_hover();
         self.delete_graphics_placement()?;
         if let Some(mut modes) = self.owned.pointer_modes.take() {
             modes.release()?;
@@ -2878,6 +2890,7 @@ impl AttachedTerminal {
     }
 
     fn clear_graphics_hover(&mut self) {
+        self.sixel_preview.clear();
         transition_hover(&mut self.hovered_image, None);
         self.pointer_position = None;
         self.hovered_image_digest = None;
@@ -3160,6 +3173,9 @@ impl AttachedTerminal {
         let mut preview_inner = None;
         let pointer_position = self.pointer_position;
         let mut hovered_image = self.hovered_image;
+        let graphics_protocol = self.owned.graphics_protocol;
+        let published_graphics = self.graphics_placement;
+        let ready_graphics = self.sixel_preview.ready_placement();
         let newline_hint = composer.newline_hint(self.keyboard_support());
         self.draw_frame(height, |frame, _| {
             let geometry = view::draw_frame_with_history_and_chips(
@@ -3184,7 +3200,23 @@ impl AttachedTerminal {
                 && let Some((balloon, inner)) =
                     graphics::preview_geometry(frame.area(), chip, image)
             {
-                view::draw_image_preview(frame, balloon, &image_description(image, index));
+                let placement = GraphicsPlacement {
+                    image_index: index,
+                    digest: image.digest(),
+                    inner,
+                };
+                let interior = graphics::preview_interior(
+                    graphics_protocol,
+                    published_graphics,
+                    ready_graphics,
+                    placement,
+                );
+                view::draw_image_preview(
+                    frame,
+                    balloon,
+                    &image_description(image, index),
+                    interior,
+                );
                 preview_inner = Some(inner);
             }
             if let Some(picker) = picker {
@@ -3222,6 +3254,9 @@ impl AttachedTerminal {
             digest: image.digest(),
             inner,
         });
+        if placement.is_none() {
+            self.sixel_preview.clear();
+        }
         let unchanged = placement.is_some() && self.graphics_placement == placement;
         if unchanged {
             return Ok(());
@@ -3236,6 +3271,15 @@ impl AttachedTerminal {
             bytes.extend_from_slice(&match protocol {
                 GraphicsProtocol::Kitty => graphics::kitty_image(image, inner),
                 GraphicsProtocol::ITerm2 => graphics::inline_image(image, inner),
+                GraphicsProtocol::Sixel(cell) => {
+                    if let Some(placement) = placement {
+                        self.sixel_preview.request(placement, image, cell);
+                    }
+                    let Some(bytes) = self.sixel_preview.take_ready() else {
+                        return Ok(());
+                    };
+                    bytes
+                }
             });
             self.graphics_placement = placement;
         }
@@ -4096,6 +4140,7 @@ impl AttachedTerminal {
     }
 
     fn release(&mut self) -> io::Result<()> {
+        self.clear_graphics_hover();
         self.cancel_clipboard_paste();
         let mut first_error = None;
         attempt_cleanup(&mut first_error, || self.delete_graphics_placement());
@@ -4142,6 +4187,8 @@ impl AttachedTerminal {
             std::mem::take(&mut self.transcript.classic_history);
         replacement.panels.panel_selection = std::mem::take(&mut self.panels.panel_selection);
         replacement.panels.panel_copy = self.panels.panel_copy.take();
+        self.sixel_preview.clear();
+        replacement.sixel_preview = std::mem::take(&mut self.sixel_preview);
         replacement.panels.dialog_armed = self.panels.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
         replacement.child_drafts = std::mem::take(&mut self.child_drafts);
@@ -4380,7 +4427,7 @@ mod graphics_lifecycle_tests {
             (false, false, Some("iTerm"), None, None),
         ] {
             assert_eq!(
-                graphics_protocol(kitty, tmux, program, lc_terminal),
+                graphics_protocol(kitty, None, tmux, program, lc_terminal),
                 expected
             );
         }

@@ -58,6 +58,28 @@ impl Modes {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphicsPeer {
+    Kitty,
+    Sixel,
+}
+
+impl GraphicsPeer {
+    fn reply(self) -> &'static [u8] {
+        match self {
+            Self::Kitty => b"\x1b_Gi=31;OK\x1b\\\x1b[?0u\x1b[?62;52;c",
+            Self::Sixel => b"\x1b[6;16;8t\x1b[?0u\x1b[?62;4c",
+        }
+    }
+
+    fn transfer(self) -> &'static [u8] {
+        match self {
+            Self::Kitty => b"\x1b_Ga=T",
+            Self::Sixel => b"\x1bP0;1q",
+        }
+    }
+}
+
 // Fields drop in order: the product guard, then the PTY pipes, then the reaping child guard.
 struct Chat {
     product: Option<(Pid, ProductGuard)>,
@@ -68,8 +90,8 @@ struct Chat {
     answered: PtyResponses,
     // Modes folded from captures that `fresh` discarded.
     folded: Modes,
-    reply_to_kitty: bool,
-    kitty_reply_sent: bool,
+    graphics_peer: Option<GraphicsPeer>,
+    graphics_reply_sent: bool,
 }
 
 impl Chat {
@@ -120,8 +142,8 @@ impl Chat {
             transcript: Vec::new(),
             answered: PtyResponses::default(),
             folded: Modes::default(),
-            reply_to_kitty: false,
-            kitty_reply_sent: false,
+            graphics_peer: None,
+            graphics_reply_sent: false,
         }
     }
 
@@ -132,17 +154,17 @@ impl Chat {
             &mut self.transcript,
             &mut self.answered,
         );
-        if self.reply_to_kitty
-            && !self.kitty_reply_sent
+        if let Some(peer) = self.graphics_peer
+            && !self.graphics_reply_sent
             && self
                 .transcript
                 .windows(b"\x1b_Gi=31,s=1,v=1,a=q".len())
                 .any(|part| part == b"\x1b_Gi=31,s=1,v=1,a=q")
         {
             self.input
-                .write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[?0u\x1b[?62;52;c")
-                .expect("answer Kitty graphics probe");
-            self.kitty_reply_sent = true;
+                .write_all(peer.reply())
+                .expect("answer graphics probe");
+            self.graphics_reply_sent = true;
         }
     }
 
@@ -273,7 +295,7 @@ impl Chat {
 fn kitty_probe_enables_any_motion_and_a_burst_keeps_following_keys() {
     let (temp, state, workspace) = session_fixture(true);
     let mut chat = Chat::start(temp.path(), &state, &workspace, &[]);
-    chat.reply_to_kitty = true;
+    chat.graphics_peer = Some(GraphicsPeer::Kitty);
     chat.wait_for(
         0,
         &[b"\x1b_Gi=31,s=1,v=1,a=q", b"\x1b[?1003h"],
@@ -320,7 +342,7 @@ fn kitty_hover_tracks_drag_leave_and_revalidates_composer_geometry() {
     )
     .expect("workspace PNG");
     let mut chat = Chat::start(temp.path(), &state, &workspace, &[]);
-    chat.reply_to_kitty = true;
+    chat.graphics_peer = Some(GraphicsPeer::Kitty);
     chat.wait_for(
         0,
         &[b"\x1b_Gi=31,s=1,v=1,a=q", b"\x1b[?1003h"],
@@ -473,6 +495,15 @@ fn kitty_hover_tracks_drag_leave_and_revalidates_composer_geometry() {
 
 #[test]
 fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
+    active_hover_journey(GraphicsPeer::Kitty);
+}
+
+#[test]
+fn sixel_hover_completion_redraws_during_active_run_and_compaction() {
+    active_hover_journey(GraphicsPeer::Sixel);
+}
+
+fn active_hover_journey(graphics: GraphicsPeer) {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde_json::json;
 
@@ -542,11 +573,11 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
         "--resume --provider custom:local --model model-1",
         true,
     );
-    chat.reply_to_kitty = true;
+    chat.graphics_peer = Some(graphics);
     chat.wait_for(
         0,
         &[b"\x1b_Gi=31,s=1,v=1,a=q", b"\x1b[?1003h"],
-        "Kitty probe and any-motion capture",
+        "graphics probe and any-motion capture",
     );
     chat.wait_armed(0, "armed fullscreen picker");
     chat.step(
@@ -563,29 +594,38 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
     let (column, row) = image_chip_position(&chat.transcript);
     let (history_column, history_row) =
         screen_text_position(&chat.transcript, "start work").expect("Run objective in History");
-    let transfer = b"\x1b_Ga=T";
+    let transfer = graphics.transfer();
     let deletion = b"\x1b_Ga=d,d=I,i=31";
     let clipboard_copy = b"\x1b]52;c;";
     let from_run = chat.transcript.len();
-    let selection = format!(
-        "\x1b[<0;{history_column};{history_row}M\x1b[<32;{column};{row}M\x1b[<0;{column};{row}m"
-    );
+    let selection = match graphics {
+        GraphicsPeer::Kitty => format!(
+            "\x1b[<0;{history_column};{history_row}M\x1b[<32;{column};{row}M\x1b[<0;{column};{row}m"
+        ),
+        GraphicsPeer::Sixel => format!("\x1b[<35;{column};{row}M"),
+    };
     chat.send(selection.as_bytes());
     chat.wait(
         from_run,
         |bytes| {
             count_bytes(bytes, transfer) >= 1
-                && bytes
-                    .windows(clipboard_copy.len())
-                    .any(|part| part == clipboard_copy)
+                && (graphics == GraphicsPeer::Sixel
+                    || bytes
+                        .windows(clipboard_copy.len())
+                        .any(|part| part == clipboard_copy))
         },
-        "Run History drag crossing chip renders and copies",
+        "Run preview and selection copy when requested",
     );
-    chat.send(format!("\x1b[<35;70;{row}M").as_bytes());
+    let leave = chat.send(format!("\x1b[<35;70;{row}M").as_bytes());
     chat.wait(
-        from_run,
-        |bytes| count_bytes(bytes, deletion) >= 1,
-        "Run input loop deletes on leave",
+        0,
+        |bytes| match graphics {
+            GraphicsPeer::Kitty => count_bytes(&bytes[leave..], deletion) >= 1,
+            GraphicsPeer::Sixel => {
+                position(&bytes[leave..], b"\x1b[?25h").is_some() && !screen_has_preview(bytes)
+            }
+        },
+        "Run input loop clears preview on leave",
     );
     release_sender.send(()).expect("release Run response");
     chat.wait(
@@ -611,25 +651,34 @@ fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
     let (history_column, history_row) =
         screen_text_position(&chat.transcript, "start work").expect("compaction History objective");
     let from_compaction = chat.transcript.len();
-    let selection = format!(
-        "\x1b[<0;{history_column};{history_row}M\x1b[<32;{column};{row}M\x1b[<0;{column};{row}m"
-    );
+    let selection = match graphics {
+        GraphicsPeer::Kitty => format!(
+            "\x1b[<0;{history_column};{history_row}M\x1b[<32;{column};{row}M\x1b[<0;{column};{row}m"
+        ),
+        GraphicsPeer::Sixel => format!("\x1b[<35;{column};{row}M"),
+    };
     chat.send(selection.as_bytes());
     chat.wait(
         from_compaction,
         |bytes| {
             count_bytes(bytes, transfer) >= 1
-                && bytes
-                    .windows(clipboard_copy.len())
-                    .any(|part| part == clipboard_copy)
+                && (graphics == GraphicsPeer::Sixel
+                    || bytes
+                        .windows(clipboard_copy.len())
+                        .any(|part| part == clipboard_copy))
         },
-        "compaction History drag crossing chip renders and copies",
+        "compaction preview and selection copy when requested",
     );
-    chat.send(format!("\x1b[<35;70;{row}M").as_bytes());
+    let leave = chat.send(format!("\x1b[<35;70;{row}M").as_bytes());
     chat.wait(
-        from_compaction,
-        |bytes| count_bytes(bytes, deletion) >= 1,
-        "compaction input loop deletes on leave",
+        0,
+        |bytes| match graphics {
+            GraphicsPeer::Kitty => count_bytes(&bytes[leave..], deletion) >= 1,
+            GraphicsPeer::Sixel => {
+                position(&bytes[leave..], b"\x1b[?25h").is_some() && !screen_has_preview(bytes)
+            }
+        },
+        "compaction input loop clears preview on leave",
     );
     release_sender
         .send(())
@@ -653,16 +702,19 @@ fn count_bytes(bytes: &[u8], needle: &[u8]) -> usize {
 }
 
 fn visible_screen(transcript: &[u8]) -> Vec<String> {
-    let sanitized = strip_kitty_control_strings(transcript);
+    let sanitized = strip_graphics_control_strings(transcript);
     screen_rows(&sanitized, 80, 24)
 }
 
-fn strip_kitty_control_strings(bytes: &[u8]) -> Vec<u8> {
+fn strip_graphics_control_strings(bytes: &[u8]) -> Vec<u8> {
     let mut sanitized = Vec::with_capacity(bytes.len());
     let mut rest = bytes;
-    while let Some(start) = rest.windows(3).position(|part| part == b"\x1b_G") {
+    while let Some(start) = rest
+        .windows(2)
+        .position(|part| matches!(part, b"\x1b_" | b"\x1bP"))
+    {
         sanitized.extend_from_slice(&rest[..start]);
-        rest = &rest[start + 3..];
+        rest = &rest[start + 2..];
         let Some(end) = rest.windows(2).position(|part| part == b"\x1b\\") else {
             return sanitized;
         };
