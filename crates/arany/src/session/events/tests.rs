@@ -2166,6 +2166,25 @@ mod payload_version_tests {
             active_ceiling_ms: 1,
         };
         let payload = proposed.payload().unwrap();
+        assert!(!payload.contains("build_jobs"));
+        let mut build = proposed.clone();
+        if let Event::ToolProposed { intent, .. } = &mut build {
+            intent.call = crate::tools::ToolCall::Command {
+                program: "cargo".into(),
+                args: vec!["build".into()],
+                cwd: String::new(),
+            };
+            intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
+            intent.limits.build_jobs = 2;
+            intent.limits.cache_bytes = 0;
+            intent.limits.cache_candidate_bytes = 0;
+        }
+        let bytes = build.payload().unwrap();
+        let (kind, version) = (build.kind(), build.version());
+        assert_eq!(
+            Event::decode(kind, version, &bytes, Some(run), Some(agent)).unwrap(),
+            build
+        );
         assert_eq!(
             Event::decode(
                 proposed.kind(),
@@ -2427,6 +2446,19 @@ mod payload_version_tests {
             continues: Some(GoalId::new()),
         };
         let started_payload = started.payload().expect("payload");
+        assert!(!started_payload.contains("build_jobs"));
+        let mut parallel = started.clone();
+        if let Event::GoalStarted {
+            resource_settings, ..
+        } = &mut parallel
+        {
+            resource_settings.build_jobs = Some(2);
+        }
+        let bytes = parallel.payload().unwrap();
+        assert_eq!(
+            Event::decode(parallel.kind(), parallel.version(), &bytes, None, None).unwrap(),
+            parallel
+        );
         assert_eq!(
             Event::decode(
                 "GoalStarted",

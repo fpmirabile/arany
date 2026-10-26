@@ -811,6 +811,8 @@ pub struct ToolLimits {
     pub cache_transfer_ms: u32,
     pub memory_bytes: u64,
     pub max_processes: u32,
+    #[serde(default = "one_job", skip_serializing_if = "is_one_job")]
+    pub build_jobs: u32,
     pub scratch_bytes: u64,
     pub project_bytes: u64,
     pub cache_requested_bytes: u64,
@@ -837,6 +839,8 @@ pub struct ToolResourceSettings {
     pub max_command_timeout_ms: u32,
     pub build_memory_bytes: u64,
     pub build_processes: u32,
+    #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
+    pub build_jobs: Option<u32>,
     pub build_project_bytes: u64,
     pub build_cache_bytes: u64,
 }
@@ -848,6 +852,7 @@ impl Default for ToolResourceSettings {
             max_command_timeout_ms: MAX_COMMAND_TIMEOUT_MS,
             build_memory_bytes: MAX_BUILD_MEMORY_BYTES,
             build_processes: MAX_BUILD_PROCESSES_OR_THREADS,
+            build_jobs: one_setting(),
             build_project_bytes: MAX_BUILD_PROJECT_BYTES,
             build_cache_bytes: MAX_BUILD_CACHE_BYTES,
         }
@@ -860,12 +865,26 @@ impl ToolResourceSettings {
             && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.max_command_timeout_ms)
             && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
             && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
+            && self.build_jobs != Some(0)
             && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
             && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
             && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
             && (self.build_cache_bytes == 0
                 || self.build_cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
     }
+}
+
+const fn one_job() -> u32 {
+    1
+}
+fn is_one_job(jobs: &u32) -> bool {
+    *jobs == one_job()
+}
+const fn one_setting() -> Option<u32> {
+    Some(one_job())
+}
+fn is_one_setting(jobs: &Option<u32>) -> bool {
+    *jobs == one_setting()
 }
 
 pub(crate) fn command_timeout_limit_message(requested_ms: u32, maximum_ms: u32) -> String {
@@ -889,6 +908,7 @@ impl Default for ToolLimits {
             cache_transfer_ms: 0,
             memory_bytes: MEMORY_BYTES,
             max_processes: MAX_PROCESSES_OR_THREADS,
+            build_jobs: one_job(),
             scratch_bytes: SCRATCH_BYTES,
             project_bytes: SCRATCH_BYTES,
             cache_requested_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
@@ -909,6 +929,8 @@ impl ToolLimits {
     fn valid(&self) -> bool {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
             && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
+            && (1..=self.max_processes).contains(&self.build_jobs)
+            && (self.resource_class == ToolResourceClass::Build || self.build_jobs == one_job())
             && self.scratch_bytes == SCRATCH_BYTES
             && match self.resource_class {
                 ToolResourceClass::Default => {

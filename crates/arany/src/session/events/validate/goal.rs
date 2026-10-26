@@ -27,7 +27,11 @@ impl Event {
                     return Err(ReplayError::InvalidPayload);
                 }
                 budget.validate()?;
-                if !resource_settings.valid() {
+                if !resource_settings.valid()
+                    || resource_settings
+                        .build_jobs
+                        .is_some_and(|jobs| jobs > resource_settings.build_processes)
+                {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(())

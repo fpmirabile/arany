@@ -816,7 +816,7 @@ fn command_limits(
     resource_class: ToolResourceClass,
     resource_settings: crate::tools::ToolResourceSettings,
     timeout_refused: bool,
-) -> Result<(), ToolError> {
+) -> Result<(), EngineError> {
     intent.limits.resource_class = resource_class;
     intent.limits.project_bytes = crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES;
     let requested_cache_bytes = if resource_class == ToolResourceClass::Build {
@@ -837,6 +837,10 @@ fn command_limits(
     if resource_class == ToolResourceClass::Build {
         intent.limits.memory_bytes = resource_settings.build_memory_bytes;
         intent.limits.max_processes = resource_settings.build_processes;
+        intent.limits.build_jobs = resource_settings
+            .build_jobs
+            .ok_or(EngineError::InvalidRequest)?;
+        runtime.bind_build_jobs(intent)?;
         intent.limits.project_bytes = resource_settings.build_project_bytes;
     }
     Ok(())

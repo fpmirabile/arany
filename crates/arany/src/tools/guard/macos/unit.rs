@@ -3941,7 +3941,7 @@ int main(int argc, char **argv) {
                     root,
                     &runtime.config.runtime_grants,
                     false,
-                    ToolResourceClass::Default,
+                    &crate::tools::ToolLimits::default(),
                 )
                 .unwrap();
                 let (probe_status, probe_stdout, probe_stderr) = reactor
@@ -3973,7 +3973,7 @@ int main(int argc, char **argv) {
                     root,
                     &runtime.config.runtime_grants,
                     false,
-                    ToolResourceClass::Default,
+                    &crate::tools::ToolLimits::default(),
                 )
                 .unwrap();
                 let (rust_status, rust_stdout, rust_stderr) = reactor
@@ -4090,7 +4090,7 @@ int main(int argc, char **argv) {
                         root,
                         &runtime.config.runtime_grants,
                         false,
-                        ToolResourceClass::Default,
+                        &crate::tools::ToolLimits::default(),
                     )
                     .unwrap();
                     let (status, stdout, stderr) = reactor
@@ -4144,7 +4144,7 @@ printf 'native command success'
                     root,
                     &runtime.config.runtime_grants,
                     false,
-                    ToolResourceClass::Default,
+                    &crate::tools::ToolLimits::default(),
                 )
                 .unwrap();
                 let (status, stdout, stderr) = reactor
