@@ -5,7 +5,7 @@ mod lifecycle;
 mod permission;
 use super::{
     AgentStatus, HookView, MAX_HOST_SESSION_GRANTS, RunView, SessionView, ToolView, active_run,
-    active_run_goal, current_goal_mut, observed_command_changeset, pending_tool_requests,
+    active_run_goal, current_goal_mut, observed_command_changeset,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, ProviderCallDisposition, ReplayError};
@@ -22,6 +22,26 @@ pub(super) fn apply(
 ) -> Result<(), ReplayError> {
     lifecycle::validate_finished(current, event)?;
     match event {
+        Event::ToolActiveTimeReserved {
+            run_id,
+            agent_run_id,
+            intent_digest,
+            active_ceiling_ms,
+        } => {
+            let run = active_run(current, *run_id)?;
+            if run
+                .primary()
+                .is_none_or(|primary| primary.id != *agent_run_id)
+                || super::pending_tool_requests(run) != Some(0)
+                || !run.hooks_settled()
+                || run.tools.iter().any(ToolView::dispatch_in_progress)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
+            tool.active_time_reserved = true;
+            record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
+        }
         Event::ToolPermissionDecided { .. } => permission::apply(current, event)?,
         Event::HookStarted {
             run_id,
@@ -79,10 +99,16 @@ fn post_target<'a>(
             .ok_or(ReplayError::InvalidTransition)?
             .tools
     };
-    let last = tools
-        .len()
-        .checked_sub(1)
+    let source = tools
+        .iter()
+        .position(|tool| tool.intent.digest() == *subject)
         .ok_or(ReplayError::InvalidTransition)?;
+    let last = tools.get(source + 1).filter(|tool| matches!(
+        &tool.intent.call,
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
+        } if source_intent_digest == subject
+    )).map_or(source, |_| source + 1);
     let integration = &tools[last];
     if matches!(
         integration.intent.call,
@@ -134,30 +160,44 @@ fn post_target<'a>(
     Ok((&mut tools[index], adjacent))
 }
 
-fn pending_tool(
-    run: &mut RunView,
+fn tool_by_digest<'a>(
+    run: &'a mut RunView,
     actor: crate::session::AgentRunId,
-) -> Result<&mut ToolView, ReplayError> {
-    if run
+    digest: &[u8; 32],
+) -> Result<&'a mut ToolView, ReplayError> {
+    let tools = if run
         .primary()
         .is_some_and(|primary| primary.id == actor && primary.status == AgentStatus::Active)
     {
-        run.tools.last_mut()
+        &mut run.tools
     } else {
-        run.agents
+        &mut run
+            .agents
             .iter_mut()
             .find(|agent| agent.id == actor && agent.status == AgentStatus::Active)
-            .and_then(|agent| agent.tools.last_mut())
-    }
-    .ok_or(ReplayError::InvalidTransition)
+            .ok_or(ReplayError::InvalidTransition)?
+            .tools
+    };
+    tools
+        .iter_mut()
+        .find(|tool| tool.observation.is_none() && tool.intent.digest() == *digest)
+        .ok_or(ReplayError::InvalidTransition)
+}
+
+fn pending_narrowing_source(run: &RunView) -> Option<(usize, &ToolView)> {
+    run.tools.iter().enumerate().find(|(_, tool)| {
+        tool.narrowed_call().is_some()
+            && !run
+                .tools
+                .iter()
+                .any(|replacement| replacement.narrowing_source == Some(tool.intent.digest()))
+    })
 }
 
 // A narrowed Tool answers nothing itself: the next Tool must be exactly its replacement.
 fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
-    run.tools
-        .last()
-        .and_then(ToolView::narrowed_call)
-        .is_none_or(|call| *call == intent.call)
+    pending_narrowing_source(run)
+        .is_none_or(|(_, source)| source.narrowed_call() == Some(&intent.call))
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
@@ -183,14 +223,14 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
     if primary.provider_calls.last().is_none_or(|call| {
         call.disposition != ProviderCallDisposition::ToolRequested
             && call.phase != AgentPhase::ToolReview
-    }) || pending_tool_requests(run) != Some(0)
-    {
+    }) {
         return false;
     }
-    run.tools
-        .last()
-        .and_then(|tool| tool.observation.as_ref())
-        .is_some_and(|observation| {
+    !run.tools.iter().any(|tool| matches!(&tool.intent.call,
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest: existing, .. }
+        } if existing == source_intent_digest))
+        && run.tools.iter().filter_map(|tool| tool.observation.as_ref()).any(|observation| {
             observation.intent.digest() == *source_intent_digest
                 && observed_command_changeset(observation)
                     .is_some_and(|source| source == *changeset)
@@ -441,7 +481,11 @@ fn valid_host_approval(
     if run.primary().is_none_or(|agent| agent.id != actor) {
         return false;
     }
-    let Some(tool) = run.tools.last() else {
+    let Some(tool) = run
+        .tools
+        .iter()
+        .find(|tool| tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest)
+    else {
         return false;
     };
     let Some(policy) = run

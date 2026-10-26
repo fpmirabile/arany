@@ -135,7 +135,7 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 45] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -179,6 +179,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
     ("ToolStarted", 22),
+    ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
 
@@ -383,6 +384,12 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         intent: ToolIntentRecord,
+        active_ceiling_ms: u64,
+    },
+    ToolActiveTimeReserved {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        intent_digest: [u8; 32],
         active_ceiling_ms: u64,
     },
     SupervisorVerdictRecorded {
@@ -627,6 +634,13 @@ struct ToolFinishedPayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ToolActiveTimePayload {
+    intent_digest: [u8; 32],
+    active_ceiling_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ToolStartedPayload {
     intent: ToolIntentRecord,
     active_ceiling_ms: u64,
@@ -866,6 +880,7 @@ impl Event {
             Self::AgentSteeringNoteRecorded { .. } => "AgentSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
+            Self::ToolActiveTimeReserved { .. } => "ToolActiveTimeReserved",
             Self::SupervisorVerdictRecorded { .. } => "SupervisorVerdictRecorded",
             Self::ToolFinished { .. } => "ToolFinished",
             Self::ToolPermissionDecided { .. } => "ToolPermissionDecided",
@@ -980,6 +995,11 @@ impl Event {
                 ..
             }
             | Self::AssistantDisplayRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ToolActiveTimeReserved {
                 run_id,
                 agent_run_id,
                 ..
@@ -1210,6 +1230,14 @@ impl Event {
                 })
             }
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
+            Self::ToolActiveTimeReserved {
+                intent_digest,
+                active_ceiling_ms,
+                ..
+            } => serialize(&ToolActiveTimePayload {
+                intent_digest: *intent_digest,
+                active_ceiling_ms: *active_ceiling_ms,
+            }),
             Self::ToolStarted {
                 intent,
                 active_ceiling_ms,
@@ -1558,6 +1586,15 @@ impl Event {
                     text: data.text,
                 }
             }
+            "ToolActiveTimeReserved" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: ToolActiveTimePayload = parse(payload)?;
+                Self::ToolActiveTimeReserved {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    intent_digest: data.intent_digest,
+                    active_ceiling_ms: data.active_ceiling_ms,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => {
                 let data: ToolStartedPayload = parse(payload)?;
                 Self::ToolStarted {
@@ -1638,6 +1675,7 @@ impl Event {
             | "GoalSteeringNoteRecorded"
             | "AgentSteeringNoteRecorded"
             | "AssistantDisplayRecorded"
+            | "ToolActiveTimeReserved"
             | "ToolStarted"
             | "ToolFinished"
             | "ToolPermissionDecided"

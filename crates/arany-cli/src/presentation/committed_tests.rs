@@ -406,3 +406,61 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
         assert!(!copy.contains("Provider"), "{copy}");
     }
 }
+
+#[tokio::test]
+async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
+    let (root, workspace, engine) = fixture();
+    let provider = Arc::new(ScriptedProvider::new(vec![finish("seed")]));
+    let outcome = run_to_end(&engine, &provider, request(&workspace, "Seed presentation"))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let (view, _) = committed(root.path(), outcome.session_id).await;
+    for guard_failure in [false, true] {
+        let mut run = view.runs[0].clone();
+        run.status = RunStatus::Failed;
+        run.failure = Some(arany::RunFailure::ToolStopped);
+        run.assistant_message = None;
+        let mut earlier = tool_fixture(
+            arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: None,
+            },
+            "Read denied",
+        );
+        earlier.active_time_reserved = true;
+        earlier.observation.as_mut().unwrap().disposition = arany::ToolDisposition::Denied;
+        let mut later = tool_fixture(
+            arany::ToolCall::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+            "Later action stopped",
+        );
+        let observation = later.observation.as_mut().unwrap();
+        if guard_failure {
+            observation.disposition = arany::ToolDisposition::Failed;
+            observation.enforcement_cause = Some(arany::EnforcementCause::GuardBootstrap);
+        } else {
+            observation.disposition = arany::ToolDisposition::Denied;
+            observation.approval_cause = Some(arany::ApprovalCause::ChannelUnavailable);
+        }
+        let mut second = earlier.clone();
+        second.intent.id = uuid::Uuid::now_v7();
+        second.observation.as_mut().unwrap().intent = second.intent.clone();
+        run.tools = vec![earlier, second, later];
+        assert!(run.stopping_tool().is_none());
+        let feedback = run_feedback(&run).unwrap();
+        assert!(
+            feedback.contains(if guard_failure {
+                "Native Tool protection failed before the action started"
+            } else {
+                "Approval channel unavailable."
+            }),
+            "{feedback}"
+        );
+        assert!(!feedback.contains("Action denied."));
+    }
+}
