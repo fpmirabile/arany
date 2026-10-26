@@ -71,6 +71,7 @@ pub(super) use macos::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
 pub(super) mod selection_phase;
+pub(super) mod transfer;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
     check_available()?;
@@ -120,9 +121,9 @@ struct Task {
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
-    worker: Option<super::worker::Transfer>,
+    worker: Option<transfer::Transfer>,
     #[serde(deserialize_with = "Option::deserialize")]
-    handover: Option<super::worker::PublicationTransfer>,
+    handover: Option<transfer::PublicationTransfer>,
     #[serde(default, skip_serializing_if = "HiddenPaths::is_empty")]
     hidden: HiddenPaths,
     #[cfg(target_os = "linux")]
@@ -693,7 +694,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 handover: runtime
                     .handover
                     .as_ref()
-                    .and_then(|_| super::worker::handover_ref(intent)),
+                    .and_then(|_| transfer::handover_ref(intent)),
                 parent_namespaces,
             })
             .is_ok()
@@ -1196,7 +1197,7 @@ pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
     .await
     .map_err(|_| ToolError::Limit)??;
     let observation = parse_observation(&bytes)?;
-    if !super::worker::wire_valid(&observation, intent) {
+    if !transfer::wire_valid(&observation, intent) {
         return Err(ToolError::Operation);
     }
     if super::discovery::possible(&intent.call) {
@@ -1205,14 +1206,14 @@ pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
         }
         return Ok(observation);
     }
-    tokio::time::timeout(super::worker::transfer_time(intent), async {
-        let bytes = super::worker::receive_frame(reader).await?;
-        let image = super::worker::Image::decode(&bytes, &action.transfer.grant)?;
+    tokio::time::timeout(transfer::transfer_time(intent), async {
+        let bytes = transfer::receive_frame(reader).await?;
+        let image = transfer::Image::decode(&bytes, &action.transfer.grant)?;
         if observation.disposition == ToolDisposition::Succeeded
             && !matches!(intent.call, ToolCall::Command { .. })
         {
             let before = action.transfer.decode(&action.input)?;
-            super::worker::validate_edit(&before, &image, &intent.call, &action.transfer.grant)?;
+            transfer::validate_edit(&before, &image, &intent.call, &action.transfer.grant)?;
         }
         *action.output.lock().map_err(|_| ToolError::Operation)? = Some(bytes);
         if !read_capped(reader, 1).await?.is_empty() {
@@ -1643,7 +1644,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     if task
         .handover
         .as_ref()
-        .is_some_and(|data| Some(data.clone()) != super::worker::handover_ref(&task.intent))
+        .is_some_and(|data| Some(data.clone()) != transfer::handover_ref(&task.intent))
         || task.worker.is_some() && task.handover.is_some()
     {
         return Err(ToolError::Configuration);
@@ -1658,7 +1659,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         || task.intent.policy_digest != task.config.digest()
         || !(task.config.allows(&task.intent.call)
             || task.worker.is_some()
-                && super::worker::handover_call(&task.intent.call, task.intent.agent_run_id)
+                && transfer::handover_call(&task.intent.call, task.intent.agent_run_id)
             || task.handover.is_some() && task.config.write)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
@@ -1775,7 +1776,7 @@ fn receive_bulk(
     workspace: &Path,
 ) -> Result<
     (
-        Option<super::worker::Image>,
+        Option<transfer::Image>,
         Option<crate::session::worker::WorkerChangeset>,
     ),
     ToolError,
@@ -1788,14 +1789,14 @@ fn receive_bulk(
         .write_all(b"WORKER_READY\n")
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
-    let bytes = super::worker::read_frame(stdin)?;
+    let bytes = transfer::read_frame(stdin)?;
     if !stdin.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
     if let Some(transfer) = &task.worker {
         Ok((Some(transfer.decode(&bytes)?), None))
     } else {
-        let changeset = super::worker::decode_handover(&task.intent, &bytes, &task.config)?;
+        let changeset = transfer::decode_handover(&task.intent, &bytes, &task.config)?;
         super::fs::worker_publication_paths(
             &super::fs::open_directory(workspace)?,
             &changeset.files,
@@ -1811,7 +1812,7 @@ fn send_result(
     result: (Result<String, ToolError>, Option<Vec<u8>>),
     stdout: &mut impl Write,
     root: &Path,
-    before: Option<&super::worker::Image>,
+    before: Option<&transfer::Image>,
 ) -> Result<(), ToolError> {
     let (disposition, output, enforcement_cause, limit_cause) =
         super::dispatch::outcome(&task.intent, result.0);
@@ -1888,7 +1889,7 @@ fn send_result(
             #[cfg(target_os = "linux")]
             let (image, private_capture) = if observation.disposition == ToolDisposition::Succeeded
             {
-                super::worker::command_capture(
+                transfer::command_capture(
                     before,
                     &super::fs::open_directory(workspace)?,
                     &worker.grant,
@@ -1916,7 +1917,7 @@ fn send_result(
         } else {
             super::fs::worker_image(
                 &super::fs::open_directory(workspace)?,
-                &super::worker::capture_paths(&worker.grant),
+                &transfer::capture_paths(&worker.grant),
             )?
         };
         image.validate(&worker.grant)?;
@@ -1932,7 +1933,7 @@ fn send_result(
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
     if let Some(bytes) = candidate {
-        super::worker::write_frame(stdout, &bytes)?;
+        transfer::write_frame(stdout, &bytes)?;
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
     #[cfg(target_os = "linux")]
@@ -2042,7 +2043,7 @@ pub(super) fn helper_main() -> ExitCode {
         drop(stdin);
         stage = BootstrapStage::Payload;
         if let Some(image) = &image {
-            super::worker::materialize(image, &super::fs::open_directory(workspace)?)?;
+            transfer::materialize(image, &super::fs::open_directory(workspace)?)?;
         }
         #[cfg(not(target_os = "macos"))]
         if task.intent.call.is_process()
@@ -2299,9 +2300,9 @@ mod tests {
     use super::*;
 
     pub(super) fn assert_enforcement_prose(selection: &[u8], worker: &[u8]) {
+        use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
         use crate::tools::selection::{CONTROL_BYTES, CONTROL_FILES, CONTROL_TOTAL_BYTES, RULES};
         use crate::tools::types::MEMORY_BYTES;
-        use crate::tools::worker::WORKER_PREPARATION_MS;
 
         let worker = std::str::from_utf8(worker).unwrap();
         let selection = std::str::from_utf8(selection).unwrap();

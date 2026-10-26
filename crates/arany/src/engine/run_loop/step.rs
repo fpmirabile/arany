@@ -1222,7 +1222,7 @@ impl RunLoop<'_> {
         let worker_cancellation = RunCancellation::new();
         let mut run_cancellation = self.controls.cancellation.clone();
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
-            .saturating_add(crate::tools::worker::transfer_time(&intent));
+            .saturating_add(crate::tools::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = if intent.call.facts().site == crate::tools::catalog::Site::InProcess {
             0

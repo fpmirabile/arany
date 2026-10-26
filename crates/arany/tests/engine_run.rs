@@ -26,6 +26,12 @@ mod performance;
 #[path = "engine_run/goals.rs"]
 mod goals;
 
+#[path = "engine_run/budgets.rs"]
+mod budgets;
+
+#[path = "engine_run/plan_contract.rs"]
+mod plan_contract;
+
 #[path = "engine_run/routing.rs"]
 mod routing;
 
