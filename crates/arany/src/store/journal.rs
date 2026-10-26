@@ -167,7 +167,7 @@ fn admit_in_transaction(
     {
         return Err(StoreError::StorageFull);
     }
-    crate::fault::record_admission(session_id, count, event_slots, kind);
+    crate::fault::record_admission(session_id, count, event_slots, kind, tool_observations);
     Ok(())
 }
 

@@ -1871,6 +1871,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             active_time_reserved: false,
             narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(1),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -1885,10 +1886,14 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         lifecycle_hook_sequence: None,
         provider_sequences: Default::default(),
     };
+    let history = serde_json::to_value(items::history_items(&run)).unwrap();
+    assert_eq!(history[1]["status"], "uncertain");
+    run.tools[0].started_sequence = None;
     assert_eq!(
-        serde_json::to_value(items::history_items(&run)).unwrap()[1]["status"],
-        "uncertain"
+        serde_json::to_value(items::history_items(&run)).unwrap(),
+        json!([history[0]])
     );
+    run.tools[0].started_sequence = Some(1);
     for (call, kind) in [
         (
             ToolCall::CommandUnguarded {
@@ -3027,8 +3032,8 @@ async fn approval_scenario_channel(
         );
     }
     if let Some(approval) = wire_approval {
-        let event = events.iter().find(|event| matches!(&event.event, Event::ToolStarted { intent, .. } if json!(intent.id) == approval["params"]["itemId"])).unwrap();
-        let Event::ToolStarted { intent, .. } = &event.event else {
+        let event = events.iter().find(|event| matches!(&event.event, Event::ToolProposed { intent, .. } if json!(intent.id) == approval["params"]["itemId"])).unwrap();
+        let Event::ToolProposed { intent, .. } = &event.event else {
             unreachable!()
         };
         assert_eq!(approval["params"]["intent"], json!(intent));

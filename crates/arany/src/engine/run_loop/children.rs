@@ -3297,6 +3297,7 @@ mod child_tool_report_tests {
             use_count: 1,
         };
         let denied = crate::session::ToolView {
+            started_sequence: Some(0),
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
