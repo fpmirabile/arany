@@ -1079,7 +1079,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
                     if profile == "openai" {
                         assert_eq!(body["tool_choice"]["mode"], "auto");
-                        assert_eq!(body["parallel_tool_calls"], false);
+                        assert_eq!(body["parallel_tool_calls"], true);
                         json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[
                             {"type":"reasoning","id":format!("rs_native_{step}"),"summary":[],"encrypted_content":"CIPHERTEXT=="},
                             {"type":"function_call","id":format!("fc_native_{step}"),"call_id":format!("call_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"arguments":arguments.to_string(),"status":"completed"}
