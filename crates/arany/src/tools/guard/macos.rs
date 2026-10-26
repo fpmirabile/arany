@@ -457,9 +457,6 @@ pub(super) fn install(
     } else if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
         profile.grant("allow file-read*", "subpath", &task.workspace)?;
     }
-    if task.worker.is_none() && task.intent.call.mutates() {
-        profile.rule("allow file-write*", "subpath", &task.workspace)?;
-    }
     profile.protect_guard(&task.guard_executable)?;
     profile.install()?;
     Ok(worker_root.unwrap_or_else(|| PathBuf::from("/")))
@@ -1414,22 +1411,30 @@ mod tests {
     fn probe(cpu: bool) -> std::process::Output {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("workspace")).unwrap();
+        std::fs::write(
+            temp.path().join("workspace/selected.txt"),
+            b"synthetic input",
+        )
+        .unwrap();
         std::fs::write(temp.path().join("outside"), b"synthetic excluded data").unwrap();
         let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "tools::guard::macos::tests::native_file_profile_helper",
+                "tools::guard::macos::tests::native_non_spawning_profile_helper",
                 "--ignored",
                 "--nocapture",
             ])
             .env_clear()
-            .env("ARANY_TEST_FILE_PROFILE_ROOT", temp.path())
+            .env("ARANY_TEST_NON_SPAWNING_PROFILE_ROOT", temp.path())
             .env(
-                "ARANY_TEST_FILE_PROFILE_PORT",
+                "ARANY_TEST_NON_SPAWNING_PROFILE_PORT",
                 network.local_addr().unwrap().port().to_string(),
             )
-            .env("ARANY_TEST_FILE_PROFILE_CPU", if cpu { "1" } else { "0" })
+            .env(
+                "ARANY_TEST_NON_SPAWNING_PROFILE_CPU",
+                if cpu { "1" } else { "0" },
+            )
             .current_dir(temp.path())
             .bounded_output_for(Duration::from_secs(90), 32 * 1024)
             .unwrap()
@@ -1438,16 +1443,19 @@ mod tests {
     #[test]
     // Skipped in the Guard: local test IPC capability is missing.
     #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
-    fn native_file_profile_denies_host_network_spawn_and_cpu_changes() {
+    fn native_non_spawning_profile_denies_writes_network_spawn_and_cpu_changes() {
         let output = probe(false);
         assert!(
             output.status.success(),
-            "native profile: {:?}; stdout={:?}; stderr={:?}",
+            "native non-spawning profile: {:?}; stdout={:?}; stderr={:?}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        crate::test_process::assert_single_test_completed(&output.stdout, "native file profile");
+        crate::test_process::assert_single_test_completed(
+            &output.stdout,
+            "native non-spawning profile",
+        );
         assert!(output.stderr.is_empty());
     }
 
@@ -1457,7 +1465,7 @@ mod tests {
         any(arany_guard, not(arany_ci)),
         ignore = "native 15-second CPU expiry; finite isolated process"
     )]
-    fn native_file_profile_cpu_expiry_cannot_be_disabled() {
+    fn native_non_spawning_profile_cpu_expiry_cannot_be_disabled() {
         let _gate = crate::test_process::NATIVE_GATE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1469,15 +1477,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "isolated native file profile helper"]
-    fn native_file_profile_helper() {
-        let root = std::env::var_os("ARANY_TEST_FILE_PROFILE_ROOT").expect("private fixture root");
+    #[ignore = "isolated native non-spawning profile helper"]
+    fn native_non_spawning_profile_helper() {
+        let root =
+            std::env::var_os("ARANY_TEST_NON_SPAWNING_PROFILE_ROOT").expect("private fixture root");
         let root = Path::new(&root);
-        let port = std::env::var("ARANY_TEST_FILE_PROFILE_PORT")
+        let port = std::env::var("ARANY_TEST_NON_SPAWNING_PROFILE_PORT")
             .unwrap()
             .parse::<u16>()
             .unwrap();
-        let cpu = std::env::var("ARANY_TEST_FILE_PROFILE_CPU").unwrap() == "1";
+        let cpu = std::env::var("ARANY_TEST_NON_SPAWNING_PROFILE_CPU").unwrap() == "1";
         let workspace = root.join("workspace");
         let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
@@ -1501,6 +1510,7 @@ mod tests {
                 enforcement_digest: enforcement_digest().unwrap(),
                 workspace_device: device,
                 workspace_inode: inode,
+                // Probe the retired primary intent directly: native installation must grant no Workspace writes.
                 call: ToolCall::Write {
                     path: "synthetic".into(),
                     expected_digest: None,
@@ -1530,6 +1540,16 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
         assert!(crate::tools::fs::open_directory(&task.workspace).is_ok());
+        assert_eq!(
+            std::fs::read(task.workspace.join("selected.txt")).unwrap(),
+            b"synthetic input"
+        );
+        assert_eq!(
+            std::fs::write(task.workspace.join("synthetic"), b"forbidden")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
         assert_eq!(
             std::fs::metadata(root.join("outside")).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied

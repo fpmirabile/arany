@@ -3372,10 +3372,10 @@ mod tests {
     }
 
     #[test]
-    fn file_profile_digest_excludes_selected_process_runtimes() {
+    fn non_process_profile_digest_excludes_selected_process_runtimes() {
         let temp = tempfile::tempdir().unwrap();
         let grants = [node_grant(temp.path())];
-        let file_profile = intent_enforcement_digest(
+        let non_process_profile = intent_enforcement_digest(
             false,
             &grants,
             #[cfg(target_os = "macos")]
@@ -3389,8 +3389,8 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(file_profile, enforcement_digest(&[]).unwrap());
-        assert_ne!(file_profile, process_profile);
+        assert_eq!(non_process_profile, enforcement_digest(&[]).unwrap());
+        assert_ne!(non_process_profile, process_profile);
     }
 
     #[test]
@@ -4004,14 +4004,14 @@ mod tests {
     }
 
     #[test]
-    fn guard_helper_refuses_an_unguarded_intent() {
+    fn guard_helper_refuses_host_and_primary_file_mutation_intents() {
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("sh");
         std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &shell).unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({
             "version": 1,
             "workspace_paths": ["src"],
-            "write": false,
+            "write": true,
             "commands": [{
                 "name": "sh",
                 "executable": shell.to_str().unwrap(),
@@ -4079,6 +4079,21 @@ mod tests {
             })),
             Err(ToolError::Configuration)
         ));
+        for (call, allowed) in [
+            (ToolCall::List { path: "src".into() }, true),
+            (
+                ToolCall::Write {
+                    path: "src/selected.txt".into(),
+                    expected_digest: None,
+                    content: "synthetic".into(),
+                },
+                false,
+            ),
+        ] {
+            let task = task(call);
+            assert!(task.intent.valid() && task.config.allows(&task.intent.call));
+            assert_eq!(validate_task(&task).is_ok(), allowed);
+        }
     }
 }
 
