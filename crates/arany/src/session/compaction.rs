@@ -108,10 +108,7 @@ fn worker_changes(
         .find(|agent| agent.id == assignment_id)
         .and_then(|agent| agent.assignment.as_ref())
         .and_then(|worker| worker.integration.as_ref())
-        .is_some_and(|(_, record)| {
-            Some(record.finished_sequence) == tool.finished_sequence
-                && record.outcome == crate::session::worker::WorkerIntegrationOutcome::Integrated
-        });
+        .is_some_and(|(_, record)| Some(record.finished_sequence) == tool.finished_sequence);
     if !integrated {
         return Vec::new();
     }
