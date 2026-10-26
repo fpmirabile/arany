@@ -6,6 +6,54 @@ pub(crate) const MAX_SPILL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_SPILL_RUN_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_REPORT_BYTES: usize =
     super::types::MAX_TOOL_OBSERVATION_BYTES + MAX_SPILL_RESULT_BYTES.div_ceil(3) * 4 + 128;
+pub(crate) const SPILL_PERSIST_TIMEOUT_MS: u64 = crate::session::STORE_ACTION_OVERHEAD_MS;
+pub(crate) const MAX_SPILL_WRITERS: usize = 1;
+static WRITERS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_SPILL_WRITERS))
+    });
+
+pub(super) struct Writer {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(super) result: tokio::sync::oneshot::Receiver<Result<(), crate::StoreError>>,
+}
+
+impl Writer {
+    pub(super) fn start(
+        access: std::sync::Arc<crate::store::SpillAccess>,
+        reference: String,
+        bytes: Vec<u8>,
+        mut gate: crate::fault::SpillWriteGate,
+    ) -> Option<Self> {
+        let permit = std::sync::Arc::clone(&WRITERS).try_acquire_owned().ok()?;
+        if !access.reserve(bytes.len()).ok()? {
+            return None;
+        }
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = std::sync::Arc::clone(&cancelled);
+        let (send, result) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("arany-spill".into())
+            .spawn(move || {
+                let result = access.write(&reference, &bytes, &stop, &mut gate);
+                drop(bytes);
+                drop(access);
+                drop(permit);
+                let _ = send.send(result);
+                drop(gate);
+            })
+            .ok()?;
+        Some(Self { cancelled, result })
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 const UTF8_EDGE_BYTES: usize = char::MAX.len_utf8() - 1;
 pub(crate) const CUT_MARKER: &[u8] = b"\n[spill truncated]\n";
 
@@ -111,6 +159,10 @@ fn retained_total(observation: &ToolObservation, require_excerpt: bool) -> Optio
             .as_u64()
             .filter(|total| *total > 0)
     }
+}
+
+pub(super) fn has_excerpt(observation: &ToolObservation) -> bool {
+    retained_total(observation, true).is_some()
 }
 
 pub(super) fn streams(stdout: &super::output::Window, stderr: &super::output::Window) -> Vec<u8> {
@@ -239,5 +291,45 @@ mod tests {
             assert!(wire.len() <= MAX_REPORT_BYTES);
             assert_eq!(decode_report(&wire).unwrap(), observation);
         }
+    }
+
+    #[tokio::test]
+    async fn spill_read_grammar_rejects_traversal_and_unknown_references_stay_attested() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = super::super::tests::in_process_runtime(
+            temp.path(),
+            serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        );
+        for path in [
+            "spill:",
+            "spill:../secret",
+            "spill:/secret",
+            "spill:ABC",
+            &format!("spill:{}/extra", "a".repeat(64)),
+        ] {
+            assert!(!super::super::fs::valid(&ToolCall::Read {
+                path: path.into(),
+                offset: None,
+                limit: None
+            }));
+        }
+        let intent = runtime.intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Read {
+                path: format!("spill:{}", "a".repeat(64)),
+                offset: None,
+                limit: None,
+            },
+        );
+        let observation = runtime
+            .execute(intent, super::super::Cancellation::new())
+            .await;
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert_eq!(observation.output, "no spill for this Run");
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::InProcess { .. })
+        ));
     }
 }

@@ -2421,6 +2421,7 @@ done
             checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
+            spill_access: None,
             config: crate::tools::config::Config {
                 version: 1,
                 workspace_paths,

@@ -108,6 +108,8 @@ pub use types::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    #[error("no spill for this Run")]
+    SpillUnavailable,
     #[error("{path:?}: {source}")]
     AtPath {
         path: String,
@@ -234,6 +236,7 @@ pub(crate) struct ToolRuntime {
     hook_stdin: Option<std::sync::Arc<str>>,
     checkpoint_gate: Option<tokio::sync::mpsc::Sender<CheckpointRequest>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
+    spill_access: Option<std::sync::Arc<crate::store::SpillAccess>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
 }
@@ -400,6 +403,84 @@ pub(crate) fn load_permissions(state: &StateRoot) -> Result<Option<PermissionSna
 }
 
 impl ToolRuntime {
+    pub(crate) fn admit_spills(
+        &mut self,
+        state: &StateRoot,
+        run: RunId,
+        history: &[crate::session::EventEnvelope],
+    ) {
+        match state.admit_spills(run, history) {
+            Ok(access) => self.spill_access = Some(std::sync::Arc::new(access)),
+            Err(_) => crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            ),
+        }
+    }
+
+    pub(crate) async fn persist_spill(
+        &self,
+        observation: &mut ToolObservation,
+        mut cancellation: Cancellation,
+    ) {
+        let Some(mut spill) = observation.spill.take() else {
+            return;
+        };
+        let Some(bytes) = spill.captured.take() else {
+            return;
+        };
+        if !spill::has_excerpt(observation) || cancellation.is_cancelled() {
+            return;
+        }
+        let Some(access) = self.spill_access.clone() else {
+            crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            );
+            return;
+        };
+        let gate = self
+            .cache_state
+            .as_ref()
+            .map(|state| crate::fault::spill_write_gate(state.path()))
+            .unwrap_or_default();
+        let writer = spill::Writer::start(
+            std::sync::Arc::clone(&access),
+            spill.r#ref.clone(),
+            bytes,
+            gate,
+        );
+        let retained = if let Some(mut writer) = writer {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => false,
+                result = tokio::time::timeout(Duration::from_millis(spill::SPILL_PERSIST_TIMEOUT_MS), &mut writer.result) => {
+                    matches!(result, Ok(Ok(Ok(())))) && !cancellation.is_cancelled()
+                }
+            }
+        } else {
+            false
+        };
+        if retained {
+            observation.spill = Some(spill);
+        } else {
+            crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            );
+        }
+    }
+
+    pub(crate) fn retain_spill(&self, observation: &ToolObservation) {
+        if let Some(spill) = &observation.spill
+            && self
+                .spill_access
+                .as_ref()
+                .is_some_and(|access| access.retain(&spill.r#ref).is_err())
+        {
+            crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            );
+        }
+    }
+
     pub(crate) fn with_queue_progress(
         mut self,
         sender: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
@@ -962,6 +1043,7 @@ impl ToolRuntime {
             active_action_gate: None,
             hook_stdin: None,
             checkpoint_gate: None,
+            spill_access: None,
             cache_state: Some(std::sync::Arc::new(
                 state
                     .try_clone()
@@ -1791,6 +1873,31 @@ impl ToolRuntime {
                     &read_intent.call,
                     read_intent.limits.result_bytes as usize,
                 ));
+            }
+            if let ToolCall::Read {
+                path,
+                offset,
+                limit,
+            } = &read_intent.call
+                && let Some(reference) = path.strip_prefix("spill:")
+            {
+                let file = runtime
+                    .spill_access
+                    .as_ref()
+                    .ok_or(ToolError::SpillUnavailable)
+                    .and_then(|access| {
+                        access
+                            .read(reference)
+                            .map_err(|_| ToolError::SpillUnavailable)
+                    });
+                return Ok(file.and_then(|file| {
+                    fs::read_page(
+                        file,
+                        *offset,
+                        *limit,
+                        read_intent.limits.result_bytes as usize,
+                    )
+                }));
             }
             let hidden = runtime.hidden_paths(&read_intent.call);
             Ok(fs::inspect(

@@ -35,6 +35,7 @@ pub enum DevelopmentFailure {
     AttachedExit,
     ExecExit,
     Output,
+    OutputSpill,
 }
 
 /// Records a closed local failure after diagnostics have been enabled.

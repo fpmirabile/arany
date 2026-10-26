@@ -372,6 +372,11 @@ impl Config {
             }
         };
         let path = path.expect("file operation has path");
+        if matches!(call, ToolCall::Read { .. })
+            && path.strip_prefix("spill:").is_some_and(valid_digest)
+        {
+            return true;
+        }
         (path.is_empty() || path == ".") && !call.mutates() || self.in_workspace_scope(path)
     }
 }

@@ -86,7 +86,8 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
         Err(ToolError::NotFound) => b"SELECT_NOT_FOUND\n",
         Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
         Err(
-            ToolError::MissingConfiguration
+            ToolError::SpillUnavailable
+            | ToolError::MissingConfiguration
             | ToolError::HostPrefixConflict { .. }
             | ToolError::InactiveHostArchiveUnconfirmed
             | ToolError::InactiveHostArchiveConflict

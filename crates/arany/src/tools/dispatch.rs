@@ -99,6 +99,9 @@ pub(super) fn outcome(
             ToolDisposition::Failed,
             format!("Search pattern refused: {cause}; nothing was read"),
         ),
+        Err(ToolError::SpillUnavailable) => {
+            (ToolDisposition::Failed, "no spill for this Run".into())
+        }
         Err(ToolError::Conflict) => (
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),

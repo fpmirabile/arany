@@ -712,7 +712,9 @@ impl RunLoop<'_> {
                 }
             },
         };
-        answer.observation.spill = None;
+        runtime
+            .persist_spill(&mut answer.observation, self.controls.cancellation.clone())
+            .await;
         self.append(Event::ToolFinished {
             checkpoint: answer.checkpoint.clone(),
             run_id: self.run_id,
@@ -720,6 +722,7 @@ impl RunLoop<'_> {
             observation: answer.observation.clone(),
         })
         .await?;
+        runtime.retain_spill(&answer.observation);
         self.commit_approval_withdrawal(intent_id)?;
         if let Some((candidate, data)) = candidate {
             self.worker
