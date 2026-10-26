@@ -252,8 +252,12 @@ Host-prefix verdicts add `host_prefix_rule` provenance. A human remember decisio
 Focused Engine permission evidence lives beside its implementation in
 `crates/arany/src/engine/run_loop/step/permission.rs`: host session-offer/reuse
 eligibility and typed-allow remembering eligibility remain pinned there. The
-end-to-end permission and authority observations remain in
-`crates/arany/tests/engine_run/permissions.rs`.
+[intent corpus](../../crates/arany/src/engine/run_loop/step/intent.rs) owns
+cancellation settlement of buffered and late active-window requests and channel
+closure; the [ask corpus](../../crates/arany/src/engine/run_loop/step/ask.rs) pins
+human waits and dispatch against system-clock use. The end-to-end permission and
+authority observations remain in `crates/arany/tests/engine_run/permissions.rs`
+and [hooks](../../crates/arany/tests/engine_run/hooks.rs).
 
 Typed `git_push`, `gh_pr_create`, `gh_pr_list` and `gh_pr_view` use the `host` execution class described by [Tools](./tools.md#human-approved-host-git). This is a second explicit exception to Guard isolation, separate from primary-only generic host commands. An optional `EffectIntent.host` pins write source data or the closed PR-list/PR-view adapter version; absent metadata keeps existing bytes unchanged. Host intents declare the `host` network class, and every other Tool retains `none`. The `Attestation::Host` receipt carries the intent digest, executable digest, PID, nullable exit code and confirmed group-teardown fact. A successful write requires exit zero, confirmed teardown and a committed primary human Ask verdict. Successful PR-list and PR-view reads accept either a committed primary human Ask verdict or a matching user-owned typed prefix verdict with a pinned settings digest; rule-only, AI-only, child, Guard and unguarded substitutions reject. Confirmed typed-read failures are Failed; interrupted host execution without confirmed completion and cleanup is Uncertain and stops continuation. Replay validates committed verdicts and receipts without reauthorizing or dispatching. Host effects with a receipt, Uncertain result, or committed approval without an outcome remain non-rewindable. The process-death fixture between approval and ToolFinished reopens twice with no outcome and no redispatch.
 
