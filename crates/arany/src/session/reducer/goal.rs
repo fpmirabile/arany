@@ -1047,3 +1047,10 @@ pub(super) fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
         });
     step_ends.into_iter().any(|end| end == covered)
 }
+
+#[cfg(test)]
+mod budget_tests;
+#[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
+mod recovery_tests;

@@ -1,11 +1,15 @@
 use super::{
     AUTHORIZE_PROMPT, AUTHORIZE_TITLE, SavedDefaults, SetupError, SetupJournal, SetupSelection,
-    await_operation, await_setup_ack, choose, review_warning,
+    await_operation, await_setup_ack, choose, load_catalog, native_catalog_default, read_api_key,
+    read_workspace_id, review_warning,
 };
 use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
-use arany::{ProviderSetupDisposition, ProviderSetupTargetKind, RecordKind, SessionDefaults};
+use arany::{
+    Effort, NativeApiCredentials, ProviderKind, ProviderSetupDisposition, ProviderSetupTargetKind,
+    RecordKind, SessionDefaults,
+};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -268,10 +272,191 @@ pub(super) async fn reset_saved_setup(
     Ok(true)
 }
 
+async fn inspect_or_file() -> Result<credentials::InspectedAccount, CredentialError> {
+    Ok(match credentials::inspect().await {
+        Ok(inspected) => inspected,
+        Err(CredentialError::Unavailable | CredentialError::TimedOut) => {
+            credentials::InspectedAccount {
+                account: None,
+                storage: AccountStorage::PrivateFile,
+            }
+        }
+        Err(error) => return Err(error),
+    })
+}
+
+pub(super) async fn native_setup(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<Option<SetupSelection>, SetupError> {
+    let inspected = match inspect_or_file().await {
+        Ok(inspected) => inspected,
+        Err(CredentialError::InvalidAccount) => {
+            if !reset_saved_setup(terminal, workspace, credentials::SetupData::Native, journal)
+                .await?
+            {
+                return Ok(None);
+            }
+            inspect_or_file().await.map_err(SetupError::recoverable)?
+        }
+        Err(error) => return Err(SetupError::recoverable(error)),
+    };
+    let expected = inspected
+        .account
+        .as_ref()
+        .map(SavedAccount::snapshot_digest)
+        .transpose()
+        .map_err(SetupError::recoverable)?;
+    let storage = inspected.storage;
+    if storage == AccountStorage::PrivateFile
+        && choose(
+            terminal,
+            1,
+            "Use private file?",
+            "NOT encrypted; same-user apps read key",
+            &[(b'2', "Cancel"), (b'1', "Use private file")],
+        )
+        .await?
+            != Some(b'1')
+    {
+        return Ok(None);
+    }
+    let Some(provider) = choose(
+        terminal,
+        2,
+        "Choose Provider",
+        "Only the selected Provider receives requests",
+        &[(b'1', "OpenAI"), (b'2', "Anthropic")],
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let provider = if provider == b'1' {
+        ProviderKind::OpenAi
+    } else {
+        ProviderKind::Anthropic
+    };
+    let Some(key) = read_api_key(terminal).await? else {
+        return Ok(None);
+    };
+    let workspace_id = if provider == ProviderKind::Anthropic {
+        match choose(
+            terminal,
+            3,
+            "API workspace",
+            "Use the key's scope or choose a Console workspace",
+            &[
+                (b'1', "Key scoped to workspace"),
+                (b'2', "Choose API workspace"),
+            ],
+        )
+        .await?
+        {
+            Some(b'1') => None,
+            Some(b'2') => {
+                let Some(id) = read_workspace_id(terminal, &key).await? else {
+                    return Ok(None);
+                };
+                Some(id)
+            }
+            None => return Ok(None),
+            _ => return Err("invalid API workspace selection".into()),
+        }
+    } else {
+        None
+    };
+    let provider = provider.native_name().expect("native Provider name");
+    let credentials = NativeApiCredentials::new(provider, key, workspace_id)
+        .map_err(|_| "invalid selected native API credentials")?;
+    let Some(items) = load_catalog(terminal, provider, &credentials).await? else {
+        return Ok(None);
+    };
+    let (model, preferred) = native_catalog_default(provider, &items)
+        .ok_or("selected account has no visible models; use /setup to retry")?;
+    let notice = if preferred {
+        format!("{provider} ready: {model} · low. Use /model to change.")
+    } else {
+        format!(
+            "{provider} ready: {model} · low. The catalog does not list prices; use /model to change."
+        )
+    };
+    let workspace_id = credentials.anthropic_workspace_id().map(str::to_owned);
+    let account = SavedAccount::new(
+        provider.into(),
+        model.to_owned(),
+        Some(Effort::Low),
+        credentials.into_api_key(),
+    )
+    .and_then(|account| account.with_anthropic_workspace(workspace_id))
+    .map_err(SetupError::recoverable)?;
+    let defaults = defaults(&account);
+    terminal.draw_setup(
+        0,
+        "Saving account",
+        match storage {
+            AccountStorage::Keyring => "Using the OS credential store",
+            AccountStorage::PrivateFile => "Using the private 0600 file",
+        },
+        0,
+        None,
+    )?;
+    let account_id = account.id;
+    let operation = journal
+        .start(
+            ProviderSetupTargetKind::NativeAccount,
+            account_id.to_string(),
+            expected,
+        )
+        .await?;
+    settle_native_save(
+        journal,
+        operation,
+        account_id,
+        credentials::save(workspace, account, storage, expected).await,
+    )
+    .await?;
+    Ok(Some(SetupSelection::Native {
+        defaults,
+        notice,
+        catalog: items,
+    }))
+}
+
+pub(super) async fn settle_native_save(
+    journal: &SetupJournal,
+    operation: uuid::Uuid,
+    account_id: uuid::Uuid,
+    result: Result<(), CredentialError>,
+) -> Result<(), SetupError> {
+    match result {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest(account_id.as_bytes()).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await?;
+        }
+        Err(error) => {
+            let disposition = if error.outcome_unknown() {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            return Err(SetupError::native_save(error));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arany::{Effort, StateRoot};
+    use arany::StateRoot;
 
     #[test]
     fn saved_account_defaults_pin_only_the_selected_account() {
