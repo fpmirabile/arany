@@ -4,7 +4,7 @@ use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-pub(crate) const COMPACTION_COMPILER_VERSION: u16 = 4;
+pub(crate) const COMPACTION_COMPILER_VERSION: u16 = 5;
 pub(crate) const MIN_RECORDED_COMPACTION_COMPILER_VERSION: u16 = 3;
 
 pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = (crate::provider::MAX_PROVIDER_REQUEST_BYTES
@@ -21,8 +21,8 @@ const _: () = assert!(
 const _: () =
     assert!(AUTO_COMPACTION_HISTORY_BYTES + 2 * TURN_RESERVE_BYTES <= MAX_COMPACTION_INPUT_BYTES);
 const _: () = assert!(AUTO_COMPACTION_HISTORY_BYTES < MAX_COMPACTION_INPUT_BYTES);
-pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 1024;
-pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 8192;
+pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 64 * 1024;
 // The editable draft bound; larger pasted or exec objectives can exceed this reserve and fail closed.
 const ATTACHED_DRAFT_RESERVE_BYTES: usize = 8 * 1024;
 // One turn's worst case: its draft, steering context, assistant answer, separators and image metadata.
@@ -277,5 +277,9 @@ mod bound_tests {
     fn automatic_threshold_leaves_room_for_two_attached_draft_turns() {
         assert_eq!(TURN_RESERVE_BYTES, 49_984);
         assert_eq!(AUTO_COMPACTION_HISTORY_BYTES, 158_080);
+        assert_eq!(MAX_COMPACTION_OUTPUT_TOKENS, 8192);
+        assert_eq!(MAX_COMPACTION_SUMMARY_BYTES, 64 * 1024);
+        assert_eq!(COMPACTION_COMPILER_VERSION, 5);
+        assert_eq!(MIN_RECORDED_COMPACTION_COMPILER_VERSION, 3);
     }
 }

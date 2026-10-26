@@ -256,7 +256,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
                 status: UnansweredStatus::Interrupted,
             },
         ],
-        max_output_tokens: 1024,
+        max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
     };
     let compact_body = compaction_body(&compact);
     let compact_input: Value =
@@ -270,7 +270,10 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
         compact_body["prompt_cache_key"],
         compact.session_id.to_string()
     );
-    assert_eq!(compact_body["max_output_tokens"], 1024);
+    assert_eq!(
+        compact_body["max_output_tokens"],
+        crate::session::MAX_COMPACTION_OUTPUT_TOKENS
+    );
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
     assert!(compact_input.get("session_id").is_none());
@@ -1639,10 +1642,22 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     for (text, accepted) in [
         (String::new(), false),
         (" \n\t".into(), false),
-        ("x".repeat(8 * 1024), true),
-        ("é".repeat(4 * 1024), true),
-        ("x".repeat(8 * 1024 + 1), false),
-        ("é".repeat(4 * 1024 + 1), false),
+        (
+            "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES),
+            true,
+        ),
+        (
+            "é".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES / 2),
+            true,
+        ),
+        (
+            "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1),
+            false,
+        ),
+        (
+            "é".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES / 2 + 1),
+            false,
+        ),
         ("  summary\n".into(), true),
         (r#"{"summary":"ok","extra":1}"#.into(), true),
     ] {

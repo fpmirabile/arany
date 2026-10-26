@@ -954,7 +954,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             assert_eq!(compactions.len(), 3);
             for (cycle, request) in compactions.iter().enumerate() {
                 assert_eq!(request.model, "test-model");
-                assert_eq!(request.max_output_tokens, 1024);
+                assert_eq!(request.max_output_tokens, 4096);
                 assert_eq!(request.previous_summary.is_some(), cycle > 0);
                 assert_eq!(request.items.len(), 5);
                 for (offset, item) in request.items.iter().enumerate() {
@@ -1018,7 +1018,7 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
         ])
         .with_compactions(vec![
             Ok(CompactionResponse {
-                summary: "z".repeat(8 * 1024 + 1),
+                summary: "z".repeat(64 * 1024 + 1),
                 response_id: None,
                 usage: arany::Usage {
                     input_tokens: Some(12),
@@ -1763,7 +1763,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
                 CompactionItem::Completed(arany::HistoryTurn { user: "Source".into(), assistant: "answer".into() }),
                 CompactionItem::Completed(arany::HistoryTurn { user: "Recovered".into(), assistant: "recovered answer".into() }),
             ]);
-            assert_eq!(requests[0].max_output_tokens, 1024);
+            assert_eq!(requests[0].max_output_tokens, 4096);
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(id).await.unwrap();
@@ -3301,7 +3301,7 @@ fn compaction_timeout_drops_the_call_and_records_failure() {
                     })],
                 "exact compaction source"
             );
-            assert_eq!(compact.max_output_tokens, 1024);
+            assert_eq!(compact.max_output_tokens, 4096);
         }
         assert!(matches!(
             record.status,

@@ -671,6 +671,8 @@ impl CompactionRecord {
             .rate_limits
             .as_ref()
             .is_some_and(|limits| !limits.valid())
+            || !serde_json::to_vec(self)
+                .is_ok_and(|bytes| bytes.len() <= crate::store::MAX_COMPACTION_RECORD_BYTES)
             || self.covered_sequence == 0
             || self.prompt_version != 1
             || self.schema_version != 1

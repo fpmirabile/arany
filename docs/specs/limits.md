@@ -10,8 +10,8 @@
 | <a id="max_history_runs"></a>[`MAX_HISTORY_RUNS`](#max_history_runs) | 32 | Runs | `crates/arany/src/session.rs` |
 | <a id="max_compaction_input_bytes"></a>[`MAX_COMPACTION_INPUT_BYTES`](#max_compaction_input_bytes) | 258048 | bytes | `crates/arany/src/session/compaction.rs` |
 | <a id="max_compaction_turns"></a>[`MAX_COMPACTION_TURNS`](#max_compaction_turns) | 256 | turns | `crates/arany/src/session/compaction.rs` |
-| <a id="max_compaction_output_tokens"></a>[`MAX_COMPACTION_OUTPUT_TOKENS`](#max_compaction_output_tokens) | 1024 | tokens | `crates/arany/src/session/compaction.rs` |
-| <a id="max_compaction_summary_bytes"></a>[`MAX_COMPACTION_SUMMARY_BYTES`](#max_compaction_summary_bytes) | 8192 | bytes | `crates/arany/src/session/compaction.rs` |
+| <a id="max_compaction_output_tokens"></a>[`MAX_COMPACTION_OUTPUT_TOKENS`](#max_compaction_output_tokens) | 8192 | tokens | `crates/arany/src/session/compaction.rs` |
+| <a id="max_compaction_summary_bytes"></a>[`MAX_COMPACTION_SUMMARY_BYTES`](#max_compaction_summary_bytes) | 65536 | bytes | `crates/arany/src/session/compaction.rs` |
 | <a id="auto_compaction_history_bytes"></a>[`AUTO_COMPACTION_HISTORY_BYTES`](#auto_compaction_history_bytes) | 158080 | bytes | `crates/arany/src/session/compaction.rs` |
 | <a id="compaction_input_expansion"></a>[`COMPACTION_INPUT_EXPANSION`](#compaction_input_expansion) | 2 | times | `crates/arany/src/provider.rs` |
 | <a id="compaction_request_envelope_bytes"></a>[`COMPACTION_REQUEST_ENVELOPE_BYTES`](#compaction_request_envelope_bytes) | 8192 | bytes | `crates/arany/src/provider.rs` |
@@ -20,6 +20,7 @@
 | <a id="max_goal_active_ms"></a>[`MAX_GOAL_ACTIVE_MS`](#max_goal_active_ms) | 1800000 | ms | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_goal_runs"></a>[`MAX_GOAL_RUNS`](#max_goal_runs) | 16 | Runs | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_event_bytes"></a>[`MAX_EVENT_BYTES`](#max_event_bytes) | 65536 | bytes | `crates/arany/src/store.rs` |
+| <a id="max_compaction_event_bytes"></a>[`MAX_COMPACTION_EVENT_BYTES`](#max_compaction_event_bytes) | 409600 | bytes | `crates/arany/src/store.rs` |
 | <a id="max_session_lock_files"></a>[`MAX_SESSION_LOCK_FILES`](#max_session_lock_files) | 65536 | files | `crates/arany/src/store/state/lock.rs` |
 | <a id="max_state_overhead_files"></a>[`MAX_STATE_OVERHEAD_FILES`](#max_state_overhead_files) | 32 | files | `crates/arany/src/store/state/lock.rs` |
 | <a id="max_workspace_lock_files"></a>[`MAX_WORKSPACE_LOCK_FILES`](#max_workspace_lock_files) | 4096 | files | `crates/arany/src/store/state/lock.rs` |
