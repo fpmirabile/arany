@@ -1373,7 +1373,12 @@ impl RunLoop<'_> {
                 .await?
             {
                 RunProgress::Stopped(cause) => return Ok(RunProgress::Stopped(cause)),
-                RunProgress::Ready(ChildProgress::Refilled) => continue,
+                RunProgress::Ready(ChildProgress::Refilled) => {
+                    if abort.is_none() {
+                        abort = self.unstarted_stop(wave.queue);
+                    }
+                    continue;
+                }
                 RunProgress::Ready(ChildProgress::Settled(disposition)) => disposition,
             };
             if abort.is_none() {

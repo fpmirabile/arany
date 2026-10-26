@@ -35,7 +35,7 @@ pub fn invalidate_editor(request: &mut EditorAssignment, case: &str) {
         "invalid_lease" => request.lease = vec!["outside".into()],
         "invalid_criterion" => {
             request.criterion = GoalSuccessCriterion::WorkspaceFileContent {
-                path: "notes/unleased".into(),
+                path: "outside/unleased".into(),
                 content: "done".into(),
             }
         }
@@ -520,17 +520,19 @@ async fn run_live(
             b"edited 0"
         );
         assert!(run.agents[1].tools[0].checkpoint.is_some());
+        assert_eq!(run.status, RunStatus::Cancelled);
+        let goal = view.goals.last().unwrap();
+        assert_eq!(goal.status, GoalStatus::Interrupted);
+        assert!(goal.report.is_none());
         assert!(
-            view.goals
-                .last()
-                .unwrap()
-                .report
-                .as_ref()
-                .unwrap()
-                .changes
+            !events
                 .iter()
-                .any(|line| line.contains("notes/0"))
+                .any(|event| matches!(event.event, Event::GoalFinished { .. }))
         );
+        let tool = &run.agents[1].tools[0];
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(observation.attested_for(&tool.intent));
         assert!(
             run.agents[1]
                 .assignment
@@ -589,8 +591,22 @@ async fn run_live(
         );
     }
     if matches!(case, "background" | "command") || case.starts_with("invalid_") {
-        assert_eq!(run.agents.len(), 1);
-        assert!(events.iter().any(|e| matches!(&e.event, Event::ProviderCallRecorded { record, .. } if record.refusal.is_some())));
+        assert_eq!(run.agents.len(), 1, "{case}: no child spawn");
+        let expected = INVALID_EDITOR_CASES
+            .iter()
+            .find_map(|(name, cause)| (*name == case).then_some(*cause))
+            .unwrap_or(if case == "background" {
+                ProposalRefusalCause::DelegateInvalid
+            } else {
+                ProposalRefusalCause::EditorCommands
+            });
+        assert!(
+            events.iter().any(|e| matches!(&e.event,
+                Event::ProviderCallRecorded { record, .. }
+                    if record.refusal.as_ref().is_some_and(|refusal| refusal.cause == expected)
+            )),
+            "{case}: expected {expected:?}"
+        );
     }
     assert!(!events.iter().any(|e| matches!(
         e.event,
@@ -643,7 +659,16 @@ fn assert_live_editor_evidence(
                 .iter()
                 .all(|t| t.intent.target == EffectTarget::Workspace)
         );
-        assert_eq!(view.goals.last().unwrap().status, GoalStatus::Completed);
+        let goal = view.goals.last().unwrap();
+        assert_eq!(goal.status, GoalStatus::Completed);
+        assert!(
+            goal.report
+                .as_ref()
+                .unwrap()
+                .changes
+                .iter()
+                .any(|line| line.contains("notes/0"))
+        );
     }
     if case == "stale_goal" {
         assert!(
