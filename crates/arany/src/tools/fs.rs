@@ -2019,15 +2019,7 @@ fn apply_files_controlled(
                             }
                         })?;
                     affected = true;
-                    // Reopen "." readably first: a path-only capability handle cannot prove durability through fsync.
-                    crate::fault::file_parent_sync(control.intent)?;
-                    parent
-                        .directory
-                        .try_clone()
-                        .map_err(|_| ToolError::Uncertain)?
-                        .into_std_file()
-                        .sync_all()
-                        .map_err(|_| ToolError::Uncertain)?;
+                    control.sync_parent(&parent.directory)?;
                     let live = Dir::from_std_file(open_file(&parent.directory, part)?);
                     check_change_directory(root, &live)?;
                     created.insert(path.clone(), identity(&live)?);
@@ -2071,14 +2063,7 @@ fn apply_files_controlled(
                     .remove_file(&parent.leaf)
                     .map_err(|_| ToolError::Operation)?;
                 affected = true;
-                crate::fault::file_parent_sync(control.intent)?;
-                parent
-                    .directory
-                    .try_clone()
-                    .map_err(|_| ToolError::Uncertain)?
-                    .into_std_file()
-                    .sync_all()
-                    .map_err(|_| ToolError::Uncertain)?;
+                control.sync_parent(&parent.directory)?;
             }
             affected = true;
             Ok(())
@@ -2205,13 +2190,7 @@ fn replace_file(
                     .rename(&temporary, parent, leaf)
                     .map_err(|_| ToolError::Operation)?;
             }
-            crate::fault::file_parent_sync(control.intent)?;
-            parent
-                .try_clone()
-                .map_err(|_| ToolError::Uncertain)?
-                .into_std_file()
-                .sync_all()
-                .map_err(|_| ToolError::Uncertain)?;
+            control.sync_parent(parent)?;
             Ok(())
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
