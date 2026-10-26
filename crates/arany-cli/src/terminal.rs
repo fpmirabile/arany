@@ -1668,7 +1668,7 @@ impl AttachedTerminal {
 
     pub fn draw_tool_approval(
         &mut self,
-        approval: &arany::ToolApproval,
+        approval: &crate::presentation::ToolApprovalPrompt,
         session: &SessionView,
         page: usize,
         choice: Option<usize>,
@@ -1678,19 +1678,16 @@ impl AttachedTerminal {
         self.cancel_clipboard_paste();
         // Approval owns the primary authority surface and arms through its own barrier.
         self.end_agent_chat()?;
-        let lines = match &approval.unguarded {
-            Some(prompt) => crate::presentation::unguarded_approval_lines(&approval.intent, prompt),
-            None => crate::presentation::tool_approval_lines(&approval.intent),
-        };
-        let choices = crate::presentation::tool_approval_choices(approval);
+        let lines = &approval.lines;
+        let choices = &approval.choices;
         if let Some(linear) = &mut self.linear {
             linear
-                .draw_tool_approval(approval.intent.id, &lines, &choices, choice.is_some())
+                .draw_tool_approval(approval.intent_id, lines, choices, choice.is_some())
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }
         let screen = self.owned().size()?;
-        let height = view::tool_approval_height(&lines, &choices, screen.width).min(screen.height);
+        let height = view::tool_approval_height(lines, choices, screen.width).min(screen.height);
         self.prepare_frame_height(height)?;
         let palette = self.palette();
         let terminal = self.owned.terminal();
@@ -1705,8 +1702,8 @@ impl AttachedTerminal {
             more = view::draw_tool_approval_frame(
                 frame,
                 area,
-                &lines,
-                &choices,
+                lines,
+                choices,
                 page,
                 choice,
                 review_notice,

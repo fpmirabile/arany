@@ -15,10 +15,47 @@ The server sends one-use human approval requests and negotiates exact-session sc
 authority and approval scopes. [Terminal](./terminal.md) owns `exec` and
 `show` output. Protocol serialization adds no authority or Engine policy.
 
-The in-process transport uses the same bounded `ClientMessage` inbound and
-Server message outbound channel pair without newline framing. The Server owns
-the Engine and Run tasks; the caller owns connection shutdown and the human
-approval channel. The library has no protocol dependency. Stdio and ACP retain their existing approval restrictions.
+The in-process transport uses bounded channels without newline framing and
+runs the same Server connection loop as stdio and ACP. Following
+[Codex's embedded app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/src/in_process.rs),
+the attached terminal supplies its local admission configuration at connection
+startup: the exact saved-account selection, reviewed Workspace grant, full Run
+request (including Skill, launch directory, images and Goal continuation) and
+live approval mode. These typed inputs are internal to the binary; JSON-RPC,
+repository content and child agents cannot construct them or acquire terminal
+approval authority. Provider and Tool admission still fail closed before a Run.
+
+The terminal submits through the Server's turn-start flow. Its controls use
+request/reply messages on the connection's inbound channel, including before
+Run acceptance: cancellation, pause, permission mode, primary and exactly
+targeted child notes, withdrawal of an untaken note, delivery counts and a
+strictly reduced open Session snapshot. A successful offer acknowledges only
+waiting; committed Events acknowledge recording. Withdrawal distinguishes an
+untaken note from an unknown child outcome. The Server forwards canonical
+Events in sequence and the original typed settlement; the terminal reconciles
+a sequence gap or resync through the snapshot request. A lost connection is a
+fatal presentation boundary, never a fabricated receipt or retry grant. The
+wire `receipt/get` remains the Goal-only receipt described below.
+
+Canonical Event delivery and control replies wait within the existing channel
+bounds; only provisional display notifications may drop under backpressure.
+Each inbound stage uses the inbound capacity and each outbound stage uses the
+outbound capacity in the limits table, including the terminal client's deferred
+notification queue; typed replies use one-use channels. The client applies
+committed Events in the terminal's [bounded bursts](./terminal.md#conversation-progress-and-history)
+before polling input again. Provisional display uses the terminal output queue directly and drops when it is full.
+Control requests remain serviceable while output waits. Shutdown drains queued
+notifications under the shared shutdown grace, then cancels remaining tasks.
+The attached Session retains its Engine for idle operations and compaction;
+the Server owns its Run tasks and connection controls. The caller owns
+connection shutdown and the human approval channel. Terminal approval requests
+retain the existing rendered lines and choice identities, and abandoned
+requests retire through a reliable local cancellation notification without a
+human verdict. Further terminal asks wait in the existing bounded approval
+inbox while a dialog is open; terminal delivery also waits for outbound capacity
+under the [approval lifecycle rules](#server-requests). Stdio and ACP retain
+their existing busy-ask refusal. The library has no protocol dependency. Stdio and ACP retain
+their existing wire vocabulary and approval restrictions.
 
 ## Framing and envelope
 
@@ -338,18 +375,24 @@ journals its verdict before dispatch and owns rule-save failure or uncertainty.
 
 Unanswered primary requests remain pending without a wall-clock deadline while
 the owning connection and Run remain live. EOF, turn interruption, pause,
-completion and output closure withdraw outstanding requests. Failed or unsent
-delivery is unavailable approval, not human decline. Enqueue is attempted once;
-a full or closed outbound queue resolves the unsent request as unavailable
-immediately, removes its pending ID and never retries delivery. Approval
-delivery and withdrawal run independently of outbound notification progress: a full output
-queue cannot hold Journal appends or prevent cancellation. A connected slow
-client alone does not expire an already enqueued request. Replies to withdrawn
+completion and output closure withdraw outstanding requests. Failed delivery
+resolves as unavailable approval, not human decline. Stdio and ACP attempt
+enqueue once: a full or closed outbound queue resolves the unsent request as
+unavailable immediately, removes its pending ID and never retries delivery.
+The attached Terminal channel waits for bounded outbound capacity before
+publishing its pending decision slot. Queue pressure alone emits no request
+and produces no verdict; delivery still requires a later human response. The
+wait ends on cancellation, abandonment, connection shutdown, Run completion or
+output closure, without sending a stale request or inventing a human verdict.
+Approval delivery and withdrawal run independently of outbound notification
+progress: a full output queue cannot hold Journal appends or prevent
+cancellation. A connected slow client alone does not expire an already enqueued request. Replies to withdrawn
 requests cannot authorize an effect, even if the request was already queued to the client.
-At most one approval is pending per connection; the Engine inbox has one
+At most one approval is published per connection; the Engine inbox has one
 bounded ingress slot. Child-request allowance and withdrawal follow the
-[Tools approval rules](./tools.md#folder-trust-and-approvals). An excess ask refuses
-without evicting or renewing the first.
+[Tools approval rules](./tools.md#folder-trust-and-approvals). Stdio and ACP
+refuse an excess ask without evicting or renewing the first; the Terminal
+channel retains it in the bounded inbox until the open dialog resolves.
 
 This client is the human approval channel. Hook asks require an explicit human
 client decision. Primary host commands require that decision unless an eligible
@@ -368,7 +411,7 @@ admission still apply. Hook execution remains owned by the Tools contract.
 | Turn input | At least one input item, at most one text of 64 KiB; base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
 | Pending inbound requests | 64 at the reader plus at most 64 deferred messages while sending output; reader buffer 64 KiB. Output waits still accept EOF, matching interruption/unsubscribe and approval replies. Deferred-input overflow cancels the Run and fails the connection. Cancellation or shutdown with output still full drops the blocked presentation operation, settles the Engine and exits with Session-history recovery guidance; ready output still drains normally. |
 | Outbound queue | 256; committed follower waits and Journal lag is reported through `events/resync`; see [`turn/display` behavior](#notifications-and-items) for provisional hint coalescing and drop rules. |
-| Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / excess approvals resolve as unavailable (not a decline); loaded threads are never evicted. Reloading a known thread consumes no extra slot; unsubscribe frees one after cancellation settles. |
+| Loaded threads / active submissions / published approval requests | 64 / 1 / 1; `threadLimit` / `busy` / [channel-specific approval backpressure](#server-requests); loaded threads are never evicted. Reloading a known thread consumes no extra slot; unsubscribe frees one after cancellation settles. |
 | Session list page / cursor | 1–100 entries (default 50) / 128 UTF-8 bytes; invalid limits/cursors refuse with invalidParams. The whole response must fit 1 MiB. |
 | Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
 | Steering and resume input | One text of at most 64 KiB, bounded further by the 8 KiB per-Run note budget for `turn/steer`; invalid params otherwise. |
@@ -411,11 +454,11 @@ pre-beta; stored formats follow the [journal migration contract](./execution.md#
 | Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas; every projected stop has one closed `goal.stopped` value and free text is refused | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs), [stop mapping](../../crates/arany-cli/src/cli/serve/items.rs), [projection table](../../crates/arany/src/session/stop.rs) |
 | CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
 | Provisional display | Opt-in and opt-out, withdrawn tentative text is absent, full-queue Journal settlement; strict reopened history retains canonical non-tentative chunks, public commentary and completion/cancellation tails; display waiting and clearing shapes validate against the schema | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [protocol conformance](../../crates/arany-cli/src/protocol/tests.rs) |
-| Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs) |
+| Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items; an embedded settlement forwards every unread committed sequence or an explicit resync before Finished, including under backpressure | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs), [embedded settlement corpus](../../crates/arany-cli/src/cli/serve/server/serve_loop/tests.rs) |
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Provider setup blocks continuation | Pending and Uncertain setup edits refuse ordinary/autonomous turns, Goal resume and thread reload with `providerSetupBlocked`; Events remain unchanged and inference/compaction Provider calls stay at zero | [`setup_edits_block_loaded_thread_prompts_without_events_or_provider_calls`](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
-| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; late accept to a live primary request dispatches once; decline denies, invalid result/EOF/unsent delivery are unavailable, cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; late accept to a live primary request dispatches once; decline denies, invalid result/EOF/failed delivery are unavailable, cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion; terminal queue pressure waits for capacity and a human response, or withdraws on lifecycle end, without inventing a verdict | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [approval capacity corpus](../../crates/arany-cli/src/cli/serve/approvals.rs) |
 | Session lifecycle | Close frees a slot after 64 loaded threads, retains durable history and cancels an active submission before releasing it; list pages include only admitted Workspace metadata, enforce page/line/cursor bounds, reject foreign and invalid cursors and never execute | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |

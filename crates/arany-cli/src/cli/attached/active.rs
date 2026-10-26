@@ -1,4 +1,4 @@
-use super::run::{PreparedSubmission, RunProgress, RunSubmission, RunUi, drive_run};
+use super::run::{PreparedSubmission, RunProgress, RunSubmission, RunUi, run_attached};
 use super::{
     Admission, Feedback, append_notice, confirm_outcome, hidden_answer_guidance, load_view,
     paused_goal_notice, print_run_answer, reload_view_or_keep, retained_draft_notice, run,
@@ -219,7 +219,7 @@ pub(super) fn preflight_idle_run(
 }
 
 pub(super) struct PendingSubmission<'a> {
-    pub(super) engine: &'a arany::Engine,
+    pub(super) engine: &'a std::sync::Arc<arany::Engine>,
     pub(super) admission: &'a Admission,
     pub(super) goal: GoalStart,
     pub(super) objective: String,
@@ -234,13 +234,13 @@ struct SubmissionInput {
 }
 
 struct SubmissionFinish<'a> {
-    engine: &'a arany::Engine,
+    engine: &'a std::sync::Arc<arany::Engine>,
     admission: &'a Admission,
     draft: Option<ComposerDraft>,
 }
 
 impl PendingSubmission<'_> {
-    pub(super) async fn submit(
+    pub(super) async fn run(
         self,
         terminal: &mut AttachedTerminal,
         view: &mut SessionView,
@@ -271,7 +271,7 @@ impl PendingSubmission<'_> {
             skill,
         };
         let result = match admit_submission(input, &finish, &mut ui, starting_sequence).await {
-            Ok(prepared) => drive_run(prepared, &mut ui).await,
+            Ok(prepared) => run_attached(prepared, &mut ui).await,
             Err(error) => Err(error),
         };
         finish.finish_run(&mut ui, result, starting_sequence).await

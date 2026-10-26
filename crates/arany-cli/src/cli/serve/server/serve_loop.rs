@@ -1,5 +1,5 @@
 use super::super::{
-    approvals, history,
+    approvals, embedded, history,
     items::{TurnState, notification},
     rewind,
     threads::{self, Threads},
@@ -39,6 +39,7 @@ struct ServerLoop {
     threads: Threads,
     outbound: mpsc::Sender<ServerMessage>,
     state: PathBuf,
+    native: Option<embedded::Native>,
 }
 
 struct SubmittedRun {
@@ -55,7 +56,7 @@ impl ServerLoop {
                 OutputClosed,
                 Event(Option<Tapped>),
                 Committed(Option<Tapped>),
-                Done(Result<Option<Refused>, EngineError>),
+                Done(Box<Result<arany::RunResult, EngineError>>),
                 Display(Option<arany::RunId>, DisplayUpdate),
             }
             let next = if let Some(turn) = self.active.as_mut() {
@@ -64,7 +65,7 @@ impl ServerLoop {
                     input = self.inbound.next(), if !self.shutdown => Next::Input(input),
                     event = turn.events.next() => Next::Event(event),
                     event = self.committed.next() => Next::Committed(event),
-                    result = self.workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(Refused::from_result)),
+                    result = self.workers.join_next() => Next::Done(Box::new(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)))),
                     (run, update) = async { turn.display.as_mut().expect("display follower").next().await }, if turn.display.is_some() => Next::Display(run, update),
                 }
             } else {
@@ -92,7 +93,7 @@ impl ServerLoop {
                 Next::Event(None) => return Err("Event stream closed during a Run".into()),
                 Next::Committed(Some(event)) => self.on_committed_event(event).await?,
                 Next::Committed(None) => return Err("committed Event stream closed".into()),
-                Next::Done(result) => self.on_run_finished(result).await?,
+                Next::Done(result) => self.on_run_finished(*result).await?,
                 Next::Display(run, update) => self.on_display(run, update),
             }
         }
@@ -101,6 +102,11 @@ impl ServerLoop {
 
     async fn on_client_message(&mut self, message: Option<ClientMessage>) -> Result<(), String> {
         match message {
+            Some(ClientMessage::Control(command)) => {
+                if let Some((local, state)) = &self.inbound.local {
+                    embedded::dispatch(command, local, state).await;
+                }
+            }
             None | Some(ClientMessage::Eof) => {
                 if let Some(turn) = &self.active {
                     turn.approvals.close();
@@ -497,11 +503,10 @@ impl ServerLoop {
 
     async fn start_turn(&mut self, request: Request) -> Result<Option<Value>, Fault> {
         let id = request.id.clone();
-        let (request, controls, inbox, first_sequence) =
+        let (providers, request, controls, inbox, first_sequence) =
             self.prepare_turn(&request.method, request.params).await?;
         let thread_id = request.session_id.expect("loaded thread");
         let submitted_goal = request.goal.id;
-        let providers = self.threads.map[&thread_id].providers.clone();
         let display = controls.hints.clone().map(DisplayFollower::new);
         let approval_mode = controls.approvals.clone().expect("approval channel");
         let steering = controls.steering.clone().expect("steering channel");
@@ -539,7 +544,33 @@ impl ServerLoop {
         &mut self,
         method: &str,
         params: Option<Value>,
-    ) -> Result<(RunRequest, RunControls, arany::ApprovalInbox, u64), Fault> {
+    ) -> Result<
+        (
+            arany::AdmittedProviders,
+            RunRequest,
+            RunControls,
+            arany::ApprovalInbox,
+            u64,
+        ),
+        Fault,
+    > {
+        if let Some(native) = &mut self.native
+            && let Some(submission) = native.pending.take()
+        {
+            let id = submission.request.session_id.ok_or_else(Fault::params)?;
+            let first = threads::load_view(&self.state, id)
+                .await?
+                .last_sequence
+                .checked_add(1)
+                .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?;
+            return Ok((
+                submission.providers,
+                submission.request,
+                submission.controls,
+                submission.inbox,
+                first,
+            ));
+        }
         let mut input = controls::Submission::parse(method, params)?;
         if self.active.is_some() {
             return Err(Fault::state(Reason::Busy));
@@ -597,7 +628,13 @@ impl ServerLoop {
             cancellation: RunCancellation::new(),
             hints,
         };
-        Ok((request, controls, inbox, first_sequence))
+        Ok((
+            loaded.providers.clone(),
+            request,
+            controls,
+            inbox,
+            first_sequence,
+        ))
     }
 
     async fn submit_run(
@@ -607,6 +644,7 @@ impl ServerLoop {
         controls: RunControls,
         finished: RunCancellation,
     ) -> Result<SubmittedRun, Fault> {
+        let grants_tools = !matches!(controls.tools, arany::ToolGrant::None);
         let worker_engine = self.engine.clone();
         let (started, ready) = tokio::sync::oneshot::channel();
         let result = self.workers.spawn(async move {
@@ -627,6 +665,13 @@ impl ServerLoop {
             Ok(Ok(handle)) => handle,
             Ok(Err(error)) => {
                 let _ = self.workers.join_next().await;
+                if let Some(native) = &mut self.native {
+                    if grants_tools {
+                        arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
+                    }
+                    native.start_error = Some(embedded::classify_run_error(error));
+                    return Err(Fault::engine(EngineError::CoordinatorFailed));
+                }
                 return Err(Fault::engine(error));
             }
             Err(_) => {
@@ -696,11 +741,30 @@ impl ServerLoop {
             },
         ));
         if encode_line(&message).is_ok() {
-            let _ = self.outbound.try_send(message);
+            if let Some(native) = &self.native {
+                let _ = native.output.try_send(embedded::Event::Message(message));
+            } else {
+                let _ = self.outbound.try_send(message);
+            }
         }
     }
 
     async fn on_run_event(&mut self, event: Tapped) -> Result<(), String> {
+        if let Some(native) = &self.native {
+            self.inbound
+                .wait(
+                    self.active.as_ref().map(OutputControl::from),
+                    &self.outbound,
+                    async {
+                        native
+                            .output
+                            .send(embedded::Event::Committed(event.clone()))
+                            .await
+                            .map_err(|_| "terminal client closed".to_owned())
+                    },
+                )
+                .await?;
+        }
         let mut control = self.active.as_ref().map(OutputControl::from);
         if let (Some(control), Tapped::Committed(event)) = (&mut control, &event)
             && event.session_id == control.thread_id
@@ -737,8 +801,13 @@ impl ServerLoop {
 
     async fn on_run_finished(
         &mut self,
-        result: Result<Option<Refused>, EngineError>,
+        result: Result<arany::RunResult, EngineError>,
     ) -> Result<(), String> {
+        let turn = self.active.as_mut().expect("active turn");
+        turn.result_done = true;
+        turn.approvals.close();
+        self.drain_run_events().await?;
+        let refused = result.as_ref().ok().and_then(Refused::from_result);
         let control = self.active.as_ref().map(OutputControl::from);
         let Self {
             inbound,
@@ -748,28 +817,36 @@ impl ServerLoop {
             opt_out,
             history,
             threads,
+            native,
             ..
         } = self;
         inbound
             .wait(control, outbound, async {
                 let turn = active.as_mut().expect("active turn");
-                turn.result_done = true;
-                turn.approvals.close();
-                Self::drain_run_events(turn, state, outbound, opt_out).await?;
                 let failure = if turn.pending_start.is_none() {
                     result.as_ref().err().map(ToString::to_string)
                 } else {
                     None
                 };
-                let (result, refused) = match result {
-                    Ok(refused) => (Ok(()), refused),
-                    Err(error) => (Err(error), None),
-                };
                 let ending = Completion::Final {
                     settled: result.is_ok(),
                     refused,
                 };
-                Self::report_start_failure(turn, result, state, outbound).await?;
+                if let Some(native) = native {
+                    if turn.state.run_id.is_some() {
+                        complete(turn, state, outbound, opt_out, &ending).await?;
+                    }
+                    native
+                        .output
+                        .send(embedded::Event::finished(
+                            result.map_err(embedded::classify_run_error),
+                        ))
+                        .await
+                        .map_err(|_| "terminal client closed".to_owned())?;
+                    *active = None;
+                    return Ok(());
+                }
+                Self::report_start_failure(turn, result.map(|_| ()), state, outbound).await?;
                 complete(turn, state, outbound, opt_out, &ending).await?;
                 if let Some(id) = turn.pending_close.take() {
                     history.unsubscribe(turn.thread_id);
@@ -796,14 +873,10 @@ impl ServerLoop {
             .await
     }
 
-    async fn drain_run_events(
-        turn: &mut ActiveTurn,
-        state: &std::path::Path,
-        outbound: &mpsc::Sender<Message>,
-        opt_out: &[String],
-    ) -> Result<(), String> {
+    async fn drain_run_events(&mut self) -> Result<(), String> {
         loop {
             let event = {
+                let turn = self.active.as_mut().expect("active turn");
                 let mut next = std::pin::pin!(turn.events.next());
                 std::future::poll_fn(|cx| {
                     Poll::Ready(match next.as_mut().poll(cx) {
@@ -816,7 +889,7 @@ impl ServerLoop {
             let Some(event) = event else {
                 break;
             };
-            observe(turn, event, state, outbound, opt_out).await?;
+            self.on_run_event(event).await?;
         }
         Ok(())
     }
@@ -853,6 +926,9 @@ impl ServerLoop {
                 let _ = self.workers.join_next().await;
             }
         }
+        if self.native.is_some() {
+            return result;
+        }
         let engine = Arc::try_unwrap(self.engine)
             .map_err(|_| "Run did not release the Engine".to_owned())?;
         let closed = engine
@@ -871,33 +947,141 @@ pub(in crate::cli) async fn run_configured(
     threads: Threads,
     stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
-    let inbound = Inbound {
-        receiver: inbound,
-        pending: VecDeque::new(),
-        stopping: stopping.clone(),
-        ended: false,
-    };
-    let engine = Arc::new(engine);
-    let committed = engine.subscribe();
-    let mut server = ServerLoop {
-        engine,
+    run_shared(
+        Arc::new(engine),
         state,
         inbound,
         outbound,
         threads,
         stopping,
-        committed,
-        history: history::History::default(),
-        rewind_preview: None,
-        active: None,
-        workers: tokio::task::JoinSet::new(),
-        next_server_id: Arc::new(std::sync::atomic::AtomicI64::new(1)),
-        initialized: false,
-        host_session_approval: false,
-        provisional_display: false,
-        opt_out: Vec::new(),
-        shutdown: false,
-    };
+        None,
+    )
+    .await
+}
+
+pub(in crate::cli) async fn run_embedded(
+    engine: Arc<Engine>,
+    state: PathBuf,
+    inbound: mpsc::Receiver<ClientMessage>,
+    outbound: mpsc::Sender<ServerMessage>,
+    native: embedded::Native,
+    stopping: watch::Sender<bool>,
+) -> Result<(), String> {
+    run_shared(
+        engine,
+        state,
+        inbound,
+        outbound,
+        Threads {
+            approval_channel: ApprovalChannel::Terminal,
+            ..Default::default()
+        },
+        stopping,
+        Some(native),
+    )
+    .await
+}
+
+async fn run_shared(
+    engine: Arc<Engine>,
+    state: PathBuf,
+    inbound: mpsc::Receiver<ClientMessage>,
+    outbound: mpsc::Sender<ServerMessage>,
+    threads: Threads,
+    stopping: watch::Sender<bool>,
+    native: Option<embedded::Native>,
+) -> Result<(), String> {
+    let mut server =
+        ServerLoop::configured(engine, state, inbound, outbound, threads, stopping, native);
+    server.start_embedded().await?;
     let result = server.run().await;
     server.on_stop(result).await
 }
+
+impl ServerLoop {
+    async fn start_embedded(&mut self) -> Result<(), String> {
+        if self.native.is_some() {
+            let thread_id = self
+                .native
+                .as_ref()
+                .and_then(|native| native.pending.as_ref())
+                .and_then(|pending| pending.request.session_id)
+                .expect("attached Session");
+            let request = Request {
+                jsonrpc: Default::default(),
+                id: RequestId::Integer(1),
+                method: "initialize".into(),
+                params: Some(
+                    json!({"clientInfo":{"name":"arany-terminal","version":env!("CARGO_PKG_VERSION")},"capabilities":{"provisionalDisplay":true}}),
+                ),
+            };
+            self.initialize(request).map_err(|fault| fault.message)?;
+            let request = Request {
+                jsonrpc: Default::default(),
+                id: RequestId::Integer(2),
+                method: "turn/start".into(),
+                params: Some(json!({"threadId":thread_id})),
+            };
+            if let Err(fault) = self.start_turn(request).await {
+                let native = self.native.as_mut().expect("attached transport");
+                let error = native.start_error.take().unwrap_or_else(|| {
+                    embedded::RunAttemptError::Failed(embedded::RunFailure::Server(fault.message))
+                });
+                native
+                    .output
+                    .send(embedded::Event::finished(Err(error)))
+                    .await
+                    .map_err(|_| "terminal client closed".to_owned())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ServerLoop {
+    fn configured(
+        engine: Arc<Engine>,
+        state: PathBuf,
+        inbound: mpsc::Receiver<ClientMessage>,
+        outbound: mpsc::Sender<ServerMessage>,
+        threads: Threads,
+        stopping: watch::Sender<bool>,
+        native: Option<embedded::Native>,
+    ) -> Self {
+        let local = native
+            .as_ref()
+            .and_then(|native| native.pending.as_ref())
+            .map(|pending| (pending.controls.clone(), state.clone()));
+        let inbound = Inbound {
+            receiver: inbound,
+            pending: VecDeque::new(),
+            stopping: stopping.clone(),
+            ended: false,
+            local,
+        };
+        let committed = engine.subscribe();
+        Self {
+            engine,
+            state,
+            inbound,
+            outbound,
+            threads,
+            stopping,
+            committed,
+            history: history::History::default(),
+            rewind_preview: None,
+            active: None,
+            workers: tokio::task::JoinSet::new(),
+            next_server_id: Arc::new(std::sync::atomic::AtomicI64::new(1)),
+            initialized: false,
+            host_session_approval: false,
+            provisional_display: false,
+            opt_out: Vec::new(),
+            shutdown: false,
+            native,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
