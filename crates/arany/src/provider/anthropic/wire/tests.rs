@@ -216,19 +216,277 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
 }
 
 #[test]
-fn outbound_tool_choice_is_auto_without_parallel() {
+fn outbound_tool_choice_is_auto_with_parallel() {
     let tool_body = body(&primary_request(MODEL), Effort::Low);
-    assert_eq!(
-        tool_body["tool_choice"],
-        json!({"type": "auto", "disable_parallel_tool_use": true})
-    );
+    assert_eq!(tool_body["tool_choice"], json!({"type": "auto"}));
     assert_eq!(tool_body["output_config"]["effort"], "low");
     assert_eq!(outcome_types(&tool_body), [] as [&str; 0]);
+    let mut editor = researcher_request(MODEL);
+    editor.input.role = crate::provider::PromptRole::Editor;
+    assert_eq!(
+        body(&editor, Effort::Low)["tool_choice"],
+        json!({"type": "auto", "disable_parallel_tool_use": true})
+    );
     let plain = body(&read_only_request(MODEL), Effort::Low);
     for field in ["tools", "tool_choice"] {
         assert!(plain.get(field).is_none(), "{field}");
     }
     assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 1);
+}
+
+#[test]
+fn multiple_tool_blocks_preserve_order_and_pair_results_in_one_user_message() {
+    let cap = usize::from(crate::session::MAX_STEP_TOOL_CALLS);
+    for mut request in [primary_request(MODEL), researcher_request(MODEL)] {
+        for count in [2, cap, cap + 1, MAX_CONTENT_BLOCKS] {
+            request.input.tools.as_mut().unwrap().steps.clear();
+            let content: Vec<_> = (0..count)
+                .map(|index| tool_use(&format!("toolu_{index}"), "arany_read", read_input()))
+                .collect();
+            let reply = decode(&request, &response("tool_use", json!(content))).unwrap();
+            assert_eq!(reply.usage.input_tokens, Some(19));
+            let step = observed_step(reply, "{\"text\":\"bounded result\"}");
+            assert_eq!(step.requests.len(), count);
+            assert_eq!(step.turn.items(ADAPTER).unwrap(), content);
+            if count > cap {
+                continue;
+            }
+            request.input.tools.as_mut().unwrap().steps.push(step);
+            let body = body(&request, Effort::Low);
+            let messages = body["messages"].as_array().unwrap();
+            let user = messages.last().unwrap();
+            assert_eq!(user["role"], "user");
+            let results: Vec<_> = user["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|block| block["type"] == "tool_result")
+                .collect();
+            assert_eq!(results.len(), count);
+            for (index, result) in results.iter().enumerate() {
+                assert_eq!(result["tool_use_id"], format!("toolu_{index}"));
+                assert_eq!(result["is_error"], false);
+            }
+        }
+        let blocks: Vec<_> = (0..=MAX_CONTENT_BLOCKS)
+            .map(|index| tool_use(&format!("toolu_{index}"), "arany_read", read_input()))
+            .collect();
+        assert!(decode(&request, &response("tool_use", json!(blocks))).is_err());
+    }
+}
+
+struct ResearchBatchProvider {
+    identity: crate::provider::ProviderIdentity,
+    fixtures: std::sync::Mutex<std::collections::VecDeque<Value>>,
+    requests: std::sync::Mutex<Vec<ProviderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl crate::provider::Provider for ResearchBatchProvider {
+    fn identity(&self) -> &crate::provider::ProviderIdentity {
+        &self.identity
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        let fixture = self
+            .fixtures
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted reply");
+        decode(&request, &fixture)
+    }
+}
+
+#[tokio::test]
+async fn researcher_over_cap_refusals_commit_before_feedback_and_bound_continuations() {
+    for attempts in [1, 3, 8] {
+        let (provider, events, view) = run_research_batch_case(attempts).await;
+        assert_research_batch_result(attempts, &provider, &events, &view);
+    }
+}
+
+async fn run_research_batch_case(
+    attempts: usize,
+) -> (
+    std::sync::Arc<ResearchBatchProvider>,
+    Vec<crate::EventEnvelope>,
+    crate::SessionView,
+) {
+    use crate::test_support::{engine, goals, scenario};
+    use crate::{EngineConfig, RunControls, StateRoot, ToolGrant};
+    use std::{os::unix::fs::PermissionsExt, sync::Arc};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = goals::facts_workspace(temp.path(), "bounded facts");
+    let state = temp.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    let config = state.join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let engine = engine::open(
+        root,
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let provider = Arc::new(research_batch_provider(attempts));
+    let mut input = scenario::request(&workspace, "Delegate bounded research");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = engine::run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    let (events, view) = goals::replayed(&state, outcome.session_id).await;
+    assert_eq!(view.runs[0], outcome.run);
+    (provider, events, view)
+}
+
+fn assert_research_batch_result(
+    attempts: usize,
+    provider: &ResearchBatchProvider,
+    events: &[crate::EventEnvelope],
+    view: &crate::SessionView,
+) {
+    use crate::RunStatus;
+    assert_eq!(
+        view.runs[0].status,
+        if attempts == 1 {
+            RunStatus::Finished
+        } else {
+            RunStatus::Failed
+        }
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, crate::Event::ToolStarted { .. }))
+    );
+    let child = &view.runs[0].agents[1];
+    assert_eq!(
+        child
+            .provider_calls
+            .iter()
+            .filter(|call| call.refusal.is_some())
+            .count(),
+        attempts
+    );
+    for call in child.provider_calls.iter().take(attempts) {
+        assert_eq!(call.disposition, crate::ProviderCallDisposition::Rejected);
+        assert_eq!(
+            call.refusal.as_ref().unwrap().cause,
+            crate::ProposalRefusalCause::InvalidArguments
+        );
+        assert_eq!(call.requested_tools, 0);
+        assert_eq!(call.input_tokens, Some(19));
+    }
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), if attempts == 1 { 4 } else { attempts + 1 });
+    assert_eq!(provider.fixtures.lock().unwrap().len(), 0);
+    for request in requests
+        .iter()
+        .skip(2)
+        .filter(|request| request.phase == AgentPhase::ChildWork)
+    {
+        assert_researcher_refusal_feedback(request);
+    }
+    if attempts == 1 {
+        let refusal = events
+            .iter()
+            .find(|event| {
+                matches!(&event.event,
+                    crate::Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == child.id && record.refusal.is_some()
+                )
+            })
+            .unwrap();
+        let reservation = events.iter().find(|event| event.sequence > refusal.sequence
+            && matches!(event.event, crate::Event::GoalProviderCallReserved { agent_run_id, .. } if agent_run_id == child.id)).unwrap();
+        assert!(refusal.sequence < reservation.sequence);
+    }
+}
+
+fn research_batch_provider(attempts: usize) -> ResearchBatchProvider {
+    let cap = usize::from(crate::session::MAX_STEP_TOOL_CALLS);
+    let mut fixtures = vec![response(
+        "tool_use",
+        json!([tool_use(
+            "toolu_delegate",
+            "arany_delegate",
+            json!({
+                "children": [{"objective": "Read the facts", "profile": null}], "agent": null
+            })
+        )]),
+    )];
+    for attempt in 0..attempts {
+        let (name, input) = if attempts == 8 && attempt % 2 == 1 {
+            ("arany_list", json!({"path": "notes"}))
+        } else {
+            ("arany_read", json!({"path": "notes/facts.txt"}))
+        };
+        let blocks: Vec<_> = (0..=cap)
+            .map(|index| tool_use(&format!("toolu_{index}"), name, input.clone()))
+            .collect();
+        fixtures.push(response("tool_use", json!(blocks)));
+    }
+    if attempts == 1 {
+        fixtures.extend([
+            response("end_turn", json!([text_block("Research complete")])),
+            response("end_turn", json!([text_block("Facts collected")])),
+        ]);
+    }
+    for (index, fixture) in fixtures.iter_mut().enumerate() {
+        fixture["id"] = json!(format!("msg_{index}"));
+    }
+    ResearchBatchProvider {
+        identity: crate::provider::ProviderIdentity::new(
+            ADAPTER,
+            MODEL,
+            crate::provider::Provenance::native(),
+        ),
+        fixtures: std::sync::Mutex::new(fixtures.into()),
+        requests: std::sync::Mutex::new(Vec::new()),
+    }
+}
+
+fn assert_researcher_refusal_feedback(request: &ProviderRequest) {
+    let cap = usize::from(crate::session::MAX_STEP_TOOL_CALLS);
+    let body = body(request, Effort::Low);
+    let content = body["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_array()
+        .unwrap();
+    let paired: Vec<_> = content
+        .iter()
+        .filter(|block| block["type"] == "tool_result")
+        .collect();
+    assert_eq!(paired.len(), cap + 1);
+    for (index, block) in paired.iter().enumerate() {
+        assert_eq!(block["tool_use_id"], format!("toolu_{index}"));
+        assert_eq!(block["is_error"], true);
+        let feedback: Value = serde_json::from_str(block["content"].as_str().unwrap()).unwrap();
+        assert_eq!(feedback["dispatched"], false);
+        assert_eq!(feedback["effect"], "none");
+        assert_eq!(feedback["error"]["cause"], "invalid_arguments");
+        assert!(
+            feedback["error"]["remediation"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("1 to {cap} Tool calls"))
+        );
+    }
 }
 
 #[test]
@@ -459,10 +717,20 @@ fn plan_is_a_separate_optional_function() {
 }
 
 #[test]
-fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
-    let request = primary_request(MODEL);
+fn inbound_rejects_max_tokens_refusal_and_mixed_outcomes() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
     let one = tool_use("toolu_1", "arany_read", read_input());
     let two = tool_use("toolu_2", "arany_read", read_input());
+    let delegate = tool_use(
+        "toolu_delegate",
+        "arany_delegate",
+        json!({
+            "children": [{"objective": "Inspect", "profile": null}], "agent": null
+        }),
+    );
     for (case, fixture) in [
         ("max_tokens", response("max_tokens", json!([one.clone()]))),
         ("refusal", response("refusal", json!([text_block("no")]))),
@@ -490,8 +758,63 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
             ),
         ),
         (
-            "two calls",
-            response("tool_use", json!([one.clone(), two.clone()])),
+            "plan mixed with read",
+            response(
+                "tool_use",
+                json!([
+                    tool_use("toolu_plan", "arany_plan", json!(goal_plan_contract())),
+                    one.clone()
+                ]),
+            ),
+        ),
+        (
+            "read mixed with plan",
+            response(
+                "tool_use",
+                json!([
+                    one.clone(),
+                    tool_use("toolu_plan", "arany_plan", json!(goal_plan_contract()))
+                ]),
+            ),
+        ),
+        (
+            "two plans",
+            response(
+                "tool_use",
+                json!([
+                    tool_use("toolu_plan", "arany_plan", json!(goal_plan_contract())),
+                    tool_use(
+                        "toolu_other_plan",
+                        "arany_plan",
+                        json!(goal_plan_contract())
+                    )
+                ]),
+            ),
+        ),
+        (
+            "text between calls",
+            response(
+                "tool_use",
+                json!([one.clone(), text_block("Inspecting"), two]),
+            ),
+        ),
+        (
+            "delegate mixed with read",
+            response("tool_use", json!([delegate.clone(), one.clone()])),
+        ),
+        (
+            "read mixed with delegate",
+            response("tool_use", json!([one.clone(), delegate])),
+        ),
+        (
+            "malformed later input",
+            response(
+                "tool_use",
+                json!([
+                    one.clone(),
+                    tool_use("toolu_bad", "arany_read", json!({"path": 42}))
+                ]),
+            ),
         ),
         (
             "duplicate ids",
@@ -1539,6 +1862,50 @@ fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
 }
 
 #[test]
+fn streamed_multi_call_inputs_are_isolated_and_replayed_in_model_order() {
+    let mut events = vec![message_start()];
+    let cap = usize::from(crate::session::MAX_STEP_TOOL_CALLS);
+    for index in 0..cap {
+        events.push(
+            json!({"type":"content_block_start","index":index,"content_block":{
+                "type":"tool_use","id":format!("toolu_{index}"),"name":"arany_read","input":{}
+            }}),
+        );
+        for fragment in [
+            format!("{{\"path\":\"src/file{index}.rs\","),
+            "\"offset\":null,\"limit\":null}".into(),
+        ] {
+            events.push(json!({"type":"content_block_delta","index":index,"delta":{
+                "type":"input_json_delta","partial_json":fragment
+            }}));
+        }
+        events.push(json!({"type":"content_block_stop","index":index}));
+    }
+    events.extend([
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let (preview, observed) = crate::provider::ResponsePreview::new();
+    let assembled = run_stream(&sse(&events), preview).unwrap().unwrap();
+    assert!(observed.borrow().answer.is_empty());
+    let reply = decode_streamed_tool(&assembled, 4096).unwrap();
+    let ProviderOutcome::Tools(requests) = &reply.outcome else {
+        panic!("multiple Tool requests");
+    };
+    assert_eq!(requests.len(), cap);
+    let turn = reply.turn.items(ADAPTER).unwrap();
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(request.id.as_str(), format!("toolu_{index}"));
+        assert_eq!(
+            request.call.path_argument().unwrap().0,
+            format!("src/file{index}.rs")
+        );
+        assert_eq!(turn[index]["id"], request.id.as_str());
+        assert_eq!(turn[index]["input"]["path"], format!("src/file{index}.rs"));
+    }
+}
+
+#[test]
 fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewed() {
     use crate::provider::ResponsePreview;
     let fragments = [
@@ -2127,10 +2494,7 @@ fn researcher_requests_extend_each_other_across_calls() {
     for pair in bodies.windows(2) {
         assert_extends(&pair[0], &pair[1]);
     }
-    assert_eq!(
-        bodies[3]["tool_choice"],
-        json!({"type":"auto", "disable_parallel_tool_use":true})
-    );
+    assert_eq!(bodies[3]["tool_choice"], json!({"type":"auto"}));
     assert_eq!(bodies[4]["tool_choice"], json!({"type":"none"}));
     assert!(
         bodies[3]["messages"]
@@ -2290,6 +2654,10 @@ fn tool_surface_matches_the_checked_in_snapshot() {
     rendered.insert(
         "assignment_outcome".into(),
         crate::provider::run_outcome_schema(&assignment),
+    );
+    rendered.insert(
+        "tool_choice".into(),
+        body(&assignment, Effort::High)["tool_choice"].clone(),
     );
     let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
     // Regenerate with ARANY_UPDATE_SNAPSHOTS=1, then review the diff.

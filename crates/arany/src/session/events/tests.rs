@@ -2848,6 +2848,10 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
     assert!(decode_call(&worker_phase, current).is_err());
+    worker_phase["refusal"]["cause"] = serde_json::json!("invalid_arguments");
+    assert!(decode_call(&worker_phase, current).is_ok());
+    worker_phase["phase"] = serde_json::json!("tool_review");
+    assert!(decode_call(&worker_phase, current).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");
     assert!(decode_call(&synthesis, current).is_ok());

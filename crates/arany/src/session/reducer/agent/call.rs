@@ -1,7 +1,6 @@
 use super::super::{
     AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal,
-    all_children_finished, current_goal_mut, definition_registry, is_delegated_synthesis,
-    is_tool_continuation, worker,
+    all_children_finished, current_goal_mut, is_delegated_synthesis, is_tool_continuation, worker,
 };
 use super::{child_tool_requests, is_child_step};
 use crate::provider::{AgentPhase, ProviderRole};
@@ -207,14 +206,21 @@ fn continuation_admission(
             c.failure_reason == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
         })
         && record.phase == AgentPhase::ChildWork;
-    let refusal_continuation = agent.role == AgentRole::Primary
+    let researcher = agent.role == AgentRole::Child
+        && agent.assignment.is_none()
+        && matches!(agent.grant, Some(ChildGrant::ReadOnly { .. }));
+    let refusal_continuation = (agent.role == AgentRole::Primary || researcher)
         && !agent.refusal_limit_reached()
         && agent
             .provider_calls
             .last()
             .is_some_and(|call| call.refusal.is_some() && call.phase == record.phase)
         && run.hooks_settled()
-        && run.tools.iter().all(ToolView::settled_without_stop);
+        && if researcher {
+            agent.tools.iter().all(ToolView::settled_without_stop)
+        } else {
+            run.tools.iter().all(ToolView::settled_without_stop)
+        };
     let plan_continuation = tools_enabled
         && agent.role == AgentRole::Primary
         && agent.provider_calls.last().is_some_and(|call| {
@@ -283,8 +289,16 @@ fn validate_disposition(
     admission: ContinuationAdmission,
 ) -> Result<(), ReplayError> {
     if agent.status != AgentStatus::Active
+        || agent.refusal_limit_reached()
         || agent.role == AgentRole::Primary && agent.outcome_correction_exhausted()
         || !admission.valid
+        || agent.role == AgentRole::Child
+            && record.refusal.as_ref().is_some_and(|refusal| {
+                agent.assignment.is_some()
+                    || !matches!(agent.grant, Some(ChildGrant::ReadOnly { .. }))
+                    || record.phase != AgentPhase::ChildWork
+                    || refusal.cause != crate::session::ProposalRefusalCause::InvalidArguments
+            })
         || record.disposition == ProviderCallDisposition::PlanRecorded
             && !(admission.tools_enabled
                 && agent.role == AgentRole::Primary
@@ -362,18 +376,13 @@ fn charge_goal_call(
 }
 
 fn child_definition_allows_turn(run: &RunView, agent: &AgentView) -> bool {
-    agent.definition.as_ref().is_none_or(|name| {
-        definition_registry(run)
-            .ok()
-            .and_then(|registry| registry.get(name).cloned())
-            .is_some_and(|definition| {
-                agent
-                    .provider_calls
-                    .iter()
-                    .filter(|prior| prior.phase == AgentPhase::ChildWork)
-                    .count()
-                    + 1
-                    < usize::from(definition.max_turns)
-            })
+    super::child_turn_limit(run, agent).is_ok_and(|limit| {
+        agent
+            .provider_calls
+            .iter()
+            .filter(|prior| prior.phase == AgentPhase::ChildWork)
+            .count()
+            + 1
+            < usize::from(limit)
     })
 }

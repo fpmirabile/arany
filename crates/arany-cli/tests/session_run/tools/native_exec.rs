@@ -1008,8 +1008,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         assert_eq!(call["call_id"], format!("call_native_{index}"));
                     }
                 } else {
-                    assert_eq!(body["tool_choice"]["type"], "auto");
-                    assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
+                    assert_eq!(body["tool_choice"], json!({"type": "auto"}));
                     let names: Vec<_> = body["tools"]
                         .as_array()
                         .unwrap()
