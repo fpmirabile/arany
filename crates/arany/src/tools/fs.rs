@@ -23,8 +23,11 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             offset,
             limit,
         } => {
-            valid_relative(path, false)
-                && offset.is_none_or(|n| n >= 1)
+            (if path.starts_with(super::spill::READ_PREFIX) {
+                super::spill::read_reference(path).is_some()
+            } else {
+                valid_relative(path, false)
+            }) && offset.is_none_or(|n| n >= 1)
                 && limit.is_none_or(|n| (1..=MAX_READ_PAGE_LINES).contains(&n))
         }
         ToolCall::Search { path, .. } => valid_relative(path, true) && super::search::valid(call),
@@ -96,7 +99,10 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     Some(match operation {
         "list" | "mkdir" => vec![path],
         "read" => vec![
-            path,
+            (
+                "path",
+                json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
+            ),
             (
                 "offset",
                 json!({"type":["integer", "null"], "description":format!("1-based start line, 1 through {}; null starts at line 1. Continue using next_line.", u32::MAX)}),

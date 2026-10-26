@@ -108,7 +108,7 @@ impl<'a> MessageStream<'a> {
             Ok(None)
         })();
         if result.is_err() {
-            crate::diagnostics::messages_failure(self.stage, self.counts());
+            crate::provider::diagnostics::messages_failure(self.stage, self.counts());
         }
         result
     }
@@ -460,7 +460,7 @@ pub(in crate::provider) fn decode_run_with_counts(
 ) -> Result<ProviderResponse, ProviderError> {
     let (result, stage, tool_arguments) = decode_run_staged(bytes, scope);
     if result.is_err() {
-        crate::diagnostics::messages_failure(
+        crate::provider::diagnostics::messages_failure(
             stage,
             crate::provider::diagnostics::StreamCounts {
                 tool_arguments,
@@ -477,7 +477,7 @@ fn decode_run_staged(
 ) -> (
     Result<ProviderResponse, ProviderError>,
     crate::provider::diagnostics::SubscriptionFailureStage,
-    Option<crate::diagnostics::ToolArgumentShape>,
+    Option<crate::provider::diagnostics::ToolArgumentShape>,
 ) {
     let mut stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
     let mut tool_arguments = None;
@@ -546,7 +546,7 @@ pub(super) fn decode_run_failure_stage(
 pub(super) fn decode_run_failure_tool_shape(
     bytes: &[u8],
     scope: &RunScope,
-) -> Option<crate::diagnostics::ToolArgumentShape> {
+) -> Option<crate::provider::diagnostics::ToolArgumentShape> {
     decode_run_staged(bytes, scope).2
 }
 
@@ -604,7 +604,7 @@ fn decode_compaction_observed(
         })
     })();
     if result.is_err() {
-        crate::diagnostics::messages_failure(
+        crate::provider::diagnostics::messages_failure(
             stage,
             crate::provider::diagnostics::StreamCounts { ..counts },
         );
@@ -862,7 +862,7 @@ struct Admitted<'a> {
 
 struct ToolRequestFailure {
     error: ProviderError,
-    tool_arguments: Option<Box<crate::diagnostics::ToolArgumentShape>>,
+    tool_arguments: Option<Box<crate::provider::diagnostics::ToolArgumentShape>>,
 }
 
 impl WireContent<'_> {
@@ -1089,7 +1089,7 @@ fn step_outcome(outcomes: Vec<ProviderOutcome>) -> Result<ProviderOutcome, Provi
 fn diagnostic_tool_arguments(
     operation: &str,
     raw_input: &serde_json::value::RawValue,
-) -> Option<crate::diagnostics::ToolArgumentShape> {
+) -> Option<crate::provider::diagnostics::ToolArgumentShape> {
     if !cfg!(debug_assertions) {
         return None;
     }
@@ -1104,8 +1104,13 @@ fn diagnostic_tool_arguments(
             serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)).ok()
         });
     Some(call.map_or_else(
-        || crate::diagnostics::ToolArgumentShape::from_serialized(operation, raw_input.get().len()),
-        |call| crate::diagnostics::ToolArgumentShape::from_call(&call),
+        || {
+            crate::provider::diagnostics::ToolArgumentShape::from_serialized(
+                operation,
+                raw_input.get().len(),
+            )
+        },
+        |call| crate::provider::diagnostics::ToolArgumentShape::from_call(&call),
     ))
 }
 

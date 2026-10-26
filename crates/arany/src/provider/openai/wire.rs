@@ -163,7 +163,7 @@ pub(crate) fn outcome_failure_diagnostic(
     model: &str,
 ) -> (
     crate::provider::diagnostics::SubscriptionFailureStage,
-    Option<crate::diagnostics::ToolArgumentShape>,
+    Option<crate::provider::diagnostics::ToolArgumentShape>,
 ) {
     use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let Ok(response) = decode_completed_event(bytes) else {
@@ -215,10 +215,10 @@ fn function_failure_diagnostic(
     call: &FunctionCall,
 ) -> (
     crate::provider::diagnostics::SubscriptionFailureStage,
-    Option<crate::diagnostics::ToolArgumentShape>,
+    Option<crate::provider::diagnostics::ToolArgumentShape>,
 ) {
-    use crate::diagnostics::ToolArgumentShape;
     use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
+    use crate::provider::diagnostics::ToolArgumentShape;
     let Some(operation) = call.name.strip_prefix(NAME_PREFIX) else {
         return (Stage::OutcomeContract, None);
     };

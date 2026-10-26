@@ -87,6 +87,48 @@ pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+pub(crate) struct SpillWriteGate {
+    #[cfg(any(test, feature = "test-support"))]
+    entered: Option<tokio::sync::oneshot::Sender<()>>,
+    #[cfg(any(test, feature = "test-support"))]
+    release: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(any(test, feature = "test-support"))]
+    finished: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl SpillWriteGate {
+    pub(crate) fn wait(&mut self) -> io::Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+            if let Some(release) = self.release.take() {
+                release
+                    .recv()
+                    .map_err(|_| io::Error::other("spill gate closed"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SpillWriteGate {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.send(());
+        }
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn spill_write_gate(state: &std::path::Path) -> SpillWriteGate {
+    #[cfg(any(test, feature = "test-support"))]
+    return FaultPlan::spill_write_gate(state);
+    #[cfg(not(any(test, feature = "test-support")))]
+    SpillWriteGate::default()
+}
+
 pub(crate) enum CheckpointStall {
     Ready,
     #[cfg(any(test, feature = "test-support"))]
@@ -333,6 +375,7 @@ mod injection {
         Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         AutonomousContinuation(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         CheckpointStall(SessionId),
+        SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
         FileParentSync(uuid::Uuid),
@@ -471,6 +514,34 @@ mod injection {
             let (release, released) = oneshot::channel();
             plan().push(Fault::Checkpoint(session, entered, released));
             (wait, release)
+        }
+
+        pub fn gate_spill_write(
+            state: std::path::PathBuf,
+        ) -> (
+            oneshot::Receiver<()>,
+            std::sync::mpsc::SyncSender<()>,
+            oneshot::Receiver<()>,
+        ) {
+            let (entered, wait) = oneshot::channel();
+            let (release, released) = std::sync::mpsc::sync_channel(1);
+            let (finished, done) = oneshot::channel();
+            plan().push(Fault::SpillWrite(
+                state,
+                super::SpillWriteGate {
+                    entered: Some(entered),
+                    release: Some(released),
+                    finished: Some(finished),
+                },
+            ));
+            (wait, release, done)
+        }
+
+        pub(crate) fn spill_write_gate(state: &std::path::Path) -> super::SpillWriteGate {
+            match take(|fault| matches!(fault, Fault::SpillWrite(path, _) if path == state)) {
+                Some(Fault::SpillWrite(_, gate)) => gate,
+                _ => super::SpillWriteGate::default(),
+            }
         }
 
         pub fn stall_checkpoint(session: SessionId) {
