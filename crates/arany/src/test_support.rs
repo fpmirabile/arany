@@ -1154,6 +1154,7 @@ fn host_admission_tool(
     crate::ToolView {
         checkpoint: None,
         observation: Some(crate::ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: crate::ToolDisposition::Denied,
             enforcement_cause: None,

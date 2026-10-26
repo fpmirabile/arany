@@ -3322,6 +3322,7 @@ mod child_tool_report_tests {
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Denied,
                 enforcement_cause: Some(EnforcementCause::FilesystemDenied),

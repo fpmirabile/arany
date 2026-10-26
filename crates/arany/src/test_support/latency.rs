@@ -606,6 +606,7 @@ mod tests {
             run_id: intent.run_id,
             agent_run_id: intent.agent_run_id,
             observation: crate::ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 output: String::new(),

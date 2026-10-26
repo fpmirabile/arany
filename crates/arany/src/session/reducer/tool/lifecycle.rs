@@ -147,6 +147,23 @@ pub(super) fn finished(
     else {
         return Err(ReplayError::InvalidTransition);
     };
+    if let Some(spill) = &observation.spill {
+        let run = current
+            .runs
+            .iter()
+            .find(|run| run.id == *run_id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        let used: u64 = run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .filter_map(|tool| tool.observation.as_ref()?.spill.as_ref())
+            .map(|spill| spill.bytes)
+            .sum();
+        if used.saturating_add(spill.bytes) > crate::tools::spill::MAX_SPILL_RUN_BYTES {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
     if names_child(current, *run_id, *agent_run_id) {
         if checkpoint.is_some() {
             return Err(ReplayError::InvalidTransition);

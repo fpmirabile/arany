@@ -91,6 +91,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         use_count: 1,
     };
     let observation = arany::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: intent.clone(),
@@ -946,6 +947,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         run_id: run,
         agent_run_id: primary,
         observation: arany::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: (disposition == arany::ToolDisposition::Limit)
                 .then_some(arany::LimitCause::Resource),

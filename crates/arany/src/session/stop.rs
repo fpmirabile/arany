@@ -312,6 +312,7 @@ mod tests {
             intent: intent.clone(),
             observation: observed.map(|(disposition, cache_update)| {
                 crate::tools::ToolObservation {
+                    spill: None,
                     enforcement_cause: None,
                     limit_cause: None,
                     intent,
