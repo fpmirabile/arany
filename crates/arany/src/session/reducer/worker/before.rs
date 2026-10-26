@@ -506,7 +506,21 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
             verdict,
             ..
         } => {
+            let batch = run.agents.iter().any(|agent| {
+                agent.id == *agent_run_id
+                    && agent.assignment.is_none()
+                    && agent
+                        .provider_calls
+                        .iter()
+                        .rev()
+                        .find(|call| call.phase != AgentPhase::ToolReview)
+                        .is_some_and(|call| {
+                            call.disposition == ProviderCallDisposition::ToolRequested
+                                && call.requested_tools > 1
+                        })
+            });
             if verdict.as_ref().is_some_and(|verdict| verdict.approved)
+                || verdict.is_none() && !batch
                 || !tools().any(|tool| {
                     tool.intent.id == intent.id
                         && tool.intent.agent_run_id == *agent_run_id
