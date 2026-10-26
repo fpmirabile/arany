@@ -4,7 +4,7 @@
 
 This contract owns saved-account scope, protected storage, selected-item startup authorization, replacement and recovery. Behavior is shared across OSes; native storage mechanisms and support evidence can differ. Provider admission belongs to the [Provider contract](./provider.md); OAuth, verified identity, consent and token renewal to the [ChatGPT contract](./chatgpt.md). [The terminal contract](./terminal.md#setup-and-account-choices) owns folder-consent ordering, account choices and interactive cancellation. Editing constraints: [security rules](../../agents/security.md).
 
-Session State stores retained Tool output under private `spill/<run-id>/<intent-digest>.txt`: directories are `0700`, files and the fixed per-Run `writer.lock` are `0600`, outside the Workspace and subject to the [spill retention and Read contract](./tools.md#in-process-reads).
+Session State retains Tool output outside the Workspace in private directories (`0700`); output files and the fixed per-Run `writer.lock` are `0600`. The [Output spill contract](./tools.md#limits-and-failure-behavior) owns layout and retention.
 
 ## Account scope and identity
 

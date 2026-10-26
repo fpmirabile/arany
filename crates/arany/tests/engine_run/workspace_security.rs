@@ -1,8 +1,9 @@
 #[cfg(target_os = "linux")]
 use super::process::BoundedOutput;
 use super::*;
+use std::io::Write;
 use std::os::unix::{
-    fs::{MetadataExt, symlink},
+    fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, symlink},
     net::UnixListener,
 };
 
@@ -222,8 +223,6 @@ fn fifo_include_rejects_without_waiting_for_a_writer() {
 
 #[tokio::test]
 async fn private_spill_paths_do_not_grant_workspace_include_authority() {
-    use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
