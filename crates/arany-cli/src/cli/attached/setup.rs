@@ -666,7 +666,7 @@ async fn settle_native_removal(
                 ProviderSetupDisposition::Failed
             };
             journal.finish(operation, None, disposition).await?;
-            Err(native_removal_error(error))
+            Err(SetupError::native_removal(error))
         }
     }
 }
@@ -755,18 +755,6 @@ fn chatgpt_removal_error(error: chatgpt::AuthorizationError) -> SetupError {
             "ChatGPT account cleanup is uncertain; restart setup and inspect saved access before continuing.".into(),
         ),
         error => SetupError::recoverable_unrecorded(error),
-    }
-}
-
-fn native_removal_error(error: CredentialError) -> SetupError {
-    match error {
-        CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown => {
-            SetupError::Presentation(
-                "Native account removal is uncertain; restart setup and inspect saved access before continuing."
-                    .into(),
-            )
-        }
-        _ => SetupError::recoverable_unrecorded(error),
     }
 }
 
@@ -2050,12 +2038,7 @@ async fn settle_native_save(
                 ProviderSetupDisposition::Failed
             };
             journal.finish(operation, None, disposition).await?;
-            if uncertain {
-                return Err(SetupError::Presentation(
-                    "Native account storage is uncertain; restart setup and inspect saved access before continuing".into(),
-                ));
-            }
-            return Err(SetupError::recoverable(error));
+            return Err(SetupError::native_save(error));
         }
     }
     Ok(())
@@ -3286,7 +3269,18 @@ pub(super) mod tests {
                 }
                 SetupPublication::ChatGpt => unreachable!("native target"),
             };
-            assert!(result.is_err());
+            let expected = match publication {
+                SetupPublication::NativeSave => {
+                    "Native account storage is uncertain; restart setup and inspect saved access before continuing"
+                }
+                SetupPublication::NativeRemoval => {
+                    "Native account removal is uncertain; restart setup and inspect saved access before continuing."
+                }
+                SetupPublication::ChatGpt => unreachable!("native target"),
+            };
+            assert!(
+                matches!(result, Err(SetupError::Presentation(message)) if message == expected)
+            );
         } else {
             let result =
                 settle_chatgpt_authorization(&journal, operation, Err(chatgpt_setup_error(error)))
