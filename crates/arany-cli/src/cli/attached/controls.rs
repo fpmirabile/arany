@@ -1951,8 +1951,13 @@ mod tests {
                 "invalid value changed draft: {value}"
             );
         }
+        let cores = std::thread::available_parallelism().unwrap().get();
+        let build_jobs = format!(
+            "Build jobs: automatic; {} effective (cores {cores}, process limit 256) (automatic or 1..cores)",
+            cores.min(256)
+        );
         assert_eq!(
-            &linear_setting_rows(preferences)[..SETTINGS.len() - 1],
+            linear_setting_rows(preferences),
             [
                 "Slash menu: tabs (tabs|combined)",
                 "Chat view: fullscreen (fullscreen|classic)",
@@ -1967,6 +1972,7 @@ mod tests {
                 "Build cache: 8.0 GB (size, e.g. 8GB)",
                 "Copy on select: on (on|off)",
                 "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)",
+                build_jobs.as_str(),
             ]
         );
         for (raw, expected) in [
