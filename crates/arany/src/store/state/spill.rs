@@ -69,6 +69,12 @@ impl SpillAccess {
         Ok(true)
     }
 
+    pub(crate) fn release(&self, bytes: usize) {
+        if let Ok(mut used) = self.bytes.lock() {
+            *used = used.saturating_sub(bytes as u64);
+        }
+    }
+
     pub(crate) fn write(
         &self,
         reference: &str,
@@ -83,21 +89,31 @@ impl SpillAccess {
                 Ok(())
             }
         };
-        check()?;
-        if !crate::validate::valid_digest(reference) || bytes.len() > MAX_SPILL_RESULT_BYTES {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let _lease = writer_lock(&self.current)?;
-        check()?;
-        let name = format!("{reference}.txt");
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .follow(FollowSymlinks::No);
-        nonblocking(&mut options);
-        let mut file = self.current.open_with(&name, &options)?;
+        let prepared = (|| -> Result<_, StoreError> {
+            check()?;
+            if !crate::validate::valid_digest(reference) || bytes.len() > MAX_SPILL_RESULT_BYTES {
+                return Err(StoreError::InvalidStateDirectory);
+            }
+            let lease = writer_lock(&self.current)?;
+            check()?;
+            let name = format!("{reference}.txt");
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .follow(FollowSymlinks::No);
+            nonblocking(&mut options);
+            let file = self.current.open_with(&name, &options)?;
+            Ok((lease, file, name))
+        })();
+        let (_lease, mut file, name) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.release(bytes.len());
+                return Err(error);
+            }
+        };
         let result = (|| {
             check()?;
             file.write_all(bytes)?;
@@ -113,7 +129,9 @@ impl SpillAccess {
             check()
         })();
         if let Err(error) = result {
-            let _ = self.current.remove_file(&name);
+            if self.current.remove_file(&name).is_ok() {
+                self.release(bytes.len());
+            }
             return Err(error.into());
         }
         Ok(())
@@ -207,8 +225,34 @@ mod tests {
         let run = RunId::new();
         let access = state.admit_spills(run, &[]).unwrap();
         let bytes = vec![b'!'; MAX_SPILL_RESULT_BYTES];
+        for (reference, cancelled) in [
+            ("a".repeat(64), true),
+            ("invalid".into(), false),
+            ("b".repeat(64), false),
+        ] {
+            let (_entered, release, _finished) =
+                crate::fault::FaultPlan::gate_spill_write(state.path().to_owned());
+            drop(release);
+            let mut gate = crate::fault::spill_write_gate(state.path());
+            assert!(access.reserve(bytes.len()).unwrap());
+            assert!(
+                access
+                    .write(&reference, &bytes, &AtomicBool::new(cancelled), &mut gate)
+                    .is_err()
+            );
+            assert!(
+                access
+                    .current
+                    .symlink_metadata(format!("{reference}.txt"))
+                    .is_err()
+            );
+        }
         for index in 0..MAX_SPILL_RUN_BYTES / MAX_SPILL_RESULT_BYTES as u64 {
-            assert!(fixture_write(&access, &format!("{index:064x}"), &bytes).unwrap());
+            let reference = format!("{index:064x}");
+            assert!(fixture_write(&access, &reference, &bytes).unwrap());
+            if index == 0 {
+                assert!(fixture_write(&access, &reference, &bytes).is_err());
+            }
         }
         assert!(!fixture_write(&access, &"f".repeat(64), b"overflow").unwrap());
         let reference = "0".repeat(64);

@@ -31,6 +31,8 @@ impl Writer {
         }
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = std::sync::Arc::clone(&cancelled);
+        let release = std::sync::Arc::clone(&access);
+        let reserved_bytes = bytes.len();
         let (send, result) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("arany-spill".into())
@@ -42,6 +44,7 @@ impl Writer {
                 let _ = send.send(result);
                 drop(gate);
             })
+            .map_err(|_| release.release(reserved_bytes))
             .ok()?;
         Some(Self { cancelled, result })
     }
