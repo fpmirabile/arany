@@ -531,6 +531,7 @@ impl View {
             }
         });
         ToolObservation {
+            spill: None,
             intent,
             disposition,
             output,
@@ -1712,6 +1713,7 @@ mod tests {
         let (disposition, output, enforcement_cause, limit_cause) =
             super::super::dispatch::outcome(&intent, result);
         ToolObservation {
+            spill: None,
             attestation: Some(Attestation::WorkerRead {
                 intent_digest: intent.digest(),
                 guard: None,
@@ -1736,6 +1738,7 @@ mod tests {
         image.validate(&view.grant).unwrap();
         validate_edit(&view.current, &image, &intent.call, &view.grant).unwrap();
         let observation = ToolObservation {
+            spill: None,
             attestation: Some(Attestation::Guard(super::super::GuardReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -2459,6 +2462,7 @@ mod tests {
                 }
             }
             let observation = ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: if case == "uncertain" {
                     ToolDisposition::Uncertain
@@ -2578,6 +2582,7 @@ mod tests {
                 }
             }
             let observation = ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 output: serde_json::to_string(&WorkerCommandResult {
@@ -2873,6 +2878,7 @@ mod tests {
             contained: std::sync::atomic::AtomicBool::new(false),
         }));
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "ok".into(),

@@ -86,6 +86,9 @@ pub(super) fn finished(
     outcome: &HookOutcome,
     prior: u64,
 ) -> Result<(), ReplayError> {
+    if outcome.observation.spill.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
     if current
         .runs
         .iter()

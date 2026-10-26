@@ -1311,6 +1311,8 @@ impl ApprovalCause {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spill: Option<super::spill::OutputSpill>,
     pub intent: EffectIntent,
     pub disposition: ToolDisposition,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -1390,6 +1392,7 @@ impl ToolObservation {
         let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
             && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
+            && self.spill.as_ref().is_none_or(|spill| spill.valid(self))
             && (self.approval_cause.is_none()
                 || self.disposition == ToolDisposition::Denied
                     && self.attestation.is_none()
@@ -1827,6 +1830,9 @@ pub(crate) fn cleared_model_result(observation: &ToolObservation) -> Value {
     {
         value["execution"] = json!("uncertain; never replay");
     }
+    if let Some(spill) = original.get("spill") {
+        value["spill"] = spill.clone();
+    }
     if let Some(target) = original.get("target") {
         value["target"] = target.clone();
     }
@@ -1922,6 +1928,9 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
             _ => "none",
         });
     }
+    if let Some(spill) = &observation.spill {
+        value["spill"] = json!(spill);
+    }
     if let Some(cause) = observation.limit_cause {
         value["limit_cause"] = json!(cause);
     }
@@ -2007,6 +2016,7 @@ mod model_call_tests {
                 use_count: 1,
             };
             let mut o = ToolObservation {
+                spill: None,
                 attestation: Some(Attestation::for_site(&intent)),
                 intent,
                 disposition: ToolDisposition::Succeeded,
@@ -2120,6 +2130,7 @@ mod unguarded_vocabulary_tests {
         assert!(Attestation::for_site(&host).valid_for(&host));
 
         let mut observation = ToolObservation {
+            spill: None,
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,
@@ -2154,6 +2165,7 @@ mod unguarded_vocabulary_tests {
     fn attested_unguarded_runs_project_as_unguarded_and_unattested_as_not_confirmed() {
         let host = intent(unguarded(&["-c", "exit 0"], ""));
         let mut observation = ToolObservation {
+            spill: None,
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,

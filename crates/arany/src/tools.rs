@@ -19,6 +19,8 @@ mod guard;
 mod mcp;
 pub(crate) use mcp::FRAME_BYTES;
 mod output;
+pub(crate) mod spill;
+pub use spill::OutputSpill;
 pub mod permissions;
 mod process;
 mod search;
@@ -1472,6 +1474,7 @@ impl ToolRuntime {
         ) && matches!(intent.call, ToolCall::Command { .. })
         {
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent,
@@ -1498,6 +1501,7 @@ impl ToolRuntime {
             || !self.config.allows(&intent.call)
         {
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent,
@@ -1611,6 +1615,7 @@ impl ToolRuntime {
         if unguarded::prohibited_intent(&intent) {
             let output = unguarded::manual_handoff(&intent.call);
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 approval_cause: None,
@@ -1672,6 +1677,7 @@ impl ToolRuntime {
             })
         });
         let mut observation = ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: outcome.limit_cause,
             attestation,
@@ -1681,7 +1687,11 @@ impl ToolRuntime {
             approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
+        if self.hook_stdin.is_none() {
+            observation.spill = spill::OutputSpill::captured(&observation, outcome.captured);
+        }
         if !observation.valid() {
+            observation.spill = None;
             observation.disposition = ToolDisposition::Limit;
             observation.limit_cause = Some(crate::tools::LimitCause::Resource);
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
@@ -1825,6 +1835,7 @@ impl ToolRuntime {
                 None
             };
         let mut observation = ToolObservation {
+            spill: None,
             attestation: Some(Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -1866,6 +1877,7 @@ static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semapho
 
 fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: Some(cause),
         intent,
@@ -1879,6 +1891,7 @@ fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> To
 
 fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent,
@@ -2009,6 +2022,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         }
     }
     ToolObservation {
+        spill: None,
         enforcement_cause,
         limit_cause: resource_limit.then_some(LimitCause::Resource),
         output,
@@ -2032,6 +2046,7 @@ pub(super) fn uncertain_observation(
     record_failure("Guard", &intent, &error);
     let stage = failure_stage(&error);
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent,

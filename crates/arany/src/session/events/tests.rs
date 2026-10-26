@@ -38,6 +38,7 @@ mod goal_success_tests {
             use_count: 1,
         };
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                 .then_some(crate::tools::LimitCause::Resource),
@@ -1901,6 +1902,7 @@ mod payload_version_tests {
             use_count: 1,
         };
         crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(crate::tools::Attestation::InProcess {

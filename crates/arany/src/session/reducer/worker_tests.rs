@@ -132,6 +132,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: intent.agent_run_id,
             observation: ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition,
                 attestation,
@@ -1562,6 +1563,7 @@ fn stop_editor_hook(f: &mut Fixture) {
         outcome: HookOutcome {
             boundary_active_ms: None, result: HookResult::Stopped { reason: None },
             observation: ToolObservation {
+                spill: None,
                 attestation: Some(Attestation::Guard(receipt(&intent))), intent,
                 disposition: ToolDisposition::Succeeded, enforcement_cause: None,
                 limit_cause: None, approval_cause: None, cache_update: CacheUpdate::NotApplicable,
@@ -3173,6 +3175,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             run_id: f.run,
             agent_run_id: f.child,
             observation: ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 enforcement_cause: None,
@@ -3433,6 +3436,7 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
         run_id: f.run,
         agent_run_id: f.child,
         observation: ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             attestation: Some(attestation),
@@ -4408,6 +4412,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             }
         };
         let observation = ToolObservation {
+            spill: None,
             attestation: Some(Attestation::Guard(receipt(&intent))),
             intent,
             disposition: if site == "stopped" {
@@ -4470,6 +4475,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                     run_id: f.run,
                     agent_run_id: actor,
                     observation: ToolObservation {
+                        spill: None,
                         intent: pending,
                         disposition: ToolDisposition::Denied,
                         output: "Hook denied this Tool: blocked".into(),
@@ -4826,6 +4832,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             ),
         };
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(), disposition, output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":exit,"stdout":stdout,"stderr":stderr,"stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":(stderr).len(),"lines":(stderr).lines().count()},"changeset":{"files":[]}}).to_string(),
             attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(crate::LimitCause::Resource),
@@ -4983,6 +4990,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: self.child,
             observation: ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 enforcement_cause: None,

@@ -254,33 +254,20 @@ fn command_output(
             Ok(output)
         };
     }
+    if site.hook_stdin.is_none() {
+        *site.captured.lock().map_err(|_| ToolError::Operation)? =
+            Some(super::spill::streams(&out, &err));
+    }
     #[cfg(target_os = "macos")]
     {
-        if matches!(truncation, Truncation::Refuse) {
-            fit_selected_command(
-                exit_code,
-                &out,
-                &err,
-                changeset.clone(),
-                budget,
-                truncation,
-                selection,
-            )?;
-        }
+        let output = fit_selected_command(
+            exit_code, &out, &err, changeset, budget, truncation, selection,
+        )?;
         super::output::CommandWindows {
             stdout: out,
             stderr: err,
         }
         .send()?;
-        let output = fit_selected_command(
-            exit_code,
-            &super::output::Window::default(),
-            &super::output::Window::default(),
-            changeset,
-            budget,
-            truncation,
-            selection,
-        )?;
         if timed_out {
             Err(ToolError::Timeout(output))
         } else {

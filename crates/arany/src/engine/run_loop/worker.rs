@@ -614,6 +614,7 @@ impl RunLoop<'_> {
             Ok(view) => view,
             Err(error) => {
                 return Ok(ToolObservation {
+                    spill: None,
                     intent,
                     disposition: ToolDisposition::Failed,
                     output: error.to_string(),
@@ -629,6 +630,7 @@ impl RunLoop<'_> {
             Ok(bytes) => bytes,
             Err(error) => {
                 return Ok(ToolObservation {
+                    spill: None,
                     intent,
                     disposition: ToolDisposition::Failed,
                     output: error.to_string(),
@@ -649,6 +651,7 @@ impl RunLoop<'_> {
             )
             .await?;
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "Worker base captured; Workspace unchanged".into(),

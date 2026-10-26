@@ -486,6 +486,7 @@ impl RunLoop<'_> {
             not_dispatched(intent, &NotDispatched::TimeoutLimit { requested, maximum })
         } else {
             ToolObservation {
+                spill: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: crate::tools::types::UNDISPATCHED_STEP_OUTPUT.into(),

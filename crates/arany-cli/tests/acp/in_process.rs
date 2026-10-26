@@ -1840,6 +1840,7 @@ async fn move_live_and_permission_projection_preserves_file_change_details() {
         "/var/workspace/destination.txt"
     );
     let uncertain = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -1875,6 +1876,7 @@ async fn move_completion_preserves_denial_projection() {
     adapter.item(&intent, None).await;
     let _ = adapter.next().await;
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Denied,
         enforcement_cause: None,
@@ -2673,6 +2675,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
     };
     assert_eq!(reply.id, Some(RequestId::Integer(22)));
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -3116,6 +3119,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         assert!(update["params"]["update"].get("content").is_none());
     }
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Succeeded,
         enforcement_cause: None,
@@ -3968,6 +3972,7 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
     let interrupt = adapter.request().await;
     assert_eq!(interrupt.method, "turn/interrupt");
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -4050,6 +4055,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .await;
     assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,

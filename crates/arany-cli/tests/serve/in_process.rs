@@ -1810,6 +1810,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         (ToolDisposition::Uncertain, "uncertain"),
     ] {
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition,
             enforcement_cause: None,
@@ -1830,6 +1831,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         assert_eq!(item["output"], "bounded\noutput");
     }
     let observation = ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         enforcement_cause: None,
@@ -1950,6 +1952,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     }
     let canary = "historical protocol hook canary";
     run.tools[0].observation = Some(ToolObservation {
+        spill: None,
         intent: run.tools[0].intent.clone(),
         disposition: ToolDisposition::Denied,
         enforcement_cause: None,

@@ -645,7 +645,7 @@ impl RunLoop<'_> {
                     }
                 });
         }
-        let answer = match verdict {
+        let mut answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
                 narrowed = Some(call);
@@ -712,6 +712,7 @@ impl RunLoop<'_> {
                 }
             },
         };
+        answer.observation.spill = None;
         self.append(Event::ToolFinished {
             checkpoint: answer.checkpoint.clone(),
             run_id: self.run_id,

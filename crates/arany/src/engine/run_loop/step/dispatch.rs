@@ -732,6 +732,7 @@ pub(super) fn undispatched(
     output: impl Into<String>,
 ) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: (disposition == ToolDisposition::Limit)
             .then_some(crate::tools::LimitCause::Resource),
