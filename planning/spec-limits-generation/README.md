@@ -60,4 +60,4 @@ No trust boundary changes. The export reads compiled constants only. The budget 
 
 ## Gates
 
-No code owner conflict. Prose conflicts: slices 1 and 2 edit the limits sections that the architecture follow-ups [P5, T2, C3 and J1–K2](../architecture-homogenization/README.md#follow-up-slices-post-refactor-review) also edit in their same-PR documentation; land slice 1 now and rebase slice 2 after K1/K2 to avoid conflicting `execution.md` rows. Slice 3's blocking mode waits for the follow-up families that are still open at that time to merge their spec edits. Slice 4 waits for C3 (the last follow-up that edits the native `tools.md` sections).
+No code owner conflict. Prose conflicts: slices 1 and 2 edit the limits sections that the architecture follow-ups P5, T2, C3 and J1–K2 (landed) also edit in their same-PR documentation; land slice 1 now and rebase slice 2 after K1/K2 to avoid conflicting `execution.md` rows. Slice 3's blocking mode waits for the follow-up families that are still open at that time to merge their spec edits. Slice 4 waits for C3 (the last follow-up that edits the native `tools.md` sections).
