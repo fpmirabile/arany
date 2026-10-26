@@ -349,6 +349,13 @@ impl View {
         Ok(())
     }
 
+    pub(crate) fn shape_intent(&self, intent: &mut EffectIntent) {
+        intent.target = self.target();
+        if !intent.call.is_process() {
+            intent.enforcement_digest = self.enforcement_digest;
+        }
+    }
+
     pub(crate) fn note_intent(&mut self, intent: &EffectIntent) {
         self.last_intent_digest = Some(intent.digest());
         self.last_enforcement_digest = Some(intent.enforcement_digest);
@@ -524,6 +531,7 @@ impl View {
             }
         });
         ToolObservation {
+            spill: None,
             intent,
             disposition,
             output,
@@ -1236,6 +1244,9 @@ fn inspect(
             offset,
             limit,
         } => {
+            if super::spill::read_reference(path).is_some() {
+                return Err(ToolError::SpillUnavailable);
+            }
             let Some(Entry::File { content, .. }) = image.entries.get(path) else {
                 return Err(ToolError::Path);
             };
@@ -1654,7 +1665,7 @@ mod tests {
 
     fn intent(runtime: &ToolRuntime, view: &View, call: ToolCall) -> EffectIntent {
         let mut intent = runtime.intent(view.run_id, view.assignment, call);
-        intent.target = view.target();
+        view.shape_intent(&mut intent);
         intent
     }
 
@@ -1705,6 +1716,7 @@ mod tests {
         let (disposition, output, enforcement_cause, limit_cause) =
             super::super::dispatch::outcome(&intent, result);
         ToolObservation {
+            spill: None,
             attestation: Some(Attestation::WorkerRead {
                 intent_digest: intent.digest(),
                 guard: None,
@@ -1729,6 +1741,7 @@ mod tests {
         image.validate(&view.grant).unwrap();
         validate_edit(&view.current, &image, &intent.call, &view.grant).unwrap();
         let observation = ToolObservation {
+            spill: None,
             attestation: Some(Attestation::Guard(super::super::GuardReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -2452,6 +2465,7 @@ mod tests {
                 }
             }
             let observation = ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: if case == "uncertain" {
                     ToolDisposition::Uncertain
@@ -2571,6 +2585,7 @@ mod tests {
                 }
             }
             let observation = ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 output: serde_json::to_string(&WorkerCommandResult {
@@ -2866,6 +2881,7 @@ mod tests {
             contained: std::sync::atomic::AtomicBool::new(false),
         }));
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "ok".into(),
@@ -3023,8 +3039,10 @@ mod tests {
             },
         ]);
         let conflict = decode_handover(&call(&conflict), &conflict, &runtime.config).unwrap();
+        let root = crate::tools::fs::open_directory(dir.path()).unwrap();
+        let control = crate::tools::fs::MutationControl::default();
         assert!(matches!(
-            fs::apply_worker_changeset(dir.path(), &conflict),
+            fs::apply_worker_changeset(&root, &conflict, &control),
             Err(ToolError::Conflict)
         ));
         assert_eq!(std::fs::read(dir.path().join("owned/a")).unwrap(), old);
@@ -3035,7 +3053,7 @@ mod tests {
             }]);
             let alias = decode_handover(&call(&alias), &alias, &runtime.config).unwrap();
             assert!(
-                fs::apply_worker_changeset(dir.path(), &alias).is_err(),
+                fs::apply_worker_changeset(&root, &alias, &control).is_err(),
                 "{path}"
             );
         }
@@ -3049,7 +3067,7 @@ mod tests {
                 "{path}"
             );
         }
-        fs::apply_worker_changeset(dir.path(), &changes).unwrap();
+        fs::apply_worker_changeset(&root, &changes, &control).unwrap();
         assert_eq!(std::fs::read(dir.path().join("owned/a")).unwrap(), new);
         assert_eq!(
             std::fs::read(dir.path().join("owned/b")).unwrap(),

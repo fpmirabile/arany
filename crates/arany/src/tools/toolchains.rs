@@ -249,7 +249,7 @@ impl RuntimeGrant {
         let Some(version) = self.version.as_deref() else {
             return false;
         };
-        if version.len() > 128 || !is_versioned_installation(self.kind, version) {
+        if version.len() > 128 || installation_version(self.kind, version).is_none() {
             return false;
         }
         let suffix = match (self.kind, self.manager) {
@@ -372,6 +372,65 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
         profile_order((&left.grant, &left.token), (&right.grant, &right.token))
     });
     Ok(candidates)
+}
+
+pub(super) fn default_profile_selection(
+    candidates: &[Candidate],
+    saved: &[RuntimeGrant],
+) -> std::collections::BTreeSet<String> {
+    use RuntimeKind::*;
+    let mut selected = saved
+        .iter()
+        .filter_map(|grant| grant.token().ok().map(|token| (grant.kind, token)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for kind in [
+        Rust,
+        Node,
+        Python,
+        CargoCache,
+        CargoSource,
+        CargoIndex,
+        NpmCache,
+        PipHttpCache,
+        PipWheelCache,
+        AppleCompiler,
+        AppleSdk,
+    ] {
+        let enabled = match kind {
+            Rust | Node | Python => true,
+            CargoCache | CargoSource | CargoIndex | AppleCompiler | AppleSdk => {
+                selected.contains_key(&Rust)
+            }
+            NpmCache => selected.contains_key(&Node),
+            PipHttpCache | PipWheelCache => selected.contains_key(&Python),
+        };
+        if !enabled || selected.contains_key(&kind) {
+            continue;
+        }
+        let newest = candidates
+            .iter()
+            .filter(|candidate| candidate.grant.kind == kind)
+            .filter_map(|candidate| {
+                let version = match kind {
+                    Rust | Node | Python => {
+                        installation_version(kind, candidate.grant.version.as_deref()?)?
+                    }
+                    AppleSdk => valid_apple_sdk_version(candidate.grant.version.as_deref()?)?,
+                    CargoCache | CargoSource | CargoIndex | NpmCache | PipHttpCache
+                    | PipWheelCache | AppleCompiler => (0, 0, 0),
+                };
+                Some((candidate, version))
+            })
+            .max_by(|(left, left_version), (right, right_version)| {
+                left_version.cmp(right_version).then_with(|| {
+                    profile_order((&right.grant, &right.token), (&left.grant, &left.token))
+                })
+            });
+        if let Some((candidate, _)) = newest {
+            selected.insert(kind, candidate.token.clone());
+        }
+    }
+    selected.into_values().collect()
 }
 
 pub(super) fn profile_order(
@@ -561,7 +620,7 @@ fn push(
     version: String,
     path: PathBuf,
 ) -> Result<(), ToolError> {
-    if !is_versioned_installation(kind, &version) {
+    if installation_version(kind, &version).is_none() {
         return Ok(());
     }
     if let Some(grant) = admit_directory(kind, manager, Some(version), path)? {
@@ -570,7 +629,7 @@ fn push(
     Ok(())
 }
 
-fn is_versioned_installation(kind: RuntimeKind, version: &str) -> bool {
+fn installation_version(kind: RuntimeKind, version: &str) -> Option<(u64, u64, u64)> {
     let version = if kind == RuntimeKind::Node {
         version.strip_prefix('v').unwrap_or(version)
     } else {
@@ -578,10 +637,11 @@ fn is_versioned_installation(kind: RuntimeKind, version: &str) -> bool {
     };
     let bytes = version.as_bytes();
     if bytes.len() > 128 {
-        return false;
+        return None;
     }
     let mut position = 0;
-    for component in 0..3 {
+    let mut numbers = [0; 3];
+    for (component, number) in numbers.iter_mut().enumerate() {
         let start = position;
         while bytes
             .get(position)
@@ -593,22 +653,24 @@ fn is_versioned_installation(kind: RuntimeKind, version: &str) -> bool {
             || position - start > 1 && bytes[start] == b'0'
             || (component < 2 && bytes.get(position) != Some(&b'.'))
         {
-            return false;
+            return None;
         }
+        *number = version[start..position].parse().ok()?;
         if component < 2 {
             position += 1;
         }
     }
     if position == bytes.len() {
-        return true;
+        return Some((numbers[0], numbers[1], numbers[2]));
     }
     if !matches!(bytes[position], b'-' | b'+') {
-        return false;
+        return None;
     }
-    bytes[position + 1..]
+    (bytes[position + 1..]
         .iter()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        && bytes.len() > position + 1
+        && bytes.len() > position + 1)
+        .then_some((numbers[0], numbers[1], numbers[2]))
 }
 
 fn apple_layout_matches(grant: &RuntimeGrant) -> bool {
@@ -625,7 +687,8 @@ fn apple_layout_matches(grant: &RuntimeGrant) -> bool {
                     && grant
                         .version
                         .as_deref()
-                        .is_some_and(valid_apple_sdk_version)
+                        .and_then(valid_apple_sdk_version)
+                        .is_some()
                     && grant.path
                         == Path::new(APPLE_CLT_SDKS).join(format!(
                             "MacOSX{}.sdk",
@@ -642,22 +705,23 @@ fn apple_layout_matches(grant: &RuntimeGrant) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn valid_apple_sdk_version(version: &str) -> bool {
+fn valid_apple_sdk_version(version: &str) -> Option<(u64, u64, u64)> {
     if version.len() > 32 {
-        return false;
+        return None;
     }
     let parts = version.split('.').collect::<Vec<_>>();
-    (2..=3).contains(&parts.len())
-        && parts[0] != "0"
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.len() <= 5
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && part
-                    .parse::<u16>()
-                    .is_ok_and(|number| number.to_string() == *part)
-        })
+    if !(2..=3).contains(&parts.len()) || parts[0] == "0" {
+        return None;
+    }
+    let mut numbers = [0; 3];
+    for (part, number) in parts.iter().zip(&mut numbers) {
+        let parsed = part.parse::<u16>().ok()?;
+        if part.len() > 5 || parsed.to_string() != *part {
+            return None;
+        }
+        *number = u64::from(parsed);
+    }
+    Some((numbers[0], numbers[1], numbers[2]))
 }
 
 #[cfg(target_os = "macos")]
@@ -687,7 +751,7 @@ fn discover_apple_runtimes(candidates: &mut Vec<Candidate>) -> Result<(), ToolEr
         let Some(version) = name
             .strip_prefix("MacOSX")
             .and_then(|name| name.strip_suffix(".sdk"))
-            .filter(|version| valid_apple_sdk_version(version))
+            .filter(|version| valid_apple_sdk_version(version).is_some())
         else {
             continue;
         };
@@ -832,4 +896,24 @@ fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Resul
         grant,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sdk_versions_require_bounded_canonical_numeric_components() {
+        for (label, expected) in [
+            ("15.9", Some((15, 9, 0))),
+            ("15.10.0", Some((15, 10, 0))),
+            ("15.10.1", Some((15, 10, 1))),
+            ("0.1", None),
+            ("15.01", None),
+            ("15.1.65536", None),
+            ("15", None),
+            ("15.1.0.0", None),
+            ("15.+1", None),
+        ] {
+            assert_eq!(super::valid_apple_sdk_version(label), expected, "{label}");
+        }
+    }
 }

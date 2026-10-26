@@ -10,8 +10,8 @@
 | <a id="max_history_runs"></a>[`MAX_HISTORY_RUNS`](#max_history_runs) | 32 | Runs | `crates/arany/src/session.rs` |
 | <a id="max_compaction_input_bytes"></a>[`MAX_COMPACTION_INPUT_BYTES`](#max_compaction_input_bytes) | 258048 | bytes | `crates/arany/src/session/compaction.rs` |
 | <a id="max_compaction_turns"></a>[`MAX_COMPACTION_TURNS`](#max_compaction_turns) | 256 | turns | `crates/arany/src/session/compaction.rs` |
-| <a id="max_compaction_output_tokens"></a>[`MAX_COMPACTION_OUTPUT_TOKENS`](#max_compaction_output_tokens) | 1024 | tokens | `crates/arany/src/session/compaction.rs` |
-| <a id="max_compaction_summary_bytes"></a>[`MAX_COMPACTION_SUMMARY_BYTES`](#max_compaction_summary_bytes) | 8192 | bytes | `crates/arany/src/session/compaction.rs` |
+| <a id="max_compaction_output_tokens"></a>[`MAX_COMPACTION_OUTPUT_TOKENS`](#max_compaction_output_tokens) | 8192 | tokens | `crates/arany/src/session/compaction.rs` |
+| <a id="max_compaction_summary_bytes"></a>[`MAX_COMPACTION_SUMMARY_BYTES`](#max_compaction_summary_bytes) | 65536 | bytes | `crates/arany/src/session/compaction.rs` |
 | <a id="auto_compaction_history_bytes"></a>[`AUTO_COMPACTION_HISTORY_BYTES`](#auto_compaction_history_bytes) | 158080 | bytes | `crates/arany/src/session/compaction.rs` |
 | <a id="compaction_input_expansion"></a>[`COMPACTION_INPUT_EXPANSION`](#compaction_input_expansion) | 2 | times | `crates/arany/src/provider.rs` |
 | <a id="compaction_request_envelope_bytes"></a>[`COMPACTION_REQUEST_ENVELOPE_BYTES`](#compaction_request_envelope_bytes) | 8192 | bytes | `crates/arany/src/provider.rs` |
@@ -20,6 +20,7 @@
 | <a id="max_goal_active_ms"></a>[`MAX_GOAL_ACTIVE_MS`](#max_goal_active_ms) | 1800000 | ms | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_goal_runs"></a>[`MAX_GOAL_RUNS`](#max_goal_runs) | 16 | Runs | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_event_bytes"></a>[`MAX_EVENT_BYTES`](#max_event_bytes) | 65536 | bytes | `crates/arany/src/store.rs` |
+| <a id="max_compaction_event_bytes"></a>[`MAX_COMPACTION_EVENT_BYTES`](#max_compaction_event_bytes) | 409600 | bytes | `crates/arany/src/store.rs` |
 | <a id="max_session_lock_files"></a>[`MAX_SESSION_LOCK_FILES`](#max_session_lock_files) | 65536 | files | `crates/arany/src/store/state/lock.rs` |
 | <a id="max_state_overhead_files"></a>[`MAX_STATE_OVERHEAD_FILES`](#max_state_overhead_files) | 32 | files | `crates/arany/src/store/state/lock.rs` |
 | <a id="max_workspace_lock_files"></a>[`MAX_WORKSPACE_LOCK_FILES`](#max_workspace_lock_files) | 4096 | files | `crates/arany/src/store/state/lock.rs` |
@@ -46,6 +47,11 @@
 | <a id="max_ordinary_tool_argument_bytes"></a>[`MAX_ORDINARY_TOOL_ARGUMENT_BYTES`](#max_ordinary_tool_argument_bytes) | 16384 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_command_integration_argument_bytes"></a>[`MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES`](#max_command_integration_argument_bytes) | 65536 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_tool_result_bytes"></a>[`MAX_TOOL_RESULT_BYTES`](#max_tool_result_bytes) | 65536 | bytes | `crates/arany/src/tools/types.rs` |
+| <a id="sweep_time_ms"></a>[`SWEEP_TIME_MS`](#sweep_time_ms) | 30000 | milliseconds | `crates/arany/src/store/state/spill.rs` |
+| <a id="spill_persist_timeout_ms"></a>[`SPILL_PERSIST_TIMEOUT_MS`](#spill_persist_timeout_ms) | 5000 | milliseconds | `crates/arany/src/tools/spill.rs` |
+| <a id="max_spill_writers"></a>[`MAX_SPILL_WRITERS`](#max_spill_writers) | 1 | writers | `crates/arany/src/tools/spill.rs` |
+| <a id="max_spill_result_bytes"></a>[`MAX_SPILL_RESULT_BYTES`](#max_spill_result_bytes) | 8388608 | bytes | `crates/arany/src/tools/spill.rs` |
+| <a id="max_spill_run_bytes"></a>[`MAX_SPILL_RUN_BYTES`](#max_spill_run_bytes) | 67108864 | bytes | `crates/arany/src/tools/spill.rs` |
 | <a id="max_read_page_lines"></a>[`MAX_READ_PAGE_LINES`](#max_read_page_lines) | 2000 | lines | `crates/arany/src/tools/types.rs` |
 | <a id="max_read_line_chars"></a>[`MAX_READ_LINE_CHARS`](#max_read_line_chars) | 2000 | characters | `crates/arany/src/tools/types.rs` |
 | <a id="max_config_bytes"></a>[`MAX_CONFIG_BYTES`](#max_config_bytes) | 65536 | bytes | `crates/arany/src/tools/permissions.rs` |

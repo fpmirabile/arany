@@ -1060,48 +1060,25 @@ pub(super) mod cleanup_tests {
         super::super::AttachedTerminal {
             newline_shortcut: super::super::NewlineShortcut::default(),
             waiting_tool: None,
-            terminal: None,
+            owned: super::super::OwnedTerminal::new(),
             mode: super::super::TerminalMode::Classic,
             classic_pinned: false,
-            alternate: None,
-            transcript_open: false,
-            scrollback_dump: false,
-            native: Default::default(),
+            transcript: Default::default(),
             active_run: None,
-            history: Default::default(),
-            classic_history: Default::default(),
-            dialog_armed: false,
-            history_adjacent: true,
-            input: None,
-            _raw_mode: None,
+            panels: Default::default(),
             pointer: Default::default(),
-            pointer_modes: None,
-            graphics_protocol: None,
             image_chip_areas: Vec::new(),
             hovered_image: None,
             pointer_position: None,
             graphics_hover_changed: false,
             graphics_placement: None,
             hovered_image_digest: None,
-            frame_area: None,
-            history_area: None,
-            panel_selection: Default::default(),
-            panel_copy: None,
-            selection_cue: None,
-            bracketed_paste: None,
-            #[cfg(unix)]
-            keyboard: None,
-            session_picker_area: None,
-            agent_picker_area: None,
             linear,
-            kept_tools: None,
             secret_echo: None,
             agent_panel: None,
             agent_chat: None,
             child_drafts: Vec::new(),
             primary_input_capacity: crate::terminal::MAX_PRIMARY_DRAFT_BYTES,
-            help_selected: None,
-            usage_panel: None,
             clipboard: None,
             clipboard_paste: None,
             deferred_input: None,
@@ -1134,10 +1111,47 @@ pub(super) mod cleanup_tests {
                 let mut linear = LinearState::new("screen-reader");
                 linear.keep_written_tools(written);
                 let mut terminal = released_terminal(Some(linear));
+                let view = crate::presentation::team_view();
+                let recorded = view.runs[0].id;
+                terminal.transcript.native.objectives.insert(recorded);
+                for (history, notice) in [
+                    (&mut terminal.transcript.history, "Fullscreen notice"),
+                    (&mut terminal.transcript.classic_history, "Classic notice"),
+                ] {
+                    history.sync(&view, 80, 24);
+                    history.record_notice(crate::terminal::TerminalNotice::History(notice));
+                }
+                terminal.transcript.transcript_open = true;
+                terminal.transcript.scrollback_dump = true;
+                terminal.transcript.history_adjacent = false;
                 terminal.release_for_output().unwrap();
                 terminal
-                    .replace_released(released_terminal(Some(LinearState::new("screen-reader"))));
+                    .reacquire_with(|_, _, _| {
+                        Ok(released_terminal(Some(LinearState::new("screen-reader"))))
+                    })
+                    .unwrap();
                 assert_eq!(terminal.linear.as_ref().unwrap().written_tools(), written);
+                assert!(terminal.user_run_recorded(recorded));
+                for (history, kept, excluded) in [
+                    (
+                        &mut terminal.transcript.history,
+                        "Fullscreen notice",
+                        "Classic notice",
+                    ),
+                    (
+                        &mut terminal.transcript.classic_history,
+                        "Classic notice",
+                        "Fullscreen notice",
+                    ),
+                ] {
+                    history.sync(&view, 80, 24);
+                    let rows = history.visible(&view);
+                    assert!(rows.iter().any(|row| row.text.contains(kept)));
+                    assert!(rows.iter().all(|row| !row.text.contains(excluded)));
+                }
+                assert!(!terminal.transcript.transcript_open);
+                assert!(!terminal.transcript.scrollback_dump);
+                assert!(terminal.transcript.history_adjacent);
             });
     }
 

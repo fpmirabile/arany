@@ -426,7 +426,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
         assert_eq!(fourth.run.config.as_ref().unwrap().excluded_history_runs, 3);
         let compacted = engine.compact_session(&AdmittedProviders::single(provider.clone()), first.session_id, workspace.clone()).await.unwrap();
-        assert_eq!(compacted.compiler_version, 4);
+        assert_eq!(compacted.compiler_version, 5);
         for (id, objective) in [(first.session_id, maximal_objective.as_str()), (fork_id, "After fork")] {
             let mut next = request(&workspace, objective);
             next.session_id = Some(id);
@@ -478,7 +478,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert_eq!(compact.session_id, first.session_id);
             assert_eq!(compact.covered_run_id, fourth.run.id);
             assert_eq!(compact.model, "test-model");
-            assert_eq!(compact.max_output_tokens, 1024);
+            assert_eq!(compact.max_output_tokens, 4096);
             assert!(compact.previous_summary.is_none());
             assert_eq!(compact.items.len(), 4);
             let mut source_items = Vec::new();
@@ -782,7 +782,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
                 CompactionItem::Completed(turn) if turn.assistant == "Answer two"
             ));
             assert!(requests[0].previous_summary.is_none());
-            assert_eq!(requests[0].max_output_tokens, 1024);
+            assert_eq!(requests[0].max_output_tokens, 4096);
         }
         assert!(matches!(
             engine
@@ -1081,7 +1081,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                     })],
                 "seed compaction source"
             );
-            assert_eq!(compacts[0].max_output_tokens, 1024);
+            assert_eq!(compacts[0].max_output_tokens, 4096);
         });
         return;
     }
@@ -1348,7 +1348,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             assert_eq!(compacts[0].session_id, session_id);
             assert_eq!(compacts[0].covered_run_id, outcome.run.id);
             assert!(compacts[0].model == "test-model", "continued compaction model");
-            assert_eq!(compacts[0].max_output_tokens, 1024);
+            assert_eq!(compacts[0].max_output_tokens, 4096);
             assert_eq!(compacts[0].previous_summary.as_deref(), Some("Derived summary"));
             assert_eq!(compacts[0].items.len(), 1);
             assert!(matches!(&compacts[0].items[0], CompactionItem::Completed(turn) if turn.user == "Question" && turn.assistant == "A B C"));
@@ -1938,9 +1938,10 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolProposed
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1958,6 +1959,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
+ToolProposed
 ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
@@ -3750,7 +3752,7 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
 }
 
 #[tokio::test]
-async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly() {
+async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -3832,16 +3834,21 @@ async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly
         let observation = view.runs[0].tools[index].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
         assert_eq!(observation.output, text);
-        assert!(matches!(
-            observation.attestation,
-            Some(arany::Attestation::Guard(_))
-        ));
     }
     for step in &view.runs[0].tools[3..] {
         assert_eq!(
             step.observation.as_ref().unwrap().disposition,
             arany::ToolDisposition::Succeeded
         );
+    }
+    for step in &view.runs[0].tools {
+        let observation = step.observation.as_ref().unwrap();
+        assert!(matches!(
+            &observation.attestation,
+            Some(arany::Attestation::InProcess { receipt, .. })
+                if receipt.is_some()
+                    == (observation.disposition == arany::ToolDisposition::Succeeded)
+        ));
     }
     store.close().await.unwrap();
 }

@@ -1,4 +1,4 @@
-use super::{SessionView, active_run, pending_tool, valid_host_approval};
+use super::{SessionView, active_run, tool_by_digest, valid_host_approval};
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, ProviderCallDisposition, ReplayError};
 use crate::tools::permissions::{
@@ -7,10 +7,11 @@ use crate::tools::permissions::{
 
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     match event {
-        Event::ToolPermissionDecided {
+        Event::ToolStarted {
             run_id,
             agent_run_id,
-            verdict,
+            verdict: Some(verdict),
+            ..
         } => {
             let host_valid = valid_host_approval(current, *run_id, *agent_run_id, verdict);
             let run = active_run(current, *run_id)?;
@@ -21,7 +22,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .and_then(|config| config.tool_policy.as_ref());
             let permissions_pinned =
                 policy.is_some_and(|policy| policy.permissions_digest.is_some());
-            let pending_call = pending_tool(run, *agent_run_id)?.intent.call.clone();
+            let pending_call = tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?
+                .intent
+                .call
+                .clone();
             let unguarded = pending_call.is_unguarded();
             let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
             let first_use = !permissions_pinned
@@ -29,9 +33,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 && !unguarded
                 && pending_call.is_git()
                 && pending_call.facts().mutates;
-            let first_unconfigured_host_read = !permissions_pinned
-                && definition_mode.is_none()
-                && matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. });
+            let first_unconfigured_host_read =
+                !permissions_pinned && definition_mode.is_none() && pending_call.is_host_pr_read();
             if first_use
                 && !(primary
                     && verdict.hook_restriction.is_none()
@@ -63,7 +66,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                             && (matches!(
                                 verdict.mode,
                                 Some(PermissionMode::Default | PermissionMode::DontAsk)
-                            ) || matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. }))
+                            ) || pending_call.is_host_pr_read())
                         || !verdict.approved && verdict.decision == Decision::Deny))
             {
                 return Err(ReplayError::InvalidTransition);
@@ -92,8 +95,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if pending_call.is_host()
                 && verdict.approved
                 && (!primary
-                    || pending_tool(run, *agent_run_id)?.intent.host.is_none()
-                    || if matches!(&pending_call, crate::tools::ToolCall::GhPrList { .. }) {
+                    || tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?
+                        .intent
+                        .host
+                        .is_none()
+                    || if pending_call.is_host_pr_read() {
                         !(verdict.source == PermissionSource::TypedPrefixRule
                             && verdict.basis == PermissionSource::TypedPrefixRule
                             && verdict.decision == Decision::Allow
@@ -121,7 +127,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if verdict.source == crate::tools::permissions::PermissionSource::AiReview
                 && verdict.approved
             {
-                let index = pending_tool(run, *agent_run_id)?
+                let index = tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?
                     .review_call_index
                     .ok_or(ReplayError::InvalidTransition)?;
                 let reviewed = run
@@ -138,10 +144,13 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             }
             let chained = run
                 .tools
-                .len()
-                .checked_sub(2)
+                .iter()
+                .position(|tool| {
+                    tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest
+                })
+                .and_then(|index| index.checked_sub(1))
                 .is_some_and(|index| run.tools[index].narrowed_call().is_some());
-            let tool = pending_tool(run, *agent_run_id)?;
+            let tool = tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?;
             let narrowing_holds = !verdict.narrowed
                 || primary
                     && !chained

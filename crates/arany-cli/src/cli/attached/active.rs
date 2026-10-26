@@ -1,4 +1,4 @@
-use super::run::{PreparedSubmission, RunProgress, RunSubmission, RunUi, drive_run};
+use super::run::{PreparedSubmission, RunProgress, RunSubmission, RunUi, run_attached};
 use super::{
     Admission, Feedback, append_notice, confirm_outcome, hidden_answer_guidance, load_view,
     paused_goal_notice, print_run_answer, reload_view_or_keep, retained_draft_notice, run,
@@ -219,7 +219,7 @@ pub(super) fn preflight_idle_run(
 }
 
 pub(super) struct PendingSubmission<'a> {
-    pub(super) engine: &'a arany::Engine,
+    pub(super) engine: &'a std::sync::Arc<arany::Engine>,
     pub(super) admission: &'a Admission,
     pub(super) goal: GoalStart,
     pub(super) objective: String,
@@ -234,13 +234,13 @@ struct SubmissionInput {
 }
 
 struct SubmissionFinish<'a> {
-    engine: &'a arany::Engine,
+    engine: &'a std::sync::Arc<arany::Engine>,
     admission: &'a Admission,
     draft: Option<ComposerDraft>,
 }
 
 impl PendingSubmission<'_> {
-    pub(super) async fn submit(
+    pub(super) async fn run(
         self,
         terminal: &mut AttachedTerminal,
         view: &mut SessionView,
@@ -271,7 +271,7 @@ impl PendingSubmission<'_> {
             skill,
         };
         let result = match admit_submission(input, &finish, &mut ui, starting_sequence).await {
-            Ok(prepared) => drive_run(prepared, &mut ui).await,
+            Ok(prepared) => run_attached(prepared, &mut ui).await,
             Err(error) => Err(error),
         };
         finish.finish_run(&mut ui, result, starting_sequence).await
@@ -1066,6 +1066,7 @@ mod tests {
             covered_run_id: arany::RunId::new(),
             covered_sequence: 1,
             source_digest: [0; 32],
+            recent_files: Vec::new(),
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             prompt_version: 1,
@@ -1234,6 +1235,7 @@ mod goal_request_tests {
             failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
             tool_compaction_covered_count: 0,
             tool_results_cleared_count: 0,
             definitions: Default::default(),

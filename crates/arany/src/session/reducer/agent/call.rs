@@ -1,7 +1,6 @@
 use super::super::{
     AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal,
-    all_children_finished, current_goal_mut, definition_registry, is_delegated_synthesis,
-    is_tool_continuation, worker,
+    all_children_finished, current_goal_mut, is_delegated_synthesis, is_tool_continuation, worker,
 };
 use super::{child_tool_requests, is_child_step};
 use crate::provider::{AgentPhase, ProviderRole};
@@ -47,7 +46,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             &mut run.agents[index].tools
         };
         tools
-            .last_mut()
+            .iter_mut()
+            .find(|tool| tool.observation.is_none())
             .ok_or(ReplayError::InvalidTransition)?
             .review_call_index = Some(review_index);
     }
@@ -66,31 +66,38 @@ fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord)
             )
             && agent
                 .provider_calls
-                .last()
+                .iter()
+                .rev()
+                .find(|call| call.phase != AgentPhase::ToolReview)
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-            && agent.tools.last().is_some_and(|tool| {
-                tool.observation.is_none()
-                    && tool.review_call_index.is_none()
-                    && tool.permission_verdict.is_none()
-            });
+            && agent
+                .tools
+                .iter()
+                .find(|tool| tool.observation.is_none())
+                .is_some_and(|tool| {
+                    tool.started_sequence.is_none()
+                        && tool.observation.is_none()
+                        && tool.review_call_index.is_none()
+                        && tool.permission_verdict.is_none()
+                });
     }
     agent.role == AgentRole::Primary
         && record.phase == AgentPhase::ToolReview
         && agent.provider_calls.last().is_some_and(|call| {
             call.disposition == ProviderCallDisposition::ToolRequested
                 || call.phase == AgentPhase::ToolReview
-                    && run.tools.last().is_some_and(|tool| {
-                        matches!(
-                            tool.intent.call,
-                            crate::tools::ToolCall::ApplyChangeset { .. }
-                        )
-                    })
+                    && run.tools.iter().any(|tool| tool.observation.is_none())
         })
-        && run.tools.last().is_some_and(|tool| {
-            tool.observation.is_none()
-                && tool.review_call_index.is_none()
-                && tool.permission_verdict.is_none()
-        })
+        && run
+            .tools
+            .iter()
+            .find(|tool| tool.observation.is_none())
+            .is_some_and(|tool| {
+                tool.started_sequence.is_none()
+                    && tool.observation.is_none()
+                    && tool.review_call_index.is_none()
+                    && tool.permission_verdict.is_none()
+            })
 }
 
 fn validate_attempt_role(
@@ -201,14 +208,21 @@ fn continuation_admission(
             c.failure_reason == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
         })
         && record.phase == AgentPhase::ChildWork;
-    let refusal_continuation = agent.role == AgentRole::Primary
+    let researcher = agent.role == AgentRole::Child
+        && agent.assignment.is_none()
+        && matches!(agent.grant, Some(ChildGrant::ReadOnly { .. }));
+    let refusal_continuation = (agent.role == AgentRole::Primary || researcher)
         && !agent.refusal_limit_reached()
         && agent
             .provider_calls
             .last()
             .is_some_and(|call| call.refusal.is_some() && call.phase == record.phase)
         && run.hooks_settled()
-        && run.tools.iter().all(ToolView::settled_without_stop);
+        && if researcher {
+            agent.tools.iter().all(ToolView::settled_without_stop)
+        } else {
+            run.tools.iter().all(ToolView::settled_without_stop)
+        };
     let plan_continuation = tools_enabled
         && agent.role == AgentRole::Primary
         && agent.provider_calls.last().is_some_and(|call| {
@@ -261,9 +275,10 @@ fn tool_request_fits(run: &RunView, agent: &AgentView, record: &ProviderCallReco
                     agent.grant,
                     Some(ChildGrant::ReadOnly { .. } | ChildGrant::EditOnly { .. })
                 )
-                && record.requested_tools == 1
+                && (agent.assignment.is_none() || record.requested_tools == 1)
                 && child_definition_allows_turn(run, agent)
-                && child_tool_requests(agent) < crate::session::MAX_CHILD_TOOL_CALLS
+                && child_tool_requests(agent).saturating_add(usize::from(record.requested_tools))
+                    <= crate::session::MAX_CHILD_TOOL_CALLS
         }
     }
 }
@@ -276,8 +291,16 @@ fn validate_disposition(
     admission: ContinuationAdmission,
 ) -> Result<(), ReplayError> {
     if agent.status != AgentStatus::Active
+        || agent.refusal_limit_reached()
         || agent.role == AgentRole::Primary && agent.outcome_correction_exhausted()
         || !admission.valid
+        || agent.role == AgentRole::Child
+            && record.refusal.as_ref().is_some_and(|refusal| {
+                agent.assignment.is_some()
+                    || !matches!(agent.grant, Some(ChildGrant::ReadOnly { .. }))
+                    || record.phase != AgentPhase::ChildWork
+                    || refusal.cause != crate::session::ProposalRefusalCause::InvalidArguments
+            })
         || record.disposition == ProviderCallDisposition::PlanRecorded
             && !(admission.tools_enabled
                 && agent.role == AgentRole::Primary
@@ -355,18 +378,13 @@ fn charge_goal_call(
 }
 
 fn child_definition_allows_turn(run: &RunView, agent: &AgentView) -> bool {
-    agent.definition.as_ref().is_none_or(|name| {
-        definition_registry(run)
-            .ok()
-            .and_then(|registry| registry.get(name).cloned())
-            .is_some_and(|definition| {
-                agent
-                    .provider_calls
-                    .iter()
-                    .filter(|prior| prior.phase == AgentPhase::ChildWork)
-                    .count()
-                    + 1
-                    < usize::from(definition.max_turns)
-            })
+    super::child_turn_limit(run, agent).is_ok_and(|limit| {
+        agent
+            .provider_calls
+            .iter()
+            .filter(|prior| prior.phase == AgentPhase::ChildWork)
+            .count()
+            + 1
+            < usize::from(limit)
     })
 }

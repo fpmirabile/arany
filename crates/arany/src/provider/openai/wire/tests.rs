@@ -256,7 +256,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
                 status: UnansweredStatus::Interrupted,
             },
         ],
-        max_output_tokens: 1024,
+        max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
     };
     let compact_body = compaction_body(&compact);
     let compact_input: Value =
@@ -270,7 +270,10 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
         compact_body["prompt_cache_key"],
         compact.session_id.to_string()
     );
-    assert_eq!(compact_body["max_output_tokens"], 1024);
+    assert_eq!(
+        compact_body["max_output_tokens"],
+        crate::session::MAX_COMPACTION_OUTPUT_TOKENS
+    );
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
     assert!(compact_input.get("session_id").is_none());
@@ -441,7 +444,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
     assert_eq!(rendered["tool_choice"]["mode"], "auto");
-    assert_eq!(rendered["parallel_tool_calls"], false);
+    assert_eq!(rendered["parallel_tool_calls"], true);
     let input = rendered["input"].as_array().unwrap();
     let at = input
         .iter()
@@ -561,6 +564,8 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: None,
             turn: delegated.turn,
@@ -729,7 +734,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
     let rendered = run_body_for(&request, Some(Effort::Low));
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
     assert_eq!(rendered["tool_choice"]["mode"], "auto");
-    assert_eq!(rendered["parallel_tool_calls"], false);
+    assert_eq!(rendered["parallel_tool_calls"], true);
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["max_output_tokens"], 4096);
     assert!(rendered.get("text").is_none());
@@ -824,7 +829,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 14);
+    assert_eq!(rows.len(), 15);
     for (catalog, accepted) in [
         (
             json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
@@ -894,6 +899,116 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 }
 
 #[test]
+fn multi_call_outcomes_preserve_model_order_usage_and_paired_replay() {
+    for mut request in [primary_request(MODEL), researcher_request(MODEL)] {
+        for count in [
+            1,
+            crate::session::MAX_STEP_TOOL_CALLS,
+            crate::session::MAX_STEP_TOOL_CALLS + 1,
+        ] {
+            let count = usize::from(count);
+            let calls: Vec<_> = (0..count)
+                .map(|index| {
+                    function_call_with(
+                        &format!("call_{index}"),
+                        &format!("item_{index}"),
+                        "arany_read",
+                        &read_arguments(),
+                    )
+                })
+                .collect();
+            let fixture = response("completed", json!(calls));
+            for decoded in [
+                decode(&request, &fixture).unwrap(),
+                decode_streamed(&request, &fixture).unwrap(),
+            ] {
+                let ProviderOutcome::Tools(requests) = &decoded.outcome else {
+                    panic!("Tool batch")
+                };
+                assert_eq!(requests.len(), count);
+                assert_eq!(decoded.usage.input_tokens, Some(12));
+                assert_eq!(decoded.usage.output_tokens, Some(8));
+                for (index, call) in requests.iter().enumerate() {
+                    assert_eq!(call.id.as_str(), format!("call_{index}"));
+                }
+                assert_eq!(decoded.turn.items("openai").unwrap(), calls);
+                if count != usize::from(crate::session::MAX_STEP_TOOL_CALLS) {
+                    continue;
+                }
+                request.input.tools.as_mut().unwrap().steps =
+                    vec![observed_step(decoded, "bounded facts")];
+                let rendered = body(&request);
+                let input = rendered["input"].as_array().unwrap();
+                let replayed: Vec<_> = input
+                    .iter()
+                    .filter(|item| item["type"] == "function_call")
+                    .cloned()
+                    .collect();
+                assert_eq!(replayed, calls);
+                let results: Vec<_> = input
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect();
+                assert_eq!(results.len(), count);
+                for (index, result) in results.iter().enumerate() {
+                    assert_eq!(result["call_id"], calls[index]["call_id"]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn multi_call_batches_reject_mixed_outcomes_and_malformed_siblings() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let read = function_call("arany_read", &read_arguments());
+    let mut duplicate_item =
+        function_call_with("call_other", "fc_test", "arany_read", &read_arguments());
+    let plan = function_call_with(
+        "call_plan",
+        "item_plan",
+        "arany_plan",
+        &serde_json::to_value(goal_plan_contract()).unwrap(),
+    );
+    let delegate = function_call_with(
+        "call_delegate",
+        "item_delegate",
+        "arany_delegate",
+        &json!({"children":[{"objective":"Inspect","profile":null}]}),
+    );
+    let malformed =
+        function_call_with("call_other", "item_other", "arany_read", &json!({"path":7}));
+    for sibling in [duplicate_item.clone(), plan, delegate, malformed] {
+        for output in [
+            json!([read.clone(), sibling.clone()]),
+            json!([sibling, read.clone()]),
+        ] {
+            let fixture = response("completed", output);
+            assert!(decode(&request, &fixture).is_err());
+            assert!(decode_streamed(&request, &fixture).is_err());
+        }
+    }
+    duplicate_item["id"] = json!("item_other");
+    let mut spent = researcher_request(MODEL);
+    let mut exhausted = catalog();
+    exhausted["tool_calls_remaining"] = json!(0);
+    spent.input.tools = Some(tool_context(exhausted));
+    let mut editor = request.clone();
+    editor.phase = AgentPhase::ChildWork;
+    editor.input.role = crate::provider::PromptRole::Editor;
+    editor.collaboration = CollaborationPolicy::Single;
+    let fixture = response("completed", json!([read, duplicate_item]));
+    for scoped in [spent, editor] {
+        assert!(decode(&scoped, &fixture).is_err());
+        assert!(decode_streamed(&scoped, &fixture).is_err());
+    }
+    assert_eq!(body(&request)["parallel_tool_calls"], true);
+}
+
+#[test]
 fn inbound_function_calls_decode_one_native_request_or_outcome() {
     let mut request = primary_request(MODEL);
     let mut offered = catalog();
@@ -901,7 +1016,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
     offered["git"]["operations"]
         .as_array_mut()
         .unwrap()
-        .push(json!("gh_pr_list"));
+        .extend([json!("gh_pr_list"), json!("gh_pr_view")]);
     request.input.tools = Some(tool_context(offered));
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 2,
@@ -995,10 +1110,10 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
     for (case, output) in [
         ("no output", json!([])),
         (
-            "two calls",
+            "duplicate call ids",
             json!([
                 read.clone(),
-                function_call_with("call_2", "fc_2", "arany_read", &read_arguments())
+                function_call_with("call_test", "fc_2", "arany_read", &read_arguments())
             ]),
         ),
         (
@@ -1097,7 +1212,7 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
         }
         let shape = format!(
             "{:?}",
-            crate::diagnostics::ToolArgumentShape::from_call(&calls[0].call)
+            crate::provider::diagnostics::ToolArgumentShape::from_call(&calls[0].call)
         );
         assert!(shape.contains("program_chars: Some(2)"));
         assert!(shape.contains("args_count: Some(2)"));
@@ -1111,6 +1226,8 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
             panic!("Command")
         };
         let step = crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: Some(ProposalRefusal {
                 operation: "arany_command".into(),
                 cause: ProposalRefusalCause::InvalidPath,
@@ -1639,10 +1756,22 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     for (text, accepted) in [
         (String::new(), false),
         (" \n\t".into(), false),
-        ("x".repeat(8 * 1024), true),
-        ("é".repeat(4 * 1024), true),
-        ("x".repeat(8 * 1024 + 1), false),
-        ("é".repeat(4 * 1024 + 1), false),
+        (
+            "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES),
+            true,
+        ),
+        (
+            "é".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES / 2),
+            true,
+        ),
+        (
+            "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1),
+            false,
+        ),
+        (
+            "é".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES / 2 + 1),
+            false,
+        ),
         ("  summary\n".into(), true),
         (r#"{"summary":"ok","extra":1}"#.into(), true),
     ] {
@@ -1842,7 +1971,7 @@ fn child_research_request_offers_only_read_only_functions_and_text_at_exhaustion
     let rendered = body(&request);
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
     assert_eq!(rendered["tool_choice"]["mode"], "auto");
-    assert_eq!(rendered["parallel_tool_calls"], false);
+    assert_eq!(rendered["parallel_tool_calls"], true);
     assert!(
         rendered["instructions"]
             .as_str()

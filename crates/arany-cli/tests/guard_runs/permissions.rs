@@ -353,14 +353,34 @@ async fn multiedit_guard_publication_denials_late_failure_and_closed_replay() {
 #[tokio::test]
 async fn typed_mutations_cancelled_approval_and_lost_receipt_never_retry() {
     for call in [multiedit(), removal(false), removal(true)] {
-        for lost in [false, true] {
-            cancelled_or_lost_mutation(call.clone(), lost).await;
+        for fault in [
+            MutationFailure::Cancelled,
+            MutationFailure::ReceiptLost,
+            MutationFailure::ParentSync,
+        ] {
+            cancelled_or_lost_mutation(call.clone(), fault).await;
         }
     }
+    cancelled_or_lost_mutation(
+        removal(true),
+        MutationFailure::ParentSyncWithDestinationParent,
+    )
+    .await;
 }
 
-async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
+#[derive(Clone, Copy, Debug)]
+enum MutationFailure {
+    Cancelled,
+    ReceiptLost,
+    ParentSync,
+    ParentSyncWithDestinationParent,
+}
+
+async fn cancelled_or_lost_mutation(call: arany::ToolCall, fault: MutationFailure) {
     let fixture = Fixture::new(None, true);
+    if matches!(fault, MutationFailure::ParentSyncWithDestinationParent) {
+        std::fs::create_dir(fixture.workspace.join("notes/nested")).unwrap();
+    }
     let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(call.clone())]));
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let cancellation = RunCancellation::new();
@@ -387,14 +407,18 @@ async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
                 result = &mut running => break result,
                 Some(approval) = inbox.next() => {
                     asked += 1;
-                    if lost { arany::FaultPlan::lose_guard_receipt(approval.intent.id); }
-                    else { cancellation.cancel(); }
+                    match fault {
+                        MutationFailure::ReceiptLost => arany::FaultPlan::lose_guard_receipt(approval.intent.id),
+                        MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent => arany::FaultPlan::fail_file_parent_sync(approval.intent.id),
+                        MutationFailure::Cancelled => { cancellation.cancel(); }
+                    }
                     approval.decide(true);
                 }
             }
         }
     };
-    if lost {
+    let published = !matches!(fault, MutationFailure::Cancelled);
+    if published {
         assert!(matches!(
             outcome,
             Err(EngineError::Tool(arany::ToolError::Uncertain))
@@ -408,40 +432,72 @@ async fn cancelled_or_lost_mutation(call: arany::ToolCall, lost: bool) {
         assert_eq!(requests.len(), 1, "no continuation or automatic retry");
         requests[0].session_id
     };
-    assert_stopped_mutation(fixture, session, &call, lost).await;
+    assert_stopped_mutation(fixture, session, &call, fault).await;
 }
 
 async fn assert_stopped_mutation(
     fixture: Fixture,
     session: SessionId,
     call: &arany::ToolCall,
-    lost: bool,
+    fault: MutationFailure,
 ) {
-    let removed = lost
+    let published = !matches!(fault, MutationFailure::Cancelled);
+    let move_sync_failed = matches!(
+        fault,
+        MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent
+    ) && matches!(call, arany::ToolCall::Move { .. });
+    let removed = published
+        && !move_sync_failed
         && matches!(
             call,
             arany::ToolCall::Delete { .. } | arany::ToolCall::Move { .. }
         );
-    assert_eq!(fixture.workspace.join("notes/facts.txt").exists(), !removed);
+    assert_eq!(
+        fixture.workspace.join("notes/facts.txt").exists(),
+        !removed,
+        "{fault:?}"
+    );
     if !removed {
         assert_eq!(
             std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
-            if lost {
+            if published && !move_sync_failed {
                 b"done".as_slice()
             } else {
                 b"Fact".as_slice()
             }
         );
     }
+    let destination_published = matches!(call, arany::ToolCall::Move { .. })
+        && matches!(
+            fault,
+            MutationFailure::ReceiptLost | MutationFailure::ParentSyncWithDestinationParent
+        );
     assert_eq!(
         fixture.workspace.join("notes/nested/moved.txt").exists(),
-        lost && matches!(call, arany::ToolCall::Move { .. })
+        destination_published,
+        "{fault:?}"
     );
+    if matches!(call, arany::ToolCall::Move { .. }) {
+        assert_eq!(fixture.workspace.join("notes/nested").is_dir(), published);
+    }
+    if destination_published {
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/nested/moved.txt")).unwrap(),
+            b"Fact"
+        );
+    }
     let (_, view) = fixture.reopen(session).await;
     assert_eq!(view.runs[0].tools.len(), 1);
     let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
-    if lost {
+    if published {
         assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
+        assert_eq!(
+            observation.attestation.is_some(),
+            matches!(
+                fault,
+                MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent
+            )
+        );
     } else {
         assert!(observation.attestation.is_none());
     }
@@ -449,21 +505,29 @@ async fn assert_stopped_mutation(
 
 #[tokio::test]
 async fn multiedit_crash_prefixes_keep_pre_go_and_committed_publication_facts() {
-    for finished in [false, true] {
+    for stage in ["started", "published", "finished"] {
+        let finished = stage == "finished";
         let fixture = Fixture::new(None, true);
         let session = fixture
             .engine
             .create_session(fixture.workspace.clone(), None)
             .await
             .unwrap();
-        let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(
-            session,
-            if finished {
-                |e| matches!(e, Event::ToolFinished { .. })
-            } else {
-                |e| matches!(e, Event::ToolStarted { .. })
-            },
-        );
+        let gate = if stage == "published" {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::ToolFinished { .. })
+            });
+            None
+        } else {
+            Some(arany::FaultPlan::gate_goal_append_acknowledgment(
+                session,
+                if finished {
+                    |e| matches!(e, Event::ToolFinished { .. })
+                } else {
+                    |e| matches!(e, Event::ToolStarted { .. })
+                },
+            ))
+        };
         let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(multiedit())]));
         let mut input = request(&fixture.workspace, "Make one atomic edit");
         input.session_id = Some(session);
@@ -481,15 +545,17 @@ async fn multiedit_crash_prefixes_keep_pre_go_and_committed_publication_facts() 
                 },
             );
             tokio::pin!(running);
-            tokio::select! {
-                result = &mut running => panic!("acknowledgment gate was not reached: {result:?}"),
-                entered = entered => entered.unwrap(),
+            if let Some((entered, release)) = gate {
+                tokio::select! {
+                    result = &mut running => panic!("acknowledgment gate was not reached: {result:?}"),
+                    entered = entered => entered.unwrap(),
+                }
+                drop(release);
             }
-            drop(release);
             assert!(running.await.is_err());
         }
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
-        let bytes = if finished {
+        let bytes = if stage != "started" {
             b"done".as_slice()
         } else {
             b"Fact".as_slice()
@@ -578,6 +644,7 @@ struct Fixture {
     state: std::path::PathBuf,
     engine: Engine,
     deny_humans: bool,
+    refuse_start: bool,
     restricted_approvals: bool,
     command_maximum: Option<u32>,
     max_children: u8,
@@ -629,6 +696,7 @@ impl Fixture {
             state,
             engine,
             deny_humans: false,
+            refuse_start: false,
             restricted_approvals: false,
             command_maximum: None,
             max_children: 1,
@@ -690,6 +758,21 @@ impl Fixture {
             input.goal.resource_settings.default_command_timeout_ms = maximum;
             input.goal.resource_settings.max_command_timeout_ms = maximum;
         }
+        let mut injected = if self.refuse_start {
+            let session = self
+                .engine
+                .create_session(self.workspace.clone(), None)
+                .await
+                .unwrap();
+            input.session_id = Some(session);
+            input.title = None;
+            Some(arany::FaultPlan::corrupt_tool_preflight(
+                session,
+                "ToolStarted",
+            ))
+        } else {
+            None
+        };
         let running = run_with(&self.engine, &provider, input, controls);
         tokio::pin!(running);
         let mut humans = 0;
@@ -710,6 +793,9 @@ impl Fixture {
                 }
             }
         };
+        if let Some(injected) = &mut injected {
+            injected.try_recv().expect("final-start preflight reached");
+        }
         let requests = provider.requests.lock().unwrap().clone();
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
@@ -897,15 +983,22 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                     .iter()
                     .position(|event| matches!(event.event, Event::ToolStarted { .. }))
                     .unwrap();
-                let decided = events
+                let proposed = events
                     .iter()
-                    .position(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
-                    .unwrap();
+                    .position(|event| matches!(event.event, Event::ToolProposed { .. }));
                 let finished = events
                     .iter()
                     .position(|event| matches!(event.event, Event::ToolFinished { .. }))
                     .unwrap();
-                assert!(started < decided && decided < finished, "{case}");
+                if ai || human {
+                    assert!(
+                        proposed.is_some_and(|proposed| proposed < started),
+                        "{case}"
+                    );
+                } else {
+                    assert!(proposed.is_none(), "{case}");
+                }
+                assert!(started < finished, "{case}");
             }
         }
     }
@@ -1085,8 +1178,13 @@ async fn permission_dispatch_denied_replay_uses_pinned_verdict_and_safe_output()
     assert!(!text.contains("Read(./notes/**)"));
     let without_verdict: Vec<_> = events
         .iter()
-        .filter(|event| !matches!(event.event, Event::ToolPermissionDecided { .. }))
         .cloned()
+        .map(|mut event| {
+            if let Event::ToolStarted { verdict, .. } = &mut event.event {
+                *verdict = None;
+            }
+            event
+        })
         .collect();
     assert!(SessionView::replay(result.session_id, &without_verdict).is_err());
     let mut forged = events.clone();
@@ -1305,11 +1403,13 @@ async fn permission_dispatch_missing_settings_preserves_existing_approval_flow()
             "done"
         );
         let (events, view) = fixture.reopen(result.session_id).await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
-        );
+        assert!(!events.iter().any(|event| matches!(
+            event.event,
+            Event::ToolStarted {
+                verdict: Some(_),
+                ..
+            }
+        )));
         assert_eq!(
             view.runs[0]
                 .config
@@ -1424,7 +1524,7 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
                     .contains("permission_rule_denied: no operation was dispatched")
             }));
         }
-        assert!(events.iter().any(|event| matches!(&event.event, Event::ToolPermissionDecided { agent_run_id, .. } if *agent_run_id == child.id)));
+        assert!(events.iter().any(|event| matches!(&event.event, Event::ToolStarted { agent_run_id, verdict: Some(_), .. } if *agent_run_id == child.id)));
     }
 }
 
@@ -1758,7 +1858,7 @@ async fn late_approval_keeps_file_and_executable_preconditions() {
             assert_eq!(observed.disposition, arany::ToolDisposition::Conflict);
             assert!(matches!(
                 observed.attestation,
-                Some(arany::Attestation::Guard(_))
+                Some(arany::Attestation::InProcess { .. })
             ));
         } else {
             assert!(observed.attestation.is_none(), "{case}");
@@ -2168,17 +2268,12 @@ async fn hook_pre_tool_use_exit_two_denies_in_the_guard_with_ordered_evidence() 
         hook.observation.intent.limits.network,
         arany::NetworkGrant::None
     );
-    let order: Vec<_> = [
-        "HookStarted",
-        "HookFinished",
-        "ToolPermissionDecided",
-        "ToolFinished",
-    ]
-    .iter()
-    .map(|kind| case.position(kind))
-    .collect();
+    let order: Vec<_> = ["HookStarted", "HookFinished", "ToolStarted", "ToolFinished"]
+        .iter()
+        .map(|kind| case.position(kind))
+        .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-    assert!(case.position("ToolStarted") < order[0]);
+    assert!(case.position("ToolProposed") < order[0]);
 
     let mut dropped = case.events.clone();
     dropped.retain(|event| !matches!(event.event, Event::HookFinished { .. }));
@@ -2197,7 +2292,11 @@ async fn hook_pre_tool_use_exit_two_denies_in_the_guard_with_ordered_evidence() 
     assert!(forged_finish.event.payload().is_err());
     let mut miscounted = case.events.clone();
     for event in &mut miscounted {
-        if let Event::ToolPermissionDecided { verdict, .. } = &mut event.event {
+        if let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut event.event
+        {
             verdict.hooks = 0;
         }
     }
@@ -3497,6 +3596,120 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
 }
 
 #[tokio::test]
+async fn hook_post_tool_use_finishes_successful_reads_after_a_sibling_limit() {
+    let fixture = Fixture::new(
+        Some(&read_post_settings(vec![shell_hook(
+            "echo checked >&2; exit 2",
+        )])),
+        false,
+    );
+    let calls: Vec<_> = ["facts", "limited", "other"]
+        .into_iter()
+        .map(|name| {
+            std::fs::write(fixture.workspace.join(format!("notes/{name}.txt")), "Fact").unwrap();
+            arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{name}")).unwrap(),
+                call: arany::ToolCall::Read {
+                    path: format!("notes/{name}.txt"),
+                    offset: None,
+                    limit: Some(32),
+                },
+            }
+        })
+        .collect();
+    let limited = calls[1].call.clone();
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tools(calls)]);
+    let requests = Arc::clone(&provider.requests);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let send = Mutex::new(Some(send));
+    let provider = Arc::new(provider.with_before_call(0, move || {
+        let run = requests.lock().unwrap()[0].run_id;
+        let gate = arany::FaultPlan::gate_in_process_read(run, limited.clone());
+        send.lock().unwrap().take().unwrap().send(gate).unwrap();
+    }));
+    let mut events = fixture.engine.subscribe();
+    let drive = async {
+        let (entered, release) = receive.await.unwrap();
+        entered.await.unwrap();
+        expire_read_after_successes(&mut events).await;
+        release
+    };
+    let ((result, requests, humans), _held_release) =
+        tokio::join!(fixture.run_provider(provider, None, false, budget()), drive);
+    assert_eq!(result.run.status, RunStatus::Failed);
+    assert_eq!(result.run.failure, Some(arany::RunFailure::ToolStopped));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(humans, 0);
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(view.runs[0], result.run);
+    assert_read_post_hooks_after_limit(&events, &view.runs[0]);
+}
+
+async fn expire_read_after_successes(events: &mut arany::Subscription) {
+    let mut succeeded = 0;
+    let mut runtime_ms = None;
+    while succeeded < 2 || runtime_ms.is_none() {
+        let Some(arany::Tapped::Committed(event)) = events.next().await else {
+            panic!("read completion tap must not lag");
+        };
+        match &event.event {
+            Event::ToolStarted { intent, .. } if matches!(&intent.call, arany::ToolCall::Read { path, .. } if path == "notes/limited.txt") =>
+            {
+                runtime_ms = Some(intent.limits.runtime_ms);
+            }
+            Event::ToolFinished { observation, .. }
+                if observation.disposition == arany::ToolDisposition::Succeeded =>
+            {
+                succeeded += 1;
+            }
+            _ => {}
+        }
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(u64::from(runtime_ms.unwrap()) + 1)).await;
+    tokio::time::resume();
+}
+
+fn assert_read_post_hooks_after_limit(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 3);
+    for tool in &run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        if observation.disposition == arany::ToolDisposition::Succeeded {
+            assert_eq!(tool.hook_feedback(), ["hook feedback: checked"]);
+            assert_eq!(tool.hooks.len(), 1);
+            let hook = &tool.hooks[0];
+            assert_eq!(
+                hook.invocation.event,
+                arany::permissions::HookEvent::PostToolUse
+            );
+            let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&tool.intent).unwrap()).into();
+            assert_eq!(hook.invocation.subject_digest, digest);
+            assert!(
+                hook.outcome
+                    .as_ref()
+                    .unwrap()
+                    .observation
+                    .attestation
+                    .is_some()
+            );
+        } else {
+            assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+            assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+            assert!(tool.hooks.is_empty());
+        }
+    }
+    let last_read = events
+        .iter()
+        .rposition(|e| matches!(e.event, Event::ToolFinished { .. }))
+        .unwrap();
+    let first_hook = events
+        .iter()
+        .position(|e| matches!(e.event, Event::HookStarted { .. }))
+        .unwrap();
+    assert!(last_read < first_hook);
+}
+
+#[tokio::test]
 async fn hook_post_tool_use_continue_false_stops_after_the_committed_effect() {
     let case = post_run(shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"review required","decision":"block","reason":"not model feedback"}'"#), true).await;
     assert_eq!(case.status, RunStatus::StoppedByHook);
@@ -4171,38 +4384,70 @@ async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity()
 
 #[tokio::test]
 async fn hook_pre_tool_use_continue_false_stops_before_primary_or_child_tool_dispatch() {
-    for child in [false, true] {
-        let fixture = Fixture::new(
-            Some(&hook_settings(
-                json!({}),
-                vec![shell_hook(
-                    r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#,
-                )],
-            )),
-            false,
-        );
-        let mut outcomes = Vec::new();
-        if child {
-            outcomes.push(ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect facts".into(),
-                    profile: None,
-                }],
-            }));
+    for refused in [false, true] {
+        for child in [false, true] {
+            stopped_pre_hook_with_start_refusal(child, refused).await;
         }
-        outcomes.push(tool_outcome(call("read")));
-        let (result, _, _) = fixture.run(outcomes, None, child).await;
-        assert_eq!(result.run.status, RunStatus::StoppedByHook);
-        assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
-        assert!(result.run.assistant_message.is_none());
-        let (_, view) = fixture.reopen(result.session_id).await;
-        let tool = if child {
-            &view.runs[0].agents[1].tools[0]
-        } else {
-            &view.runs[0].tools[0]
-        };
+    }
+}
+
+async fn stopped_pre_hook_with_start_refusal(child: bool, refused: bool) {
+    let mut fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(
+                r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#,
+            )],
+        )),
+        false,
+    );
+    fixture.refuse_start = refused;
+    let mut outcomes = Vec::new();
+    if child {
+        outcomes.push(ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                editor: None,
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
+        }));
+    }
+    outcomes.push(tool_outcome(call("read")));
+    let (result, _, _) = fixture.run(outcomes, None, child).await;
+    assert_eq!(result.run.status, RunStatus::StoppedByHook);
+    assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
+    assert!(result.run.assistant_message.is_none());
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(view.runs[0], result.run);
+    let actor = &view.runs[0].agents[usize::from(child)];
+    assert_eq!(actor.status, arany::AgentStatus::StoppedByHook);
+    assert_eq!(actor.tool_refusal.is_some(), refused);
+    let tool = if child {
+        &actor.tools[0]
+    } else {
+        &view.runs[0].tools[0]
+    };
+    if refused {
+        assert!(tool.started_sequence.is_none());
+        assert!(tool.observation.is_none());
+        let stopped = events.iter().position(|event| matches!(&event.event,
+            Event::HookFinished { outcome, .. } if matches!(outcome.result, arany::permissions::HookResult::Stopped { .. })
+        )).unwrap();
+        let refusal = events
+            .iter()
+            .position(|event| matches!(event.event, Event::ToolPreflightRefused { .. }))
+            .unwrap();
+        assert!(stopped < refusal);
+        assert!(events[refusal + 1..].iter().any(|event| matches!(
+            event.event,
+            Event::RunFinished {
+                disposition: arany::RunDisposition::StoppedByHook,
+                failure: None,
+                ..
+            }
+        )));
+    } else {
         assert!(tool.observation.as_ref().unwrap().attestation.is_none());
     }
 }
@@ -4305,7 +4550,15 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
     let verdicts = case
         .events
         .iter()
-        .filter(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
+        .filter(|event| {
+            matches!(
+                event.event,
+                Event::ToolStarted {
+                    verdict: Some(_),
+                    ..
+                }
+            )
+        })
         .count();
     let dispatched = case
         .tools
@@ -4340,6 +4593,296 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
         limit: Some(32),
     };
     assert!(SessionView::replay(case.session, &forged).is_err());
+}
+
+#[tokio::test]
+async fn hook_narrowed_read_batch_commits_replacement_before_sibling_reservations() {
+    let narrowed = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: None,
+        limit: Some(8),
+    };
+    let fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(&narrowing_script(
+                &json!(narrowed),
+                "\"limit\":32",
+            ))],
+        )),
+        true,
+    );
+    let requests = (0..4)
+        .map(|index| arany::ToolRequest {
+            id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+            call: if index == 0 {
+                call("read")
+            } else {
+                arany::ToolCall::Read {
+                    path: "notes/facts.txt".into(),
+                    offset: None,
+                    limit: Some(16),
+                }
+            },
+        })
+        .collect();
+    let (result, requests, humans) = fixture
+        .run(
+            vec![ProviderOutcome::Tools(requests), finish("answer")],
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert_eq!(humans, 0);
+    assert_eq!(requests.len(), 2);
+    let step = &requests[1].input.tools.as_ref().unwrap().steps[0];
+    assert_eq!(step.requests.len(), 4);
+    assert_eq!(step.observations.len(), 5);
+    assert_eq!(
+        step.narrowed_observations
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+    assert_eq!(step.observations[0].intent.call, step.requests[0].call);
+    assert_eq!(
+        step.observations[0].disposition,
+        arany::ToolDisposition::Denied
+    );
+    assert!(step.observations[0].attestation.is_none());
+    assert_eq!(step.observations[1].intent.call, narrowed);
+    for (observation, request) in step.observations[2..].iter().zip(&step.requests[1..]) {
+        assert_eq!(observation.intent.call, request.call);
+    }
+    assert!(
+        step.observations[1..]
+            .iter()
+            .all(
+                |observation| observation.disposition == arany::ToolDisposition::Succeeded
+                    && matches!(
+                        observation.attestation,
+                        Some(arany::Attestation::InProcess { .. })
+                    )
+            )
+    );
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(
+        view.runs[0], result.run,
+        "closed replay preserves the complete batch"
+    );
+    assert_narrowed_read_batch_order(&events, &view.runs[0]);
+}
+
+fn assert_narrowed_read_batch_order(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 5);
+    let (original, replacement) = (&run.tools[0], &run.tools[1]);
+    assert!(original.permission_verdict.as_ref().unwrap().narrowed);
+    assert_eq!(
+        replacement.narrowing_source,
+        Some(original.permission_verdict.as_ref().unwrap().intent_digest)
+    );
+    assert!(
+        !replacement.active_time_reserved,
+        "the replacement reserves through its own ToolStarted"
+    );
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolStarted { intent, .. } => Some((event.sequence, intent.id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 5);
+    assert_eq!(starts[0].1, original.intent.id);
+    assert_eq!(starts[1].1, replacement.intent.id);
+    assert_eq!(
+        starts[2..].iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        run.tools[2..]
+            .iter()
+            .map(|tool| tool.intent.id)
+            .collect::<Vec<_>>()
+    );
+    let first_finish = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. }
+                if observation.intent.id == original.intent.id =>
+            {
+                Some(event.sequence)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let proposals: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolProposed { .. }))
+        .collect();
+    assert!(proposals.len() >= 4);
+    assert!(proposals[3].sequence < starts[0].0);
+    assert!(starts[0].0 < first_finish && first_finish < starts[1].0);
+    let reservations: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
+        .collect();
+    assert_eq!(reservations.len(), 4);
+    assert!(
+        reservations[1].sequence > starts[1].0,
+        "the replacement restores request accounting before sibling reservation"
+    );
+}
+
+#[tokio::test]
+async fn narrowed_batch_stops_when_replacement_preparation_exhausts_active_time() {
+    const ACTIVE_ALLOWANCE_MS: u64 = 100_000;
+    const REMAINING_BEFORE_REPLACEMENT_MS: u64 = 5_000;
+    let _deadline = engine_support::deadline("narrowed batch allowance", HOOK_CANCELLATION_TIMEOUT);
+    let narrowed = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: None,
+        limit: Some(8),
+    };
+    let fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(&narrowing_script(
+                &json!(narrowed),
+                "\"limit\":32",
+            ))],
+        )),
+        true,
+    );
+    let session = fixture
+        .engine
+        .create_session(fixture.workspace.clone(), None)
+        .await
+        .unwrap();
+    let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+        matches!(event, Event::ToolFinished { .. })
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Tools(
+        (0..4)
+            .map(|index| arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                call: if index == 1 {
+                    narrowed.clone()
+                } else {
+                    call("read")
+                },
+            })
+            .collect(),
+    )]));
+    let mut input = request(&fixture.workspace, "Read a narrowed batch");
+    input.include_paths.clear();
+    input.session_id = Some(session);
+    input.title = None;
+    input.goal.budget = Some(arany::GoalBudget {
+        max_active_ms: Some(ACTIVE_ALLOWANCE_MS),
+        ..budget()
+    });
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        ..Default::default()
+    };
+    let outcome = {
+        let running = run_with(&fixture.engine, &provider, input, controls);
+        tokio::pin!(running);
+        tokio::select! {
+            result = &mut running => panic!("narrowing did not reach its committed observation: {result:?}"),
+            result = entered => result.unwrap(),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(
+            ACTIVE_ALLOWANCE_MS - REMAINING_BEFORE_REPLACEMENT_MS,
+        ))
+        .await;
+        tokio::time::resume();
+        release.send(()).unwrap();
+        running
+            .await
+            .expect("replacement allowance exhaustion is a normal stop")
+    };
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    fixture.engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
+    assert_eq!(view.runs[0], outcome.run);
+    assert_narrowed_batch_stop(session, &events, &view.runs[0]);
+}
+
+fn assert_narrowed_batch_stop(
+    session: SessionId,
+    events: &[arany::EventEnvelope],
+    run: &arany::RunView,
+) {
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+    assert_eq!(
+        arany_cli::presentation::run_feedback(run).as_deref(),
+        Some(
+            "Error: Run failed. The Goal budget refused the next action. No answer was committed. Use /agents to inspect this Run."
+        )
+    );
+    let tools = &run.tools;
+    assert_eq!(
+        tools.len(),
+        4,
+        "no replacement intent fits the remaining allowance"
+    );
+    assert!(tools[0].permission_verdict.as_ref().unwrap().narrowed);
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool.observation.as_ref().unwrap().attestation.is_none())
+    );
+    for tool in &tools[1..] {
+        assert!(
+            tool.observation
+                .as_ref()
+                .unwrap()
+                .output
+                .starts_with("not_dispatched:")
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .count(),
+        4
+    );
+    let mut continuation = events
+        .iter()
+        .take_while(|event| !matches!(event.event, Event::AgentFinished { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut reservation = events
+        .iter()
+        .find(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+        .unwrap()
+        .clone();
+    reservation.sequence = continuation.last().unwrap().sequence + 1;
+    continuation.push(reservation);
+    assert!(
+        SessionView::replay(session, &continuation).is_ok(),
+        "a pending Tool can reserve its review call"
+    );
+    let mut recorded = events
+        .iter()
+        .find(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
+        .unwrap()
+        .clone();
+    let Event::ProviderCallRecorded { record, .. } = &mut recorded.event else {
+        unreachable!()
+    };
+    record.disposition = arany::ProviderCallDisposition::Finished;
+    record.requested_tools = 0;
+    recorded.sequence = continuation.last().unwrap().sequence + 1;
+    continuation.push(recorded);
+    assert!(
+        SessionView::replay(session, &continuation).is_err(),
+        "a missing replacement never allows Provider continuation"
+    );
 }
 
 #[tokio::test]

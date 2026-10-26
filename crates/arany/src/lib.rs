@@ -92,29 +92,30 @@ pub use session::{
     MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, MAX_USER_MESSAGE_BYTES, PlanUsage, ProposalRefusal,
     ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
-    ProviderSetupTarget, ProviderSetupTargetKind, ReplayError, RunConfig, RunDisposition,
-    RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId,
-    SessionListItem, SessionPage, SessionView, TokenCount, ToolIntentRecord, ToolView, UsageGroup,
+    ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
+    RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
+    SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
+    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView, UsageGroup,
     UsageView, WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
 pub use store::{
-    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, ProviderRecordEdit,
-    ProviderRecordTarget, RECORD_FORMATS, Record, RecordFormat, RecordKind, RecordStep, StateRoot,
-    Store, StoreError,
+    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, InspectedEvent,
+    InspectionCause, InspectionFailure, ProviderRecordEdit, ProviderRecordTarget, RECORD_FORMATS,
+    Record, RecordFormat, RecordKind, RecordStep, SessionInspection, StateRoot, Store, StoreError,
 };
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalCause, ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate,
     CommandChangeset, DEFAULT_PR_LIMIT, DefinitionFilePin, DefinitionRegistryPin, EffectIntent,
-    EnforcementCause, FileChange, FileSuggestionSource, FileVersion, GuardReceipt, HostIntent,
-    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, PrState,
-    ProjectSkills, RuntimeProfileOption, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME,
-    SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition,
-    ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError, TrustReset,
-    UnguardedGrant, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions,
+    EnforcementCause, FileChange, FileReceipt, FileSuggestionSource, FileVersion, GuardReceipt,
+    HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputSpill,
+    OutputTotal, PrState, ProjectSkills, RuntimeProfileOption, SUGGESTION_LIFETIME,
+    SUGGESTION_QUERY_TIME, SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext,
+    ToolDisposition, ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
+    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError,
+    TrustReset, UnguardedGrant, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions,
     configured_skill_names, mention_paths, native_protection_supported, now_ms, project_skills,
     runtime_skill_names, tool_guard_main, tool_host_main,
 };

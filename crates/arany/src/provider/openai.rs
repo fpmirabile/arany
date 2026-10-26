@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(crate) mod chat;
 mod limits;
 mod responses;
 mod subscription;
@@ -252,7 +253,9 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.identity.model || !(1..=1024).contains(&request.max_output_tokens)
+        if request.model != self.identity.model
+            || !(1..=crate::session::MAX_COMPACTION_OUTPUT_TOKENS)
+                .contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }

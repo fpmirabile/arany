@@ -2,7 +2,7 @@ use super::*;
 use crate::provider::{AgentPhase, ProviderKind};
 use crate::tools::types::HostCommandPin;
 use crate::tools::{EffectIntent, HostIntent, ToolCall, ToolLimits};
-use crate::validate::MAX_PATH_BYTES;
+use crate::validate::{MAX_PATH_BYTES, valid_digest, valid_relative};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -578,6 +578,81 @@ pub enum ProposalRefusalCause {
     EditorGrant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolRefusalReason {
+    Payload,
+    Transition,
+    Scope,
+    Lease,
+}
+
+impl std::fmt::Display for ToolRefusalReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Payload => "Invalid Tool intent or permission payload.",
+            Self::Transition => "Tool start violates the committed Session transition.",
+            Self::Scope => "Tool call exceeds the committed Goal phase or plan scope.",
+            Self::Lease => "Tool call conflicts with an active worker lease.",
+        })
+    }
+}
+
+impl Serialize for ToolRefusalReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolRefusalReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        [Self::Payload, Self::Transition, Self::Scope, Self::Lease]
+            .into_iter()
+            .find(|reason| reason.to_string() == text)
+            .ok_or_else(|| serde::de::Error::custom("invalid Tool refusal reason"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+#[error("{cause:?}: {reason}")]
+pub struct ToolRefusal {
+    pub cause: ProposalRefusalCause,
+    pub reason: ToolRefusalReason,
+}
+
+impl ToolRefusal {
+    pub(crate) const INVALID_TRANSITION: Self = Self {
+        cause: ProposalRefusalCause::Phase,
+        reason: ToolRefusalReason::Transition,
+    };
+
+    pub(crate) fn valid(self) -> bool {
+        matches!(
+            (self.cause, self.reason),
+            (
+                ProposalRefusalCause::InvalidArguments,
+                ToolRefusalReason::Payload
+            ) | (
+                ProposalRefusalCause::Phase,
+                ToolRefusalReason::Transition | ToolRefusalReason::Scope
+            ) | (
+                ProposalRefusalCause::PlanScopeExcludesCall,
+                ToolRefusalReason::Scope
+            ) | (ProposalRefusalCause::LeaseOverlap, ToolRefusalReason::Lease)
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPreflightRefusal {
+    pub intent_digest: [u8; 32],
+    pub refusal: ToolRefusal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<crate::tools::permissions::PermissionVerdict>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalRefusal {
@@ -630,6 +705,8 @@ pub struct CompactionRecord {
     pub covered_run_id: RunId,
     pub covered_sequence: u64,
     pub source_digest: [u8; 32],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_files: Vec<RecentFile>,
     pub provider: String,
     pub model: String,
     pub prompt_version: u16,
@@ -655,6 +732,13 @@ pub struct CompactionRecord {
     pub status: CompactionStatus,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentFile {
+    pub path: String,
+    pub digest: String,
+}
+
 impl CompactionRecord {
     fn usage(&self) -> crate::provider::Usage {
         crate::provider::Usage {
@@ -671,6 +755,18 @@ impl CompactionRecord {
             .rate_limits
             .as_ref()
             .is_some_and(|limits| !limits.valid())
+            || !serde_json::to_vec(self)
+                .is_ok_and(|bytes| bytes.len() <= crate::store::MAX_COMPACTION_RECORD_BYTES)
+            || self.recent_files.len() > MAX_COMPACTION_RECENT_FILES
+            || !serde_json::to_vec(&self.recent_files)
+                .is_ok_and(|bytes| bytes.len() <= MAX_COMPACTION_RECENT_FILES_BYTES)
+            || self.recent_files.iter().enumerate().any(|(index, file)| {
+                !valid_relative(&file.path, false)
+                    || !valid_digest(&file.digest)
+                    || self.recent_files[..index]
+                        .iter()
+                        .any(|previous| previous.path == file.path)
+            })
             || self.covered_sequence == 0
             || self.prompt_version != 1
             || self.schema_version != 1
@@ -840,11 +936,15 @@ impl ProviderCallRecord {
                     return true;
                 }
                 if reason == crate::provider::ProviderFailureReason::ProposalRefused
-                    && !matches!(
+                    && (!matches!(
                         self.phase,
                         crate::provider::AgentPhase::RootPlan
                             | crate::provider::AgentPhase::RootSynthesis
-                    )
+                            | crate::provider::AgentPhase::ChildWork
+                    ) || self.phase == crate::provider::AgentPhase::ChildWork
+                        && self.refusal.as_ref().is_none_or(|refusal| {
+                            refusal.cause != ProposalRefusalCause::InvalidArguments
+                        }))
                 {
                     return true;
                 }

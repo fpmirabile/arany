@@ -264,32 +264,40 @@ impl SessionView {
             .iter()
             .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
         let run = current_run(self, *run_id)?;
-        if run.primary().is_some_and(|agent| {
-            agent.id == *agent_run_id
-                && (agent.refusal_limit_reached()
-                    || agent.outcome_correction_exhausted()
-                    || agent.outcome_correction_pending()
-                        && (!run.hooks_settled()
-                            || run.tools.iter().any(|tool| !tool.settled_without_stop())))
-        }) {
+        let actor = run
+            .agents
+            .iter()
+            .find(|agent| agent.id == *agent_run_id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        let tools = if actor.role == AgentRole::Primary {
+            &run.tools
+        } else {
+            &actor.tools
+        };
+        if tools.iter().any(|tool| !tool.hooks_settled()) {
             return Err(ReplayError::InvalidTransition);
         }
-        if let Some(agent) = run.agents.iter().find(|agent| agent.id == *agent_run_id)
-            && let Some(name) = &agent.definition
+        if actor.refusal_limit_reached()
+            || run.primary().is_some_and(|agent| {
+                agent.id == *agent_run_id
+                    && (agent.outcome_correction_exhausted()
+                        || agent.outcome_correction_pending()
+                            && (!run.hooks_settled()
+                                || run.tools.iter().any(|tool| !tool.settled_without_stop())))
+            })
         {
-            let registry = super::definition_registry(run)?;
-            let definition = registry.get(name).ok_or(ReplayError::InvalidTransition)?;
-            let own_tool_pending = agent
-                .tools
-                .last()
-                .is_some_and(|tool| tool.observation.is_none());
+            return Err(ReplayError::InvalidTransition);
+        }
+        if actor.role == AgentRole::Child {
+            let turn_limit = super::agent::child_turn_limit(run, actor)?;
+            let own_tool_pending = actor.tools.iter().any(|tool| tool.observation.is_none());
             if !own_tool_pending
-                && agent
+                && actor
                     .provider_calls
                     .iter()
                     .filter(|call| call.phase == AgentPhase::ChildWork)
                     .count()
-                    >= usize::from(definition.max_turns)
+                    >= usize::from(turn_limit)
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -327,10 +335,7 @@ impl SessionView {
             .ok_or(ReplayError::InvalidTransition)?;
         let stored_bytes = run.steering_bytes();
         // A pending Tool observation means this reservation is a Tool review, not a planning or synthesis call.
-        let tool_pending = run
-            .tools
-            .last()
-            .is_some_and(|tool| tool.observation.is_none());
+        let tool_pending = run.tools.iter().any(|tool| tool.observation.is_none());
         if tool_pending
             || stored_bytes + text.len() + MAX_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES
         {
@@ -366,10 +371,7 @@ impl SessionView {
             || agent.status != AgentStatus::Active
             || run.workers.stop.is_some()
             || run.hook_stop_reason().is_some()
-            || agent
-                .tools
-                .last()
-                .is_some_and(|tool| tool.observation.is_none())
+            || agent.tools.iter().any(|tool| tool.observation.is_none())
             || run.steering_bytes() + text.len() + MAX_CHILD_STEERING_LABEL_BYTES
                 > MAX_STEERING_NOTE_BYTES
         {
@@ -930,6 +932,7 @@ pub(super) fn apply(
                     .primary()
                     .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
                 || !run.compaction_matches(record)
+                || !crate::session::recent_files_match(std::slice::from_ref(run), record)
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())
@@ -952,6 +955,7 @@ pub(super) fn apply(
                 ))
                 .ok_or(ReplayError::InvalidTransition)?;
             let run = active_run(current, *run_id)?;
+            run.tool_compaction_recent_files = record.recent_files.clone();
             if let CompactionStatus::Succeeded { summary, .. } = &record.status {
                 run.tool_compaction_summary = Some(summary.clone());
                 run.tool_compaction_covered_count = *covered_tool_count;
@@ -1043,3 +1047,10 @@ pub(super) fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
         });
     step_ends.into_iter().any(|end| end == covered)
 }
+
+#[cfg(test)]
+mod budget_tests;
+#[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
+mod recovery_tests;

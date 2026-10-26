@@ -404,6 +404,10 @@ pub enum ToolCall {
         #[serde(default = "default_pr_limit", deserialize_with = "pr_limit_or_default")]
         limit: u8,
     },
+    GhPrView {
+        repository: String,
+        number: u32,
+    },
     // Null or omitted path and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
@@ -517,6 +521,10 @@ pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolE
 }
 
 impl ToolCall {
+    pub(crate) const fn is_host_pr_read(&self) -> bool {
+        matches!(self, Self::GhPrList { .. } | Self::GhPrView { .. })
+    }
+
     pub(crate) fn is_process(&self) -> bool {
         self.facts().spawns_process
     }
@@ -583,7 +591,8 @@ impl ToolCall {
             | Self::GitSwitch { .. }
             | Self::GitPush { .. }
             | Self::GhPrCreate { .. }
-            | Self::GhPrList { .. } => None,
+            | Self::GhPrList { .. }
+            | Self::GhPrView { .. } => None,
         }
     }
 
@@ -757,7 +766,7 @@ pub struct HostIntent {
 impl EffectIntent {
     pub fn effective_timeout_ms(&self) -> u32 {
         let cap = match self.call {
-            ToolCall::GhPrList { .. } => GIT_TIMEOUT_MS,
+            ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => GIT_TIMEOUT_MS,
             _ if self.call.is_host() => 600_000,
             _ if self.call.is_git() => GIT_TIMEOUT_MS,
             ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
@@ -982,6 +991,21 @@ impl GuardReceipt {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FileReceipt {
+    pub intent_digest: [u8; 32],
+    pub before: Option<[u8; 32]>,
+    pub after: Option<[u8; 32]>,
+    pub executable: bool,
+}
+
+impl FileReceipt {
+    pub(crate) fn enforcement_digest() -> [u8; 32] {
+        digest(b"arany-in-process-file-v1")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnguardedReceipt {
     pub contract_version: u32,
     pub intent_digest: [u8; 32],
@@ -1005,6 +1029,8 @@ impl UnguardedReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Attestation {
     InProcess {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<FileReceipt>,
         policy_digest: [u8; 32],
         workspace_device: u64,
         workspace_inode: u64,
@@ -1089,13 +1115,18 @@ impl Attestation {
                     }
             }
             Self::InProcess {
+                receipt,
                 policy_digest,
                 workspace_device,
                 workspace_inode,
             } => {
                 intent.target == EffectTarget::Workspace
                     && intent.call.facts().site == Site::InProcess
+                    && (!intent.call.facts().mutates || super::fs::in_process_mutation(intent))
                     && !matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
+                    && receipt.as_ref().is_none_or(|receipt| {
+                        intent.call.facts().mutates && receipt.intent_digest == intent.digest()
+                    })
                     && *policy_digest == intent.policy_digest
                     && *workspace_device == intent.workspace_device
                     && *workspace_inode == intent.workspace_inode
@@ -1104,7 +1135,10 @@ impl Attestation {
                 intent.target == EffectTarget::Workspace
                     && !matches!(intent.call, ToolCall::PrepareWorker { .. })
                     && (intent.call.facts().site == Site::Guard
-                        || super::discovery::possible(&intent.call))
+                        || super::discovery::possible(&intent.call)
+                        || intent.call.facts().family == super::catalog::Family::File
+                            && intent.call.facts().mutates
+                            && !super::fs::in_process_mutation(intent))
                     && receipt.valid_for(intent)
             }
             Self::Host(receipt) => {
@@ -1127,13 +1161,18 @@ impl Attestation {
 
     #[cfg(test)]
     pub(crate) fn for_site(intent: &EffectIntent) -> Self {
-        let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. }) {
+        let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
+            || intent.call.facts().mutates
+                && intent.call.facts().family == super::catalog::Family::File
+                && !super::fs::in_process_mutation(intent)
+        {
             Site::Guard
         } else {
             intent.call.facts().site
         };
         match site {
             Site::InProcess => Self::InProcess {
+                receipt: None,
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
@@ -1272,6 +1311,8 @@ impl ApprovalCause {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spill: Option<super::spill::OutputSpill>,
     pub intent: EffectIntent,
     pub disposition: ToolDisposition,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -1320,6 +1361,18 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
 }
 
 impl ToolObservation {
+    pub fn enforcement_diagnostic(&self) -> Option<&'static str> {
+        self.enforcement_cause.map(|cause| {
+            if cause == EnforcementCause::FilesystemDenied
+                && super::fs::in_process_mutation(&self.intent)
+            {
+                "File enforcement: protected path or set-ID entry refused"
+            } else {
+                cause.diagnostic()
+            }
+        })
+    }
+
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
@@ -1351,6 +1404,7 @@ impl ToolObservation {
         let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
             && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
+            && self.spill.as_ref().is_none_or(|spill| spill.valid(self))
             && (self.approval_cause.is_none()
                 || self.disposition == ToolDisposition::Denied
                     && self.attestation.is_none()
@@ -1398,6 +1452,10 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|attestation| attestation.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
+            && (!super::fs::in_process_mutation(&self.intent)
+                || self.disposition != ToolDisposition::Succeeded
+                || matches!(&self.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. })
+                    if super::fs::file_receipt(&self.intent, &self.output).is_ok_and(|expected| expected == *receipt)))
             && match self.enforcement_cause {
                 None => true,
                 Some(EnforcementCause::FilesystemDenied) => {
@@ -1406,8 +1464,11 @@ impl ToolObservation {
                 Some(EnforcementCause::GuardBootstrap) => {
                     self.disposition == ToolDisposition::Failed
                         && self.attestation.is_none()
+                        && !super::fs::in_process_mutation(&self.intent)
                         && (self.intent.call.facts().site == super::catalog::Site::Guard
-                            || super::discovery::possible(&self.intent.call))
+                            || super::discovery::possible(&self.intent.call)
+                            || self.intent.call.facts().family == super::catalog::Family::File
+                                && self.intent.call.facts().mutates)
                 }
             }
             && (!self.intent.call.is_host()
@@ -1418,13 +1479,9 @@ impl ToolObservation {
                             receipt.pid > 0
                                 && (self.disposition == ToolDisposition::Uncertain
                                     || self.disposition == ToolDisposition::Failed
-                                        && matches!(self.intent.call, ToolCall::GhPrList { .. })
+                                        && self.intent.call.is_host_pr_read()
                                         && receipt.descendants_confirmed_stopped
-                                        && (self.output == super::git::host::PR_LIST_CAPTURE_LIMIT
-                                            || self.output == super::git::host::PR_LIST_FAILED
-                                                && receipt.exit_code != Some(0)
-                                            || self.output == super::git::host::PR_LIST_INVALID
-                                                && receipt.exit_code == Some(0))
+                                        && valid_host_pr_read_failure(self, receipt)
                                     || self.disposition == ToolDisposition::Failed
                                         && matches!(self.intent.call, ToolCall::GitPush { .. })
                                         && receipt.exit_code == Some(1)
@@ -1433,18 +1490,31 @@ impl ToolObservation {
                                     || self.disposition == ToolDisposition::Succeeded
                                         && receipt.exit_code == Some(0)
                                         && receipt.descendants_confirmed_stopped
-                                        && (!matches!(self.intent.call, ToolCall::GhPrList { .. })
-                                            || match self.intent.call {
-                                                ToolCall::GhPrList { limit, .. } => {
-                                                    super::git::host::valid_pr_list_output(
-                                                        &self.output,
-                                                        limit,
-                                                    )
-                                                }
-                                                _ => false,
-                                            }))
+                                        && match self.intent.call {
+                                            ToolCall::GhPrList { limit, .. } => {
+                                                super::git::host::valid_pr_list_output(
+                                                    &self.output,
+                                                    limit,
+                                                )
+                                            }
+                                            ToolCall::GhPrView {
+                                                ref repository,
+                                                number,
+                                            } => super::git::host::valid_pr_view_output(
+                                                &self.output,
+                                                super::git::host::PrViewIdentity {
+                                                    repository: repository.clone(),
+                                                    number,
+                                                },
+                                            ),
+                                            _ => true,
+                                        })
                         }
-                        None => self.disposition != ToolDisposition::Succeeded,
+                        None => {
+                            self.disposition != ToolDisposition::Succeeded
+                                && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
+                                    && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                        }
                         _ => false,
                     })
             && (!self.intent.call.is_unguarded()
@@ -1464,6 +1534,26 @@ impl ToolObservation {
     }
 }
 
+fn valid_host_pr_read_failure(observation: &ToolObservation, receipt: &UnguardedReceipt) -> bool {
+    match &observation.intent.call {
+        ToolCall::GhPrList { .. } => {
+            observation.output == super::git::host::PR_LIST_CAPTURE_LIMIT
+                || observation.output == super::git::host::PR_LIST_FAILED
+                    && receipt.exit_code != Some(0)
+                || observation.output == super::git::host::PR_LIST_INVALID
+                    && receipt.exit_code == Some(0)
+        }
+        ToolCall::GhPrView { .. } => {
+            observation.output == super::git::host::PR_VIEW_CAPTURE_LIMIT
+                || observation.output == super::git::host::PR_VIEW_FAILED
+                || (observation.output == super::git::host::PR_VIEW_INVALID
+                    || observation.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                    && receipt.exit_code == Some(0)
+        }
+        _ => false,
+    }
+}
+
 /// One Tool call the Provider asked for; the id correlates its result in the next request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolRequest {
@@ -1476,6 +1566,8 @@ pub struct ToolRequest {
 pub struct ToolStep {
     pub cleared: bool,
     pub refusal: Option<crate::session::ProposalRefusal>,
+    pub refusal_index: Option<usize>,
+    pub narrowed_observations: std::collections::BTreeSet<usize>,
     pub plan: Option<crate::provider::PlanRequest>,
     pub turn: crate::provider::ProviderTurn,
     /// Empty for a Delegate step.
@@ -1510,17 +1602,12 @@ impl ToolStep {
 
     // A Tool a hook narrowed is denied and directly followed by its replacement, which answers the request.
     pub(crate) fn narrowed(&self, index: usize) -> bool {
-        let (Some(denied), Some(next)) = (
-            self.observations.get(index),
-            self.observations.get(index + 1),
-        ) else {
-            return false;
-        };
-        denied.disposition == ToolDisposition::Denied
-            && super::permissions::narrows(&denied.intent.call, &next.intent.call)
+        self.narrowed_observations.contains(&index)
     }
 }
 
+pub(crate) const UNDISPATCHED_STEP_OUTPUT: &str =
+    "not_dispatched: step stopped before this call; no operation was dispatched";
 pub(crate) const MAX_TOOL_REFUSAL_BYTES: usize = 2048;
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
@@ -1582,7 +1669,9 @@ impl ToolContext {
 
     fn step_len(&self, step: &ToolStep) -> usize {
         step.turn.len()
-            + usize::from(step.refusal.is_some()) * (MAX_TOOL_REFUSAL_BYTES + RESULT_ENVELOPE_BYTES)
+            + usize::from(step.refusal.is_some())
+                * step.requests.len().max(1)
+                * (MAX_TOOL_REFUSAL_BYTES + RESULT_ENVELOPE_BYTES)
             + step.plan.as_ref().map_or(0, |plan| {
                 plan.result().to_string().len() + RESULT_ENVELOPE_BYTES
             })
@@ -1753,6 +1842,9 @@ pub(crate) fn cleared_model_result(observation: &ToolObservation) -> Value {
     {
         value["execution"] = json!("uncertain; never replay");
     }
+    if let Some(spill) = original.get("spill") {
+        value["spill"] = spill.clone();
+    }
     if let Some(target) = original.get("target") {
         value["target"] = target.clone();
     }
@@ -1848,11 +1940,14 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
             _ => "none",
         });
     }
+    if let Some(spill) = &observation.spill {
+        value["spill"] = json!(spill);
+    }
     if let Some(cause) = observation.limit_cause {
         value["limit_cause"] = json!(cause);
     }
-    if let Some(cause) = observation.enforcement_cause {
-        value["enforcement_cause"] = json!(cause.diagnostic());
+    if let Some(diagnostic) = observation.enforcement_diagnostic() {
+        value["enforcement_cause"] = json!(diagnostic);
     }
     value
 }
@@ -1933,6 +2028,7 @@ mod model_call_tests {
                 use_count: 1,
             };
             let mut o = ToolObservation {
+                spill: None,
                 attestation: Some(Attestation::for_site(&intent)),
                 intent,
                 disposition: ToolDisposition::Succeeded,
@@ -2036,6 +2132,7 @@ mod unguarded_vocabulary_tests {
         assert!(!guard_receipt.valid_for(&host));
         assert!(
             !Attestation::InProcess {
+                receipt: None,
                 policy_digest: host.policy_digest,
                 workspace_device: host.workspace_device,
                 workspace_inode: host.workspace_inode,
@@ -2045,6 +2142,7 @@ mod unguarded_vocabulary_tests {
         assert!(Attestation::for_site(&host).valid_for(&host));
 
         let mut observation = ToolObservation {
+            spill: None,
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,
@@ -2079,6 +2177,7 @@ mod unguarded_vocabulary_tests {
     fn attested_unguarded_runs_project_as_unguarded_and_unattested_as_not_confirmed() {
         let host = intent(unguarded(&["-c", "exit 0"], ""));
         let mut observation = ToolObservation {
+            spill: None,
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,

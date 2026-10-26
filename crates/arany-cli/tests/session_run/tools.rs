@@ -408,7 +408,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(compacted.compiler_version, 4);
+    assert_eq!(compacted.compiler_version, 5);
     engine.close().await.unwrap();
     assert_eq!(
         outcome.run.status,
@@ -516,7 +516,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         assert_eq!(compactions[0].session_id, outcome.session_id);
         assert_eq!(compactions[0].covered_run_id, outcome.run.id);
         assert_eq!(compactions[0].model, "tool-model");
-        assert_eq!(compactions[0].max_output_tokens, 1024);
+        assert_eq!(compactions[0].max_output_tokens, 4096);
         assert!(compactions[0].previous_summary.is_none());
         let [CompactionItem::Completed(turn)] = compactions[0].items.as_slice() else {
             panic!("complete Tool turn required");
@@ -3622,3 +3622,51 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
 
 #[path = "tools/inline_approval.rs"]
 mod inline_approval;
+
+#[tokio::test]
+async fn unknown_spill_is_an_attested_failed_read_outside_workspace_path_scopes() {
+    use arany::test_support::{goals::finish_with, scenario::ScriptedProvider};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).unwrap();
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        crate::tool_outcome(ToolCall::Read {
+            path: format!("spill:{}", "a".repeat(64)),
+            offset: None,
+            limit: None,
+        }),
+        finish_with("Read refused safely"),
+    ]));
+    let engine = arany::test_support::engine::open(
+        state,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        proposal_request(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Failed);
+    assert_eq!(observation.output, "no spill for this Run");
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::InProcess { .. })
+    ));
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    engine.close().await.unwrap();
+}

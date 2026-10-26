@@ -108,6 +108,7 @@ struct PreHook<'a, 'b> {
     intent: &'a EffectIntent,
     config: &'a PermissionConfig,
     narrowable: bool,
+    interrupted: Option<&'a crate::engine::RunCancellation>,
 }
 
 struct HookTiming {
@@ -371,6 +372,7 @@ impl RunLoop<'_> {
         config: &PermissionConfig,
         intent: &EffectIntent,
         narrowable: bool,
+        interrupted: Option<&crate::engine::RunCancellation>,
     ) -> Result<HookFold, EngineError> {
         let plans = match self.hook_plans(runtime, config, HookEvent::PreToolUse, &intent.call) {
             Ok(plans) => plans,
@@ -420,6 +422,7 @@ impl RunLoop<'_> {
         if !self.task_fits_all(&runtime, intent.agent_run_id, &plans) {
             return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
         }
+        self.propose_tool(intent).await?;
         self.run_pre_tool_hooks(
             PreHook {
                 grant,
@@ -427,6 +430,7 @@ impl RunLoop<'_> {
                 intent,
                 config,
                 narrowable,
+                interrupted,
             },
             plans,
             (subject_digest, input_digest),
@@ -442,6 +446,12 @@ impl RunLoop<'_> {
     ) -> Result<HookFold, EngineError> {
         let mut fold = HookFold::none();
         for plan in plans {
+            if hook
+                .interrupted
+                .is_some_and(crate::engine::RunCancellation::is_cancelled)
+            {
+                break;
+            }
             let run = match self
                 .run_hook(
                     hook.runtime,
@@ -1063,7 +1073,7 @@ impl RunLoop<'_> {
         Ok(match clock {
             HookClock::Pause(pause) => {
                 let (observation, segment, exhausted, _) =
-                    Box::pin(self.dispatch_guard(runtime, hook_intent, pause)).await?;
+                    Box::pin(self.dispatch_effect(runtime, hook_intent, Some(pause))).await?;
                 (observation, segment, exhausted)
             }
             HookClock::Deadline(deadline) => {

@@ -70,6 +70,11 @@ fn host(call: &ToolCall) -> Vec<String> {
             ));
             lines.push(format!("Limit: {limit}"));
         }
+        ToolCall::GhPrView { repository, number } => {
+            lines.push("Private GitHub PR data may be sent to the current Provider.".into());
+            lines.push(format!("Repository: {}", escape_terminal(repository)));
+            lines.push(format!("Pull request: #{number}"));
+        }
         _ => unreachable!("host Git family operation"),
     }
     lines

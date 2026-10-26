@@ -220,6 +220,7 @@ pub(super) fn history_items(run: &RunView) -> Vec<Item> {
         run.tools
             .iter()
             .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .filter(|tool| tool.started_sequence.is_some())
             .map(|tool| {
                 tool_item_with_denial_output(
                     &tool.intent,

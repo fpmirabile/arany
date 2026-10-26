@@ -128,9 +128,9 @@ pub fn enter_native_account_isolated_test() -> bool {
             .expect("native account test process");
         if !output.status.success() {
             let relayed =
-                crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr)
-                    || crate::process::relay_native_panic_location(&output.stderr, case);
-            if !relayed {
+                crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr);
+            let panic_relayed = crate::process::relay_native_panic_location(&output.stderr, case);
+            if !relayed && !panic_relayed {
                 crate::process::annotate_native_fixture(&format!(
                     "fixture={case}; stage=isolated_child_exit_without_fixture_annotation; exit={:?}",
                     output.status.code()
@@ -159,6 +159,9 @@ pub fn enter_native_account_isolated_test() -> bool {
 
 fn native_account_test_case(test: &str) -> &'static str {
     match test {
+        "auto_compaction::attached_context_threshold_preserves_history_after_success_failure_or_interruption" => {
+            "auto_compaction"
+        }
         "tools::native_exec::shipped_exec_continues_after_guarded_command_and_replays_closed_events" => {
             "shipped_exec"
         }

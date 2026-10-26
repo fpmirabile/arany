@@ -10,6 +10,12 @@ use tokio::time::Instant;
 pub use injection::FaultPlan;
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::tool_preflight(session, event);
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn append(session: SessionId, event: &Event) -> Result<(), StoreError> {
     #[cfg(any(test, feature = "test-support"))]
     if FaultPlan::append_fails(session, event) {
@@ -50,9 +56,10 @@ pub(crate) fn record_admission(
     count: usize,
     slots: usize,
     kind: AdmissionKind,
+    observations: usize,
 ) {
     #[cfg(any(test, feature = "test-support"))]
-    crate::test_support::admissions::record(session, count, slots, kind);
+    crate::test_support::admissions::record(session, count, slots, kind, observations);
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
@@ -78,6 +85,48 @@ pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     FaultPlan::commit_marker(token)?;
     Ok(())
+}
+
+#[derive(Default)]
+pub(crate) struct SpillWriteGate {
+    #[cfg(any(test, feature = "test-support"))]
+    entered: Option<tokio::sync::oneshot::Sender<()>>,
+    #[cfg(any(test, feature = "test-support"))]
+    release: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(any(test, feature = "test-support"))]
+    finished: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl SpillWriteGate {
+    pub(crate) fn wait(&mut self) -> io::Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+            if let Some(release) = self.release.take() {
+                release
+                    .recv()
+                    .map_err(|_| io::Error::other("spill gate closed"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SpillWriteGate {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.send(());
+        }
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn spill_write_gate(state: &std::path::Path) -> SpillWriteGate {
+    #[cfg(any(test, feature = "test-support"))]
+    return FaultPlan::spill_write_gate(state);
+    #[cfg(not(any(test, feature = "test-support")))]
+    SpillWriteGate::default()
 }
 
 pub(crate) enum CheckpointStall {
@@ -145,12 +194,30 @@ pub(crate) async fn retry_backoff(session: SessionId, delay: Duration) {
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn in_process_read(intent: &crate::tools::EffectIntent) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((entered, release)) = FaultPlan::in_process_read_gate(intent) {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) async fn autonomous_continuation(session: SessionId) {
     #[cfg(any(test, feature = "test-support"))]
     if let Some((entered, release)) = FaultPlan::autonomous_continuation_gate(session) {
         let _ = entered.send(());
         let _ = release.await;
     }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn file_parent_sync(intent: Option<uuid::Uuid>) -> Result<(), ToolError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if intent.is_some_and(FaultPlan::file_parent_sync_fails) {
+        return Err(ToolError::Uncertain);
+    }
+    Ok(())
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
@@ -292,6 +359,13 @@ mod injection {
     type Admits = fn(&Event) -> bool;
 
     enum Fault {
+        InProcessRead(
+            crate::session::RunId,
+            crate::tools::ToolCall,
+            oneshot::Sender<()>,
+            oneshot::Receiver<()>,
+        ),
+        ToolPreflight(SessionId, &'static str, oneshot::Sender<()>),
         CheckAcknowledgment(
             crate::CheckId,
             fn(&crate::CheckView) -> bool,
@@ -301,8 +375,10 @@ mod injection {
         Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         AutonomousContinuation(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         CheckpointStall(SessionId),
+        SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
+        FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
         GuardCacheReport(
             uuid::Uuid,
@@ -357,6 +433,59 @@ mod injection {
     pub struct FaultPlan;
 
     impl FaultPlan {
+        pub fn gate_in_process_read(
+            run: crate::session::RunId,
+            call: crate::tools::ToolCall,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait_entered) = oneshot::channel();
+            let (release, wait_release) = oneshot::channel();
+            plan().push(Fault::InProcessRead(run, call, entered, wait_release));
+            (wait_entered, release)
+        }
+
+        pub(crate) fn in_process_read_gate(
+            intent: &crate::tools::EffectIntent,
+        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::InProcessRead(run, call, ..) if *run == intent.run_id && *call == intent.call),
+            ) {
+                Some(Fault::InProcessRead(_, _, entered, release)) => Some((entered, release)),
+                _ => None,
+            }
+        }
+
+        pub fn corrupt_tool_preflight(
+            session: SessionId,
+            kind: &'static str,
+        ) -> oneshot::Receiver<()> {
+            let (entered, wait) = oneshot::channel();
+            plan().push(Fault::ToolPreflight(session, kind, entered));
+            wait
+        }
+
+        pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
+            if let Some(Fault::ToolPreflight(_, _, entered)) = take(
+                |fault| matches!(fault, Fault::ToolPreflight(id, kind, _) if *id == session && *kind == event.kind()),
+            ) {
+                if let Event::ToolProposed { intent, .. } | Event::ToolStarted { intent, .. } =
+                    event
+                {
+                    intent.workspace_inode = intent.workspace_inode.saturating_add(1);
+                }
+                if let Event::ToolStarted {
+                    intent,
+                    verdict: Some(verdict),
+                    ..
+                } = event
+                {
+                    // Keep the payload valid so the changed Workspace pin reaches the reducer.
+                    verdict.intent_digest =
+                        crate::tools::EffectIntent::from(intent.clone()).digest();
+                }
+                let _ = entered.send(());
+            }
+        }
+
         pub fn gate_check_acknowledgment(
             check: crate::CheckId,
             admits: fn(&crate::CheckView) -> bool,
@@ -385,6 +514,34 @@ mod injection {
             let (release, released) = oneshot::channel();
             plan().push(Fault::Checkpoint(session, entered, released));
             (wait, release)
+        }
+
+        pub fn gate_spill_write(
+            state: std::path::PathBuf,
+        ) -> (
+            oneshot::Receiver<()>,
+            std::sync::mpsc::SyncSender<()>,
+            oneshot::Receiver<()>,
+        ) {
+            let (entered, wait) = oneshot::channel();
+            let (release, released) = std::sync::mpsc::sync_channel(1);
+            let (finished, done) = oneshot::channel();
+            plan().push(Fault::SpillWrite(
+                state,
+                super::SpillWriteGate {
+                    entered: Some(entered),
+                    release: Some(released),
+                    finished: Some(finished),
+                },
+            ));
+            (wait, release, done)
+        }
+
+        pub(crate) fn spill_write_gate(state: &std::path::Path) -> super::SpillWriteGate {
+            match take(|fault| matches!(fault, Fault::SpillWrite(path, _) if path == state)) {
+                Some(Fault::SpillWrite(_, gate)) => gate,
+                _ => super::SpillWriteGate::default(),
+            }
         }
 
         pub fn stall_checkpoint(session: SessionId) {
@@ -534,6 +691,14 @@ mod injection {
         pub(crate) fn record_publication_fails(state: &std::path::Path, record: &str) -> bool {
             take(|fault| matches!(fault, Fault::RecordPublication(path, name) if path == state && *name == record))
                 .is_some()
+        }
+
+        pub fn fail_file_parent_sync(intent: uuid::Uuid) {
+            plan().push(Fault::FileParentSync(intent));
+        }
+
+        pub(crate) fn file_parent_sync_fails(intent: uuid::Uuid) -> bool {
+            take(|fault| matches!(fault, Fault::FileParentSync(id) if *id == intent)).is_some()
         }
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {

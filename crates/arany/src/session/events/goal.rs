@@ -579,6 +579,9 @@ impl GoalPlanContract {
     pub(crate) fn allows_call(&self, call: &crate::tools::ToolCall) -> bool {
         use crate::tools::ToolCall;
         match call {
+            ToolCall::Read { path, .. } if crate::tools::spill::read_reference(path).is_some() => {
+                true
+            }
             ToolCall::ParseAgentDefinition { .. }
             | ToolCall::PrepareWorker { .. }
             | ToolCall::ApplyChangeset {
@@ -630,7 +633,7 @@ impl GoalPlanContract {
             | ToolCall::GitSwitch { .. }
             | ToolCall::GitPush { .. }
             | ToolCall::GhPrCreate { .. } => self.allows_path("."),
-            ToolCall::GhPrList { .. } => self.allows_path("."),
+            ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => self.allows_path("."),
         }
     }
 

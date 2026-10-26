@@ -954,7 +954,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             assert_eq!(compactions.len(), 3);
             for (cycle, request) in compactions.iter().enumerate() {
                 assert_eq!(request.model, "test-model");
-                assert_eq!(request.max_output_tokens, 1024);
+                assert_eq!(request.max_output_tokens, 4096);
                 assert_eq!(request.previous_summary.is_some(), cycle > 0);
                 assert_eq!(request.items.len(), 5);
                 for (offset, item) in request.items.iter().enumerate() {
@@ -1018,7 +1018,7 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
         ])
         .with_compactions(vec![
             Ok(CompactionResponse {
-                summary: "z".repeat(8 * 1024 + 1),
+                summary: "z".repeat(64 * 1024 + 1),
                 response_id: None,
                 usage: arany::Usage {
                     input_tokens: Some(12),
@@ -1337,6 +1337,43 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
     });
 }
 
+fn pad_capacity_history(path: &Path, session: SessionId, prefix: i64, branch: bool) {
+    let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let (first_padding_sequence, last_padding_sequence) = if branch {
+        let (first, boundary): (i64, i64) = transaction
+            .query_row(
+                "SELECT MIN(sequence), MAX(CASE WHEN kind = 'RunFinished' THEN sequence END) FROM events WHERE session_id = ?1",
+                [session.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let padding = prefix - boundary;
+        assert!(padding > 0);
+        // Fork capacity counts the selected prefix, so padding must precede its Run boundary.
+        transaction
+            .execute(
+                "UPDATE events SET sequence = sequence + ?1 WHERE session_id = ?2 AND sequence > ?3",
+                rusqlite::params![padding, session.to_string(), first],
+            )
+            .unwrap();
+        (first + 1, first + padding)
+    } else {
+        let first: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (first, prefix)
+    };
+    for sequence in first_padding_sequence..=last_padding_sequence {
+        transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn persistence_capacity_is_admitted_before_provider_usage() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1352,16 +1389,16 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         // same-route retry facts per call; the boundary is the largest prefix that still admits the Run.
         // A single plain Run commits 11 Events and one Team child 17.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9986, CollaborationPolicy::Single, false, false, false, false),
-            (9985, CollaborationPolicy::Single, true, false, false, false),
+            (9987, CollaborationPolicy::Single, false, false, false, false),
+            (9986, CollaborationPolicy::Single, true, false, false, false),
             (9977, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
             (9975, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9985, CollaborationPolicy::Single, false, true, false, false),
-            (9984, CollaborationPolicy::Single, true, true, false, false),
-            (9985, CollaborationPolicy::Single, false, false, true, false),
-            (9984, CollaborationPolicy::Single, true, false, true, false),
-            (9922, CollaborationPolicy::Single, false, false, false, true),
-            (9921, CollaborationPolicy::Single, true, false, false, true),
+            (9986, CollaborationPolicy::Single, false, true, false, false),
+            (9985, CollaborationPolicy::Single, true, true, false, false),
+            (9986, CollaborationPolicy::Single, false, false, true, false),
+            (9985, CollaborationPolicy::Single, true, false, true, false),
+            (9923, CollaborationPolicy::Single, false, false, false, true),
+            (9922, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
@@ -1369,18 +1406,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let id = run_to_end(&engine, &provider, request(&workspace, "Initial")).await.unwrap().session_id;
             engine.close().await.unwrap();
-            let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
-            let transaction = connection.transaction().unwrap();
-            let first_padding_sequence: i64 = transaction
-                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
-            }
-            transaction.commit().unwrap();
-            drop(connection);
+            pad_capacity_history(&path, id, i64::from(prefix), branch);
             let responses = if matches!(policy, CollaborationPolicy::Team { .. }) {
                 vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Child".into(), profile: None }] }), finish(), finish()]
             } else { vec![finish()] };
@@ -1421,7 +1447,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             if admitted {
                 assert_eq!(result.unwrap().run.status, RunStatus::Finished, "case {index}");
             } else {
-                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "case {index}");
+                assert!(matches!(result, Err(EngineError::Store(arany::StoreError::ReplayLimit))), "case {index}: {result:?}");
             }
             engine.close().await.unwrap();
             let phases: Vec<_> = requests.lock().unwrap().iter().map(|request| request.phase).collect();
@@ -1763,7 +1789,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
                 CompactionItem::Completed(arany::HistoryTurn { user: "Source".into(), assistant: "answer".into() }),
                 CompactionItem::Completed(arany::HistoryTurn { user: "Recovered".into(), assistant: "recovered answer".into() }),
             ]);
-            assert_eq!(requests[0].max_output_tokens, 1024);
+            assert_eq!(requests[0].max_output_tokens, 4096);
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(id).await.unwrap();
@@ -3301,7 +3327,7 @@ fn compaction_timeout_drops_the_call_and_records_failure() {
                     })],
                 "exact compaction source"
             );
-            assert_eq!(compact.max_output_tokens, 1024);
+            assert_eq!(compact.max_output_tokens, 4096);
         }
         assert!(matches!(
             record.status,

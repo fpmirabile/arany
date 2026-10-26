@@ -33,6 +33,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let command_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(Attestation::Guard(GuardReceipt {
@@ -58,7 +59,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         intent: command_intent,
         observation: Some(command_observation),
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,
@@ -84,6 +88,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             use_count: 1,
         };
         let observation = crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
@@ -101,7 +106,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             intent,
             observation: Some(observation),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -117,6 +125,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         images: Vec::new(),
         config: None,
         agents: vec![AgentView {
+            tool_refusal: None,
+            tool_refusal_sequence: None,
             profile: None,
             assignment: None,
             definition: None,
@@ -138,6 +148,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         finished_sequence: Some(2),
         tools,
         tool_compaction_summary: None,
+        tool_compaction_recent_files: Vec::new(),
         tool_compaction_covered_count: 0,
         tool_results_cleared_count: 0,
         definitions: Default::default(),
@@ -585,6 +596,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let uncertain_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(Attestation::Guard(GuardReceipt {
@@ -611,7 +623,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         intent: uncertain_intent.clone(),
         observation: Some(uncertain_observation),
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,
@@ -686,6 +701,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let failed_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: failed_intent.clone(),
@@ -703,7 +719,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         observation: Some(failed_observation),
         intent: failed_intent,
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,
@@ -783,6 +802,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 use_count: 1,
             };
             let observation = crate::tools::ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent: intent.clone(),
@@ -799,7 +819,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 observation: Some(observation),
                 intent,
                 review_call_index: None,
+                active_time_reserved: false,
+                narrowing_source: None,
                 permission_verdict: None,
+                started_sequence: Some(0),
                 hooks: Vec::new(),
                 hook_sequence: None,
                 finished_sequence: None,
@@ -858,6 +881,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     timeout_intent.limits.cache_candidate_bytes = 0;
     timeout_intent.limits.cache_transfer_ms = 0;
     let timeout_observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: Some(crate::tools::LimitCause::RequestedTime),
         intent: timeout_intent.clone(),
@@ -874,7 +898,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         intent: timeout_intent,
         observation: Some(timeout_observation),
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,
@@ -959,6 +986,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
     let mut intent = read_intent(&call);
     intent.run_id = run_id;
     let observation = crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(Attestation::for_site(&intent)),
@@ -977,7 +1005,10 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         intent,
         observation: Some(observation),
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,
@@ -1000,6 +1031,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         finished_sequence: Some(2),
         tools: vec![tool; 100],
         tool_compaction_summary: None,
+        tool_compaction_recent_files: Vec::new(),
         tool_compaction_covered_count: 0,
         tool_results_cleared_count: 0,
         definitions: Default::default(),
@@ -1164,6 +1196,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
     run.tools.push(ToolView {
         checkpoint: None,
         observation: Some(crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
@@ -1175,7 +1208,10 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
         }),
         intent,
         review_call_index: None,
+        active_time_reserved: false,
+            narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: None,

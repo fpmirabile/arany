@@ -19,6 +19,8 @@ mod guard;
 mod mcp;
 pub(crate) use mcp::FRAME_BYTES;
 mod output;
+pub(crate) mod spill;
+pub use spill::OutputSpill;
 pub mod permissions;
 mod process;
 mod search;
@@ -53,7 +55,7 @@ pub(crate) use workspace::WORKSPACE_PERMISSIONS;
 pub use workspace::{
     RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
 };
-/// Whether this OS implements native Guard protection for typed file Tools.
+/// Whether this OS implements admitted native Tool protection.
 pub const fn native_protection_supported() -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))
 }
@@ -98,14 +100,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     ApprovalCause, Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause,
-    FileChange, FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS,
-    MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits,
-    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
-    ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
+    FileChange, FileReceipt, FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit,
+    MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
+    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    #[error("no spill for this Run")]
+    SpillUnavailable,
     #[error("{path:?}: {source}")]
     AtPath {
         path: String,
@@ -170,6 +174,8 @@ pub enum ToolError {
     Pattern(&'static str),
     #[error("Tool operation failed")]
     Operation,
+    #[error("File operation cancelled before publication")]
+    Cancelled,
     #[error("Tool effect completion is uncertain")]
     Uncertain,
     #[error(
@@ -230,6 +236,7 @@ pub(crate) struct ToolRuntime {
     hook_stdin: Option<std::sync::Arc<str>>,
     checkpoint_gate: Option<tokio::sync::mpsc::Sender<CheckpointRequest>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
+    spill_access: Option<std::sync::Arc<crate::store::SpillAccess>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
 }
@@ -396,6 +403,84 @@ pub(crate) fn load_permissions(state: &StateRoot) -> Result<Option<PermissionSna
 }
 
 impl ToolRuntime {
+    pub(crate) fn admit_spills(
+        &mut self,
+        state: &StateRoot,
+        run: RunId,
+        history: &[crate::session::EventEnvelope],
+    ) {
+        match state.admit_spills(run, history) {
+            Ok(access) => self.spill_access = Some(std::sync::Arc::new(access)),
+            Err(_) => crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            ),
+        }
+    }
+
+    pub(crate) async fn persist_spill(
+        &self,
+        observation: &mut ToolObservation,
+        mut cancellation: Cancellation,
+    ) {
+        let Some(mut spill) = observation.spill.take() else {
+            return;
+        };
+        let Some(bytes) = spill.captured.take() else {
+            return;
+        };
+        if !spill::has_excerpt(observation) || cancellation.is_cancelled() {
+            return;
+        }
+        let Some(access) = self.spill_access.clone() else {
+            crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            );
+            return;
+        };
+        let gate = self
+            .cache_state
+            .as_ref()
+            .map(|state| crate::fault::spill_write_gate(state.path()))
+            .unwrap_or_default();
+        let writer = spill::Writer::start(
+            std::sync::Arc::clone(&access),
+            spill.r#ref.clone(),
+            bytes,
+            gate,
+        );
+        let retained = if let Some(mut writer) = writer {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => false,
+                result = tokio::time::timeout(Duration::from_millis(spill::SPILL_PERSIST_TIMEOUT_MS), &mut writer.result) => {
+                    matches!(result, Ok(Ok(Ok(())))) && !cancellation.is_cancelled()
+                }
+            }
+        } else {
+            false
+        };
+        if retained {
+            observation.spill = Some(spill);
+        } else {
+            crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            );
+        }
+    }
+
+    pub(crate) fn retain_spill(&self, observation: &ToolObservation) {
+        if let Some(spill) = &observation.spill
+            && self
+                .spill_access
+                .as_ref()
+                .is_some_and(|access| access.retain(&spill.r#ref).is_err())
+        {
+            crate::diagnostics::record_development_failure(
+                crate::diagnostics::DevelopmentFailure::OutputSpill,
+            );
+        }
+    }
+
     pub(crate) fn with_queue_progress(
         mut self,
         sender: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
@@ -459,7 +544,7 @@ impl ToolRuntime {
             workspace_device: self.workspace_identity.device,
             workspace_inode: self.workspace_identity.inode,
             policy_digest: self.config.digest(),
-            enforcement_digest: self.enforcement_digest,
+            enforcement_digest: FileReceipt::enforcement_digest(),
         }
     }
 
@@ -958,6 +1043,7 @@ impl ToolRuntime {
             active_action_gate: None,
             hook_stdin: None,
             checkpoint_gate: None,
+            spill_access: None,
             cache_state: Some(std::sync::Arc::new(
                 state
                     .try_clone()
@@ -1156,11 +1242,11 @@ impl ToolRuntime {
                     .filter(|name| match *name {
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
-                        "gh_pr_list" => self.host_authentication.as_ref().as_ref()
+                        "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         _ => true,
                     })
-                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list") || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
+                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view") || self.config.pinned_gh().is_some())
                     .collect();
                 serde_json::json!({"write":write,"host":true,"operations":operations,"scope":catalog::GIT_SCOPE})
             } else {
@@ -1293,7 +1379,12 @@ impl ToolRuntime {
         agent_run_id: AgentRunId,
         call: ToolCall,
     ) -> EffectIntent {
-        let enforcement_digest = if call.is_process() {
+        let enforcement_digest = if call.facts().family == catalog::Family::File
+            && call.facts().mutates
+            && call.facts().site == Site::InProcess
+        {
+            FileReceipt::enforcement_digest()
+        } else if call.is_process() {
             self.process_enforcement_digest
         } else {
             self.enforcement_digest
@@ -1391,7 +1482,9 @@ impl ToolRuntime {
     }
 
     pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call) {
+        if discovery::possible(call)
+            || call.facts().family == catalog::Family::File && call.facts().mutates
+        {
             guard::RESERVATION_OVERHEAD
         } else {
             self.reservation_overhead(call)
@@ -1436,21 +1529,32 @@ impl ToolRuntime {
         bytes: std::sync::Arc<[u8]>,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        if let Err(error) = worker::decode_handover(&intent, &bytes, &self.config) {
-            return unstarted_observation(intent, error);
-        }
         let mut runtime = self.clone();
         runtime.handover = Some(bytes);
-        match guard::execute(&runtime, &intent, cancellation).await {
-            Ok(observation) => observation,
-            Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
-        }
+        runtime.run_file(intent, cancellation).await
+    }
+
+    pub(crate) async fn execute_concurrent_read(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::InProcess)).await
     }
 
     pub(crate) async fn execute(
         &self,
         intent: EffectIntent,
         cancellation: Cancellation,
+    ) -> ToolObservation {
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::Automatic)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+        reads: ReadDispatch,
     ) -> ToolObservation {
         if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
             && !self.guard_available
@@ -1463,6 +1567,7 @@ impl ToolRuntime {
         ) && matches!(intent.call, ToolCall::Command { .. })
         {
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent,
@@ -1489,6 +1594,7 @@ impl ToolRuntime {
             || !self.config.allows(&intent.call)
         {
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent,
@@ -1500,7 +1606,13 @@ impl ToolRuntime {
             };
         }
         match intent.call.facts().site {
-            Site::InProcess => self.run_read(intent, cancellation).await,
+            Site::InProcess if intent.call.facts().mutates => {
+                self.run_file(intent, cancellation).await
+            }
+            Site::InProcess => match reads {
+                ReadDispatch::Automatic => self.run_read(intent, cancellation).await,
+                ReadDispatch::InProcess => self.run_in_process(intent, cancellation).await,
+            },
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
@@ -1527,6 +1639,69 @@ impl ToolRuntime {
         }
     }
 
+    async fn run_file(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
+        if !self.guard_available {
+            return unstarted_observation(intent, ToolError::ProtectionUnavailable);
+        }
+        if !fs::in_process_mutation(&intent) {
+            return unstarted_observation(intent, ToolError::Configuration);
+        }
+        let started = tokio::time::Instant::now();
+        let window = match self.begin_active_action(started).await {
+            Ok(window) => window,
+            Err(error) => return unstarted_observation(intent, error),
+        };
+        let deadline = started + Duration::from_millis(u64::from(intent.limits.runtime_ms));
+        let deadline = window.map_or(deadline, |window| deadline.min(window.payload_deadline));
+        if let Err(error) = self.before_dispatch(window, 0, &cancellation).await {
+            return if cancellation.is_cancelled() {
+                unstarted_observation(intent, ToolError::Cancelled)
+            } else if matches!(error, ToolError::Limit) {
+                unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired")
+            } else {
+                unstarted_observation(intent, error)
+            };
+        }
+        let control = fs::MutationControl::new(intent.id, cancellation, deadline);
+        let Some(Ok(permit)) = self
+            .reads
+            .as_ref()
+            .map(|reads| reads.slots.clone().try_acquire_owned())
+        else {
+            return unattested_limit(
+                intent,
+                LimitCause::ReadCapacity,
+                "In-process file capacity is full; nothing was changed",
+            );
+        };
+        let blocking_control = control.clone();
+        let (runtime, file_intent) = (self.clone(), intent.clone());
+        let writing = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let control = blocking_control;
+            let root = runtime.pinned_root(&file_intent)?;
+            let result = if let Some(bytes) = &runtime.handover {
+                let changeset = worker::decode_handover(&file_intent, bytes, &runtime.config)?;
+                fs::apply_worker_changeset(&root, &changeset, &control)
+            } else {
+                fs::mutate(&root, &file_intent.call, &runtime.config, &control)
+            };
+            Ok::<_, ToolError>(result)
+        });
+        let result = match tokio::time::timeout_at(deadline, writing).await {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(error))) => return unstarted_observation(intent, error),
+            Ok(Err(_)) => Err(ToolError::Uncertain),
+            Err(_) => Err(control.expire()),
+        };
+        let observation = self.in_process_observation(intent.clone(), result);
+        crate::fault::guard_cache_report(&observation).await;
+        match crate::fault::guard_result(observation.intent.id, Ok(observation)) {
+            Ok(observation) => observation,
+            Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
+        }
+    }
+
     async fn run_unguarded(
         &self,
         intent: EffectIntent,
@@ -1544,6 +1719,7 @@ impl ToolRuntime {
         if unguarded::prohibited_intent(&intent) {
             let output = unguarded::manual_handoff(&intent.call);
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 approval_cause: None,
@@ -1605,6 +1781,7 @@ impl ToolRuntime {
             })
         });
         let mut observation = ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: outcome.limit_cause,
             attestation,
@@ -1614,7 +1791,11 @@ impl ToolRuntime {
             approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
+        if self.hook_stdin.is_none() {
+            observation.spill = spill::OutputSpill::captured(&observation, outcome.captured);
+        }
         if !observation.valid() {
+            observation.spill = None;
             observation.disposition = ToolDisposition::Limit;
             observation.limit_cause = Some(crate::tools::LimitCause::Resource);
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
@@ -1635,7 +1816,9 @@ impl ToolRuntime {
             || !intent.valid()
             || intent.policy_digest != self.config.digest()
             || intent.enforcement_digest
-                != if intent.call.is_process() {
+                != if fs::in_process_mutation(intent) {
+                    FileReceipt::enforcement_digest()
+                } else if intent.call.is_process() {
                     self.process_enforcement_digest
                 } else {
                     self.enforcement_digest
@@ -1689,6 +1872,15 @@ impl ToolRuntime {
                 "In-process read capacity is full; nothing was read",
             );
         };
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return cancelled_read(intent),
+            ready = tokio::time::timeout_at(deadline, crate::fault::in_process_read(&intent)) => {
+                if ready.is_err() {
+                    return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+                }
+            },
+        }
         let (runtime, read_intent) = (self.clone(), intent.clone());
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1713,6 +1905,31 @@ impl ToolRuntime {
                     read_intent.limits.result_bytes as usize,
                 ));
             }
+            if let ToolCall::Read {
+                path,
+                offset,
+                limit,
+            } = &read_intent.call
+                && let Some(reference) = spill::read_reference(path)
+            {
+                let file = runtime
+                    .spill_access
+                    .as_ref()
+                    .ok_or(ToolError::SpillUnavailable)
+                    .and_then(|access| {
+                        access
+                            .read(reference)
+                            .map_err(|_| ToolError::SpillUnavailable)
+                    });
+                return Ok(file.and_then(|file| {
+                    fs::read_page(
+                        file,
+                        *offset,
+                        *limit,
+                        read_intent.limits.result_bytes as usize,
+                    )
+                }));
+            }
             let hidden = runtime.hidden_paths(&read_intent.call);
             Ok(fs::inspect(
                 &root,
@@ -1734,30 +1951,56 @@ impl ToolRuntime {
                 Err(_) => return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired"),
             },
         };
+        self.in_process_observation(intent, result)
+    }
+
+    fn in_process_observation(
+        &self,
+        intent: EffectIntent,
+        result: Result<String, ToolError>,
+    ) -> ToolObservation {
         let (disposition, output, enforcement_cause, limit_cause) =
             dispatch::outcome(&intent, result);
+        let receipt =
+            if fs::in_process_mutation(&intent) && disposition == ToolDisposition::Succeeded {
+                match fs::file_receipt(&intent, &output) {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => {
+                        return uncertain_observation(intent, error, CacheUpdate::NotApplicable);
+                    }
+                }
+            } else {
+                None
+            };
         let mut observation = ToolObservation {
-            enforcement_cause,
-            limit_cause,
+            spill: None,
             attestation: Some(Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
+                receipt,
             }),
             intent,
             disposition,
             output,
+            enforcement_cause,
+            limit_cause,
             approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
-            observation.limit_cause = Some(crate::tools::LimitCause::Resource);
+            observation.limit_cause = Some(LimitCause::Resource);
             observation.enforcement_cause = None;
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
         observation
     }
+}
+
+enum ReadDispatch {
+    Automatic,
+    InProcess,
 }
 
 #[derive(Clone)]
@@ -1777,6 +2020,7 @@ static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semapho
 
 fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: Some(cause),
         intent,
@@ -1790,6 +2034,7 @@ fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> To
 
 fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent,
@@ -1850,6 +2095,11 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    if matches!(error, ToolError::Cancelled) {
+        let mut observation = cancelled_read(intent);
+        observation.output = "File operation cancelled; nothing in the Workspace changed".into();
+        return observation;
+    }
     if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
         return unattested_limit(
             intent,
@@ -1864,6 +2114,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
             .then_some(EnforcementCause::GuardBootstrap);
     let site = match intent.call.facts().site {
+        Site::InProcess if intent.call.facts().mutates => "File",
         Site::InProcess => "Read",
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
@@ -1914,6 +2165,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         }
     }
     ToolObservation {
+        spill: None,
         enforcement_cause,
         limit_cause: resource_limit.then_some(LimitCause::Resource),
         output,
@@ -1937,6 +2189,7 @@ pub(super) fn uncertain_observation(
     record_failure("Guard", &intent, &error);
     let stage = failure_stage(&error);
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent,

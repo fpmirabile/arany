@@ -193,6 +193,34 @@ pub(super) fn run_finished(run: &RunView) -> Result<(), ReplayError> {
     Ok(())
 }
 
+fn primary_intents_idle(run: &RunView) -> bool {
+    quiescent(run)
+        || run.workers.capture.is_none()
+            && run.primary().is_some_and(|primary| {
+                primary
+                    .provider_calls
+                    .iter()
+                    .rev()
+                    .find(|call| call.phase != AgentPhase::ToolReview)
+                    .is_some_and(|call| {
+                        call.disposition == ProviderCallDisposition::ToolRequested
+                            && call.requested_tools > 1
+                    })
+            })
+            && run.tools.iter().all(|tool| {
+                tool.observation.is_some()
+                    || !tool.dispatch_in_progress()
+                        && tool.narrowing_source.is_none()
+                        && !tool.intent.call.is_internal()
+                        && !matches!(tool.intent.call, ToolCall::ApplyChangeset { .. })
+            })
+            && run
+                .agents
+                .iter()
+                .flat_map(|agent| &agent.tools)
+                .all(|tool| tool.observation.is_some())
+}
+
 pub(super) fn tool_started(
     run: &RunView,
     agent_run_id: &AgentRunId,
@@ -205,7 +233,7 @@ pub(super) fn tool_started(
         return Err(ReplayError::InvalidTransition);
     }
     if primary(run, *agent_run_id) {
-        if intent.target != EffectTarget::Workspace || !quiescent(run) {
+        if intent.target != EffectTarget::Workspace || !primary_intents_idle(run) {
             return Err(ReplayError::InvalidTransition);
         }
         if let ToolCall::ApplyChangeset {
@@ -215,36 +243,9 @@ pub(super) fn tool_started(
             if !integration_source(run, source) {
                 return Err(ReplayError::InvalidTransition);
             }
-        } else if intent.call.mutates() || intent.call.is_process() {
-            let leases: Vec<_> = run
-                .agents
-                .iter()
-                .filter_map(|a| a.assignment.as_ref())
-                .filter(|w| w.released.is_none())
-                .flat_map(|w| &w.pins.request.lease)
-                .collect();
-            let paths: Vec<_> = match &intent.call {
-                ToolCall::Write { path, .. }
-                | ToolCall::Edit { path, .. }
-                | ToolCall::Delete { path, .. }
-                | ToolCall::MultiEdit {
-                    file_path: path, ..
-                }
-                | ToolCall::Mkdir { path } => vec![path],
-                ToolCall::Move {
-                    source,
-                    destination,
-                    ..
-                } => vec![source, destination],
-                ToolCall::ApplyChangeset {
-                    source: ChangesetSource::CommandReceipt { changeset, .. },
-                } => changeset.files.iter().map(|f| &f.path).collect(),
-                _ if !leases.is_empty() => return Err(ReplayError::InvalidTransition),
-                _ => Vec::new(),
-            };
-            if paths.iter().any(|p| leases.iter().any(|l| overlaps(l, p))) {
-                return Err(ReplayError::InvalidTransition);
-            }
+        } else {
+            super::super::tool::validate_primary_tool_lease(run, &intent.call)
+                .map_err(|_| ReplayError::InvalidTransition)?;
         }
     } else if worker(run, *agent_run_id).is_ok() {
         if !child_tool_admissible(run, *agent_run_id, intent) {
@@ -414,23 +415,15 @@ pub(super) fn check(
     if unrecorded_integration(run) && starts_team_work(event) {
         return Err(ReplayError::InvalidTransition);
     }
-    let workspace_stopped = run
+    let stop_sequence = run
         .tools
         .iter()
-        .any(|t| t.observation.as_ref().is_some_and(|o| o.stops_run()));
-    if (run.workers.stop.is_some() || workspace_stopped)
-        && matches!(
-            event,
-            Event::AgentSpawned { .. }
-                | Event::ToolStarted { .. }
-                | Event::GoalProviderCallReserved { .. }
-                | Event::ProviderFallbackUsed { .. }
-                | Event::ProviderRetryScheduled { .. }
-                | Event::WorkerHandoverRecorded { .. }
-                | Event::WorkerVerificationRecorded { .. }
-        )
-    {
-        return Err(ReplayError::InvalidTransition);
+        .filter(|tool| tool.observation.as_ref().is_some_and(|o| o.stops_run()))
+        .filter_map(|tool| tool.finished_sequence)
+        .chain(run.workers.stop.as_ref().map(|(sequence, _)| *sequence))
+        .min();
+    if let Some(sequence) = stop_sequence {
+        check_after_stop(run, event, sequence)?;
     }
     if let Some(id) = actor
         && let Ok(w) = worker(run, id)
@@ -469,6 +462,114 @@ pub(super) fn check(
         {
             return Err(ReplayError::InvalidTransition);
         }
+    }
+    Ok(())
+}
+
+fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), ReplayError> {
+    let tools = || {
+        run.tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+    };
+    match event {
+        Event::ToolStarted {
+            agent_run_id,
+            intent,
+            verdict,
+            ..
+        } => {
+            let batch = run.agents.iter().any(|agent| {
+                agent.id == *agent_run_id
+                    && agent.assignment.is_none()
+                    && agent
+                        .provider_calls
+                        .iter()
+                        .rev()
+                        .find(|call| call.phase != AgentPhase::ToolReview)
+                        .is_some_and(|call| {
+                            call.disposition == ProviderCallDisposition::ToolRequested
+                                && call.requested_tools > 1
+                        })
+            });
+            if verdict.as_ref().is_some_and(|verdict| verdict.approved)
+                || verdict.is_none() && !batch
+                || !tools().any(|tool| {
+                    tool.intent.id == intent.id
+                        && tool.intent.agent_run_id == *agent_run_id
+                        && tool.started_sequence.is_none()
+                        && tool.observation.is_none()
+                })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::ToolFinished {
+            observation,
+            checkpoint,
+            ..
+        } => {
+            let started_after_stop = tools().any(|tool| {
+                tool.intent.id == observation.intent.id
+                    && tool
+                        .started_sequence
+                        .is_some_and(|started| started > sequence)
+            });
+            if started_after_stop
+                && (!matches!(
+                    observation.disposition,
+                    ToolDisposition::Denied | ToolDisposition::Limit
+                ) || observation.attestation.is_some()
+                    || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
+                    || checkpoint.is_some())
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::AgentSpawned { .. }
+        | Event::ToolProposed { .. }
+        | Event::ToolActiveTimeReserved { .. }
+        | Event::GoalProviderCallReserved { .. }
+        | Event::ProviderFallbackUsed { .. }
+        | Event::ProviderRetryScheduled { .. }
+        | Event::WorkerHandoverRecorded { .. }
+        | Event::WorkerVerificationRecorded { .. } => return Err(ReplayError::InvalidTransition),
+        Event::ToolPreflightRefused { .. }
+        | Event::WorkspaceRewindStarted { .. }
+        | Event::WorkspaceRewindFinished { .. }
+        | Event::SessionStarted { .. }
+        | Event::SessionDefaultChanged { .. }
+        | Event::SessionForked { .. }
+        | Event::ContextCompacted { .. }
+        | Event::SessionRenamed { .. }
+        | Event::ProviderSetupEditStarted { .. }
+        | Event::ProviderSetupEditFinished { .. }
+        | Event::GoalStarted { .. }
+        | Event::GoalRunLinked { .. }
+        | Event::GoalResumed { .. }
+        | Event::GoalPlanContractRecorded { .. }
+        | Event::GoalFinished { .. }
+        | Event::MessageAccepted { .. }
+        | Event::RunStarted { .. }
+        | Event::ProviderCallRecorded { .. }
+        | Event::GoalCompactionCallReserved { .. }
+        | Event::ToolResultsCleared { .. }
+        | Event::GoalContextCompacted { .. }
+        | Event::GoalSteeringNoteRecorded { .. }
+        | Event::AgentSteeringNoteRecorded { .. }
+        | Event::AssistantDisplayRecorded { .. }
+        | Event::SupervisorVerdictRecorded { .. }
+        | Event::HookStarted { .. }
+        | Event::HookFinished { .. }
+        | Event::AgentFinished { .. }
+        | Event::WorkerDataChunk { .. }
+        | Event::WorkerDataSealed { .. }
+        | Event::WorkerIntegrationRecorded { .. }
+        | Event::WorkerHandoverDiscarded { .. }
+        | Event::WorkerLeaseReleased { .. }
+        | Event::WorkerStopObserved { .. }
+        | Event::MessageCommitted { .. }
+        | Event::RunFinished { .. } => {}
     }
     Ok(())
 }

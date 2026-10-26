@@ -16,7 +16,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 struct Pending {
     id: RequestId,
-    session: bool,
+    decisions: Vec<ApprovalDecision>,
     decide: oneshot::Sender<ApprovalReply>,
 }
 
@@ -29,7 +29,7 @@ struct State {
 pub(super) struct Channel {
     pub outbound: mpsc::Sender<Message>,
     pub next_id: Arc<AtomicI64>,
-    pub withdrawals: bool,
+    pub approval_channel: super::server::ApprovalChannel,
 }
 
 pub(super) struct Approvals {
@@ -55,8 +55,10 @@ impl Approvals {
         let Channel {
             outbound,
             next_id,
-            withdrawals,
+            approval_channel,
         } = channel;
+        let withdrawals = approval_channel != super::server::ApprovalChannel::Human;
+        let terminal = approval_channel == super::server::ApprovalChannel::Terminal;
         let state = Arc::new(Mutex::new(State::default()));
         let changed = Arc::new(Notify::new());
         let mut owner = Self {
@@ -86,10 +88,10 @@ impl Approvals {
                         answer = None;
                         let pending = state.lock().expect("approval state").pending.take();
                         let _ = current.as_mut().expect("approval").withdrawal_committed().await;
-                        notify_withdrawal(pending, &outbound, withdrawals);
+                        notify_withdrawal(pending, &outbound, withdrawals, terminal).await;
                         current = None;
                     }
-                    approval = inbox.next() => {
+                    approval = inbox.next(), if !terminal || current.is_none() => {
                         let Some(mut approval) = approval else { break };
                         if current.is_some() {
                             approval.decide(ApprovalReply::Unavailable);
@@ -100,22 +102,38 @@ impl Approvals {
                             () = cancel.cancelled() => break,
                             () = finished.cancelled() => break,
                             () = outbound.closed() => break,
+                            () = changed.notified(), if terminal => break,
                             () = approval.abandoned() => None,
                             started = started_at(intent) => {
-                                started.and_then(|started| request(thread_id, &approval, started, &next_id))
+                                started.and_then(|started| request(thread_id, &approval, started, &next_id, terminal))
                             },
                         };
                         let Some(message) = message else { approval.decide(ApprovalReply::Unavailable); continue; };
+                        let permit = if terminal {
+                            tokio::select! { biased;
+                                () = cancel.cancelled() => break,
+                                () = finished.cancelled() => break,
+                                () = outbound.closed() => break,
+                                () = changed.notified() => break,
+                                () = approval.abandoned() => continue,
+                                permit = outbound.reserve() => match permit {
+                                    Ok(permit) => permit,
+                                    Err(_) => break,
+                                },
+                            }
+                        } else {
+                            let Ok(permit) = outbound.try_reserve() else {
+                                approval.decide(ApprovalReply::Unavailable);
+                                continue;
+                            };
+                            permit
+                        };
                         let (decide, decision) = oneshot::channel();
                         let mut state = state.lock().expect("approval state");
                         if state.closed { approval.decide(ApprovalReply::Unavailable); break; }
-                        let Ok(permit) = outbound.try_reserve() else {
-                            approval.decide(ApprovalReply::Unavailable);
-                            continue;
-                        };
                         state.pending = Some(Pending {
                             id: message.id.clone(),
-                            session: approval.unguarded.as_ref().is_some_and(|prompt| prompt.remember),
+                            decisions: decisions(&approval, terminal),
                             decide,
                         });
                         current = Some(approval);
@@ -124,11 +142,12 @@ impl Approvals {
                     }
                 }
             }
-            let mut state = state.lock().expect("approval state");
-            state.closed = true;
-            let pending = state.pending.take();
-            drop(state);
-            notify_withdrawal(pending, &outbound, withdrawals);
+            let pending = {
+                let mut state = state.lock().expect("approval state");
+                state.closed = true;
+                state.pending.take()
+            };
+            notify_withdrawal(pending, &outbound, withdrawals, terminal).await;
         }));
         owner
     }
@@ -141,18 +160,19 @@ impl Approvals {
         };
         let decision = result
             .and_then(|value| serde_json::from_value::<ApprovalResult>(value).ok())
-            .map(|result| result.decision);
+            .map(|result| result.decision)
+            .filter(|decision| pending.decisions.contains(decision));
         if matches!(decision, Some(ApprovalDecision::Cancel)) {
             self.cancel.cancel();
         }
         let _ = pending.decide.send(match decision {
             Some(ApprovalDecision::Accept) => ApprovalReply::AllowOnce,
-            Some(ApprovalDecision::AcceptForSession) if pending.session => {
-                ApprovalReply::AllowForSession
-            }
-            Some(ApprovalDecision::AcceptForSession) => ApprovalReply::Unavailable,
+            Some(ApprovalDecision::AcceptForSession) => ApprovalReply::AllowForSession,
+            Some(ApprovalDecision::AllowPrefixInFolder) => ApprovalReply::AllowPrefixInFolder,
             Some(ApprovalDecision::Decline) => ApprovalReply::Deny,
-            Some(ApprovalDecision::Cancel) | None => ApprovalReply::Unavailable,
+            Some(ApprovalDecision::Cancel | ApprovalDecision::Unavailable) | None => {
+                ApprovalReply::Unavailable
+            }
         });
     }
 
@@ -163,10 +183,12 @@ impl Approvals {
         self.changed.notify_one();
     }
 
-    #[cfg(test)]
-    pub fn empty_for_test() -> Self {
+    pub fn closed() -> Self {
         Self {
-            state: Default::default(),
+            state: Arc::new(Mutex::new(State {
+                pending: None,
+                closed: true,
+            })),
             changed: Default::default(),
             cancel: RunCancellation::new(),
             worker: None,
@@ -183,12 +205,22 @@ impl Drop for Approvals {
     }
 }
 
-fn notify_withdrawal(pending: Option<Pending>, output: &mpsc::Sender<Message>, enabled: bool) {
+async fn notify_withdrawal(
+    pending: Option<Pending>,
+    output: &mpsc::Sender<Message>,
+    enabled: bool,
+    reliable: bool,
+) {
     if enabled && let Some(pending) = pending {
-        let _ = output.try_send(Message::Notification(super::items::notification(
+        let message = Message::Notification(super::items::notification(
             "$/cancel_request",
             serde_json::json!({"requestId": pending.id}),
-        )));
+        ));
+        if reliable {
+            let _ = output.send(message).await;
+        } else {
+            let _ = output.try_send(message);
+        }
     }
 }
 
@@ -204,7 +236,7 @@ pub(super) async fn started_at(
     events
         .ok()?
         .into_iter()
-        .find(|event| matches!(&event.event, Event::ToolStarted { intent: started, .. } if *started == intent))
+        .find(|event| matches!(&event.event, Event::ToolProposed { intent: started, .. } if *started == intent))
         .map(|event| event.created_at_ms)
 }
 
@@ -244,11 +276,30 @@ fn next_request_id(next_id: &AtomicI64) -> Option<i64> {
     }
 }
 
+fn decisions(approval: &ToolApproval, terminal: bool) -> Vec<ApprovalDecision> {
+    let mut decisions = crate::presentation::tool_approval_choices(approval)
+        .into_iter()
+        .filter_map(|choice| match choice.reply() {
+            ApprovalReply::AllowOnce => Some(ApprovalDecision::Accept),
+            ApprovalReply::AllowForSession => Some(ApprovalDecision::AcceptForSession),
+            ApprovalReply::AllowPrefixInFolder if terminal => {
+                Some(ApprovalDecision::AllowPrefixInFolder)
+            }
+            ApprovalReply::Deny => Some(ApprovalDecision::Decline),
+            ApprovalReply::AllowPrefixInFolder | ApprovalReply::Unavailable => None,
+        })
+        .collect::<Vec<_>>();
+    decisions.dedup();
+    decisions.extend([ApprovalDecision::Cancel, ApprovalDecision::Unavailable]);
+    decisions
+}
+
 fn request(
     thread_id: SessionId,
     approval: &ToolApproval,
     started_at_ms: i64,
     next_id: &AtomicI64,
+    terminal: bool,
 ) -> Option<Request> {
     let intent = &approval.intent;
     let request = Request {
@@ -263,18 +314,18 @@ fn request(
                 started_at_ms,
                 intent: serde_json::to_value(intent).ok()?,
                 lines: lines(intent, approval.unguarded.as_ref()),
-                available_decisions: approval
-                    .unguarded
-                    .as_ref()
-                    .filter(|prompt| prompt.remember)
-                    .map(|_| {
-                        vec![
-                            ApprovalDecision::Accept,
-                            ApprovalDecision::AcceptForSession,
-                            ApprovalDecision::Decline,
-                            ApprovalDecision::Cancel,
-                        ]
-                    }),
+                allow_auto_edits: terminal && approval.allow_auto_edits,
+                available_decisions: {
+                    let offered = decisions(approval, terminal);
+                    (offered.contains(&ApprovalDecision::AcceptForSession)
+                        || offered.contains(&ApprovalDecision::AllowPrefixInFolder))
+                    .then(|| {
+                        offered
+                            .into_iter()
+                            .filter(|decision| *decision != ApprovalDecision::Unavailable)
+                            .collect()
+                    })
+                },
             })
             .ok()?,
         ),
@@ -379,6 +430,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_prefix_candidates_are_offered_only_to_the_attached_human_channel() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        for terminal in [false, true] {
+            let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+            let intent = intent(read());
+            let (allowed, ()) = tokio::join!(
+                arany::test_support::approval::ask(&approvals, &intent),
+                async {
+                    let mut approval = inbox.next().await.unwrap();
+                    approval.remember_prefix = Some(arany::permissions::TypedGitPrefix::Commit);
+                    let request =
+                        request(SessionId::new(), &approval, 1, &AtomicI64::new(1), terminal)
+                            .unwrap();
+                    let params: ApprovalParams =
+                        serde_json::from_value(request.params.unwrap()).unwrap();
+                    assert_eq!(
+                        params
+                            .available_decisions
+                            .unwrap_or_default()
+                            .contains(&ApprovalDecision::AllowPrefixInFolder),
+                        terminal
+                    );
+                    assert_eq!(
+                        decisions(&approval, terminal)
+                            .contains(&ApprovalDecision::AllowPrefixInFolder),
+                        terminal
+                    );
+                    approval.decide(ApprovalReply::Deny);
+                }
+            );
+            assert!(!allowed);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_client_retains_the_rendered_choices_and_unguarded_focus() {
+        for (call, prefix, host) in [
+            (
+                ToolCall::Mkdir {
+                    path: "directory".into(),
+                },
+                None,
+                false,
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "Update files".into(),
+                    paths: vec!["file.txt".into()],
+                    staged: false,
+                },
+                Some(arany::permissions::TypedGitPrefix::Commit),
+                false,
+            ),
+            (
+                ToolCall::CommandUnguarded {
+                    program: "make".into(),
+                    args: Vec::new(),
+                    cwd: String::new(),
+                    justification: "Build".into(),
+                    prefix_rule: Some(vec!["make".into()]),
+                },
+                None,
+                true,
+            ),
+        ] {
+            let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+            let intent = intent(call);
+            let (_, ()) = tokio::join!(
+                arany::test_support::approval::ask(&approvals, &intent),
+                async {
+                    let mut approval = inbox.next().await.unwrap();
+                    approval.remember_prefix = prefix;
+                    approval.allow_auto_edits = !host;
+                    if host {
+                        approval.unguarded = Some(UnguardedPrompt {
+                            executable: "/bin/make".into(),
+                            attribution: None,
+                            remember: true,
+                            prefix: true,
+                            sensitive: false,
+                            inactive_rules: false,
+                        });
+                    }
+                    let request =
+                        request(SessionId::new(), &approval, 1, &AtomicI64::new(1), true).unwrap();
+                    let received =
+                        crate::cli::serve::embedded::Approval::from_request(request).unwrap();
+                    assert_eq!(received.prompt.intent_id, approval.intent.id);
+                    assert_eq!(
+                        received.prompt.lines,
+                        lines(&approval.intent, approval.unguarded.as_ref())
+                    );
+                    assert_eq!(
+                        received.prompt.choices,
+                        crate::presentation::tool_approval_choices(&approval)
+                    );
+                    assert_eq!(received.prompt.unguarded, host);
+                    approval.decide(ApprovalReply::Deny);
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_oversized_request_denies_without_being_sent() {
         let _deadline = crate::cli::serve::tests::deadline();
         let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
@@ -390,7 +545,7 @@ mod tests {
             Channel {
                 outbound,
                 next_id: Arc::new(AtomicI64::new(1)),
-                withdrawals: false,
+                approval_channel: super::super::server::ApprovalChannel::Human,
             },
             RunCancellation::new(),
             |_| async { Some(1) },
@@ -429,7 +584,7 @@ mod tests {
                 Channel {
                     outbound,
                     next_id: Arc::new(AtomicI64::new(1)),
-                    withdrawals: false,
+                    approval_channel: super::super::server::ApprovalChannel::Human,
                 },
                 RunCancellation::new(),
                 |_| async { Some(1) },
@@ -453,10 +608,174 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum CapacityEnding {
+        Human,
+        Cancel,
+        Abandon,
+        Shutdown,
+        Finished,
+        OutputClosed,
+    }
+
+    struct CapacityAsk {
+        approvals: ToolApprovals,
+        owner: Approvals,
+        output: mpsc::Receiver<Message>,
+        asked: tokio::task::JoinHandle<bool>,
+        cancel: RunCancellation,
+        finished: RunCancellation,
+    }
+
+    impl CapacityAsk {
+        const OUTPUT_CAPACITY: usize = 1;
+
+        fn start() -> Self {
+            let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+            let (outbound, output) = mpsc::channel(Self::OUTPUT_CAPACITY);
+            outbound
+                .try_send(super::super::server::response(
+                    RequestId::Integer(99),
+                    serde_json::json!({}),
+                ))
+                .unwrap();
+            let cancel = RunCancellation::new();
+            let finished = RunCancellation::new();
+            let owner = Approvals::start(
+                inbox,
+                cancel.clone(),
+                SessionId::new(),
+                Channel {
+                    outbound,
+                    next_id: Arc::new(AtomicI64::new(1)),
+                    approval_channel: super::super::server::ApprovalChannel::Terminal,
+                },
+                finished.clone(),
+                |_| async { Some(1) },
+            );
+            let asking = approvals.clone();
+            let asked = tokio::spawn(async move {
+                arany::test_support::approval::ask(&asking, &intent(read())).await
+            });
+            Self {
+                approvals,
+                owner,
+                output,
+                asked,
+                cancel,
+                finished,
+            }
+        }
+
+        async fn finish(self, ending: CapacityEnding) {
+            match ending {
+                CapacityEnding::Human => self.answer().await,
+                CapacityEnding::Abandon => self.abandon().await,
+                stop => self.stop(stop).await,
+            }
+        }
+
+        async fn answer(mut self) {
+            assert!(matches!(
+                self.output.recv().await,
+                Some(Message::Response(_))
+            ));
+            let request = next_request(&mut self.output).await;
+            assert!(
+                tokio::time::timeout(WITHDRAWAL_COMMIT_WAIT, &mut self.asked)
+                    .await
+                    .is_err(),
+                "delivery alone is not a human verdict"
+            );
+            self.owner
+                .respond(request.id, Some(serde_json::json!({"decision":"accept"})));
+            assert!(self.asked.await.unwrap());
+        }
+
+        async fn abandon(mut self) {
+            self.asked.abort();
+            let _ = self.asked.await;
+            assert!(matches!(
+                self.output.recv().await,
+                Some(Message::Response(_))
+            ));
+            let asking = self.approvals.clone();
+            let fresh = tokio::spawn(async move {
+                arany::test_support::approval::ask(&asking, &intent(read())).await
+            });
+            let request = next_request(&mut self.output).await;
+            assert_eq!(
+                request.id,
+                RequestId::Integer(2),
+                "the abandoned unsent Ask must not be delivered"
+            );
+            self.owner
+                .respond(request.id, Some(serde_json::json!({"decision":"accept"})));
+            assert!(fresh.await.unwrap());
+        }
+
+        async fn stop(mut self, stop: CapacityEnding) {
+            match stop {
+                CapacityEnding::Cancel => {
+                    self.cancel.cancel();
+                }
+                CapacityEnding::Shutdown => self.owner.close(),
+                CapacityEnding::Finished => {
+                    self.finished.cancel();
+                }
+                CapacityEnding::OutputClosed => self.output.close(),
+                CapacityEnding::Human | CapacityEnding::Abandon => {
+                    unreachable!("separate delivery paths")
+                }
+            }
+            assert!(!self.asked.await.unwrap());
+            assert!(matches!(
+                self.output.recv().await,
+                Some(Message::Response(_))
+            ));
+            assert!(
+                self.output.try_recv().is_err(),
+                "no request is delivered after its lifecycle ends"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_full_output_waits_for_delivery_or_lifecycle_without_inventing_a_verdict() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        for ending in [
+            CapacityEnding::Human,
+            CapacityEnding::Cancel,
+            CapacityEnding::Abandon,
+            CapacityEnding::Shutdown,
+            CapacityEnding::Finished,
+            CapacityEnding::OutputClosed,
+        ] {
+            let mut pending = CapacityAsk::start();
+            assert!(
+                tokio::time::timeout(WITHDRAWAL_COMMIT_WAIT, &mut pending.asked)
+                    .await
+                    .is_err(),
+                "a full terminal queue must not resolve the live Ask"
+            );
+            assert!(
+                pending.owner.state.lock().unwrap().pending.is_none(),
+                "an unsent Ask has no published decision slot"
+            );
+            pending.finish(ending).await;
+        }
+    }
+
     #[tokio::test]
     async fn one_approval_is_pending_and_an_abandoned_ask_frees_the_slot() {
         let _deadline = crate::cli::serve::tests::deadline();
-        for withdrawals in [false, true] {
+        use super::super::server::ApprovalChannel;
+        for approval_channel in [
+            ApprovalChannel::Human,
+            ApprovalChannel::Restricted,
+            ApprovalChannel::Terminal,
+        ] {
+            let withdrawals = approval_channel != ApprovalChannel::Human;
             let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
             let (outbound, mut output) = mpsc::channel(8);
             let owner = Approvals::start(
@@ -466,7 +785,7 @@ mod tests {
                 Channel {
                     outbound,
                     next_id: Arc::new(AtomicI64::new(1)),
-                    withdrawals,
+                    approval_channel,
                 },
                 RunCancellation::new(),
                 |_| async { Some(1) },
@@ -484,14 +803,34 @@ mod tests {
             tokio::time::advance(Duration::from_secs(3600)).await;
             tokio::time::resume();
             assert!(!first.is_finished(), "live approval must not expire");
-            assert!(!ask(read()).await.expect("second ask"));
-            assert!(output.try_recv().is_err());
-            owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));
-            assert!(first.await.expect("first ask"));
+            let abandoned_id = if approval_channel == ApprovalChannel::Terminal {
+                let mut second = ask(read());
+                tokio::time::pause();
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), &mut second)
+                        .await
+                        .is_err(),
+                    "a second terminal ask waits for the open dialog"
+                );
+                tokio::time::resume();
+                owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));
+                assert!(first.await.expect("first ask"));
+                let queued = next_request(&mut output).await;
+                assert_eq!(queued.id, RequestId::Integer(2));
+                owner.respond(queued.id, Some(serde_json::json!({"decision":"decline"})));
+                assert!(!second.await.expect("second ask"));
+                3
+            } else {
+                assert!(!ask(read()).await.expect("second ask"));
+                assert!(output.try_recv().is_err());
+                owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));
+                assert!(first.await.expect("first ask"));
+                2
+            };
 
             let abandoned = ask(read());
             let request = next_request(&mut output).await;
-            assert_eq!(request.id, RequestId::Integer(2));
+            assert_eq!(request.id, RequestId::Integer(abandoned_id));
             abandoned.abort();
             let _ = abandoned.await;
             let third = ask(read());
@@ -500,11 +839,14 @@ mod tests {
                     panic!("approval withdrawal")
                 };
                 assert_eq!(note.method, "$/cancel_request");
-                assert_eq!(note.params.unwrap()["requestId"], 2);
+                assert_eq!(note.params.unwrap()["requestId"], abandoned_id);
             }
-            assert_eq!(next_request(&mut output).await.id, RequestId::Integer(3));
+            assert_eq!(
+                next_request(&mut output).await.id,
+                RequestId::Integer(abandoned_id + 1)
+            );
             owner.respond(
-                RequestId::Integer(2),
+                RequestId::Integer(abandoned_id),
                 Some(serde_json::json!({"decision":"accept"})),
             );
             owner.close();
@@ -530,7 +872,7 @@ mod tests {
             Channel {
                 outbound,
                 next_id: Arc::new(AtomicI64::new(1)),
-                withdrawals: true,
+                approval_channel: super::super::server::ApprovalChannel::Restricted,
             },
             RunCancellation::new(),
             |_| async { Some(1) },

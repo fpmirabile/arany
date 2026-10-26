@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v40";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v44";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -99,6 +99,7 @@ pub async fn check_native_model(
         account_id,
     } = request;
     let (profile, model) = (profile.as_str(), model.as_str());
+    let kind = ProviderKind::parse(profile).ok_or(NativeCheckError::InvalidSelection)?;
     let fingerprint = fingerprint_credentials(profile, model, effort, &credentials, account_id)?;
     let target = CheckTarget::Native {
         profile: profile.into(),
@@ -127,8 +128,8 @@ pub async fn check_native_model(
             return Err(NativeCheckError::ModelUnavailable);
         };
         context_window_tokens = model_entry.context_window_tokens;
-        match profile {
-            "openai" => {
+        match kind {
+            ProviderKind::OpenAi => {
                 let provider = OpenAiProvider::for_conformance(
                     model.to_owned(),
                     effort,
@@ -137,13 +138,13 @@ pub async fn check_native_model(
                 .map_err(|_| NativeCheckError::ConformanceFailed)?;
                 probe(&provider, &mut journal).await?;
             }
-            "anthropic" => {
+            ProviderKind::Anthropic => {
                 let provider =
                     AnthropicProvider::for_conformance(model.to_owned(), effort, credentials)
                         .map_err(|_| NativeCheckError::ConformanceFailed)?;
                 probe(&provider, &mut journal).await?;
             }
-            _ => return Err(NativeCheckError::InvalidSelection),
+            ProviderKind::ChatGpt | ProviderKind::Custom => return Err(NativeCheckError::InvalidSelection),
         }
         let refreshed = revalidate.await?;
         if fingerprint_credentials(profile, model, effort, &refreshed, account_id)? != fingerprint { return Err(NativeCheckError::EvidenceUnavailable); }
@@ -438,7 +439,7 @@ async fn probe<P: Provider>(
         Err(error) => return Err(provider_failure(journal, error).await),
     };
     if response.summary.trim().is_empty()
-        || response.summary.len() > 8 * 1024
+        || response.summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
         || response.response_id.as_deref() == Some(&direct_id)
         || response.response_id.as_deref() == Some(&delegate_id)
@@ -487,10 +488,13 @@ fn fingerprint_with_workspace(
     account_id: Option<Uuid>,
     workspace_id: Option<&str>,
 ) -> Result<[u8; 32], NativeCheckError> {
-    let protocol = match profile {
-        "openai" => "https://api.openai.com/v1/responses;json_schema",
-        "anthropic" => "https://api.anthropic.com/v1/messages;output_config.format",
-        _ => return Err(NativeCheckError::InvalidSelection),
+    let kind = ProviderKind::parse(profile).ok_or(NativeCheckError::InvalidSelection)?;
+    let protocol = match kind {
+        ProviderKind::OpenAi => "https://api.openai.com/v1/responses;json_schema",
+        ProviderKind::Anthropic => "https://api.anthropic.com/v1/messages;output_config.format",
+        ProviderKind::ChatGpt | ProviderKind::Custom => {
+            return Err(NativeCheckError::InvalidSelection);
+        }
     };
     if !valid_model_id(model) || !valid_saved_api_account_id(profile, account_id) {
         return Err(NativeCheckError::InvalidSelection);
@@ -555,12 +559,36 @@ mod tests {
             probe_fingerprint_contract().as_bytes(),
             b"three-probes-1024-output-tokens"
         );
+        for (profile, expected) in [
+            (
+                "openai",
+                "ab5711964b206551d053f3da1da3ff2b306abf194db749ac9a9423fda885d39b",
+            ),
+            (
+                "anthropic",
+                "edfe554165083886b3c64b717790aa15ca2f238306a850fc47f6a22237a1c9a8",
+            ),
+        ] {
+            let digest = fingerprint(
+                profile,
+                "example-model",
+                Effort::High,
+                "synthetic-native-key",
+                None,
+            )
+            .unwrap();
+            let actual: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(actual, expected, "{profile}");
+        }
     }
 
     async fn reject_superseded_native_evidence(root: StateRoot, key: &str, checked_at_ms: i64) {
         for version in [
             "native-goal-contract-outcome-conformance-v33",
             "native-goal-contract-outcome-conformance-journal-v38",
+            "native-goal-contract-outcome-conformance-journal-v41",
+            "native-goal-contract-outcome-conformance-journal-v42",
+            "native-goal-contract-outcome-conformance-journal-v43",
         ] {
             let mut legacy = Vec::new();
             for field in [
@@ -851,6 +879,8 @@ mod tests {
         WrongDelegation,
         DuplicateId,
         BadCompaction,
+        LargeCompaction,
+        OversizedCompaction,
     }
 
     struct ProbeFixture {
@@ -953,10 +983,13 @@ mod tests {
             assert_eq!(request.items.len(), 1);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompactionResponse {
-                summary: if matches!(self.case, ProbeCase::BadCompaction) {
-                    String::new()
-                } else {
-                    "safe summary".into()
+                summary: match self.case {
+                    ProbeCase::BadCompaction => String::new(),
+                    ProbeCase::LargeCompaction => "S".repeat(16 * 1024),
+                    ProbeCase::OversizedCompaction => {
+                        "S".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES + 1)
+                    }
+                    _ => "safe summary".into(),
                 },
                 response_id: Some("compaction".into()),
                 usage: crate::provider::Usage {
@@ -978,6 +1011,8 @@ mod tests {
             (ProbeCase::WrongDelegation, false, 2),
             (ProbeCase::DuplicateId, false, 2),
             (ProbeCase::BadCompaction, false, 3),
+            (ProbeCase::LargeCompaction, true, 3),
+            (ProbeCase::OversizedCompaction, false, 3),
         ] {
             let fixture = ProbeFixture {
                 case,
@@ -1084,10 +1119,12 @@ mod tests {
             )
             .unwrap()
         );
-        assert!(matches!(
-            fingerprint("custom", "x", Effort::High, key, None),
-            Err(NativeCheckError::InvalidSelection)
-        ));
+        for profile in ["", "other", "OpenAI", "chatgpt", "custom", "custom:local"] {
+            assert!(matches!(
+                fingerprint(profile, "x", Effort::High, key, None),
+                Err(NativeCheckError::InvalidSelection)
+            ));
+        }
         assert!(matches!(
             fingerprint("openai", "bad\nmodel", Effort::High, key, None),
             Err(NativeCheckError::InvalidSelection)

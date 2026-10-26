@@ -4,10 +4,12 @@ use super::dispatch::Verdict;
 use super::dispatch::{NotDispatched, not_dispatched};
 use super::permission::{Permission, effective_permission_mode};
 use super::{
-    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD,
-    TOOL_CLEANUP_OVERHEAD, timeout_limit_cause,
+    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD, StepEnd,
+    TOOL_CLEANUP_OVERHEAD, completion_deadline, timeout_limit_cause,
 };
-use crate::engine::ledger::{Action, ActiveDeadlineCause, Admission, duration_ms};
+use crate::engine::ledger::{
+    Action, ActiveDeadlineCause, Admission, NARROWING_EVENTS, duration_ms,
+};
 use crate::engine::{EngineError, RunCancellation};
 use crate::session::Event;
 use crate::store::AdmissionKind;
@@ -21,6 +23,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const EDITOR_RUNTIME_DIVISOR: u64 = 4;
+pub(super) const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
 // Cache restoration and publication need additional time within the delegation allowance.
 const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
 
@@ -43,6 +46,30 @@ pub(super) fn sizing_deadline_refusal(cause: Option<ActiveDeadlineCause>) -> Siz
     match cause {
         Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
         Some(ActiveDeadlineCause::Delegation) | None => SizingRefusal::DelegationDeadline,
+    }
+}
+
+pub(super) struct PendingToolRefusal {
+    agent_run_id: crate::session::AgentRunId,
+    intent_id: uuid::Uuid,
+    pub(super) record: Box<crate::session::ToolPreflightRefusal>,
+}
+
+impl PendingToolRefusal {
+    pub(super) fn new(
+        intent: &EffectIntent,
+        refusal: crate::session::ToolRefusal,
+        verdict: Option<PermissionVerdict>,
+    ) -> Self {
+        Self {
+            agent_run_id: intent.agent_run_id,
+            intent_id: intent.id,
+            record: Box::new(crate::session::ToolPreflightRefusal {
+                intent_digest: intent.digest(),
+                refusal,
+                verdict,
+            }),
+        }
     }
 }
 
@@ -208,7 +235,7 @@ impl RunLoop<'_> {
                         .saturating_add(self.ledger().verdicts(Action::Tool))
                         .saturating_add(self.ledger().drain_headroom())
                         .saturating_add(2 * (hook_events + narrowing))
-                        .saturating_add(if narrowing > 0 { 3 } else { 0 }),
+                        .saturating_add(if narrowing > 0 { NARROWING_EVENTS } else { 0 }),
                     Action::Tool
                         .tool_observations()
                         .saturating_add(hook_events + narrowing),
@@ -227,8 +254,8 @@ impl RunLoop<'_> {
                 )
             }
         };
-        // This intent's ToolStarted can exceed the ordinary Event bound; an observation slot covers it.
-        let observations = observations.saturating_add(1);
+        // Proposal and start each carry the complete intent and can exceed the ordinary Event bound.
+        let observations = observations.saturating_add(MAX_INTENT_RECORDS_PER_TOOL);
         let mut kind = AdmissionKind::Operation;
         let tail = if worker {
             let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;
@@ -267,6 +294,27 @@ impl RunLoop<'_> {
         call: ToolCall,
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
+        let intent = match self
+            .size_step_intent(grant, runtime, step, call, post_call)
+            .await?
+        {
+            Ok(intent) => intent,
+            Err(cause) => return Ok(Err(cause)),
+        };
+        Ok(self
+            .validate_step_intent(runtime, &intent)
+            .await?
+            .map(|()| intent))
+    }
+
+    pub(super) async fn size_step_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        post_call: &ToolCall,
+    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
         let sized = self
             .sized_intent(grant, runtime, step, call.clone(), post_call)
             .await?;
@@ -274,7 +322,7 @@ impl RunLoop<'_> {
             Ok(intent) => Ok(Ok(intent)),
             Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(
                 match self
-                    .record_delegation_deadline(grant, runtime, call)
+                    .record_delegation_deadline(grant, runtime, &[call])
                     .await?
                 {
                     Ok(()) => refusal.into(),
@@ -291,7 +339,53 @@ impl RunLoop<'_> {
         }
     }
 
-    async fn sized_intent(
+    pub(super) async fn validate_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), StopCause>, EngineError> {
+        match self.preflight_step_intent(runtime, intent)? {
+            Ok(()) => Ok(Ok(())),
+            Err(record) => {
+                let cause = record.record.refusal;
+                self.record_tool_refusal(record).await?;
+                Ok(Err(StopCause::ToolRefused(cause)))
+            }
+        }
+    }
+
+    pub(super) fn preflight_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
+        let mut event = Event::ToolProposed {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        self.ledger().view(|view| {
+            crate::session::validate_tool_started(view, &event)
+                .map_err(|refusal| PendingToolRefusal::new(intent, refusal, None))
+        })
+    }
+
+    pub(super) async fn record_tool_refusal(
+        &self,
+        pending: PendingToolRefusal,
+    ) -> Result<(), EngineError> {
+        self.append(Event::ToolPreflightRefused {
+            run_id: self.run_id,
+            agent_run_id: pending.agent_run_id,
+            record: *pending.record,
+        })
+        .await?;
+        self.commit_approval_withdrawal(pending.intent_id)
+    }
+
+    pub(super) async fn sized_intent(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -397,74 +491,168 @@ impl RunLoop<'_> {
         };
     }
 
-    async fn record_delegation_deadline(
+    pub(super) async fn propose_tool(&self, intent: &EffectIntent) -> Result<(), EngineError> {
+        let proposed = self.ledger().view(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.tools
+                    .iter()
+                    .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                    .any(|tool| tool.intent.id == intent.id)
+            })
+        })?;
+        if !proposed {
+            let runtime = self.controls.tools.ok_or(EngineError::CoordinatorFailed)?;
+            self.append(Event::ToolProposed {
+                run_id: self.run_id,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
+            })
+            .await?;
+            if matches!(
+                intent.target,
+                crate::session::worker::EffectTarget::WorkerView { .. }
+            ) {
+                self.worker
+                    .lock()
+                    .await
+                    .get_mut(&intent.agent_run_id)
+                    .ok_or(EngineError::CoordinatorFailed)?
+                    .note_intent(intent);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn tool_ceiling(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<u64, EngineError> {
+        let post_call = match &intent.call {
+            ToolCall::ApplyChangeset {
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest,
+                        ..
+                    },
+            } => self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| {
+                        run.tools
+                            .iter()
+                            .find(|tool| tool.intent.digest() == *source_intent_digest)
+                    })
+                    .map(|tool| tool.intent.call.clone())
+            })?,
+            _ => None,
+        };
+        let (_, pre_ms, post_ms) = self.hook_admission(
+            runtime,
+            &intent.call,
+            post_call.as_ref().unwrap_or(&intent.call),
+        );
+        let action_ms = if intent.agent_run_id == self.primary_id {
+            tool_action_ms(runtime, intent)
+                .saturating_add(pre_ms)
+                .saturating_add(post_ms)
+        } else {
+            0
+        };
+        self.ledger().active_ceiling(action_ms)
+    }
+
+    pub(super) async fn record_delegation_deadline(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
-        call: ToolCall,
+        calls: &[ToolCall],
     ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
         let Grant::Researcher { child, .. } = grant else {
             return Err(EngineError::CoordinatorFailed);
         };
-        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        if child.kind.is_editor() {
-            self.shape_worker_intent(&mut intent, child.agent_run_id)?;
+        let mut intents = Vec::with_capacity(calls.len());
+        for call in calls {
+            let mut intent = runtime.intent(self.run_id, child.agent_run_id, call.clone());
+            if child.kind.is_editor() {
+                self.shape_worker_intent(&mut intent, child.agent_run_id)?;
+            }
+            let permission = self
+                .permission(grant, runtime, &intent.call)
+                .narrow_terminal(self.terminal_mode(), &intent.call);
+            if let Err(refusal) = self
+                .admit_tool(grant, runtime, &intent, permission, 0, false)
+                .await?
+            {
+                return Ok(Err(refusal));
+            }
+            intents.push(intent);
         }
+        self.admit_step_journal(runtime, &intents).await?;
+        if intents.len() > 1 {
+            for intent in &intents {
+                self.propose_tool(intent).await?;
+            }
+        }
+        for intent in intents {
+            self.finish_delegation_deadline(grant, runtime, intent)
+                .await?;
+        }
+        Ok(Ok(()))
+    }
+
+    async fn finish_delegation_deadline(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+    ) -> Result<(), EngineError> {
         let permission = self
             .permission(grant, runtime, &intent.call)
             .narrow_terminal(self.terminal_mode(), &intent.call);
-        if let Err(refusal) = self
-            .admit_tool(grant, runtime, &intent, permission, 0, false)
-            .await?
-        {
-            return Ok(Err(refusal));
-        }
+        let agent_run_id = intent.agent_run_id;
+        let verdict =
+            effective_permission_mode(runtime.permissions(), grant).map(|mode| PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                mode: Some(mode),
+                decision: permission.decision,
+                basis: permission.basis,
+                source: if permission.decision == Decision::Ask {
+                    PermissionSource::UnavailableApproval
+                } else {
+                    permission.basis
+                },
+                approved: false,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            });
         self.append(Event::ToolStarted {
             run_id: self.run_id,
-            agent_run_id: child.agent_run_id,
+            agent_run_id,
             intent: intent.clone().into(),
             active_ceiling_ms: self.ledger().active_ceiling(0)?,
+            verdict,
         })
         .await?;
-        if child.kind.is_editor() {
+        if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
             self.worker
                 .lock()
                 .await
-                .get_mut(&child.agent_run_id)
+                .get_mut(&agent_run_id)
                 .ok_or(EngineError::CoordinatorFailed)?
                 .note_intent(&intent);
         }
-        if let Some(mode) = effective_permission_mode(runtime.permissions(), grant) {
-            self.append(Event::ToolPermissionDecided {
-                run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
-                verdict: PermissionVerdict {
-                    host: None,
-                    intent_digest: intent.digest(),
-                    mode: Some(mode),
-                    decision: permission.decision,
-                    basis: permission.basis,
-                    source: if permission.decision == Decision::Ask {
-                        PermissionSource::UnavailableApproval
-                    } else {
-                        permission.basis
-                    },
-                    approved: false,
-                    hook_restriction: None,
-                    hooks: 0,
-                    narrowed: false,
-                },
-            })
-            .await?;
-        }
         self.append(Event::ToolFinished {
             run_id: self.run_id,
-            agent_run_id: child.agent_run_id,
+            agent_run_id,
             observation: not_dispatched(intent, &NotDispatched::DelegationDeadline),
             checkpoint: None,
         })
         .await?;
-        Ok(Ok(()))
+        Ok(())
     }
 }
 
@@ -488,47 +676,83 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
-            .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
+            .start_intent(grant, runtime, &intent, post_call, narrowable)
             .await?
         {
             return Ok(Err(refusal.into()));
         }
-        let agent_run_id = intent.agent_run_id;
-        let intent_id = intent.id;
-        // A researcher's Tool runs inside its delegation's reservation.
-        let action_ms = match grant {
-            Grant::Primary { .. } => tool_action_ms(runtime, &intent)
-                .saturating_add(pre_ms)
-                .saturating_add(post_ms),
-            Grant::Researcher { .. } => 0,
-        };
-        self.append(Event::ToolStarted {
+        self.dispatch_intent(grant, runtime, intent, narrowable)
+            .await
+    }
+
+    pub(super) async fn start_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        post_call: &ToolCall,
+        narrowable: bool,
+    ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
+        let permission = self.permission(grant, runtime, &intent.call);
+        let (hook_events, _, _) = self.hook_admission(runtime, &intent.call, post_call);
+        if let Err(refusal) = self
+            .admit_tool(grant, runtime, intent, permission, hook_events, narrowable)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
+        Ok(Ok(()))
+    }
+
+    pub(super) async fn finish_answer(&self, answer: &Answer) -> Result<(), EngineError> {
+        self.append(Event::ToolFinished {
+            checkpoint: answer.checkpoint.clone(),
             run_id: self.run_id,
-            agent_run_id,
-            intent: intent.clone().into(),
-            active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
+            agent_run_id: answer.observation.intent.agent_run_id,
+            observation: answer.observation.clone(),
         })
         .await?;
+        self.commit_approval_withdrawal(answer.observation.intent.id)
+    }
+
+    pub(super) async fn dispatch_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+        narrowable: bool,
+    ) -> Result<IntentResult, EngineError> {
+        let agent_run_id = intent.agent_run_id;
+        let permission = self.permission(grant, runtime, &intent.call);
+        let mut narrowed = None;
+        let mut candidate = None;
+        let verdict = match self
+            .before_dispatch(grant, runtime, intent, permission, narrowable, None)
+            .await?
+        {
+            Ok(Admission::Reserved(verdict)) => verdict,
+            Ok(Admission::Exhausted) => return Ok(Err(StopCause::ActiveTime)),
+            Err(record) => {
+                let cause = record.record.refusal;
+                self.record_tool_refusal(record).await?;
+                return Ok(Err(StopCause::ToolRefused(cause)));
+            }
+        };
         if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
             self.worker
                 .lock()
                 .await
                 .get_mut(&agent_run_id)
                 .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
+                .note_intent(match &verdict {
+                    Verdict::Dispatch { intent, .. } => intent,
+                    Verdict::Deny(answer) | Verdict::Narrow(answer, _) => {
+                        &answer.observation.intent
+                    }
+                });
         }
-        let mut narrowed = None;
-        let mut candidate = None;
-        let Admission::Reserved(verdict) = self
-            .before_dispatch(grant, runtime, intent, permission, narrowable)
-            .await?
-        else {
-            return Ok(Err(StopCause::ActiveTime));
-        };
-        let answer = match verdict {
+        let mut answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
                 narrowed = Some(call);
@@ -568,41 +792,43 @@ impl RunLoop<'_> {
                     };
                     tokio::pin!(execution);
                     let mut observation = tokio::select! {
+                        biased;
                         result = &mut execution => result?,
+                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                         () = async {
                             match active_deadline {
                                 Some(deadline) => deadline.elapsed().await,
                                 None => tokio::time::sleep_until(deadline).await,
                             }
                         } => { timed_out = true; cancellation.cancel(); execution.await? },
-                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                     };
-                    if timed_out && observation.disposition == ToolDisposition::Cancelled {
-                        observation.disposition = ToolDisposition::Limit;
-                        observation.limit_cause =
-                            timeout_limit_cause(active_deadline.map(|d| d.cause));
-                    }
+                    let stop = match completion_deadline(
+                        observation.disposition,
+                        timed_out,
+                        active_deadline.map(|deadline| deadline.cause),
+                    ) {
+                        StepEnd::Continue => None,
+                        StepEnd::Stopped(cause) => {
+                            observation.disposition = ToolDisposition::Limit;
+                            observation.limit_cause =
+                                timeout_limit_cause(active_deadline.map(|deadline| deadline.cause));
+                            Some(cause)
+                        }
+                    };
                     Answer {
                         checkpoint: None,
                         observation,
-                        stop: timed_out.then(|| match active_deadline.map(|d| d.cause) {
-                            Some(ActiveDeadlineCause::Goal) => StopCause::ActiveTime,
-                            Some(ActiveDeadlineCause::Delegation) => StopCause::DelegationDeadline,
-                            None => StopCause::ToolStopped,
-                        }),
+                        stop,
                         active_time: None,
                     }
                 }
             },
         };
-        self.append(Event::ToolFinished {
-            checkpoint: answer.checkpoint.clone(),
-            run_id: self.run_id,
-            agent_run_id,
-            observation: answer.observation.clone(),
-        })
-        .await?;
-        self.commit_approval_withdrawal(intent_id)?;
+        runtime
+            .persist_spill(&mut answer.observation, self.controls.cancellation.clone())
+            .await;
+        self.finish_answer(&answer).await?;
+        runtime.retain_spill(&answer.observation);
         if let Some((candidate, data)) = candidate {
             self.worker
                 .lock()
@@ -711,5 +937,51 @@ pub(super) async fn execute_cancellable(
             execution.await
         }
         observation = &mut execution => observation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_refuses_buffered_and_late_active_window_requests() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let permit = sender
+            .clone()
+            .reserve_owned()
+            .await
+            .expect("reserve a slot");
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _ = receipt.await;
+            "settled"
+        };
+        tokio::pin!(execution);
+        let late = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            permit.send(ActiveActionRequest {
+                admitted_at: Instant::now(),
+                reply,
+            });
+        });
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            settle_cancelled(execution.as_mut(), &mut receiver),
+        )
+        .await
+        .expect("the Guard must not wait for a reply nobody sends");
+        assert_eq!(settled, "settled");
+        late.await.expect("late sender");
+        let (again, _) = tokio::sync::oneshot::channel();
+        assert!(
+            sender
+                .send(ActiveActionRequest {
+                    admitted_at: Instant::now(),
+                    reply: again,
+                })
+                .await
+                .is_err()
+        );
     }
 }

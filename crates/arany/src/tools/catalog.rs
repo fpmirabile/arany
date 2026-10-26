@@ -78,6 +78,7 @@ const fn read_row(
 
 const fn write_row(name: &'static str, order: u8, description: &'static str) -> OperationFacts {
     OperationFacts {
+        site: Site::InProcess,
         mutates: true,
         asks_approval: true,
         goal_success: true,
@@ -94,7 +95,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 27] = [
+pub(crate) static ALL: [OperationFacts; 28] = [
     read_row(
         "list",
         Family::File,
@@ -272,6 +273,18 @@ pub(crate) static ALL: [OperationFacts; 27] = [
             "List a bounded number of GitHub pull requests from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
         )
     },
+    OperationFacts {
+        site: Site::Host,
+        asks_approval: true,
+        prelude: true,
+        spawns_process: true,
+        ..facts_row(
+            "gh_pr_view",
+            Family::Git,
+            27,
+            "Inspect one GitHub pull request's bounded description, discussion, reviews and checks from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
+        )
+    },
 ];
 
 static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
@@ -333,6 +346,7 @@ impl ToolCall {
             Self::GitPush { .. } => &ALL[22],
             Self::GhPrCreate { .. } => &ALL[23],
             Self::GhPrList { .. } => &ALL[26],
+            Self::GhPrView { .. } => &ALL[27],
         }
     }
 }
@@ -470,7 +484,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                         && if facts.mutates {
                             catalog["write"] == true
                         } else {
-                            facts.name == "gh_pr_list"
+                            matches!(facts.name, "gh_pr_list" | "gh_pr_view")
                         };
                 }
                 if !facts.mutates || catalog["write"] == true && git_writes {
@@ -759,6 +773,10 @@ mod tests {
                 head: None,
                 limit: crate::tools::types::DEFAULT_PR_LIMIT,
             },
+            ToolCall::GhPrView {
+                repository: "github.com/o/r".into(),
+                number: 1,
+            },
         ]
     }
 
@@ -804,7 +822,7 @@ mod tests {
             for host in [false, true] {
                 let catalog = json!({
                     "write": write,
-                    "git": {"write": false, "host": host, "operations": ["git_push", "gh_pr_create", "gh_pr_list"]},
+                    "git": {"write": false, "host": host, "operations": ["git_push", "gh_pr_create", "gh_pr_list", "gh_pr_view"]},
                     "commands": [{"name":"gh", "interpreter":false, "inputs":[]}]
                 });
                 let offered: Vec<_> = catalog_call_schemas(&catalog)
@@ -816,8 +834,9 @@ mod tests {
                 assert_eq!(
                     offered,
                     match (write, host) {
-                        (true, true) => vec!["git_push", "gh_pr_create", "gh_pr_list"],
-                        (false, true) => vec!["gh_pr_list"],
+                        (true, true) =>
+                            vec!["git_push", "gh_pr_create", "gh_pr_list", "gh_pr_view"],
+                        (false, true) => vec!["gh_pr_list", "gh_pr_view"],
                         _ => vec![],
                     }
                 );
@@ -828,7 +847,7 @@ mod tests {
                         !catalog_call_schemas(&missing_read)
                             .iter()
                             .filter_map(facts_of)
-                            .any(|facts| facts.name == "gh_pr_list")
+                            .any(|facts| matches!(facts.name, "gh_pr_list" | "gh_pr_view"))
                     );
                 }
             }
@@ -850,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn only_file_and_skill_reads_run_in_process() {
+    fn only_file_operations_and_skill_reads_run_in_process() {
         assert!(
             ToolCall::CommandUnguarded {
                 program: "cargo".into(),
@@ -868,11 +887,30 @@ mod tests {
             .filter(|facts| facts.site == Site::InProcess)
             .map(|facts| facts.name)
             .collect();
-        assert_eq!(in_process, ["list", "read", "search", "skill", "glob"]);
+        assert_eq!(
+            in_process,
+            [
+                "list",
+                "read",
+                "search",
+                "mkdir",
+                "write",
+                "edit",
+                "apply_changeset",
+                "skill",
+                "glob",
+                "multiedit",
+                "delete",
+                "move"
+            ]
+        );
         assert!(
             ALL.iter()
                 .filter(|facts| facts.site == Site::InProcess)
-                .all(|facts| !facts.mutates && !facts.spawns_process && !facts.asks_approval)
+                .all(|facts| !facts.spawns_process
+                    && matches!(facts.family, Family::File | Family::Skill)
+                    && (!facts.mutates || facts.family == Family::File)
+                    && facts.asks_approval == facts.mutates)
         );
     }
 

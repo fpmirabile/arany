@@ -49,32 +49,38 @@ pub(super) enum InputFailure {
     Return(String),
 }
 
+impl From<String> for InputFailure {
+    fn from(error: String) -> Self {
+        Self::Shutdown(error)
+    }
+}
+
 pub(super) enum InputRoute {
     Handled,
     Composer,
 }
 
 impl RunProgress<'_> {
-    pub(super) fn offer_note(
+    pub(super) async fn offer_note(
         &mut self,
         ui: &mut RunUi<'_>,
         text: String,
     ) -> Result<Option<Feedback>, InputFailure> {
-        let feedback = if ui.terminal.is_linear() && self.held.is_some() {
+        let feedback = if ui.terminal.is_linear() && self.drafts.held.is_some() {
             Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
         } else if !ui.composer.images().is_empty() {
             Feedback::Transient("Steering notes are text only; draft retained".into())
-        } else if self.offered.is_some() && !ui.terminal.is_linear() {
+        } else if self.drafts.offered.is_some() && !ui.terminal.is_linear() {
             // The composer still holds the waiting note; editing it withdraws the offer.
             Feedback::Transient(
                 "Steering note waits for the agent's next step; editing withdraws it".into(),
             )
         } else {
-            match self.steering.offer_note(text) {
+            match self.controls.offer_note(text).await? {
                 Ok(()) => {
-                    self.offered = Some(ui.composer.text().to_owned());
+                    self.drafts.offered = Some(ui.composer.text().to_owned());
                     if ui.terminal.is_linear() {
-                        self.linear_offers.push(ui.composer.take_draft());
+                        self.drafts.linear_offers.push(ui.composer.take_draft());
                         Feedback::Transient("Steering note waits for the agent's next step".into())
                     } else {
                         Feedback::Transient(
@@ -88,10 +94,10 @@ impl RunProgress<'_> {
         };
         // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
         if ui.terminal.is_linear()
-            && self.held.is_none()
+            && self.drafts.held.is_none()
             && let Some(draft) = hold_draft(ui.composer)
         {
-            self.held = Some(draft);
+            self.drafts.held = Some(draft);
         }
         if ui
             .terminal
@@ -103,13 +109,17 @@ impl RunProgress<'_> {
         Ok(Some(feedback))
     }
 
-    pub(super) fn pause(&mut self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+    pub(super) async fn pause(
+        &mut self,
+        ui: &mut RunUi<'_>,
+    ) -> Result<Option<Feedback>, InputFailure> {
         let notice = match self.stop {
             ActiveStop::Running => {
-                self.steering.pause();
+                self.controls.pause().await?;
                 self.stop = ActiveStop::Pausing;
                 ui.terminal
-                    .settle_child_notes(ui.view, &self.steering, true);
+                    .settle_child_notes(ui.view, self.controls.child_withdrawal(), true)
+                    .await;
                 "Pausing at the next step; Ctrl+C cancels now"
             }
             ActiveStop::Pausing => "Already pausing at the next step",
@@ -138,8 +148,8 @@ impl RunProgress<'_> {
             self.starting_sequence,
         );
         Ok(match submission {
-            ActiveSubmission::SteeringNote(text) => return self.offer_note(ui, text),
-            ActiveSubmission::Pause => return self.pause(ui),
+            ActiveSubmission::SteeringNote(text) => return self.offer_note(ui, text).await,
+            ActiveSubmission::Pause => return self.pause(ui).await,
             ActiveSubmission::Rejected(notice) => {
                 if ui.terminal.is_linear() && !ui.composer.has_text_pastes() {
                     ui.composer.take();
@@ -221,7 +231,7 @@ impl RunProgress<'_> {
                 ))
             }
             TerminalInput::CycleApprovalMode => {
-                Some(Feedback::History(self.cycle_approval(ui.composer)))
+                Some(Feedback::History(self.cycle_approval(ui.composer).await?))
             }
             TerminalInput::ClipboardPaste => Some(match ui.terminal.request_clipboard_paste() {
                 Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
@@ -268,12 +278,12 @@ impl RunProgress<'_> {
                 "Quick actions are unavailable during a Run; /agents opens details".into(),
             )),
             TerminalInput::Submit => return self.submit_input(ui).await,
-            _ => return self.control_input(ui, input),
+            _ => return self.control_input(ui, input).await,
         })
     }
 
     fn continued_line(&self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
-        if self.held.is_some() {
+        if self.drafts.held.is_some() {
             ui.terminal
                 .restore_draft_input(ui.composer.input_capacity())
                 .map_err(|_| InputFailure::Shutdown("terminal input failed".to_owned()))?;
@@ -335,7 +345,7 @@ impl RunProgress<'_> {
         if self.approval_ui.pending.is_some()
             && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_))
         {
-            return self.handle_approval(ui, input, page);
+            return self.handle_approval(ui, input, page).await;
         }
         match self.route_help(ui, input)? {
             InputRoute::Handled => return Ok(()),
@@ -368,10 +378,10 @@ impl RunProgress<'_> {
             self.stop,
         );
         let notice = self.composer_input(ui, input).await?;
-        self.finish_input(ui, input, notice)
+        self.finish_input(ui, input, notice).await
     }
 
-    fn finish_input(
+    async fn finish_input(
         &mut self,
         ui: &mut RunUi<'_>,
         input: TerminalInput,
@@ -379,12 +389,13 @@ impl RunProgress<'_> {
     ) -> Result<(), InputFailure> {
         if !ui.terminal.is_linear()
             && self
+                .drafts
                 .offered
                 .as_deref()
                 .is_some_and(|text| ui.composer.text() != text || !ui.composer.images().is_empty())
         {
-            self.offered = None;
-            notice = Some(if self.steering.withdraw_note().is_some() {
+            self.drafts.offered = None;
+            notice = Some(if self.controls.withdraw_note().await?.is_some() {
                 Feedback::Transient("Steering note withdrawn; draft retained".into())
             } else {
                 // The Engine already took the note, so it is sent; the edited draft stays.
@@ -428,8 +439,8 @@ impl RunProgress<'_> {
             return Ok(None);
         }
         if exits_after_settled_run(ui.composer, ui.view, self.starting_sequence) {
-            abandon_drafts_for_exit(ui.composer, &mut self.held, &self.steering);
-            self.offered = None;
+            abandon_drafts_for_exit(ui.composer, &mut self.drafts.held, &self.controls).await;
+            self.drafts.offered = None;
             ui.terminal
                 .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|_| InputFailure::Shutdown("terminal input failed".into()))?;
@@ -525,7 +536,7 @@ impl RunProgress<'_> {
                 let ordinal = agent.map_or(0, |agent| agent.ordinal);
                 let count = agent.map_or(0, |agent| agent.steering_notes.len());
                 let (notice, offer) = if self.stop == ActiveStop::Running {
-                    match self.steering.offer_child_note(target, text.clone()) {
+                    match self.controls.offer_child_note(target, text.clone()).await? {
                         Ok(()) => (
                             format!("Note waiting for child {ordinal}'s next step"),
                             Some((text, count)),
@@ -542,7 +553,9 @@ impl RunProgress<'_> {
                 Some(None)
             }
             Ok(AgentChatInput::ChildEdited(target)) => {
-                ui.terminal.withdraw_child_offer(target, &self.steering);
+                ui.terminal
+                    .withdraw_child_offer(target, self.controls.child_withdrawal())
+                    .await;
                 Some(None)
             }
             Ok(AgentChatInput::Pass) => None,

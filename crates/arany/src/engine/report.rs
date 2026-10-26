@@ -890,6 +890,9 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         crate::tools::ToolCall::GhPrList { repository, .. } => {
             format!("host PR list in {repository}")
         }
+        crate::tools::ToolCall::GhPrView { repository, number } => {
+            format!("host PR view #{number} in {repository}")
+        }
         crate::tools::ToolCall::GitCommit { .. } => "Git commit".into(),
         crate::tools::ToolCall::GitBranch { name: None, .. } => "Git branch list".into(),
         crate::tools::ToolCall::GitBranch {

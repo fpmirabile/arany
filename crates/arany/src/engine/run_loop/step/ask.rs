@@ -1,8 +1,8 @@
 use super::dispatch::UnguardedRefusal;
 use super::permission::RuleSave;
 use super::{Grant, ReviewProgress, RunLoop};
-use crate::engine::EngineError;
 use crate::engine::ledger::{Action, Admission};
+use crate::engine::{EngineError, RunCancellation};
 use crate::tools::permissions::{PermissionSource, TypedGitPrefix};
 use crate::tools::{
     ApprovalMode, ApprovalReply, ApprovalWithdrawal, EffectIntent, ToolApprovals, ToolCall,
@@ -18,6 +18,7 @@ pub(super) enum AskSite {
     Primary(AskOptions),
     Delegated {
         active_deadline: Option<crate::engine::ledger::ActiveDeadline>,
+        interrupted: Option<RunCancellation>,
     },
 }
 
@@ -25,6 +26,23 @@ pub(super) struct AskOptions {
     pub(super) unguarded_prompt: Option<UnguardedPrompt>,
     pub(super) allow_auto_edits: bool,
     pub(super) remember_prefix: Option<TypedGitPrefix>,
+    pub(super) interrupted: Option<RunCancellation>,
+}
+
+impl AskSite {
+    fn interrupted(&self) -> Option<&RunCancellation> {
+        match self {
+            Self::Primary(options) => options.interrupted.as_ref(),
+            Self::Delegated { interrupted, .. } => interrupted.as_ref(),
+        }
+    }
+}
+
+pub(super) async fn interrupted(cancellation: Option<&RunCancellation>) {
+    match cancellation {
+        Some(cancellation) => cancellation.clone().cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 pub(super) struct Resolution {
@@ -95,6 +113,7 @@ impl RunLoop<'_> {
                     chain,
                     AskSite::Delegated {
                         active_deadline: active_deadline.clone(),
+                        interrupted: options.interrupted,
                     },
                 )
                 .await
@@ -108,6 +127,7 @@ impl RunLoop<'_> {
         chain: &[Resolver<'_>],
         site: AskSite,
     ) -> Result<Admission<Resolution>, EngineError> {
+        self.propose_tool(intent).await?;
         let initial_mode = self.terminal_mode();
         let mut resolution = Resolution {
             approved: false,
@@ -117,6 +137,12 @@ impl RunLoop<'_> {
             withdrawal: None,
         };
         for resolver in chain {
+            if site
+                .interrupted()
+                .is_some_and(RunCancellation::is_cancelled)
+            {
+                break;
+            }
             match resolver {
                 Resolver::AiReview { objective } => {
                     match self
@@ -129,11 +155,15 @@ impl RunLoop<'_> {
                     }
                 }
                 Resolver::Human => match &site {
-                    AskSite::Delegated { active_deadline } => {
+                    AskSite::Delegated {
+                        active_deadline,
+                        interrupted,
+                    } => {
                         self.resolve_delegated_human(
                             intent,
                             active_deadline.as_ref(),
                             &mut resolution,
+                            interrupted.as_ref(),
                         )
                         .await?
                     }
@@ -172,12 +202,13 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         active_deadline: Option<&crate::engine::ledger::ActiveDeadline>,
         resolution: &mut Resolution,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<(), EngineError> {
         let Some(approvals) = self.controls.approvals else {
             return Ok(());
         };
         let (reply, withdrawal) = self
-            .delegated_human_reply(intent, active_deadline, approvals)
+            .delegated_human_reply(intent, active_deadline, approvals, interrupted)
             .await?;
         resolution.withdrawal = withdrawal;
         resolution.approved = matches!(
@@ -209,27 +240,32 @@ impl RunLoop<'_> {
         &self,
         approvals: &ToolApprovals,
         intent: &EffectIntent,
-        prompt: Option<UnguardedPrompt>,
-        allow_auto_edits: bool,
-        remember_prefix: Option<TypedGitPrefix>,
-    ) -> ApprovalReply {
+        options: &AskOptions,
+    ) -> (ApprovalReply, Option<ApprovalWithdrawal>) {
+        let prompt = options.unguarded_prompt.clone();
         let mut cancellation = self.controls.cancellation.clone();
-        let reply = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => ApprovalReply::Unavailable,
-            () = self.approval_paused() => ApprovalReply::Unavailable,
-            reply = async {
-                match prompt.clone() {
-                    Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => approvals.ask_local(intent, allow_auto_edits, remember_prefix).await,
-                }
-            } => reply,
+        let (reply, withdrawal) = if prompt.is_none() && options.interrupted.is_some() {
+            self.interruptible_local_reply(approvals, intent, options)
+                .await
+        } else {
+            let reply = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => ApprovalReply::Unavailable,
+                () = self.approval_paused() => ApprovalReply::Unavailable,
+                reply = async {
+                    match prompt.clone() {
+                        Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
+                        None => approvals.ask_local(intent, options.allow_auto_edits, options.remember_prefix).await,
+                    }
+                } => reply,
+            };
+            (reply, None)
         };
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
-        match reply {
+        let reply = match reply {
             ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
             ApprovalReply::AllowPrefixInFolder
-                if remember_prefix.is_none()
+                if options.remember_prefix.is_none()
                     && !prompt.as_ref().is_some_and(|prompt| prompt.prefix) =>
             {
                 if intent.call.is_unguarded() || intent.call.is_host() {
@@ -243,6 +279,35 @@ impl RunLoop<'_> {
             | ApprovalReply::AllowOnce
             | ApprovalReply::AllowForSession
             | ApprovalReply::AllowPrefixInFolder) => reply,
+        };
+        (reply, withdrawal)
+    }
+
+    async fn interruptible_local_reply(
+        &self,
+        approvals: &ToolApprovals,
+        intent: &EffectIntent,
+        options: &AskOptions,
+    ) -> (ApprovalReply, Option<ApprovalWithdrawal>) {
+        let mut cancellation = self.controls.cancellation.clone();
+        let mut pending = tokio::select! {
+            biased;
+            () = interrupted(options.interrupted.as_ref()) => return (ApprovalReply::Unavailable, None),
+            () = cancellation.cancelled() => return (ApprovalReply::Unavailable, None),
+            () = self.approval_paused() => return (ApprovalReply::Unavailable, None),
+            pending = approvals.begin_local(intent, options.allow_auto_edits, options.remember_prefix) => pending,
+        };
+        let reply = tokio::select! {
+            biased;
+            () = interrupted(options.interrupted.as_ref()) => None,
+            () = cancellation.cancelled() => None,
+            () = self.approval_paused() => None,
+            reply = pending.reply() => Some(reply),
+        };
+        match reply {
+            Some(crate::tools::ApprovalWaitReply::Replied(reply)) => (reply, None),
+            Some(crate::tools::ApprovalWaitReply::Closed) => (ApprovalReply::Unavailable, None),
+            None => (ApprovalReply::Unavailable, pending.reject_late_replies()),
         }
     }
 }
@@ -281,4 +346,38 @@ pub(super) async fn unguarded_gate(
         sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
         inactive_rules: runtime.has_inactive_host_rules(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
+        let step = include_str!("../step.rs");
+        let ask = include_str!("ask.rs");
+        let tools = include_str!("../../../tools.rs");
+        let guard = include_str!("../../../tools/guard.rs");
+        for (source, start, end) in [
+            (ask, "    pub(super) async fn human_reply(", "\n    }\n}"),
+            (ask, "    async fn resolve_ask(", "\n    }\n}"),
+            (
+                step,
+                "    async fn dispatch_primary(",
+                "    async fn dispatch_effect(",
+            ),
+            (tools, "    async fn run_unguarded(", "    fn pinned_root("),
+            (tools, "    fn pinned_root(", "    async fn run_in_process("),
+            (guard, "fn validate_task(", "fn restore_cache("),
+        ] {
+            let body = source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0;
+            for clock in ["now_ms(", "SystemTime", "expires_at_ms"] {
+                assert!(!body.contains(clock), "{start} reintroduced {clock}");
+            }
+        }
+    }
 }

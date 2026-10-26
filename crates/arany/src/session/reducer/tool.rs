@@ -5,15 +5,190 @@ mod lifecycle;
 mod permission;
 use super::{
     AgentStatus, HookView, MAX_HOST_SESSION_GRANTS, RunView, SessionView, ToolView, active_run,
-    active_run_goal, current_goal_mut, observed_command_changeset, pending_tool_requests,
+    active_run_goal, current_goal_mut, observed_command_changeset,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, ProviderCallDisposition, ReplayError};
+use crate::session::{ToolPreflightRefusal, ToolRefusal, ToolRefusalReason};
 use crate::tools::permissions::{
     Decision, HookEvent, HookResult, HostApproval, MAX_HOOKS_PER_OCCURRENCE, PermissionMode,
     PermissionSource, PermissionVerdict,
 };
 use crate::tools::{EffectIntent, ToolPolicyReceipt};
+
+pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result<(), ToolRefusal> {
+    use crate::session::ProposalRefusalCause::InvalidArguments;
+    let payload = ToolRefusal {
+        cause: InvalidArguments,
+        reason: ToolRefusalReason::Payload,
+    };
+    let transition = ToolRefusal::INVALID_TRANSITION;
+    let (Event::ToolProposed {
+        intent,
+        run_id,
+        agent_run_id,
+        ..
+    }
+    | Event::ToolStarted {
+        intent,
+        run_id,
+        agent_run_id,
+        ..
+    }) = event
+    else {
+        return Err(payload);
+    };
+    event.validate().map_err(|_| payload)?;
+    let run = view
+        .runs
+        .last()
+        .filter(|run| run.id == *run_id)
+        .ok_or(transition)?;
+    let pending = run.tools.iter().any(|tool| tool.intent.id == intent.id);
+    if !pending
+        && run
+            .primary()
+            .is_some_and(|primary| primary.id == *agent_run_id)
+    {
+        validate_primary_tool_scope(view, *run_id, &intent.call).map_err(|cause| ToolRefusal {
+            cause,
+            reason: ToolRefusalReason::Scope,
+        })?;
+        validate_primary_tool_lease(run, &intent.call).map_err(|cause| ToolRefusal {
+            cause,
+            reason: ToolRefusalReason::Lease,
+        })?;
+    }
+    let (run_id, agent_run_id) = event.scope();
+    let mut candidate = view.clone();
+    candidate
+        .apply_committed(&crate::session::EventEnvelope {
+            sequence: view.last_sequence.saturating_add(1),
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event: event.clone(),
+            created_at_ms: 0,
+        })
+        .map_err(|error| match error {
+            ReplayError::InvalidPayload | ReplayError::UnknownEvent => payload,
+            ReplayError::InvalidTransition | ReplayError::InvalidSnapshot => transition,
+        })
+}
+
+pub(crate) fn validate_primary_tool_scope(
+    view: &SessionView,
+    run_id: crate::session::RunId,
+    call: &crate::tools::ToolCall,
+) -> Result<(), crate::session::ProposalRefusalCause> {
+    use crate::session::ProposalRefusalCause::{Phase, PlanScopeExcludesCall};
+    use crate::tools::ToolCall;
+    let goal = active_run_goal(view, run_id).ok_or(Phase)?;
+    if goal.phase != crate::session::GoalPhase::Implementation && !call.is_goal_plan_prelude() {
+        return Err(Phase);
+    }
+    if !matches!(call, ToolCall::ParseAgentDefinition { .. })
+        && let Some(contract) = &goal.plan_contract
+        && (goal.awaiting_plan_contract
+            || !(matches!(
+                call,
+                ToolCall::PrepareWorker { .. } | ToolCall::ApplyChangeset { .. }
+            ) || contract.allows_call(call)))
+    {
+        return Err(PlanScopeExcludesCall);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_primary_tool_lease(
+    run: &RunView,
+    call: &crate::tools::ToolCall,
+) -> Result<(), crate::session::ProposalRefusalCause> {
+    use crate::session::ProposalRefusalCause::LeaseOverlap;
+    use crate::tools::ToolCall;
+    if matches!(
+        call,
+        ToolCall::ApplyChangeset {
+            source: crate::worker::ChangesetSource::WorkerHandover { .. }
+        }
+    ) || !(call.mutates() || call.is_process())
+    {
+        return Ok(());
+    }
+    let leases: Vec<_> = run
+        .agents
+        .iter()
+        .filter_map(|agent| agent.assignment.as_ref())
+        .filter(|worker| worker.released.is_none())
+        .flat_map(|worker| &worker.pins.request.lease)
+        .collect();
+    let paths: Vec<_> = match call {
+        ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::Delete { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        }
+        | ToolCall::Mkdir { path } => vec![path],
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => vec![source, destination],
+        ToolCall::ApplyChangeset {
+            source: crate::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => changeset.files.iter().map(|file| &file.path).collect(),
+        _ if !leases.is_empty() => return Err(LeaseOverlap),
+        _ => Vec::new(),
+    };
+    if paths.iter().any(|path| {
+        leases
+            .iter()
+            .any(|lease| crate::worker::overlaps(lease, path))
+    }) {
+        return Err(LeaseOverlap);
+    }
+    Ok(())
+}
+
+fn preflight_refused(
+    view: &mut SessionView,
+    run_id: crate::session::RunId,
+    actor: crate::session::AgentRunId,
+    record: &ToolPreflightRefusal,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    let run = active_run(view, run_id)?;
+    let agent = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == actor)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if agent.status != AgentStatus::Active
+        || agent.tool_refusal.is_some()
+        || run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .filter(|tool| tool.intent.agent_run_id == actor)
+            .any(ToolView::outcome_unknown)
+        || run
+            .lifecycle_hooks
+            .iter()
+            .filter(|hook| hook.invocation.intent.agent_run_id == actor)
+            .any(HookView::outcome_unknown)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let agent = run
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == actor)
+        .ok_or(ReplayError::InvalidTransition)?;
+    agent.tool_refusal = Some(record.clone());
+    agent.tool_refusal_sequence = Some(sequence);
+    Ok(())
+}
 
 pub(super) fn apply(
     current: &mut SessionView,
@@ -22,7 +197,49 @@ pub(super) fn apply(
 ) -> Result<(), ReplayError> {
     lifecycle::validate_finished(current, event)?;
     match event {
-        Event::ToolPermissionDecided { .. } => permission::apply(current, event)?,
+        Event::ToolPreflightRefused {
+            run_id,
+            agent_run_id,
+            record,
+        } => {
+            preflight_refused(current, *run_id, *agent_run_id, record, prior)?;
+        }
+        Event::ToolActiveTimeReserved {
+            run_id,
+            agent_run_id,
+            intent_digest,
+            active_ceiling_ms,
+        } => {
+            let run = active_run(current, *run_id)?;
+            let read = |call: &crate::tools::ToolCall| {
+                call.site() == crate::tools::catalog::Site::InProcess && !call.mutates()
+            };
+            let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
+            if tool.active_time_reserved {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let pending_read = read(&tool.intent.call);
+            if run
+                .primary()
+                .is_none_or(|primary| primary.id != *agent_run_id)
+                || super::pending_tool_requests(run) != Some(0)
+                || !run.hooks_settled()
+                || run.tools.iter().any(|tool| {
+                    tool.dispatch_in_progress() && !(pending_read && read(&tool.intent.call))
+                })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
+            tool.active_time_reserved = true;
+            record_tool_ceiling(
+                current,
+                *run_id,
+                *agent_run_id,
+                intent_digest,
+                *active_ceiling_ms,
+            )?;
+        }
         Event::HookStarted {
             run_id,
             agent_run_id,
@@ -33,18 +250,19 @@ pub(super) fn apply(
             agent_run_id,
             outcome,
         } => hook::finished(current, *run_id, *agent_run_id, outcome, prior)?,
-        Event::ToolStarted {
+        Event::ToolProposed {
             run_id,
             agent_run_id,
             intent,
             active_ceiling_ms,
-        } => lifecycle::started(
+        } => lifecycle::proposed(
             current,
             *run_id,
             *agent_run_id,
             &intent.clone().into(),
             *active_ceiling_ms,
         )?,
+        Event::ToolStarted { .. } => lifecycle::started(current, event, prior)?,
         Event::ToolFinished { .. } => lifecycle::finished(current, event, prior)?,
         _ => return Err(ReplayError::InvalidTransition),
     }
@@ -58,14 +276,80 @@ fn permissions_pinned(run: &RunView) -> bool {
         .is_some_and(|policy| policy.permissions_digest.is_some())
 }
 
-// The Tool a PostToolUse hook follows: the last Tool, or the source of the changeset the last Tool
-// integrated. The hook must directly follow that Tool's latest journaled step.
+fn concurrent_post_source(
+    run: &RunView,
+    actor: crate::session::AgentRunId,
+    subject: &[u8; 32],
+) -> bool {
+    let Some(agent) = run.agents.iter().find(|agent| agent.id == actor) else {
+        return false;
+    };
+    let Some(call) = agent
+        .provider_calls
+        .iter()
+        .rev()
+        .find(|call| call.phase != AgentPhase::ToolReview)
+    else {
+        return false;
+    };
+    if call.disposition != ProviderCallDisposition::ToolRequested
+        || call.requested_tools < 2
+        || !run.hooks_settled()
+    {
+        return false;
+    }
+    let tools = if run.primary().is_some_and(|primary| primary.id == actor) {
+        &run.tools[run.initial_tool_count()..]
+    } else {
+        &agent.tools[..]
+    };
+    let original = |tool: &&ToolView| {
+        tool.narrowing_source.is_none()
+            && !tool.intent.call.is_internal()
+            && !matches!(
+                tool.intent.call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+            )
+    };
+    if tools.iter().filter(original).count() != super::requested_tool_total(agent) {
+        return false;
+    }
+    let step: Vec<_> = tools
+        .iter()
+        .rev()
+        .filter(original)
+        .take(usize::from(call.requested_tools))
+        .collect();
+    let Some(source) = tools.iter().find(|tool| tool.intent.digest() == *subject) else {
+        return false;
+    };
+    step.iter().any(|tool| {
+        tool.intent.digest() == *subject || source.narrowing_source == Some(tool.intent.digest())
+    }) && step.iter().all(|tool| {
+        tool.intent.call.site() == crate::tools::catalog::Site::InProcess
+            && !tool.intent.call.mutates()
+            && tool.observation.as_ref().is_none_or(|observation| {
+                !matches!(
+                    observation.attestation,
+                    Some(crate::tools::Attestation::Guard(_))
+                )
+            })
+            || !tool.active_time_reserved
+                && tool.permission_verdict.is_none()
+                && tool.hooks.is_empty()
+                && tool.review_call_index.is_none()
+                && tool.observation.is_none()
+    })
+}
+
 fn post_target<'a>(
     run: &'a mut RunView,
     actor: crate::session::AgentRunId,
     subject: &[u8; 32],
     previous: u64,
+    no_provider_pending: bool,
 ) -> Result<(&'a mut ToolView, bool), ReplayError> {
+    let concurrent = no_provider_pending && concurrent_post_source(run, actor, subject);
     let tools = if run
         .primary()
         .is_some_and(|agent| agent.id == actor && agent.status == AgentStatus::Active)
@@ -79,10 +363,16 @@ fn post_target<'a>(
             .ok_or(ReplayError::InvalidTransition)?
             .tools
     };
-    let last = tools
-        .len()
-        .checked_sub(1)
+    let source = tools
+        .iter()
+        .position(|tool| tool.intent.digest() == *subject)
         .ok_or(ReplayError::InvalidTransition)?;
+    let last = tools.get(source + 1).filter(|tool| matches!(
+        &tool.intent.call,
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
+        } if source_intent_digest == subject
+    )).map_or(source, |_| source + 1);
     let integration = &tools[last];
     if matches!(
         integration.intent.call,
@@ -130,34 +420,77 @@ fn post_target<'a>(
         .finished_sequence
         .max(tools[index].hook_sequence)
         .max(capture_sequence);
-    let adjacent = !awaiting_integration && tail == Some(previous);
+    let adjacent = !awaiting_integration
+        && (tail == Some(previous) || concurrent && deferred_read_post(tools, index));
     Ok((&mut tools[index], adjacent))
 }
 
-fn pending_tool(
-    run: &mut RunView,
+fn deferred_read_post(tools: &[ToolView], index: usize) -> bool {
+    let source = &tools[index];
+    source.intent.call.site() == crate::tools::catalog::Site::InProcess
+        && !source.intent.call.mutates()
+        && source.observation.as_ref().is_some_and(|observation| {
+            matches!(
+                observation.attestation,
+                Some(crate::tools::Attestation::InProcess { .. })
+            )
+        })
+        && !source
+            .hooks
+            .iter()
+            .any(|hook| hook.invocation.event == HookEvent::PostToolUse)
+        && tools
+            .iter()
+            .filter(|tool| {
+                tool.hooks
+                    .iter()
+                    .any(|hook| hook.invocation.event == HookEvent::PostToolUse)
+            })
+            .all(|tool| {
+                tool.finished_sequence
+                    .zip(source.finished_sequence)
+                    .is_some_and(|(before, after)| before < after)
+            })
+}
+
+fn tool_by_digest<'a>(
+    run: &'a mut RunView,
     actor: crate::session::AgentRunId,
-) -> Result<&mut ToolView, ReplayError> {
-    if run
+    digest: &[u8; 32],
+) -> Result<&'a mut ToolView, ReplayError> {
+    let tools = if run
         .primary()
         .is_some_and(|primary| primary.id == actor && primary.status == AgentStatus::Active)
     {
-        run.tools.last_mut()
+        &mut run.tools
     } else {
-        run.agents
+        &mut run
+            .agents
             .iter_mut()
             .find(|agent| agent.id == actor && agent.status == AgentStatus::Active)
-            .and_then(|agent| agent.tools.last_mut())
-    }
-    .ok_or(ReplayError::InvalidTransition)
+            .ok_or(ReplayError::InvalidTransition)?
+            .tools
+    };
+    tools
+        .iter_mut()
+        .find(|tool| tool.observation.is_none() && tool.intent.digest() == *digest)
+        .ok_or(ReplayError::InvalidTransition)
+}
+
+fn pending_narrowing_source(run: &RunView) -> Option<(usize, &ToolView)> {
+    run.tools.iter().enumerate().find(|(_, tool)| {
+        tool.narrowed_call().is_some()
+            && !run
+                .tools
+                .iter()
+                .any(|replacement| replacement.narrowing_source == Some(tool.intent.digest()))
+    })
 }
 
 // A narrowed Tool answers nothing itself: the next Tool must be exactly its replacement.
 fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
-    run.tools
-        .last()
-        .and_then(ToolView::narrowed_call)
-        .is_none_or(|call| *call == intent.call)
+    pending_narrowing_source(run)
+        .is_none_or(|(_, source)| source.narrowed_call() == Some(&intent.call))
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
@@ -183,18 +516,50 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
     if primary.provider_calls.last().is_none_or(|call| {
         call.disposition != ProviderCallDisposition::ToolRequested
             && call.phase != AgentPhase::ToolReview
-    }) || pending_tool_requests(run) != Some(0)
-    {
+    }) {
         return false;
     }
-    run.tools
-        .last()
-        .and_then(|tool| tool.observation.as_ref())
-        .is_some_and(|observation| {
+    !run.tools.iter().any(|tool| matches!(&tool.intent.call,
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest: existing, .. }
+        } if existing == source_intent_digest))
+        && run.tools.iter().filter_map(|tool| tool.observation.as_ref()).any(|observation| {
             observation.intent.digest() == *source_intent_digest
                 && observed_command_changeset(observation)
                     .is_some_and(|source| source == *changeset)
         })
+}
+
+fn record_tool_ceiling(
+    current: &mut SessionView,
+    run_id: crate::session::RunId,
+    actor: crate::session::AgentRunId,
+    digest: &[u8; 32],
+    ceiling_ms: u64,
+) -> Result<(), ReplayError> {
+    let run = active_run(current, run_id)?;
+    let read = |tool: &ToolView| {
+        tool.intent.call.site() == crate::tools::catalog::Site::InProcess
+            && !tool.intent.call.mutates()
+    };
+    let overlaps = run.primary().is_some_and(|primary| primary.id == actor)
+        && run
+            .tools
+            .iter()
+            .rev()
+            .any(|tool| read(tool) && tool.intent.digest() == *digest)
+        && run.tools.iter().any(|tool| {
+            tool.dispatch_in_progress() && read(tool) && tool.intent.digest() != *digest
+        });
+    let ceiling_ms = if overlaps {
+        active_run_goal(current, run_id)
+            .ok_or(ReplayError::InvalidTransition)?
+            .active_ceiling_ms
+            .max(ceiling_ms)
+    } else {
+        ceiling_ms
+    };
+    record_run_ceiling(current, run_id, ceiling_ms)
 }
 
 fn record_run_ceiling(
@@ -370,6 +735,29 @@ pub(super) fn before_lifecycle_event(
     let Some(run) = current.runs.last() else {
         return Ok(());
     };
+    if event.scope().0 == Some(run.id)
+        && let Some(actor) = event.scope().1
+        && run
+            .agents
+            .iter()
+            .any(|agent| agent.id == actor && agent.tool_refusal.is_some())
+        && !matches!(
+            event,
+            Event::AgentFinished {
+                disposition: crate::session::AgentDisposition::Failed
+                    | crate::session::AgentDisposition::Cancelled
+                    | crate::session::AgentDisposition::StoppedByHook,
+                ..
+            } | Event::WorkerDataChunk { .. }
+                | Event::WorkerDataSealed { .. }
+                | Event::WorkerHandoverRecorded { .. }
+                | Event::WorkerHandoverDiscarded { .. }
+                | Event::WorkerLeaseReleased { .. }
+                | Event::WorkerStopObserved { .. }
+        )
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     if run
         .lifecycle_hooks
         .last()
@@ -395,13 +783,15 @@ pub(super) fn before_lifecycle_event(
         hook.outcome
             .as_ref()
             .is_some_and(|outcome| outcome.observation.stops_run())
-    }) && matches!(
+    }) && (matches!(
         event,
         Event::GoalProviderCallReserved { .. }
-            | Event::ToolStarted { .. }
+            | Event::ToolProposed { .. }
+            | Event::ToolActiveTimeReserved { .. }
             | Event::HookStarted { .. }
             | Event::AgentSpawned { .. }
-    ) {
+    ) || matches!(event, Event::ToolStarted { verdict, .. } if verdict.as_ref().is_none_or(|verdict| verdict.approved)))
+    {
         return Err(ReplayError::InvalidTransition);
     }
     if matches!(
@@ -441,7 +831,11 @@ fn valid_host_approval(
     if run.primary().is_none_or(|agent| agent.id != actor) {
         return false;
     }
-    let Some(tool) = run.tools.last() else {
+    let Some(tool) = run
+        .tools
+        .iter()
+        .find(|tool| tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest)
+    else {
         return false;
     };
     let Some(policy) = run

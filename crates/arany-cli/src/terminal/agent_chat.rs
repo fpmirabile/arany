@@ -7,7 +7,7 @@ use super::{
 use crate::presentation::{
     AgentTarget, AgentTranscript, Appended, TranscriptPart, agent_targets, run_targets,
 };
-use arany::{AgentRunId, ChildSteeringTarget, RunId, RunSteering, SessionId, SessionView};
+use arany::{AgentRunId, ChildSteeringTarget, RunId, SessionId, SessionView};
 use std::io;
 
 pub(super) const MAX_CHOICE_BYTES: usize = 16;
@@ -320,8 +320,8 @@ impl AttachedTerminal {
             let admitted = composer.is_empty()
                 && !composer.has_open_menu()
                 && self.clipboard.is_none()
-                && !self.transcript_open
-                && !self.scrollback_dump;
+                && !self.transcript.transcript_open
+                && !self.transcript.scrollback_dump;
             return self.navigate(view, input, admitted).await;
         }
         if let Some(draft) = self.selected_child_draft_mut() {
@@ -624,14 +624,18 @@ impl AttachedTerminal {
         }
     }
 
-    pub fn withdraw_child_offer(&mut self, target: ChildSteeringTarget, steering: &RunSteering) {
+    pub async fn withdraw_child_offer(
+        &mut self,
+        target: ChildSteeringTarget,
+        mut withdraw: impl AsyncFnMut(ChildSteeringTarget) -> Option<String>,
+    ) {
         if let Some(draft) = self
             .child_drafts
             .iter_mut()
             .find(|draft| draft.target == target)
             && draft.offered.is_some()
         {
-            let withdrawn = steering.withdraw_child_note(target).is_some();
+            let withdrawn = withdraw(target).await.is_some();
             if withdrawn || draft.composer.is_empty() {
                 draft.offered = None;
             } else if let Some(offer) = &mut draft.offered {
@@ -678,10 +682,10 @@ impl AttachedTerminal {
             .any(|draft| draft.offered.is_some())
     }
 
-    pub fn settle_child_notes(
+    pub async fn settle_child_notes(
         &mut self,
         view: &SessionView,
-        steering: &RunSteering,
+        mut withdraw: impl AsyncFnMut(ChildSteeringTarget) -> Option<String>,
         stopped: bool,
     ) -> bool {
         let mut changed = false;
@@ -691,7 +695,7 @@ impl AttachedTerminal {
                 continue;
             }
             if draft.offered.is_some() && (stopped || !editable_child(view, draft.target)) {
-                let withdrawn = steering.withdraw_child_note(draft.target).is_some();
+                let withdrawn = withdraw(draft.target).await.is_some();
                 if withdrawn {
                     draft.offered = None;
                 } else if let Some(offer) = &mut draft.offered {
@@ -1071,7 +1075,7 @@ impl AttachedTerminal {
             return Ok(());
         }
         let classic = self.mode == TerminalMode::Classic;
-        let screen = self.terminal.as_mut().expect("owned terminal").size()?;
+        let screen = self.owned.terminal().size()?;
         self.prepare_frame_height(if classic {
             AGENT_CHAT_ROWS
         } else {
@@ -1081,6 +1085,7 @@ impl AttachedTerminal {
             self.write_native_agent_chat()?;
             if let Some(text) = history_notice
                 && self
+                    .transcript
                     .native
                     .last_notice
                     .as_ref()
@@ -1090,14 +1095,16 @@ impl AttachedTerminal {
             {
                 let (kind, body) = notice_kind(text);
                 self.insert_native(kind, body, None)?;
-                self.native.last_notice = Some((view.last_sequence, text.to_owned()));
+                self.transcript.native.last_notice = Some((view.last_sequence, text.to_owned()));
             }
         } else if let Some(text) = history_notice {
             // The primary keeps the notice for when it is shown again.
-            self.history.record_notice(TerminalNotice::History(text));
+            self.transcript
+                .history
+                .record_notice(TerminalNotice::History(text));
         }
         let palette = self.palette();
-        let armed = self.dialog_armed;
+        let armed = self.panels.dialog_armed;
         let target = self.agent_chat.as_ref().and_then(AgentChat::target);
         let draft = target
             .and_then(|target| {
@@ -1122,7 +1129,7 @@ impl AttachedTerminal {
         }
         chat.shown = true;
         let label = chat.label().to_owned();
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = self.owned.terminal();
         terminal.draw(|frame| {
             let area = dialog_area(frame.area(), AGENT_CHAT_ROWS, classic);
             if !classic && let Some(transcript) = &chat.transcript {
@@ -1145,7 +1152,7 @@ impl AttachedTerminal {
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
         // The child view offers no selection, so pointer gestures never reach the primary History.
-        self.history_area = None;
+        self.panels.history_area = None;
         Ok(())
     }
 
@@ -1362,7 +1369,7 @@ mod tests {
         );
         assert_eq!(terminal.child_drafts[0].composer.text(), "/literal");
         terminal.child_note_feedback(target, "waiting".into(), Some(("/literal".into(), 0)));
-        terminal.withdraw_child_offer(target, &RunSteering::new());
+        terminal.withdraw_child_offer(target, async |_| None).await;
         assert!(matches!(
             terminal
                 .edit_child(&view, TerminalInput::Submit)
@@ -1667,7 +1674,11 @@ mod tests {
         view.runs[0].agents[1]
             .steering_notes
             .push("/literal".into());
-        assert!(terminal.settle_child_notes(&view, &RunSteering::new(), false));
+        assert!(
+            terminal
+                .settle_child_notes(&view, async |_| None, false)
+                .await
+        );
         assert_eq!(
             terminal.child_drafts[0].composer.text(),
             "/literal",
@@ -1683,20 +1694,30 @@ mod tests {
         view.runs[0].agents[2]
             .steering_notes
             .push("/literal".into());
-        assert!(terminal.settle_child_notes(&view, &RunSteering::new(), false));
+        assert!(
+            terminal
+                .settle_child_notes(&view, async |_| None, false)
+                .await
+        );
         assert!(terminal.child_drafts[0].composer.is_empty());
         assert_eq!(
             terminal.child_drafts[0].notice.as_deref(),
             Some("Steering note recorded for child 2")
         );
-        assert!(!terminal.settle_child_notes(&view, &RunSteering::new(), false));
+        assert!(
+            !terminal
+                .settle_child_notes(&view, async |_| None, false)
+                .await
+        );
         terminal.child_drafts[0]
             .composer
             .insert_paste("newer")
             .unwrap();
         terminal.child_note_feedback(target, "waiting".into(), Some(("older".into(), 1)));
         view.runs[0].agents[2].steering_notes.push("older".into());
-        terminal.settle_child_notes(&view, &RunSteering::new(), false);
+        terminal
+            .settle_child_notes(&view, async |_| None, false)
+            .await;
         assert_eq!(terminal.child_drafts[0].composer.text(), "newer");
         assert_eq!(primary.text(), "primary draft");
         assert_eq!(primary.cursor_byte_offset(), caret);

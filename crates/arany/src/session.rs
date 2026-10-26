@@ -34,10 +34,12 @@ pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{
-    AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, CompactionInputError,
-    MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
-    MAX_COMPACTION_TURNS, MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction,
-    validate_compaction_references,
+    AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, COMPACTION_SUMMARY_SEPARATOR_BYTES,
+    CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
+    MAX_COMPACTION_RECENT_CONTEXT_BYTES, MAX_COMPACTION_SUMMARY_BYTES, MAX_COMPACTION_TURNS,
+    MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, join_recent_files, recent_files,
+    recent_files_across, recent_files_match, render_recent_files, validate_compaction_references,
+    validate_compactions_with_sequence, validate_goal_context_compactions_with_sequence,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
@@ -53,8 +55,9 @@ pub use events::{
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
     ProviderCallRecord, ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind,
-    ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults, SessionId,
-    ToolIntentRecord, WorkspaceIdentity,
+    RecentFile, ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults,
+    SessionId, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason,
+    WorkspaceIdentity,
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
@@ -64,9 +67,9 @@ pub(crate) use events::{
 pub(crate) use events::{
     add_command_selection, expiring_intent_text, expiring_payload, goal_started_v7_payload,
     goal_started_v7_to_v8, intent_without_expiry, pre_command_selection_payload,
-    pre_file_removal_payload, pre_gh_pr_list_payload, pre_git_write_payload, pre_glob_payload,
-    pre_host_git_payload, pre_host_payload, pre_host_prefix_payload, pre_multiedit_payload,
-    pre_role_routing_payload, pre_roster_setup_payload, pre_typed_prefix_payload,
+    pre_file_removal_payload, pre_gh_pr_list_payload, pre_gh_pr_view_payload,
+    pre_git_write_payload, pre_glob_payload, pre_host_git_payload, pre_host_payload,
+    pre_multiedit_payload, pre_role_routing_payload, pre_roster_setup_payload,
     provider_call_v18_payload, provider_call_v18_to_v19, provider_call_v19_payload,
     provider_call_v19_to_v20, provider_call_v22_payload, rebind_intent_pins, replace_intent_pin,
     rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
@@ -92,6 +95,7 @@ pub use reducer::{
 pub(crate) use reducer::{
     ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,
     evidence_admitted, private_criterion_evidence, private_failure, validate_editor_request,
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
     verification_passed, wave_settled,
 };
 pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};

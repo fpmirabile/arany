@@ -397,6 +397,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        spill_access: None,
         config,
         workspace: PathBuf::new(),
         reads: None,
@@ -1724,7 +1725,7 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 14);
+    assert_eq!(rows.len(), 15);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))
@@ -1867,9 +1868,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         enforcement_digest: [2; 32],
         workspace_device: 1,
         workspace_inode: 2,
-        call: ToolCall::Mkdir {
-            path: "src/new".into(),
-        },
+        call: ToolCall::GitStatus { path: "src".into() },
         limits: ToolLimits::default(),
         use_count: 1,
     };
@@ -1908,6 +1907,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limits: intent.limits.clone(),
     };
     let observation = ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: intent.clone(),
@@ -1954,6 +1954,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limits: command_intent.limits.clone(),
     };
     let uncertain_cache = ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: command_intent,
@@ -2186,6 +2187,20 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         crate::test_support::recorded_tool_failure(unstarted.id).as_deref(),
         Some("Guard stage=connection deadline")
     );
+    let mut file = intent(ToolCall::Mkdir {
+        path: "src/new".into(),
+    });
+    file.enforcement_digest = FileReceipt::enforcement_digest();
+    let failed = super::unstarted_observation(file.clone(), super::ToolError::ChangedInput);
+    assert!(failed.valid() && failed.stops_run() && failed.attestation.is_none());
+    assert_eq!(
+        failed.output,
+        "File pinned input unavailable before dispatch; no operation was dispatched."
+    );
+    assert_eq!(
+        crate::test_support::recorded_tool_failure(file.id).as_deref(),
+        Some("File stage=pinned input")
+    );
     assert_eq!(
         crate::test_support::recorded_tool_failure(uuid::Uuid::now_v7()),
         None
@@ -2277,6 +2292,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         intent.limits.cache_bytes = cache_requested_bytes;
         intent.limits.cache_candidate_bytes = 0;
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
@@ -2756,6 +2772,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        spill_access: None,
         config,
         workspace: PathBuf::new(),
         reads: None,
@@ -2927,6 +2944,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        spill_access: None,
         config: serde_json::from_value(value).unwrap(),
         workspace: PathBuf::new(),
         reads: None,
@@ -2995,6 +3013,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        spill_access: None,
         config: serde_json::from_value(config.clone()).unwrap(),
         workspace: workspace.to_owned(),
         workspace_identity: super::fs::workspace_identity(&root).unwrap(),
@@ -3098,6 +3117,7 @@ async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> Too
     let (disposition, output, enforcement_cause, limit_cause) =
         super::dispatch::outcome(&intent, result);
     ToolObservation {
+        spill: None,
         attestation: Some(Attestation::Guard(super::GuardReceipt {
             contract_version: 1,
             intent_digest: intent.digest(),
@@ -3157,10 +3177,15 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         runtime.reservation_overhead(&read("src/main.rs")),
         std::time::Duration::ZERO
     );
-    assert!(
+    assert_eq!(
         runtime.reservation_overhead(&ToolCall::Mkdir {
             path: "src/new".into()
-        }) > std::time::Duration::ZERO
+        }),
+        std::time::Duration::ZERO
+    );
+    assert!(
+        runtime.reservation_overhead(&ToolCall::GitStatus { path: "src".into() })
+            > std::time::Duration::ZERO
     );
 
     assert_eq!(
@@ -3169,9 +3194,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
             args: vec![],
             cwd: "".into(),
         }),
-        runtime.reservation_overhead(&ToolCall::Mkdir {
-            path: "src/new".into()
-        }) + std::time::Duration::from_secs(5),
+        super::guard::RESERVATION_OVERHEAD + super::selection::PHASE_TIME,
     );
 
     for pin in ["grant", "enforcement"] {
@@ -5592,4 +5615,113 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
     }
     assert!(temp.path().join("owned/source").exists());
     assert!(!temp.path().join("owned/new").exists());
+}
+
+#[tokio::test]
+async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let call = ToolCall::Mkdir {
+        path: "directory".into(),
+    };
+    let observed = run_in_process(&runtime, call.clone()).await;
+    assert_eq!(observed.disposition, ToolDisposition::Succeeded);
+    assert!(observed.valid());
+    assert!(
+        matches!(&observed.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.intent_digest == observed.intent.digest())
+    );
+    assert!(temp.path().join("directory").is_dir());
+    assert_eq!(
+        runtime.reservation_overhead(&call),
+        std::time::Duration::ZERO
+    );
+    assert_eq!(
+        runtime.intent_reservation_overhead(&observed.intent),
+        std::time::Duration::ZERO
+    );
+    assert_eq!(
+        runtime.worker_reservation_overhead(&call),
+        super::guard::RESERVATION_OVERHEAD
+    );
+    let mut private_intent = observed.intent.clone();
+    private_intent.target = crate::worker::EffectTarget::WorkerView {
+        assignment_id: private_intent.agent_run_id,
+        base_digest: [1; 32],
+        revision: 0,
+        cache_generation: None,
+    };
+    assert_eq!(
+        runtime.intent_reservation_overhead(&private_intent),
+        super::guard::RESERVATION_OVERHEAD
+    );
+    let call = ToolCall::Mkdir {
+        path: "cancelled".into(),
+    };
+    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+    let cancelled = super::Cancellation::new();
+    cancelled.cancel();
+    assert_eq!(
+        runtime.execute(intent, cancelled).await.disposition,
+        ToolDisposition::Cancelled
+    );
+    assert!(!temp.path().join("cancelled").exists());
+    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call);
+    crate::FaultPlan::fail_file_parent_sync(intent.id);
+    let observed = runtime.execute(intent, super::Cancellation::new()).await;
+    assert_eq!(observed.disposition, ToolDisposition::Uncertain);
+    assert!(observed.valid() && observed.stops_run());
+    assert!(temp.path().join("cancelled").is_dir());
+    let mut denied = observed;
+    denied.disposition = ToolDisposition::Denied;
+    denied.enforcement_cause = Some(EnforcementCause::FilesystemDenied);
+    assert_eq!(
+        denied.enforcement_diagnostic(),
+        Some("File enforcement: protected path or set-ID entry refused")
+    );
+    assert_eq!(
+        super::types::model_observation(&denied)["enforcement_cause"],
+        denied.enforcement_diagnostic().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn workspace_file_versions_publish_in_process_with_intent_bound_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    let runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let path = "src/file";
+    let source_digest = [1; 32];
+    for call in [
+        json!({"operation":"write","path":path,"expected_digest":null,"content":"before"}),
+        json!({"operation":"edit","path":path,"expected_digest":hex_digest(b"before"),"old":"before","new":"middle"}),
+        json!({"operation":"multiedit","file_path":path,"expected_digest":hex_digest(b"middle"),"edits":[{"old_string":"middle","new_string":"after","replace_all":false}]}),
+        json!({"operation":"mkdir","path":"src/nested"}),
+        json!({"operation":"move","source":path,"destination":"src/nested/moved","expected_digest":hex_digest(b"after")}),
+        json!({"operation":"delete","path":"src/nested/moved","expected_digest":hex_digest(b"after")}),
+        json!({"operation":"apply_changeset","source":{"kind":"command_receipt","source_intent_digest":source_digest,"changeset":{"files":[{"path":path,"before":null,"after":FileVersion::from_bytes(b"published",false)}]}}}),
+    ] {
+        let call: ToolCall = serde_json::from_value(call).unwrap();
+        assert_eq!(call.facts().site, Site::InProcess);
+        assert_eq!(
+            runtime.reservation_overhead(&call),
+            std::time::Duration::ZERO
+        );
+        let observed = run_in_process(&runtime, call).await;
+        assert_eq!(
+            observed.disposition,
+            ToolDisposition::Succeeded,
+            "{observed:?}"
+        );
+        assert!(observed.valid());
+        assert!(
+            matches!(&observed.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.intent_digest == observed.intent.digest())
+        );
+    }
+    assert_eq!(std::fs::read(temp.path().join(path)).unwrap(), b"published");
 }

@@ -1252,6 +1252,8 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "cancel_background",
         "cancel_mixed",
         "hook_sibling_stop",
+        "integration_refused",
+        "wave_tool_refused",
         // Killing the Guard parent proves an unknown outcome only on Linux, like the other Uncertain hook journeys.
         #[cfg(target_os = "linux")]
         "hook_uncertain_sibling",

@@ -4,6 +4,8 @@
 
 This contract owns saved-account scope, protected storage, selected-item startup authorization, replacement and recovery. Behavior is shared across OSes; native storage mechanisms and support evidence can differ. Provider admission belongs to the [Provider contract](./provider.md); OAuth, verified identity, consent and token renewal to the [ChatGPT contract](./chatgpt.md). [The terminal contract](./terminal.md#setup-and-account-choices) owns folder-consent ordering, account choices and interactive cancellation. Editing constraints: [security rules](../../agents/security.md).
 
+Session State retains Tool output outside the Workspace in private directories (`0700`); output files and the fixed per-Run `writer.lock` are `0600`. The [Output spill contract](./tools.md#limits-and-failure-behavior) owns layout and retention.
+
 ## Account scope and identity
 
 A saved Provider Account belongs to one effective OS user across that user's Sessions and StateRoots, never the whole machine. On Linux and macOS, account metadata and its replacement lock use the effective user's passwd home, independently of `HOME`, XDG variables and Session `--state-dir`. The native roots are `.local/state/arany` on Linux and `Library/Application Support/dev.Arany.arany` on macOS. Keyring items remain in that user's OS credential store. Session-root configuration retains its separate contract.
@@ -45,6 +47,8 @@ Setup prefers the OS keyring. An unavailable, unpinned store may offer a separat
 
 Bare startup first reuses the last explicit saved-source preference, selecting Provider/account/model metadata without loading credentials; disconnected ChatGPT metadata cannot restore access. Without a preference, checked record presence determines available saved routes before either payload is read. When API and ChatGPT records coexist, billing-route choice is explicit. Cancellation reads neither payload and creates no Session; an invalid selected record never falls back to the other route. A legacy unpinned native keyring item without a current backend marker is not a configured account and is never loaded during discovery, including when a ChatGPT index exists. Use explicit native account setup to admit native access; inspection without that marker probes backend availability but returns no saved account.
 
+The [terminal contract](./terminal.md#setup-and-account-choices) owns native account choices, interactive cancellation and account-inspection display.
+
 On Linux, Secret Service admission accepts one bounded `unix:path=` or `unix:abstract=` address with an optional exact GUID, or the bounded absolute `XDG_RUNTIME_DIR`. With both absent, the client connects directly to `/run/user/<uid>/bus` without autolaunch.
 
 ### Selected-item authorization
@@ -54,6 +58,8 @@ After folder consent and account choice, attached startup authorizes only the se
 Native-account discovery without a remembered preference uses the same cancellable interactive wait for its existing bounded account read, then discards the key before chat without a duplicate authorization or credential cache. Neither path refreshes tokens, starts sign-in, grants Run authority or invokes inference. Revalidate the selected account after authorization and reload current credentials at use.
 
 Interactive startup access has a supervised two-minute human-interaction deadline. Cancellation kills and reaps the helper and restores the terminal according to its contract. Denial, missing/invalid items, identity replacement and timeout report safe startup feedback without a Provider call, sign-in, automatic retry or fallback. Routine reads, writes and deletion retain five-second deadlines. On macOS the OS owns per-item permission persistence; Allow Once may require another prompt on later access.
+
+Attached setup converts native-account and saved-access failures through the [shared setup error owner](../../crates/arany-cli/src/cli/attached/setup/error.rs), including operation-specific native save/removal feedback. The conversion preserves exact messages and diagnostic recording; native save/removal flows settle journal disposition before reporting publication failure. Refusal, cancellation, uncertainty, retry and fallback behavior remain unchanged, with native publication/reopen evidence in the [credential corpus](../../crates/arany-cli/src/accounts/credentials.rs).
 
 The keyring helper is a short-lived copy of the same binary. It uses a fixed service, bounded private pipes, a cleared environment and `/` as its working directory. Startup authorization validates the identity inside the helper and returns no credential. Test builds require an absolute `ARANY_TEST_EXE`, and shipped binaries ignore it; synthetic input comes through a private file, not a parent pipe.
 
@@ -99,6 +105,8 @@ After an OS-store write or deletion helper is dispatched, disappearance, wait or
 The account-replacement lock is held in the same blocking task as the OS credential-store write, so cancelling the awaiting interface cannot release it early.
 
 Explicit saved native-account removal snapshots the valid account record, model preferences and selected keyring credential identity together under the account lock before confirmation, then rechecks all three under the lock. It removes the account marker and model preferences before deleting only the unchanged pinned keyring slot, so uncertain deletion leaves the credential unconfigured; stale snapshots refuse. A crash may leave an orphaned keyring item, which is never loaded without its marker. Malformed records use the separate checked reset path, which never decodes them or deletes a credential based on an untrusted record. Setup's ChatGPT removal binds the selected account identity and exact account-index snapshot to local cleanup; it sends no remote revocation request. Explicit `provider logout chatgpt` remains the separate remote sign-out action.
+
+The attached [native setup flow](../../crates/arany-cli/src/cli/attached/setup/native.rs) coordinates account lookup, selected-account catalog loading/default selection, setup and save settlement, native removal and saved-setup reset, retaining lookup → choice → catalog → journal → save/settle ordering and confirmation before removal/reset publication. Its explicit-effort table pins unreviewed-model admission and low-effort catalog defaults. Snapshot admission, account locking and key access remain in the [credential owner](../../crates/arany-cli/src/accounts/credentials.rs), whose removal/reset and publication/reopen scenarios retain the existing setup uncertainty bridge.
 
 ## Limits and record admission
 

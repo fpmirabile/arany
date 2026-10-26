@@ -86,7 +86,7 @@ fn run_broken_stderr_case(compaction: bool) {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("compaction request");
                     let input: serde_json::Value = crate::semantic::input(&wire);
-                    assert_eq!(wire["max_output_tokens"], 1024);
+                    assert_eq!(wire["max_output_tokens"], 4096);
                     assert_eq!(input["items"].as_array().expect("history items").len(), 1);
                     assert!(input.get("workspace_guidance").is_none());
                     assert!(input.get("includes").is_none());

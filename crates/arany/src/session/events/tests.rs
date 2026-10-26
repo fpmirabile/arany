@@ -38,6 +38,7 @@ mod goal_success_tests {
             use_count: 1,
         };
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                 .then_some(crate::tools::LimitCause::Resource),
@@ -1180,6 +1181,7 @@ mod subscription_compaction_tests {
             covered_run_id: RunId::new(),
             covered_sequence: 1,
             source_digest: [1; 32],
+            recent_files: Vec::new(),
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             prompt_version: 1,
@@ -1201,6 +1203,13 @@ mod subscription_compaction_tests {
         };
         assert!(record.validate().is_ok());
         let encoded = serde_json::to_value(&record).unwrap();
+        assert!(encoded.get("recent_files").is_none());
+        let mut legacy = encoded.clone();
+        legacy.as_object_mut().unwrap().remove("recent_files");
+        assert_eq!(
+            serde_json::from_value::<CompactionRecord>(legacy).unwrap(),
+            record
+        );
         assert!(encoded["chatgpt_provenance"].is_null());
         assert_eq!(encoded["output_token_bound"], "provider_enforced");
         for field in [
@@ -1228,7 +1237,9 @@ mod subscription_compaction_tests {
                 invalid[field] = serde_json::json!(version);
                 let invalid: CompactionRecord = serde_json::from_value(invalid).unwrap();
                 let historical_compiler = field == "compiler_version"
-                    && version == crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION;
+                    && (crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION
+                        ..=crate::session::COMPACTION_COMPILER_VERSION)
+                        .contains(&version);
                 assert_eq!(
                     invalid.validate().is_ok(),
                     historical_compiler,
@@ -1254,6 +1265,99 @@ mod subscription_compaction_tests {
             serde_json::from_value::<CompactionRecord>(encoded.clone()).unwrap(),
             record
         );
+        record.recent_files = vec![crate::session::RecentFile {
+            path: "src/main.rs".into(),
+            digest: "a".repeat(64),
+        }];
+        assert!(record.validate().is_ok());
+        let count_boundary: Vec<crate::session::RecentFile> = (0
+            ..crate::session::events::MAX_COMPACTION_RECENT_FILES)
+            .map(|index| crate::session::RecentFile {
+                path: format!("src/file-{index}.rs"),
+                digest: "a".repeat(64),
+            })
+            .collect();
+        record.recent_files = count_boundary;
+        assert!(record.validate().is_ok());
+        let byte_boundary: Vec<crate::session::RecentFile> = (0
+            ..crate::session::events::MAX_COMPACTION_RECENT_FILES)
+            .map(|index| crate::session::RecentFile {
+                path: format!(
+                    "d{index}/{}",
+                    "x".repeat(
+                        424 - (if index + 1 == crate::session::events::MAX_COMPACTION_RECENT_FILES {
+                            1
+                        } else {
+                            0
+                        }) - 3
+                    )
+                ),
+                digest: "a".repeat(64),
+            })
+            .collect();
+        let byte_boundary_size = serde_json::to_vec(&byte_boundary).unwrap().len();
+        assert_eq!(
+            byte_boundary_size,
+            crate::session::events::MAX_COMPACTION_RECENT_FILES_BYTES
+        );
+        assert!(
+            byte_boundary
+                .iter()
+                .all(|file| crate::validate::valid_relative(&file.path, false))
+        );
+        record.recent_files = byte_boundary.clone();
+        assert!(record.validate().is_ok());
+        let count_overflow = (0..=crate::session::events::MAX_COMPACTION_RECENT_FILES)
+            .map(|index| crate::session::RecentFile {
+                path: format!("src/file-{index}.rs"),
+                digest: "a".repeat(64),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            count_overflow
+                .iter()
+                .all(|file| crate::validate::valid_relative(&file.path, false))
+        );
+        let mut byte_overflow = byte_boundary.clone();
+        byte_overflow
+            .last_mut()
+            .expect("recent-file byte boundary")
+            .path
+            .push('x');
+        assert!(
+            serde_json::to_vec(&byte_overflow).unwrap().len()
+                == crate::session::events::MAX_COMPACTION_RECENT_FILES_BYTES + 1
+        );
+        assert!(
+            byte_overflow
+                .iter()
+                .all(|file| crate::validate::valid_relative(&file.path, false))
+        );
+        for invalid in [
+            vec![crate::session::RecentFile {
+                path: "../main.rs".into(),
+                digest: "a".repeat(64),
+            }],
+            vec![crate::session::RecentFile {
+                path: "src/main.rs".into(),
+                digest: "x".repeat(64),
+            }],
+            count_overflow,
+            vec![
+                crate::session::RecentFile {
+                    path: "src/main.rs".into(),
+                    digest: "a".repeat(64),
+                },
+                crate::session::RecentFile {
+                    path: "src/main.rs".into(),
+                    digest: "b".repeat(64),
+                },
+            ],
+            byte_overflow,
+        ] {
+            record.recent_files = invalid;
+            assert!(record.validate().is_err());
+        }
         for (field, value) in [
             ("admission", serde_json::json!("unchecked")),
             ("admission", serde_json::Value::Null),
@@ -1400,6 +1504,17 @@ mod provider_call_tests {
         record.input_tokens = Some(100);
         record.output_tokens = Some(10);
         assert!(record.validate().is_ok());
+        record.wire_provenance =
+            Some(crate::provider::ProviderWireProvenance::ChatCompletionsStopStorageUnspecified);
+        let encoded = serde_json::to_value(&record).expect("Chat provenance payload");
+        assert_eq!(
+            encoded["wire_provenance"],
+            "chat_completions_stop_storage_unspecified"
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderCallRecord>(encoded).expect("Chat provenance replay"),
+            record
+        );
         record.disposition = ProviderCallDisposition::TimedOut;
         assert!(record.validate().is_err());
         record.disposition = ProviderCallDisposition::Finished;
@@ -1744,6 +1859,7 @@ mod payload_version_tests {
             ));
         }
         for kind in [
+            "ToolProposed",
             "ToolStarted",
             "ToolFinished",
             "RunStarted",
@@ -1786,9 +1902,11 @@ mod payload_version_tests {
             use_count: 1,
         };
         crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(crate::tools::Attestation::InProcess {
+                receipt: None,
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
                 workspace_inode: intent.workspace_inode,
@@ -1810,6 +1928,7 @@ mod payload_version_tests {
         observation.attestation = None;
         let events = [
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: observation.intent.clone().into(),
@@ -1989,17 +2108,20 @@ mod payload_version_tests {
             prefix_rule: None,
         };
         let started = Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: agent,
-            intent: intent.into(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 1,
         };
-        let verdict = Event::ToolPermissionDecided {
+        let verdict = Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
             run_id: run,
             agent_run_id: agent,
-            verdict: crate::tools::permissions::PermissionVerdict {
+            verdict: Some(crate::tools::permissions::PermissionVerdict {
                 host: None,
-                intent_digest: [3; 32],
+                intent_digest: intent.digest(),
                 decision: crate::tools::permissions::Decision::Allow,
                 mode: None,
                 basis: crate::tools::permissions::PermissionSource::SessionApproval,
@@ -2008,9 +2130,15 @@ mod payload_version_tests {
                 hook_restriction: None,
                 hooks: 0,
                 narrowed: false,
-            },
+            }),
         };
-        for event in [&started, &verdict] {
+        let reservation = Event::ToolActiveTimeReserved {
+            run_id: run,
+            agent_run_id: agent,
+            intent_digest: [3; 32],
+            active_ceiling_ms: 7_000,
+        };
+        for event in [&started, &verdict, &reservation] {
             let payload = event.payload().expect("payload");
             let version = payload_version(event.kind()).expect("known kind");
             assert_eq!(
@@ -2024,10 +2152,43 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(started.version()));
+        assert_eq!(payload_version("ToolPermissionDecided"), None);
+    }
+
+    #[test]
+    fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let proposed = Event::ToolProposed {
+            run_id: run,
+            agent_run_id: agent,
+            intent: read_observation(run, agent).intent.into(),
+            active_ceiling_ms: 1,
+        };
+        let payload = proposed.payload().unwrap();
         assert_eq!(
-            payload_version("ToolPermissionDecided"),
-            Some(verdict.version())
+            Event::decode(
+                proposed.kind(),
+                proposed.version(),
+                &payload,
+                Some(run),
+                Some(agent)
+            )
+            .unwrap(),
+            proposed
         );
+        let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        extra["verdict"] = serde_json::Value::Null;
+        assert!(matches!(
+            Event::decode(
+                proposed.kind(),
+                proposed.version(),
+                &extra.to_string(),
+                Some(run),
+                Some(agent)
+            ),
+            Err(ReplayError::InvalidPayload)
+        ));
     }
 
     #[test]
@@ -2038,6 +2199,7 @@ mod payload_version_tests {
         assert!(read.valid());
         let mut drifted = read.clone();
         drifted.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
             policy_digest: [1; 32],
             workspace_device: 1,
             workspace_inode: 3,
@@ -2161,6 +2323,7 @@ mod payload_version_tests {
                 active_ceiling_ms: 125_000,
             },
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: read_observation(run, agent).intent.into(),
@@ -2523,6 +2686,7 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
         ("AgentSpawned", "/assignment", "cache_generation"),
         ("AgentSpawned", "/assignment/grant", "commands"),
         ("ToolStarted", "/intent/target", "cache_generation"),
+        ("ToolStarted", "", "verdict"),
         ("ToolFinished", "/intent/target", "cache_generation"),
         ("WorkerHandoverRecorded", "", "criterion_evidence"),
     ] {
@@ -2729,6 +2893,39 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
 }
 
 #[test]
+fn tool_preflight_refusal_payload_is_closed_and_keeps_its_fixed_reason() {
+    let (run, agent) = (RunId::new(), AgentRunId::new());
+    let event = Event::ToolPreflightRefused {
+        run_id: run,
+        agent_run_id: agent,
+        record: ToolPreflightRefusal {
+            intent_digest: [1; 32],
+            refusal: ToolRefusal::INVALID_TRANSITION,
+            verdict: None,
+        },
+    };
+    let payload = event.payload().unwrap();
+    assert_eq!(
+        Event::decode(event.kind(), 1, &payload, Some(run), Some(agent)).unwrap(),
+        event
+    );
+    for case in ["cause", "reason", "digest", "extra"] {
+        let mut forged: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        match case {
+            "cause" => forged["refusal"]["cause"] = serde_json::json!("lease_overlap"),
+            "reason" => forged["refusal"]["reason"] = serde_json::json!("untrusted reason"),
+            "digest" => forged["intent_digest"] = serde_json::json!(vec![0; 32]),
+            "extra" => forged["extra"] = serde_json::json!(true),
+            _ => unreachable!(),
+        }
+        assert!(
+            Event::decode(event.kind(), 1, &forged.to_string(), Some(run), Some(agent)).is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings() {
     let run_version = crate::test_support::payload_version("RunFinished");
     use crate::provider::ProviderFailureReason;
@@ -2839,6 +3036,10 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     }
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
+    assert!(decode_call(&worker_phase, current).is_err());
+    worker_phase["refusal"]["cause"] = serde_json::json!("invalid_arguments");
+    assert!(decode_call(&worker_phase, current).is_ok());
+    worker_phase["phase"] = serde_json::json!("tool_review");
     assert!(decode_call(&worker_phase, current).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");

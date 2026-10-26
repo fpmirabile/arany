@@ -366,7 +366,7 @@ async fn primary_host_request_needs_no_prior_failure_and_replays_after_human_all
         })
         .unwrap();
     let decided = position(
-        |event| matches!(event, Event::ToolPermissionDecided { verdict, .. } if verdict.approved && verdict.source == PermissionSource::Human),
+        |event| matches!(event, Event::ToolStarted { verdict: Some(verdict), .. } if verdict.approved && verdict.source == PermissionSource::Human),
     );
     let finished = events
         .iter()
@@ -374,7 +374,8 @@ async fn primary_host_request_needs_no_prior_failure_and_replays_after_human_all
             matches!(&envelope.event, Event::ToolFinished { observation, .. } if observation.intent.call.is_unguarded())
         })
         .unwrap();
-    assert!(started < decided && decided < finished);
+    assert_eq!(started, decided);
+    assert!(decided < finished);
     assert_eq!(view.runs[0].unguarded_tools(), 1);
     let status = arany_cli::presentation::goal_status(&view);
     assert!(status.contains("unguarded effects: 1"), "{status}");
@@ -1468,7 +1469,7 @@ async fn host_prefix_save_reuses_next_run_and_revocation_restores_the_prompt() {
     denied(&third, "user_declined");
     let (events, view) = host.reopen(second.outcome.session_id).await;
     assert_eq!(view.runs[0].unguarded_tools(), 1);
-    assert!(events.iter().any(|event| matches!(&event.event, Event::ToolPermissionDecided { verdict, .. }
+    assert!(events.iter().any(|event| matches!(&event.event, Event::ToolStarted { verdict: Some(verdict), .. }
         if verdict.source == PermissionSource::HostPrefixRule && verdict.host.as_ref().is_some_and(|host| host.rule.is_some()))));
     for prefix in 1..=events.len() {
         SessionView::replay(second.outcome.session_id, &events[..prefix]).unwrap();
@@ -1480,11 +1481,10 @@ async fn host_prefix_save_reuses_next_run_and_revocation_restores_the_prompt() {
         let verdict = forged
             .iter_mut()
             .find_map(|event| match &mut event.event {
-                Event::ToolPermissionDecided { verdict, .. }
-                    if verdict.source == PermissionSource::HostPrefixRule =>
-                {
-                    Some(verdict)
-                }
+                Event::ToolStarted {
+                    verdict: Some(verdict),
+                    ..
+                } if verdict.source == PermissionSource::HostPrefixRule => Some(verdict),
                 _ => None,
             })
             .unwrap();
@@ -1986,5 +1986,5 @@ async fn a_host_write_to_settings_creates_no_new_authority_and_blocks_reuse() {
     assert!(!verdict.approved && verdict.host.is_none());
     let (events, view) = host.reopen(seen.outcome.session_id).await;
     assert_eq!(view.runs[0].unguarded_tools(), 1);
-    assert_eq!(events.iter().filter(|event| matches!(&event.event, Event::ToolPermissionDecided { verdict, .. } if verdict.approved)).count(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(&event.event, Event::ToolStarted { verdict: Some(verdict), .. } if verdict.approved)).count(), 1);
 }

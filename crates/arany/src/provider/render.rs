@@ -326,16 +326,22 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         });
     }
     if let Some(refusal) = &step.refusal {
-        let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
-        let output = json!({"error": refusal_note(refusal), "dispatched": false, "effect": "none"});
-        if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
-            return Err(ProviderError::Rejected);
+        for (index, tool_request) in requests.by_ref().enumerate() {
+            let mut output =
+                json!({"error": refusal_note(refusal), "dispatched": false, "effect": "none"});
+            if step.requests.len() > 1 {
+                output["call_index"] = json!(index);
+                output["error"]["offending_index"] = json!(step.refusal_index);
+            }
+            if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
+                return Err(ProviderError::Rejected);
+            }
+            results.push(Block::ToolResult {
+                id: tool_request.id.clone(),
+                output,
+                is_error: true,
+            });
         }
-        results.push(Block::ToolResult {
-            id: tool_request.id.clone(),
-            output,
-            is_error: true,
-        });
     }
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
@@ -385,10 +391,12 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 
 fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
     use crate::session::ProposalRefusalCause::*;
+    let arguments = format!(
+        "Send 1 to {} Tool calls matching the offered schemas and bounds.",
+        crate::session::MAX_STEP_TOOL_CALLS
+    );
     let remediation = match refusal.cause {
-        InvalidArguments => {
-            "Invalid Tool arguments; send one call matching the offered schema and its bounds."
-        }
+        InvalidArguments => arguments.as_str(),
         InvalidPath => {
             "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Leading ./ and one trailing directory / are normalized; file trailing /, absolute paths, empty components, traversal and private paths are forbidden."
         }
@@ -465,6 +473,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
                 &tool.hook_feedback(),
                 tool.model_denial_output().unwrap_or(&observation.output),
             ),
+            None if tool.started_sequence.is_none() => json!({"call": model_call(&tool.intent.call), "execution": "not dispatched; proposal only"}),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
         .collect();

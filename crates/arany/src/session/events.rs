@@ -24,14 +24,18 @@ pub use records::{
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
     DisplayChunk, EffectTarget, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES,
     MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal,
-    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition,
-    RunFailure, SessionDefaults, ToolIntentRecord,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RecentFile, RunConfig,
+    RunDisposition, RunFailure, SessionDefaults, ToolIntentRecord, ToolPreflightRefusal,
+    ToolRefusal, ToolRefusalReason,
 };
 use validate::bounded;
 
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use uuid::{Uuid, Version};
+
+pub(crate) const MAX_COMPACTION_RECENT_FILES: usize = 8;
+pub(crate) const MAX_COMPACTION_RECENT_FILES_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WorkspaceIdentity {
@@ -132,7 +136,7 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 46] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -141,7 +145,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 12),
+    ("GoalPlanContractRecorded", 13),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
@@ -150,7 +154,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 15),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 23),
+    ("ProviderCallRecorded", 24),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -167,15 +171,17 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 7),
-    ("HookStarted", 11),
-    ("HookFinished", 17),
-    ("ToolFinished", 28),
+    ("ToolProposed", 1),
+    ("ToolPreflightRefused", 1),
+    ("HookStarted", 12),
+    ("HookFinished", 18),
+    ("ToolFinished", 29),
     ("RunStarted", 24),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 21),
+    ("ToolStarted", 23),
+    ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
 
@@ -376,10 +382,28 @@ pub enum Event {
         agent_run_id: AgentRunId,
         chunk: DisplayChunk,
     },
+    ToolPreflightRefused {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: ToolPreflightRefusal,
+    },
+    ToolProposed {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        intent: ToolIntentRecord,
+        active_ceiling_ms: u64,
+    },
     ToolStarted {
         run_id: RunId,
         agent_run_id: AgentRunId,
         intent: ToolIntentRecord,
+        active_ceiling_ms: u64,
+        verdict: Option<crate::tools::permissions::PermissionVerdict>,
+    },
+    ToolActiveTimeReserved {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        intent_digest: [u8; 32],
         active_ceiling_ms: u64,
     },
     SupervisorVerdictRecorded {
@@ -392,11 +416,6 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         observation: crate::tools::ToolObservation,
-    },
-    ToolPermissionDecided {
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        verdict: crate::tools::permissions::PermissionVerdict,
     },
     HookStarted {
         run_id: RunId,
@@ -511,7 +530,7 @@ pub struct ForkLineage {
     pub prefix_digest: [u8; 32],
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReplayError {
     #[error("invalid Event payload")]
     InvalidPayload,
@@ -624,7 +643,22 @@ struct ToolFinishedPayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ToolActiveTimePayload {
+    intent_digest: [u8; 32],
+    active_ceiling_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ToolStartedPayload {
+    intent: ToolIntentRecord,
+    active_ceiling_ms: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    verdict: Option<crate::tools::permissions::PermissionVerdict>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolProposedPayload {
     intent: ToolIntentRecord,
     active_ceiling_ms: u64,
 }
@@ -803,6 +837,12 @@ struct GoalSteeringNotePayloadRef<'a> {
 struct ToolStartedPayloadRef<'a> {
     intent: &'a ToolIntentRecord,
     active_ceiling_ms: u64,
+    verdict: &'a Option<crate::tools::permissions::PermissionVerdict>,
+}
+#[derive(Serialize)]
+struct ToolProposedPayloadRef<'a> {
+    intent: &'a ToolIntentRecord,
+    active_ceiling_ms: u64,
 }
 #[derive(Serialize)]
 struct ToolFinishedPayloadRef<'a> {
@@ -863,9 +903,11 @@ impl Event {
             Self::AgentSteeringNoteRecorded { .. } => "AgentSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
+            Self::ToolActiveTimeReserved { .. } => "ToolActiveTimeReserved",
             Self::SupervisorVerdictRecorded { .. } => "SupervisorVerdictRecorded",
             Self::ToolFinished { .. } => "ToolFinished",
-            Self::ToolPermissionDecided { .. } => "ToolPermissionDecided",
+            Self::ToolProposed { .. } => "ToolProposed",
+            Self::ToolPreflightRefused { .. } => "ToolPreflightRefused",
             Self::HookStarted { .. } => "HookStarted",
             Self::HookFinished { .. } => "HookFinished",
             Self::AgentFinished { .. } => "AgentFinished",
@@ -981,12 +1023,22 @@ impl Event {
                 agent_run_id,
                 ..
             }
+            | Self::ToolActiveTimeReserved {
+                run_id,
+                agent_run_id,
+                ..
+            }
             | Self::ToolStarted {
                 run_id,
                 agent_run_id,
                 ..
             }
-            | Self::ToolPermissionDecided {
+            | Self::ToolPreflightRefused {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ToolProposed {
                 run_id,
                 agent_run_id,
                 ..
@@ -1023,6 +1075,7 @@ impl Event {
         self.validate()?;
         match self {
             Self::SupervisorVerdictRecorded { verdict, .. } => serialize(verdict),
+            Self::ToolPreflightRefused { record, .. } => serialize(record),
             Self::WorkspaceRewindStarted { record } => serialize(record),
             Self::WorkspaceRewindFinished { record } => serialize(record),
             Self::SessionStarted {
@@ -1207,11 +1260,29 @@ impl Event {
                 })
             }
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
+            Self::ToolActiveTimeReserved {
+                intent_digest,
+                active_ceiling_ms,
+                ..
+            } => serialize(&ToolActiveTimePayload {
+                intent_digest: *intent_digest,
+                active_ceiling_ms: *active_ceiling_ms,
+            }),
             Self::ToolStarted {
                 intent,
                 active_ceiling_ms,
+                verdict,
                 ..
             } => serialize(&ToolStartedPayloadRef {
+                intent,
+                active_ceiling_ms: *active_ceiling_ms,
+                verdict,
+            }),
+            Self::ToolProposed {
+                intent,
+                active_ceiling_ms,
+                ..
+            } => serialize(&ToolProposedPayloadRef {
                 intent,
                 active_ceiling_ms: *active_ceiling_ms,
             }),
@@ -1223,7 +1294,6 @@ impl Event {
                 observation,
                 checkpoint,
             }),
-            Self::ToolPermissionDecided { verdict, .. } => serialize(verdict),
             Self::HookStarted { hook, .. } => serialize(hook),
             Self::HookFinished { outcome, .. } => serialize(outcome),
             Self::AgentFinished {
@@ -1443,6 +1513,13 @@ impl Event {
                     images: data.images,
                 }
             }
+            "ToolPreflightRefused" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ToolPreflightRefused {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    record: parse(payload)?,
+                }
+            }
             "SupervisorVerdictRecorded" if run_id.is_some() && agent_run_id.is_some() => {
                 Self::SupervisorVerdictRecorded {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -1555,6 +1632,15 @@ impl Event {
                     text: data.text,
                 }
             }
+            "ToolActiveTimeReserved" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: ToolActiveTimePayload = parse(payload)?;
+                Self::ToolActiveTimeReserved {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    intent_digest: data.intent_digest,
+                    active_ceiling_ms: data.active_ceiling_ms,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => {
                 let data: ToolStartedPayload = parse(payload)?;
                 Self::ToolStarted {
@@ -1562,6 +1648,7 @@ impl Event {
                     agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
                     intent: data.intent,
                     active_ceiling_ms: data.active_ceiling_ms,
+                    verdict: data.verdict,
                 }
             }
             "AssistantDisplayRecorded" if run_id.is_some() && agent_run_id.is_some() => {
@@ -1580,11 +1667,13 @@ impl Event {
                     checkpoint: data.checkpoint,
                 }
             }
-            "ToolPermissionDecided" if run_id.is_some() && agent_run_id.is_some() => {
-                Self::ToolPermissionDecided {
+            "ToolProposed" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: ToolProposedPayload = parse(payload)?;
+                Self::ToolProposed {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                    verdict: parse(payload)?,
+                    intent: data.intent,
+                    active_ceiling_ms: data.active_ceiling_ms,
                 }
             }
             "HookStarted" if run_id.is_some() && agent_run_id.is_some() => Self::HookStarted {
@@ -1635,9 +1724,10 @@ impl Event {
             | "GoalSteeringNoteRecorded"
             | "AgentSteeringNoteRecorded"
             | "AssistantDisplayRecorded"
+            | "ToolActiveTimeReserved"
             | "ToolStarted"
             | "ToolFinished"
-            | "ToolPermissionDecided"
+            | "ToolProposed"
             | "HookStarted"
             | "HookFinished"
             | "MessageCommitted"
@@ -1790,7 +1880,6 @@ pub(crate) fn expiring_payload(kind: &str, payload: &str) -> Option<String> {
     }
     let payload = value.to_string();
     let text = match kind {
-        "ToolStarted" => serialize(&parse::<ToolStartedPayload>(&payload).ok()?).ok()?,
         "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(&payload).ok()?).ok()?,
         "HookStarted" => {
             serialize(&parse::<crate::tools::permissions::HookInvocation>(&payload).ok()?).ok()?
@@ -1810,21 +1899,8 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
     before_operations(kind, payload, &["glob"], Some("glob"))
 }
 
-pub(crate) fn pre_host_prefix_payload(kind: &str, payload: &str) -> Option<String> {
-    if kind != "ToolPermissionDecided" {
-        return None;
-    }
-    let verdict: crate::tools::permissions::PermissionVerdict =
-        serde_json::from_str(payload).ok()?;
-    (verdict.source != crate::tools::permissions::PermissionSource::HostPrefixRule
-        && verdict.basis != crate::tools::permissions::PermissionSource::HostPrefixRule
-        && verdict.host.as_ref().is_none_or(|host| host.rule.is_none()))
-    .then(|| serde_json::to_string(&verdict).ok())
-    .flatten()
-}
-
 pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
-    use crate::tools::permissions::{HookResult, PermissionSource};
+    use crate::tools::permissions::HookResult;
     fn again<T: Serialize + for<'de> Deserialize<'de>>(
         payload: &str,
         allowed: impl FnOnce(&T) -> bool,
@@ -1869,19 +1945,9 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
                 .then(|| string_run_provider_text(&data))
                 .flatten()
         }
-        "ToolStarted" => expiring_again::<ToolStartedPayload>(kind, payload, |data| {
-            intent_allowed(&data.intent.clone().into())
-        }),
         "ToolFinished" => expiring_again::<ToolFinishedPayload>(kind, payload, |data| {
             observation_allowed(&data.observation)
         }),
-        "ToolPermissionDecided" => {
-            again::<crate::tools::permissions::PermissionVerdict>(payload, |verdict| {
-                verdict.host.is_none()
-                    && verdict.basis != PermissionSource::SessionApproval
-                    && verdict.source != PermissionSource::SessionApproval
-            })
-        }
         "AgentSpawned" => again::<SpawnPayload>(payload, |data| {
             data.grant
                 .is_none_or(|grant| grant.unguarded() == crate::tools::UnguardedGrant::Denied)
@@ -1941,11 +2007,18 @@ pub(crate) fn pre_host_git_payload(kind: &str, payload: &str) -> Option<String> 
 }
 
 pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String> {
+    before_typed_pr_read(kind, payload, "gh_pr_list")
+}
+
+pub(crate) fn pre_gh_pr_view_payload(kind: &str, payload: &str) -> Option<String> {
+    before_typed_pr_read(kind, payload, "gh_pr_view")
+}
+
+fn before_typed_pr_read(kind: &str, payload: &str, operation: &str) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()
     }
     let text = match kind {
-        "ToolStarted" => again::<ToolStartedPayload>(payload),
         "ToolFinished" => again::<ToolFinishedPayload>(payload),
         "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
         "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
@@ -1953,7 +2026,7 @@ pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, &["gh_pr_list"], None)).then_some(text)
+    (!mentions(&serde_json::from_str(&text).ok()?, &[operation], None)).then_some(text)
 }
 
 pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {
@@ -2037,7 +2110,6 @@ pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<Stri
         serialize(&parse::<T>(payload).ok()?).ok()
     }
     let text = match kind {
-        "ToolStarted" => again::<ToolStartedPayload>(payload),
         "ToolFinished" => again::<ToolFinishedPayload>(payload),
         "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
         "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
@@ -2066,16 +2138,6 @@ pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String>
     .then_some(text)
 }
 
-// The typed text a verdict had before the typed prefix rule source existed, or `None` when it
-// names that source (it did not exist) or does not parse.
-pub(crate) fn pre_typed_prefix_payload(payload: &str) -> Option<String> {
-    let verdict: crate::tools::permissions::PermissionVerdict = parse(payload).ok()?;
-    let forged = |source| source == crate::tools::permissions::PermissionSource::TypedPrefixRule;
-    (!forged(verdict.basis) && !forged(verdict.source))
-        .then(|| serialize(&verdict).ok())
-        .flatten()
-}
-
 fn before_operations(
     kind: &str,
     payload: &str,
@@ -2086,9 +2148,7 @@ fn before_operations(
         serialize(&parse::<T>(payload).ok()?).ok()
     }
     let text = match kind {
-        "ToolStarted" | "ToolFinished" | "HookStarted" | "HookFinished" => {
-            expiring_payload(kind, payload)
-        }
+        "ToolFinished" | "HookStarted" | "HookFinished" => expiring_payload(kind, payload),
         "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
         "AgentSpawned" => again::<SpawnPayload>(payload),
         "RunStarted" => run_started_v18_payload(payload),

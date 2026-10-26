@@ -3,7 +3,25 @@ use super::*;
 impl Event {
     pub(super) fn validate_tool(&self) -> Result<(), ReplayError> {
         match self {
-            Self::ToolStarted {
+            Self::ToolPreflightRefused { record, .. } => {
+                if record.intent_digest != [0; 32] && record.refusal.valid() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::ToolActiveTimeReserved {
+                intent_digest,
+                active_ceiling_ms,
+                ..
+            } => {
+                if *intent_digest == [0; 32] || *active_ceiling_ms == 0 {
+                    Err(ReplayError::InvalidPayload)
+                } else {
+                    Ok(())
+                }
+            }
+            Self::ToolProposed {
                 run_id,
                 agent_run_id,
                 intent,
@@ -91,7 +109,28 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
-            Self::ToolPermissionDecided { verdict, .. } => {
+            Self::ToolStarted {
+                run_id,
+                agent_run_id,
+                intent,
+                active_ceiling_ms,
+                verdict,
+            } => {
+                Self::ToolProposed {
+                    run_id: *run_id,
+                    agent_run_id: *agent_run_id,
+                    intent: intent.clone(),
+                    active_ceiling_ms: *active_ceiling_ms,
+                }
+                .validate_tool()?;
+                let Some(verdict) = verdict else {
+                    return Ok(());
+                };
+                if verdict.intent_digest
+                    != crate::tools::EffectIntent::from(intent.clone()).digest()
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
                 use crate::tools::permissions::{
                     Decision, MAX_HOOKS_PER_OCCURRENCE, PermissionSource,
                 };

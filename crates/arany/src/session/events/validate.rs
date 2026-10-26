@@ -52,11 +52,13 @@ impl Event {
             | Self::AgentSteeringNoteRecorded { .. }
             | Self::GoalFinished { .. }
             | Self::GoalProviderCallReserved { .. } => Event::validate_goal(self),
-            Self::ToolStarted { .. }
+            Self::ToolPreflightRefused { .. }
+            | Self::ToolStarted { .. }
+            | Self::ToolActiveTimeReserved { .. }
             | Self::ToolFinished { .. }
             | Self::HookStarted { .. }
             | Self::HookFinished { .. }
-            | Self::ToolPermissionDecided { .. } => Event::validate_tool(self),
+            | Self::ToolProposed { .. } => Event::validate_tool(self),
             Self::AgentSpawned { .. } => Event::validate_agent(self),
             Self::RunStarted { .. }
             | Self::ProviderFallbackUsed { .. }

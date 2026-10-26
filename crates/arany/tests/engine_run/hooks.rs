@@ -99,6 +99,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
             boundary_active_ms: None,
             result: arany::permissions::HookResult::Stopped { reason: Some(reason.into()) },
             observation: arany::ToolObservation {
+                spill: None,
                 attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {
                     contract_version: 1, intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(), enforcement_digest: intent.enforcement_digest, limits: intent.limits.clone(),
                 })),

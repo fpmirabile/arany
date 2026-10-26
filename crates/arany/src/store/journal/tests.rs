@@ -112,6 +112,154 @@ async fn setup_store_with_remaining_slots(
     )
 }
 
+#[tokio::test]
+async fn store_reopens_maximum_worst_case_escaped_compaction_summary() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let fixture = crate::session::worker_compacted_fixture(true);
+    let compacted_index = fixture
+        .events
+        .iter()
+        .position(|event| matches!(event, Event::GoalContextCompacted { .. }))
+        .expect("compaction fixture Event");
+    let store = crate::Store::open(root.try_clone().expect("State handle")).expect("Store");
+    for event in &fixture.events[..compacted_index] {
+        store
+            .append(fixture.session, event.clone())
+            .await
+            .expect("prefix Event");
+    }
+    let prefix = store
+        .load_session(fixture.session)
+        .await
+        .expect("committed prefix");
+    let Event::GoalContextCompacted {
+        goal_id,
+        run_id,
+        covered_tool_count,
+        record,
+    } = fixture.events[compacted_index].clone()
+    else {
+        unreachable!()
+    };
+    let summary = "\u{1}".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
+    let mut record = successful_compaction_record(record, &summary);
+    record.source_digest = crate::session::prefix_digest(&prefix, record.covered_sequence)
+        .expect("stored prefix digest");
+    let session_record = record.clone();
+    let event = Event::GoalContextCompacted {
+        goal_id,
+        run_id,
+        covered_tool_count,
+        record,
+    };
+    let payload = event.payload().expect("valid compaction Event");
+    assert!(payload.len() > super::super::MAX_EVENT_BYTES);
+    assert!(payload.len() <= super::super::MAX_COMPACTION_EVENT_BYTES);
+    store
+        .admit(
+            fixture.session,
+            1,
+            0,
+            crate::store::AdmissionKind::Compaction,
+        )
+        .await
+        .expect("compaction admission headroom");
+    store
+        .append(fixture.session, event)
+        .await
+        .expect("bounded compaction Event");
+    for event in &fixture.events[compacted_index + 1..] {
+        store
+            .append(fixture.session, event.clone())
+            .await
+            .expect("remaining Event");
+    }
+    let view = store
+        .load_view(fixture.session)
+        .await
+        .expect("Session view")
+        .expect("Session");
+    let run = &view.runs[0];
+    let compacted_prefix = store
+        .load_session(fixture.session)
+        .await
+        .expect("stored compaction prefix");
+    let mut record = session_record;
+    record.covered_sequence = run.finished_sequence.expect("finished Run");
+    record.source_digest =
+        crate::session::prefix_digest(&compacted_prefix, record.covered_sequence)
+            .expect("completed Run digest");
+    let event = Event::ContextCompacted {
+        record,
+        active_ms: Some(0),
+    };
+    let payload = event.payload().expect("valid Session compaction Event");
+    assert!(payload.len() > super::super::MAX_EVENT_BYTES);
+    assert!(payload.len() <= super::super::MAX_COMPACTION_EVENT_BYTES);
+    store
+        .admit(
+            fixture.session,
+            2,
+            0,
+            crate::store::AdmissionKind::Compaction,
+        )
+        .await
+        .expect("Session compaction admission headroom");
+    store
+        .append(
+            fixture.session,
+            Event::GoalCompactionCallReserved {
+                goal_id,
+                run_id,
+                active_ceiling_ms: 0,
+            },
+        )
+        .await
+        .expect("Session compaction call reservation");
+    store
+        .append(fixture.session, event)
+        .await
+        .expect("bounded Session compaction Event");
+    store.close().await.expect("close Store");
+
+    let reopened = crate::Store::open(root).expect("reopened Store");
+    let view = reopened
+        .load_view(fixture.session)
+        .await
+        .expect("replayed Session")
+        .expect("Session");
+    assert_eq!(
+        view.runs[0].tool_compaction_summary.as_deref(),
+        Some(summary.as_str())
+    );
+    assert!(matches!(
+        &view.compactions[0].record.status,
+        CompactionStatus::Succeeded { summary: stored, .. } if stored == &summary
+    ));
+    assert_eq!(
+        view.goal(goal_id)
+            .expect("replayed Goal")
+            .compaction_call_reserved,
+        None
+    );
+    reopened.close().await.expect("close reopened Store");
+}
+
+fn successful_compaction_record(
+    mut record: crate::session::CompactionRecord,
+    summary: &str,
+) -> crate::session::CompactionRecord {
+    let summary_bytes = summary.len() as u32;
+    record.status = crate::session::CompactionStatus::Succeeded {
+        content_digest: crate::validate::digest(summary.as_bytes()),
+        summary_bytes,
+        summary_tokens_estimate: summary_bytes.div_ceil(4),
+        summary: summary.to_owned(),
+    };
+    record
+}
+
 async fn publish_setup_profile(
     store: &crate::Store,
     root: &StateRoot,
@@ -569,6 +717,9 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
 
 // The largest typed Write: a six-byte escape per content byte and a long escaped path.
 fn largest_tool_started_payload() -> String {
+    use crate::tools::permissions::{
+        Decision, MAX_HOOKS_PER_OCCURRENCE, PermissionMode, PermissionSource, PermissionVerdict,
+    };
     let intent = crate::tools::EffectIntent {
         host: None,
         host_command: None,
@@ -590,6 +741,18 @@ fn largest_tool_started_payload() -> String {
     };
     assert!(intent.valid());
     Event::ToolStarted {
+        verdict: Some(PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Ask,
+            mode: Some(PermissionMode::AcceptEdits),
+            basis: PermissionSource::Hook,
+            source: PermissionSource::UnavailableApproval,
+            approved: false,
+            hook_restriction: Some(Decision::Ask),
+            hooks: u8::try_from(MAX_HOOKS_PER_OCCURRENCE).unwrap(),
+            narrowed: false,
+        }),
         run_id: intent.run_id,
         agent_run_id: intent.agent_run_id,
         intent: intent.into(),
@@ -599,15 +762,55 @@ fn largest_tool_started_payload() -> String {
     .unwrap()
 }
 
-// Near the floor, one admitted intent (its ToolStarted and ToolFinished slots) must leave room to
-// commit the largest ToolStarted and a full ToolFinished; reserving the completion alone does not.
 #[test]
 fn tool_admission_near_capacity_reserves_the_largest_intent_and_its_completion() {
+    for prepared in [false, true] {
+        assert_tool_tail_capacity(prepared);
+    }
+}
+
+const CAPACITY_PADDING_DIVISOR: i64 = 2;
+
+fn pad_capacity(transaction: &Transaction<'_>, rows: i64, page_size: i64) {
+    transaction.execute(
+        "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n < ?1) INSERT INTO capacity_padding SELECT zeroblob(?2) FROM rows",
+        params![rows, page_size / CAPACITY_PADDING_DIVISOR],
+    ).unwrap();
+}
+
+fn fill_admitted_capacity(
+    transaction: &Transaction<'_>,
+    page_size: i64,
+    admits: impl Fn(&Transaction<'_>) -> bool,
+) {
+    assert!(admits(transaction));
+    let mut batch = (ADMISSION_HEADROOM_BYTES / page_size / CAPACITY_PADDING_DIVISOR).max(1);
+    while batch > 0 {
+        transaction.execute_batch("SAVEPOINT step").unwrap();
+        pad_capacity(transaction, batch, page_size);
+        if admits(transaction) {
+            transaction.execute_batch("RELEASE step").unwrap();
+        } else {
+            transaction
+                .execute_batch("ROLLBACK TO step; RELEASE step")
+                .unwrap();
+            batch /= CAPACITY_PADDING_DIVISOR;
+        }
+    }
+}
+
+fn assert_tool_tail_capacity(prepared: bool) {
     let temp = tempfile::tempdir().expect("private test root");
     let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
     let mut connection = open_connection(&root, false).expect("file-backed store");
     let session_id = SessionId::new();
     let started = largest_tool_started_payload();
+    let mut proposal: serde_json::Value = serde_json::from_str(&started).unwrap();
+    proposal.as_object_mut().unwrap().remove("verdict");
+    let proposal = proposal.to_string();
+    let completion_observations = 1;
+    let intent_records = 1 + usize::from(prepared);
+    let tail_slots = completion_observations + intent_records;
     let finished = format!(
         "\"{}\"",
         "x".repeat(crate::store::MAX_TOOL_FINISHED_BYTES - 2)
@@ -621,17 +824,21 @@ fn tool_admission_near_capacity_reserves_the_largest_intent_and_its_completion()
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .unwrap();
     let admits = |t: &Transaction<'_>, observations: usize| {
-        let results = [AdmissionKind::Operation, AdmissionKind::SealedData]
-            .map(|kind| admit_in_transaction(t, session_id, 2, observations, kind).is_ok());
+        let results = [AdmissionKind::Operation, AdmissionKind::SealedData].map(|kind| {
+            admit_in_transaction(t, session_id, tail_slots, observations, kind).is_ok()
+        });
         assert_eq!(
             results[0], results[1],
             "worker sealed-data admission reserves the same bytes"
         );
         results[0]
     };
-    let pair_commits = |t: &Transaction<'_>| {
+    let tail_commits = |t: &Transaction<'_>| {
         t.execute_batch("SAVEPOINT pair").unwrap();
-        for (kind, payload) in [("ToolStarted", &started), ("ToolFinished", &finished)] {
+        for (kind, payload) in std::iter::once(("ToolProposed", &proposal))
+            .filter(|_| prepared)
+            .chain([("ToolStarted", &started), ("ToolFinished", &finished)])
+        {
             t.execute(
                 "INSERT INTO events (session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms) VALUES (?1, 'run', 'agent', ?2, 1, ?3, 0)",
                 params![session_id.to_string(), kind, payload],
@@ -642,45 +849,22 @@ fn tool_admission_near_capacity_reserves_the_largest_intent_and_its_completion()
         t.execute_batch("ROLLBACK TO pair; RELEASE pair").unwrap();
         room >= ADMISSION_HEADROOM_BYTES
     };
-    // Pad, then step one page at a time to the last page count each reservation admits.
-    let pad = |t: &Transaction<'_>, rows: i64| {
-        t.execute(
-            "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n < ?1) INSERT INTO capacity_padding SELECT zeroblob(3000) FROM rows",
-            [rows],
-        )
-        .unwrap();
-    };
-    let last_admitted = |t: &Transaction<'_>, observations: usize| {
-        assert!(admits(t, observations));
-        loop {
-            t.execute_batch("SAVEPOINT step").unwrap();
-            pad(t, 1);
-            if !admits(t, observations) {
-                t.execute_batch("ROLLBACK TO step; RELEASE step").unwrap();
-                return;
-            }
-            t.execute_batch("RELEASE step").unwrap();
-        }
-    };
     transaction
         .execute_batch("CREATE TABLE capacity_padding(value BLOB NOT NULL) STRICT;")
         .unwrap();
-    let floor = (MAX_DATABASE_BYTES - ADMISSION_HEADROOM_BYTES) / page_size;
-    pad(
-        &transaction,
-        floor - pages(&transaction) - 2 * 1024 * 1024 / page_size,
-    );
-    last_admitted(&transaction, 2);
-    assert!(pair_commits(&transaction));
-    pad(&transaction, 1);
+    fill_admitted_capacity(&transaction, page_size, |t| admits(t, tail_slots));
+    assert!(tail_commits(&transaction));
+    pad_capacity(&transaction, 1, page_size);
     assert!(
-        !admits(&transaction, 2),
+        !admits(&transaction, tail_slots),
         "the intent is refused before dispatch"
     );
-    last_admitted(&transaction, 1);
+    fill_admitted_capacity(&transaction, page_size, |t| {
+        admits(t, completion_observations)
+    });
     assert!(
-        !pair_commits(&transaction),
-        "a completion-only reservation would strand the intent"
+        !tail_commits(&transaction),
+        "omitting intent records from admission would strand the step"
     );
 }
 
@@ -712,11 +896,29 @@ fn every_event_slot_admits_a_current_tool_observation() {
     let payload = largest_tool_started_payload();
     assert!(payload.len() > crate::store::MAX_EVENT_BYTES);
     assert!(payload.len() <= event_payload_limit("ToolStarted", started));
-    let verdict = payload_version("ToolPermissionDecided").expect("payload version");
+    let host = crate::session::session_host_protocol_fixture();
+    let host_start = host.events.iter().rev().find(|event| matches!(event,
+        Event::ToolStarted { verdict: Some(verdict), .. }
+            if verdict.host.as_ref().is_some_and(|approval| approval.source_intent.is_some())
+    )).expect("host start with a session approval source");
+    assert!(host_start.payload().unwrap().len() <= event_payload_limit("ToolStarted", started));
+    assert_eq!(payload_version("ToolPermissionDecided"), None);
+    let proposed = payload_version("ToolProposed").expect("proposal version");
     assert_eq!(
-        event_payload_limit("ToolPermissionDecided", verdict),
-        crate::store::MAX_EVENT_BYTES
+        event_payload_limit("ToolProposed", proposed),
+        event_payload_limit("ToolStarted", started)
     );
+    for kind in ["ContextCompacted", "GoalContextCompacted"] {
+        let version = payload_version(kind).expect("compaction payload version");
+        assert_eq!(
+            event_payload_limit(kind, version),
+            crate::store::MAX_COMPACTION_EVENT_BYTES
+        );
+        assert_eq!(
+            event_payload_limit(kind, version - 1),
+            crate::store::MAX_EVENT_BYTES
+        );
+    }
 }
 
 #[test]
@@ -846,6 +1048,91 @@ fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
     );
 }
 
+fn pending_publication_history(started: bool) -> (SessionId, Vec<Event>) {
+    let mut fixture = crate::session::worker_protocol_fixture();
+    let end = fixture
+        .events
+        .iter()
+        .rposition(|event| matches!(event, Event::ProviderCallRecorded { .. }))
+        .unwrap();
+    fixture.events.truncate(end + 1);
+    let Event::ProviderCallRecorded { record, .. } = &mut fixture.events[end] else {
+        unreachable!()
+    };
+    record.disposition = crate::session::ProviderCallDisposition::ToolRequested;
+    record.requested_tools = 1;
+    let mut intent = fixture
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::ToolFinished { observation, .. }
+                if observation.intent.agent_run_id == fixture.primary =>
+            {
+                Some(observation.intent.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    intent.id = uuid::Uuid::now_v7();
+    intent.call = crate::tools::ToolCall::Write {
+        path: "src/a".into(),
+        expected_digest: Some(crate::validate::hex_digest(b"new")),
+        content: "changed".into(),
+    };
+    fixture.events.push(if started {
+        Event::ToolStarted {
+            run_id: fixture.run,
+            agent_run_id: fixture.primary,
+            intent: intent.into(),
+            active_ceiling_ms: 0,
+            verdict: None,
+        }
+    } else {
+        Event::ToolProposed {
+            run_id: fixture.run,
+            agent_run_id: fixture.primary,
+            intent: intent.into(),
+            active_ceiling_ms: 0,
+        }
+    });
+    (fixture.session, fixture.events)
+}
+
+#[test]
+fn rewind_after_a_proposal_only_publication_survives_cold_reopen() {
+    for started in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let (session, events) = pending_publication_history(started);
+        {
+            let mut connection = open_connection(&root, false).unwrap();
+            let mut hot = None;
+            for event in events {
+                append(&mut connection, &mut hot, session, event).unwrap();
+            }
+        }
+        let mut connection = open_connection(&root, false).unwrap();
+        let (_, view) = resolve_view(&connection, session, 0, &mut 0).unwrap();
+        let view = view.unwrap();
+        let target = view.rewinds.checkpoints[0].clone();
+        let plan = crate::session::rewind::plan(&view, &target).unwrap();
+        assert_eq!(!plan.blockers.is_empty(), started);
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "src/a");
+        assert_eq!(plan.files[0].restore_to, None);
+        assert_eq!(
+            plan.files[0].expected_current.as_ref().unwrap().sha256,
+            crate::validate::hex_digest(b"new")
+        );
+        let begin = crate::session::rewind_started_fixture(&view, target);
+        assert_eq!(
+            append(&mut connection, &mut None, session, begin).is_ok(),
+            !started
+        );
+    }
+}
+
 fn forked_rewind_fixture(
     root: &StateRoot,
 ) -> (Connection, Option<HotSession>, SessionId, SessionView) {
@@ -858,6 +1145,23 @@ fn forked_rewind_fixture(
     let child = fork_session(&mut connection, f.session, "Fork".into()).unwrap();
     let (_, view) = resolve_view(&connection, child, 0, &mut 0).unwrap();
     (connection, hot, child, view.unwrap())
+}
+
+#[test]
+fn fork_inspection_preserves_sqlite_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let (connection, _, child, _) = forked_rewind_fixture(&root);
+    let inspection = super::super::replay::inspect_session(&connection, child).unwrap();
+    assert!(inspection.failure.is_none());
+    assert!(inspection.prefix_view.is_some());
+    connection
+        .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 1)
+        .unwrap();
+    assert!(matches!(
+        super::super::replay::inspect_session(&connection, child),
+        Err(StoreError::Sqlite(_))
+    ));
 }
 
 #[test]

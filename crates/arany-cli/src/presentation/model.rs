@@ -464,6 +464,8 @@ mod tests {
                 tool_policy: None,
             }),
             agents: std::iter::once(AgentView {
+                tool_refusal: None,
+                tool_refusal_sequence: None,
                 profile: None,
                 assignment: None,
                 definition: None,
@@ -480,6 +482,8 @@ mod tests {
                 status: AgentStatus::Active,
             })
             .chain((1..=5).map(|ordinal| AgentView {
+                tool_refusal: None,
+                tool_refusal_sequence: None,
                 profile: None,
                 assignment: None,
                 definition: None,
@@ -507,6 +511,7 @@ mod tests {
             failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
             tool_compaction_covered_count: 0,
             tool_results_cleared_count: 0,
             definitions: Default::default(),
@@ -543,7 +548,10 @@ mod tests {
             intent: intent.clone(),
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -603,6 +611,7 @@ mod tests {
         };
         run.tools[0].intent = intent.clone();
         run.tools[0].observation = Some(arany::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             intent,
@@ -681,6 +690,17 @@ mod tests {
             let feedback = run_feedback(&finished).unwrap();
             assert!(feedback.contains("Workspace read stopped before it started"));
             assert!(!feedback.contains("Guard"));
+            let mkdir = arany::ToolCall::Mkdir {
+                path: "src/new".into(),
+            };
+            finished.tools[0].intent.call = mkdir.clone();
+            finished.tools[0].observation.as_mut().unwrap().intent.call = mkdir;
+            assert_eq!(
+                run_feedback(&finished).as_deref(),
+                Some(
+                    "Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run."
+                )
+            );
             let observation = run.tools[0].observation.as_mut().unwrap();
             observation.disposition = arany::ToolDisposition::Succeeded;
             observation.cache_update = arany::CacheUpdate::NotApplicable;
@@ -766,7 +786,10 @@ mod tests {
             intent: child_read,
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,

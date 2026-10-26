@@ -1,8 +1,8 @@
 use super::limits;
 use super::responses::StreamDecoder;
 use super::{OPENAI_ENDPOINT, wire};
-use crate::diagnostics::subscription_failure;
 use crate::provider::conversation::Conversation;
+use crate::provider::diagnostics::subscription_failure;
 use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage};
 use crate::provider::{
     AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
@@ -230,7 +230,7 @@ async fn probe_model_at(
     journal_probe(check, crate::CheckCallKind::Compaction, async {
         let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
         if response.summary.trim().is_empty()
-            || response.summary.len() > 8 * 1024
+            || response.summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES
             || !response
                 .response_id
                 .as_deref()
@@ -596,7 +596,7 @@ async fn admit_stream_headers(
     if response.content_length().is_some_and(|length| {
         length > crate::provider::max_stream_bytes(call.max_output_tokens) as u64
     }) {
-        crate::diagnostics::stream_limit(0, 0);
+        crate::provider::diagnostics::stream_limit(0, 0);
         return Err(failure(
             Stage::ContentLength,
             ProviderError::InvalidStream,
@@ -698,25 +698,6 @@ fn subscription_body(
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
     let mut body = wire::run_body_with_effort(request, conversation, effort)?;
-    if request.input.role != PromptRole::ToolReview && body["tool_choice"] != "none" {
-        let tools = conversation.tools.as_deref().unwrap_or_default();
-        let allowed = wire::allowed_functions(request, tools, &conversation.outcome);
-        if let Some(functions) = body.get_mut("tools").and_then(Value::as_array_mut) {
-            functions.retain(|function| {
-                function["name"]
-                    .as_str()
-                    .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
-            });
-            if functions.is_empty() {
-                let fields = body.as_object_mut().ok_or(ProviderError::Rejected)?;
-                for key in ["tools", "tool_choice", "parallel_tool_calls"] {
-                    fields.remove(key);
-                }
-            } else {
-                body["tool_choice"] = json!("auto");
-            }
-        }
-    }
     // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
     for item in body["input"].as_array_mut().into_iter().flatten() {
         if matches!(item["type"].as_str(), Some("reasoning" | "function_call"))

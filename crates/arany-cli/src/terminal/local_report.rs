@@ -20,18 +20,13 @@ impl AttachedTerminal {
         loop {
             let mut page = 1;
             let mut last = 0;
-            let width = self
-                .terminal
-                .as_mut()
-                .expect("owned terminal")
-                .size()?
-                .width;
+            let width = self.owned.terminal().size()?.width;
             let rows = text
                 .lines()
                 .flat_map(|line| view::wrap_cells(line, usize::from(width.max(1)), 0))
                 .collect::<Vec<_>>();
             let height = u16::try_from(rows.len().saturating_add(2)).unwrap_or(u16::MAX);
-            let armed = self.dialog_armed;
+            let armed = self.panels.dialog_armed;
             self.draw_dialog(Some(session), height, |frame, area| {
                 page = usize::from(area.height.saturating_sub(2).max(1));
                 last = rows.len().saturating_sub(page);

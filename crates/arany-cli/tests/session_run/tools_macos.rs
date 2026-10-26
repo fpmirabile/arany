@@ -831,14 +831,32 @@ async fn native_file_journey_helper() {
         );
         match observation.attestation.as_ref().unwrap() {
             arany::Attestation::InProcess {
+                receipt,
                 policy_digest,
                 workspace_device,
                 workspace_inode,
             } => {
                 assert!(matches!(
                     observation.intent.call,
-                    ToolCall::Read { .. } | ToolCall::Search { .. } | ToolCall::Skill { .. }
+                    ToolCall::Read { .. }
+                        | ToolCall::Search { .. }
+                        | ToolCall::Skill { .. }
+                        | ToolCall::Write { .. }
+                        | ToolCall::Edit { .. }
+                        | ToolCall::MultiEdit { .. }
+                        | ToolCall::Mkdir { .. }
+                        | ToolCall::Delete { .. }
+                        | ToolCall::Move { .. }
+                        | ToolCall::ApplyChangeset { .. }
                 ));
+                if observation.disposition == ToolDisposition::Succeeded
+                    && !matches!(
+                        observation.intent.call,
+                        ToolCall::Read { .. } | ToolCall::Search { .. } | ToolCall::Skill { .. }
+                    )
+                {
+                    assert!(receipt.is_some());
+                }
                 assert_eq!(*policy_digest, observation.intent.policy_digest);
                 assert_eq!(
                     (*workspace_device, *workspace_inode),
@@ -948,7 +966,13 @@ async fn native_file_journey_helper() {
     assert_eq!(replay.runs[1], fresh_outcome.run);
     store.close().await.unwrap();
     trace_case(root, "refusal");
-    guard_refuses_before_go(root, &workspace, &outcome.run.tools[0].intent);
+    let discovery = outcome
+        .run
+        .tools
+        .iter()
+        .find(|tool| matches!(tool.intent.call, ToolCall::List { .. }))
+        .expect("recorded Guard discovery intent");
+    guard_refuses_before_go(root, &workspace, &discovery.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
 }
 
@@ -1180,7 +1204,7 @@ async fn native_offline_rust_build_helper() {
         .expect("physical Apple Command Line Tools compiler candidate");
     let sdk = choices
         .iter()
-        .find(|option| option.group == "macOS SDK" && option.detected)
+        .find(|option| option.group == "macOS SDK" && option.detected && option.selected)
         .expect("physical versioned macOS SDK candidate");
     assert!(rust.detected && compiler.detected && sdk.detected);
     setup_context("Apple runtime baseline probes", || {
@@ -2476,6 +2500,7 @@ int main(void) {
             "closed Goal replay: {case}"
         );
         if case == "overflow" {
+            const EXPECTED_OUTPUT_BYTES: u64 = 1_048_591;
             let contract = replay.goals[0]
                 .plan_contract
                 .as_ref()
@@ -2487,7 +2512,23 @@ int main(void) {
             ));
             let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
             let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
-            assert_eq!(result["stdout_total"]["bytes"], 1048591);
+            assert_eq!(result["stdout_total"]["bytes"], EXPECTED_OUTPUT_BYTES);
+            let spill = observation
+                .spill
+                .as_ref()
+                .expect("macOS retains excerpted output");
+            assert_eq!(spill.bytes, EXPECTED_OUTPUT_BYTES);
+            assert!(!spill.truncated);
+            let file = state_path
+                .join("spill")
+                .join(replay.runs[0].id.to_string())
+                .join(format!("{}.txt", spill.r#ref));
+            let raw = std::fs::read(file).unwrap();
+            assert_eq!(raw.len() as u64, spill.bytes);
+            let padding = raw
+                .strip_prefix(b"payload-started")
+                .expect("retained output starts with the command prefix");
+            assert!(padding.iter().all(|byte| *byte == b' '));
             assert!(
                 result["stdout"]
                     .as_str()
@@ -2599,6 +2640,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
+        ("workspace_write", "admission"),
         ("missing_preparation", "admission"),
         ("invalid_go", "admission"),
         ("early_go", "admission"),
@@ -2613,10 +2655,14 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         let mut intent = admitted.clone();
         intent.id = uuid::Uuid::now_v7();
         intent.policy_digest = Sha256::digest(config_bytes).into();
-        intent.call = ToolCall::Write {
-            path: "src/never-dispatched.txt".into(),
-            expected_digest: None,
-            content: "must not be created".into(),
+        intent.call = if case == "workspace_write" {
+            ToolCall::Write {
+                path: "src/never-dispatched.txt".into(),
+                expected_digest: None,
+                content: "must not be created".into(),
+            }
+        } else {
+            ToolCall::List { path: "src".into() }
         };
         if case == "stale_workspace" {
             intent.workspace_inode += 1;

@@ -1,10 +1,10 @@
 use super::{ActiveStop, InputFailure, InputRoute, RunProgress, RunUi};
+use crate::cli::serve::embedded::Approval;
 use crate::terminal::{Composer, TerminalInput};
-use arany::RunCancellation;
 
 #[derive(Default)]
 pub(super) struct ApprovalUi {
-    pub(super) pending: Option<arany::ToolApproval>,
+    pub(super) pending: Option<Approval>,
     pub(super) page: usize,
     pub(super) choice: usize,
     pub(super) answer: Composer,
@@ -35,18 +35,6 @@ pub(super) fn linear_approval_choice(
     }
 }
 
-pub(super) async fn withdraw_abandoned_approval(
-    pending: &mut Option<arany::ToolApproval>,
-    answer: &mut Composer,
-) {
-    match pending.as_mut() {
-        Some(approval) => approval.abandoned().await,
-        None => std::future::pending().await,
-    }
-    pending.take();
-    answer.clear();
-}
-
 impl RunProgress<'_> {
     pub(super) fn receive_approval(&mut self, ui: &mut RunUi<'_>) {
         if self.approval_ui.pending.is_some() {
@@ -57,26 +45,29 @@ impl RunProgress<'_> {
             .approval_ui
             .pending
             .as_ref()
-            .filter(|approval| approval.unguarded.is_some())
-            .map_or(0, |approval| {
-                crate::presentation::tool_approval_choices(approval).len() - 1
-            });
+            .filter(|approval| approval.prompt.unguarded)
+            .map_or(0, |approval| approval.prompt.choices.len() - 1);
         self.approval_ui.unarmed = self.approval_ui.pending.is_some();
         self.approval_ui.review_notice = false;
         self.approval_ui.answer.clear();
     }
 
-    pub(super) fn handle_approval(
+    pub(super) async fn handle_approval(
         &mut self,
         ui: &mut RunUi<'_>,
         input: TerminalInput,
         page: ApprovalPage,
     ) -> Result<(), InputFailure> {
-        let choices = crate::presentation::tool_approval_choices(
-            self.approval_ui.pending.as_ref().expect("pending action"),
-        );
+        let choices = self
+            .approval_ui
+            .pending
+            .as_ref()
+            .expect("pending action")
+            .prompt
+            .choices
+            .clone();
         self.approval_ui.choice = self.approval_ui.choice.min(choices.len() - 1);
-        match self.approval_control(ui, input, choices.len())? {
+        match self.approval_control(ui, input, choices.len()).await? {
             InputRoute::Handled => return Ok(()),
             InputRoute::Composer => {}
         }
@@ -94,7 +85,7 @@ impl RunProgress<'_> {
         }
         if matches!(input, TerminalInput::Character(_) | TerminalInput::Submit) {
             if let Some(choice) = self.approval_reply(ui, input, page, &choices) {
-                self.decide_approval(ui, choice)?;
+                self.decide_approval(ui, choice).await?;
             }
         } else {
             self.navigate_approval(input, page, choices.len());
@@ -102,20 +93,23 @@ impl RunProgress<'_> {
         Ok(())
     }
 
-    fn approval_control(
+    async fn approval_control(
         &mut self,
         ui: &mut RunUi<'_>,
         input: TerminalInput,
         choices: usize,
     ) -> Result<InputRoute, InputFailure> {
         if input == TerminalInput::CycleApprovalMode {
-            let _ = self.cycle_approval(ui.composer);
+            let _ = self.cycle_approval(ui.composer).await?;
             return Ok(InputRoute::Handled);
         }
-        if interrupt_approval_input(&input, &self.cancellation, &mut self.stop) {
+        if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
+            self.stop = ActiveStop::Cancelling;
+            self.controls.cancel().await?;
             self.approval_ui.pending.take();
             ui.terminal
-                .settle_child_notes(ui.view, &self.steering, true);
+                .settle_child_notes(ui.view, self.controls.child_withdrawal(), true)
+                .await;
             ui.terminal
                 .restore_draft_input(ui.composer.input_capacity())
                 .map_err(|error| InputFailure::Return(error.to_string()))?;
@@ -197,7 +191,7 @@ impl RunProgress<'_> {
         }
     }
 
-    fn decide_approval(
+    async fn decide_approval(
         &mut self,
         ui: &mut RunUi<'_>,
         choice: crate::presentation::ToolApprovalChoice,
@@ -209,13 +203,16 @@ impl RunProgress<'_> {
                 }
                 let _ = super::super::permissions::cycle(ui.composer);
             }
-            self.approvals.set_mode(arany::ApprovalMode::AutoEdits);
+            self.controls
+                .set_mode(arany::ApprovalMode::AutoEdits)
+                .await?;
         }
         self.approval_ui
             .pending
             .take()
             .expect("pending action")
-            .decide(choice.reply());
+            .decide(&self.controls, choice.reply())
+            .await?;
         ui.terminal
             .restore_draft_input(ui.composer.input_capacity())
             .map_err(|error| InputFailure::Return(error.to_string()))?;
@@ -228,7 +225,7 @@ impl RunProgress<'_> {
             .approval_ui
             .pending
             .as_ref()
-            .is_some_and(|approval| approval.unguarded.is_some())
+            .is_some_and(|approval| approval.prompt.unguarded)
         {
             choices - 1
         } else {
@@ -241,24 +238,14 @@ impl RunProgress<'_> {
         self.approval_ui.review_notice = false;
     }
 
-    pub(super) fn cycle_approval(&self, composer: &mut Composer) -> String {
+    pub(super) async fn cycle_approval(
+        &self,
+        composer: &mut Composer,
+    ) -> Result<String, InputFailure> {
         let notice = super::super::permissions::cycle(composer);
-        self.approvals
-            .set_mode(composer.approval_mode().unwrap_or_default());
-        notice
-    }
-}
-
-pub(super) fn interrupt_approval_input(
-    input: &TerminalInput,
-    cancellation: &RunCancellation,
-    stop: &mut ActiveStop,
-) -> bool {
-    if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
-        *stop = ActiveStop::Cancelling;
-        cancellation.cancel();
-        true
-    } else {
-        false
+        self.controls
+            .set_mode(composer.approval_mode().unwrap_or_default())
+            .await?;
+        Ok(notice)
     }
 }

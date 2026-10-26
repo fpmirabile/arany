@@ -1499,6 +1499,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         crate::tools::dispatch::outcome(&intent, Err(error));
                     worker.observation.disposition = disposition;
                     worker.observation.output = output;
+                    worker.observation.spill = None;
                     worker.observation.enforcement_cause = cause;
                     worker.observation.limit_cause = limit_cause;
                     command_before = None;
@@ -1557,6 +1558,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                                     observation.limit_cause =
                                         Some(crate::tools::LimitCause::Resource);
                                     observation.enforcement_cause = None;
+                                    observation.spill = None;
                                     observation.output =
                                         "Command changeset exceeded its reserved capacity".into();
                                 }
@@ -1570,6 +1572,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                                 observation.disposition = disposition;
                                 observation.enforcement_cause = cause;
                                 observation.limit_cause = limit_cause;
+                                observation.spill = None;
                                 observation.output =
                                     "Command changeset could not be captured".into();
                             }
@@ -1614,8 +1617,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 && runtime.worker.is_none()
             {
                 let transfer = async {
-                    let bytes =
-                        serde_json::to_vec(observation).map_err(|_| ToolError::Operation)?;
+                    let bytes = crate::tools::spill::encode_report(observation)?;
                     output
                         .write_all(&bytes)
                         .await
@@ -1754,9 +1756,12 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     .map_err(|_| ToolError::Operation)?;
             } else {
                 let bytes = match &result {
-                    Ok(observation) => serde_json::to_vec(observation),
-                    Err(ToolError::GuardBootstrap(failure)) => serde_json::to_vec(failure),
-                    Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone())),
+                    Ok(observation) => crate::tools::spill::encode_report(observation),
+                    Err(ToolError::GuardBootstrap(failure)) => {
+                        serde_json::to_vec(failure).map_err(|_| ToolError::Operation)
+                    }
+                    Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone()))
+                        .map_err(|_| ToolError::Operation),
                 }
                 .map_err(|_| ToolError::Operation)?;
                 output
@@ -2416,6 +2421,7 @@ done
             checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
+            spill_access: None,
             config: crate::tools::config::Config {
                 version: 1,
                 workspace_paths,
@@ -3448,14 +3454,15 @@ int main(int argc, char **argv) {
             let (root, mut attestation, listener) =
                 launch_helper(&mut unit, phase, source.path()).await;
             if matches!(phase, "storage" | "storage-drop" | "command-profile") {
-                crate::tools::fs::native(
-                    source.path(),
+                crate::tools::fs::mutate(
+                    &crate::tools::fs::open_directory(source.path()).unwrap(),
                     &ToolCall::Write {
                         path: "selected".into(),
                         expected_digest: Some(crate::validate::hex_digest(b"before edit")),
                         content: "after typed edit".into(),
                     },
                     &snapshot_runtime(source.path()).config,
+                    &crate::tools::fs::MutationControl::default(),
                 )
                 .unwrap();
             }
@@ -4167,6 +4174,7 @@ printf 'native command success'
                         root,
                         crate::tools::ToolLimits::default().cache_bytes > 0,
                         crate::tools::ToolLimits::default().result_bytes as usize,
+                        &Default::default(),
                     ))
                     .unwrap();
                 let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
@@ -4184,6 +4192,7 @@ printf 'native command success'
                         root,
                         crate::tools::ToolLimits::default().cache_bytes > 0,
                         crate::tools::ToolLimits::default().result_bytes as usize,
+                        &Default::default(),
                     ))
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_str(&result).unwrap();

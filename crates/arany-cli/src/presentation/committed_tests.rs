@@ -406,3 +406,137 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
         assert!(!copy.contains("Provider"), "{copy}");
     }
 }
+
+#[tokio::test]
+async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
+    let (root, workspace, engine) = fixture();
+    let provider = Arc::new(ScriptedProvider::new(vec![finish("seed")]));
+    let outcome = run_to_end(&engine, &provider, request(&workspace, "Seed presentation"))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let (view, _) = committed(root.path(), outcome.session_id).await;
+    for guard_failure in [false, true] {
+        let mut run = view.runs[0].clone();
+        run.status = RunStatus::Failed;
+        run.failure = Some(arany::RunFailure::ToolStopped);
+        run.assistant_message = None;
+        let mut earlier = tool_fixture(
+            arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: None,
+            },
+            "Read denied",
+        );
+        earlier.active_time_reserved = true;
+        earlier.observation.as_mut().unwrap().disposition = arany::ToolDisposition::Denied;
+        let mut later = tool_fixture(
+            arany::ToolCall::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+            "Later action stopped",
+        );
+        let observation = later.observation.as_mut().unwrap();
+        if guard_failure {
+            observation.disposition = arany::ToolDisposition::Failed;
+            observation.enforcement_cause = Some(arany::EnforcementCause::GuardBootstrap);
+        } else {
+            observation.disposition = arany::ToolDisposition::Denied;
+            observation.approval_cause = Some(arany::ApprovalCause::ChannelUnavailable);
+        }
+        let mut second = earlier.clone();
+        second.intent.id = uuid::Uuid::now_v7();
+        second.observation.as_mut().unwrap().intent = second.intent.clone();
+        run.tools = vec![earlier, second, later];
+        assert!(run.stopping_tool().is_none());
+        let feedback = run_feedback(&run).unwrap();
+        assert!(
+            feedback.contains(if guard_failure {
+                "Native Tool protection failed before the action started"
+            } else {
+                "Approval channel unavailable."
+            }),
+            "{feedback}"
+        );
+        assert!(!feedback.contains("Action denied."));
+    }
+}
+
+#[tokio::test]
+async fn preflight_refusal_feedback_and_exports_use_the_reopened_receipt() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(root.path(), "Fact");
+    let state = root.path().join("state");
+    let engine = open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(
+        state.join("tools.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        finish("ready"),
+        tool_outcome(arany::ToolCall::Read {
+            path: "notes/facts.txt".into(),
+            offset: None,
+            limit: None,
+        }),
+        finish("unexpected continuation"),
+    ]));
+    let initial = run_to_end(&engine, &provider, request(&workspace, "Prepare"))
+        .await
+        .unwrap();
+    let mut injected = arany::FaultPlan::corrupt_tool_preflight(initial.session_id, "ToolProposed");
+    let mut input = request(&workspace, "Read the facts");
+    input.session_id = Some(initial.session_id);
+    input.title = None;
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: arany::ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    injected.try_recv().unwrap();
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    engine.close().await.unwrap();
+    let (view, events) = committed(root.path(), initial.session_id).await;
+    assert_eq!(view.runs.last().unwrap(), &outcome.run);
+    assert_eq!(
+        run_feedback(view.runs.last().unwrap()).unwrap(),
+        "Error: Run failed. Phase: Tool start violates the committed Session transition. The refused action was not dispatched. No answer was committed. Use /agents to inspect this Run."
+    );
+    let jsonl = render_session(&view, &events, Output::Jsonl);
+    for (line, event) in jsonl.lines().zip(&events) {
+        if let Event::ToolPreflightRefused { record, .. } = &event.event {
+            let line: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(line["payload"], serde_json::to_value(record).unwrap());
+            let expected = format!(
+                "{} ToolPreflightRefused {}",
+                event.sequence,
+                event.event.payload().unwrap()
+            );
+            assert!(
+                render_session(&view, &events, Output::Text)
+                    .lines()
+                    .any(|line| line == expected)
+            );
+        }
+    }
+}

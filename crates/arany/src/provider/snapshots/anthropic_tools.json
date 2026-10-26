@@ -101,6 +101,7 @@
             ]
           },
           "path": {
+            "description": "Workspace file path, or spill:<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.",
             "type": "string"
           }
         },
@@ -1292,6 +1293,7 @@
             ]
           },
           "path": {
+            "description": "Workspace file path, or spill:<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.",
             "type": "string"
           }
         },
@@ -1624,6 +1626,7 @@
             ]
           },
           "path": {
+            "description": "Workspace file path, or spill:<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.",
             "type": "string"
           }
         },
@@ -1776,5 +1779,8 @@
       },
       "name": "arany_glob"
     }
-  ]
+  ],
+  "tool_choice": {
+    "type": "auto"
+  }
 }

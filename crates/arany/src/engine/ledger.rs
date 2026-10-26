@@ -1,5 +1,5 @@
 use super::{EngineError, STORE_ACTION_OVERHEAD};
-use crate::journal::Journal;
+use crate::journal::{Journal, JournalWriter};
 use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
     AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal, Event, EventEnvelope, GoalBudget,
@@ -9,6 +9,9 @@ use crate::session::{
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
+
+pub(super) const MAX_NARROWINGS_PER_STEP: usize = 1;
+pub(super) const NARROWING_EVENTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ActiveDeadlineCause {
@@ -190,6 +193,7 @@ pub enum Action {
     ProviderCall { previews: bool, steering: bool },
     Child { in_flight: u32, research: bool },
     Tool,
+    ToolStep { calls: usize },
     Worker { chunks: usize },
     Review,
     Compaction,
@@ -203,7 +207,7 @@ impl Action {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
-                7 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
             Self::Child {
                 in_flight,
@@ -214,6 +218,9 @@ impl Action {
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
+            Self::ToolStep { calls } => calls
+                .saturating_mul(Self::Tool.max_events().saturating_add(1))
+                .saturating_add(MAX_NARROWINGS_PER_STEP.saturating_mul(NARROWING_EVENTS)),
             Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
@@ -235,6 +242,7 @@ impl Action {
                 .unwrap_or(usize::MAX)
                 .saturating_add(1),
             Self::Tool | Self::Review => 2,
+            Self::ToolStep { calls } => calls.saturating_mul(Self::Tool.verdict_slots()),
             Self::Worker { .. } => 12,
             Self::Compaction | Self::BoundaryCompaction { .. } => 0,
             Self::Delegation { children, research } => {
@@ -293,6 +301,7 @@ impl Action {
                     0
                 }),
             Self::Tool | Self::Review => attempt_facts(ProviderRole::Review),
+            Self::ToolStep { calls } => calls.saturating_mul(attempt_facts(ProviderRole::Review)),
             Self::Worker { .. } => attempt_facts(ProviderRole::Review)
                 .saturating_add(8 * attempt_facts(ProviderRole::Child))
                 .saturating_add(attempt_facts(ProviderRole::Primary)),
@@ -321,6 +330,11 @@ impl Action {
         match self {
             // A command can need a separate integration observation, so reserve two observations per Tool step.
             Self::Tool | Self::Review | Self::Worker { .. } => 2,
+            Self::ToolStep { calls } => calls
+                .saturating_mul(Self::Tool.tool_observations())
+                .saturating_add(
+                    MAX_NARROWINGS_PER_STEP.saturating_mul(Self::Tool.tool_observations()),
+                ),
             Self::Child {
                 in_flight,
                 research: true,
@@ -472,7 +486,17 @@ impl GoalLedger {
         session_id: SessionId,
         event: Event,
     ) -> Result<Arc<EventEnvelope>, EngineError> {
-        let (committed, fed) = journal
+        let writer = journal.writer().await;
+        self.append_committed_in(&writer, session_id, event).await
+    }
+
+    pub(super) async fn append_committed_in(
+        &self,
+        writer: &JournalWriter<'_>,
+        session_id: SessionId,
+        event: Event,
+    ) -> Result<Arc<EventEnvelope>, EngineError> {
+        let (committed, fed) = writer
             .append_then(session_id, event, |envelope| self.committed(envelope))
             .await?;
         fed?;
@@ -517,6 +541,10 @@ impl GoalLedger {
 
     pub(super) fn active_elapsed(&self) -> Duration {
         self.activity.elapsed()
+    }
+
+    pub(super) fn activity_in_progress(&self) -> bool {
+        self.activity.active()
     }
 
     pub(super) fn active_deadline(
@@ -601,6 +629,7 @@ impl GoalLedger {
             Action::ProviderCall { .. }
             | Action::Child { .. }
             | Action::Tool
+            | Action::ToolStep { .. }
             | Action::Worker { .. } => {
                 self.can_start_provider_call() && self.remaining_calls() != Some(0)
             }
@@ -634,6 +663,7 @@ impl GoalLedger {
                     Action::ProviderCall { .. }
                     | Action::Child { .. }
                     | Action::Tool
+                    | Action::ToolStep { .. }
                     | Action::Worker { .. }
                     | Action::Review => BudgetAction::Provider,
                 },

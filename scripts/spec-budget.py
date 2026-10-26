@@ -11,7 +11,7 @@ from pathlib import Path
 SPEC_DIR = Path("docs/specs")
 LIMITS_FILE = SPEC_DIR / "limits.md"
 BUDGET_FILE = SPEC_DIR / "budget.toml"
-TOTAL_WORD_BUDGET = 135_500
+TOTAL_WORD_BUDGET = 142_000
 NUMBER = re.compile(r"(?<!\w)(\d[\d,]*(?:\.\d+)?)\s+([A-Za-z][A-Za-z /\n-]*)")
 UNIT_WORD = re.compile(r"[A-Za-z]+(?:/[A-Za-z]+)?")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")

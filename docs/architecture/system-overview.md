@@ -31,7 +31,7 @@ The full product contract is successful when it proves all of these together:
 7. bounded instruction discovery follows the [Session admission contract](../specs/session.md#workspace-admission-and-authority);
 8. `exec` and `show` expose the same committed facts without terminal initialization; and
 9. cancellation reaches the primary and every admitted child without fabricating completion; and
-10. explicitly enabled primary Tools use typed one-use intents, restrict-only Policy, native Guard enforcement, bounded continuation and durable non-executing replay.
+10. explicitly enabled primary Tools use typed one-use intents, restrict-only Policy, native Guard enforcement for programs and capability-scoped file publication, bounded continuation and durable non-executing replay.
 
 Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The primary-only [host-command exception](../specs/tools.md#primary-host-commands) requires explicit human or admitted user-owned rule authority and a pinned, supervised command, never automatic fallback. Engine owns live epochs and journaled scope/reuse validation; Tools owns executable admission and supervision. Host effects cannot be published as Guard changesets or rewound, and the same user can modify Arany state and journal.
 
@@ -50,7 +50,7 @@ Session and ancestor locks remain scoped to a Run, while the Store thread lives
 until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns Engine lifetime and admission.
 The binary's `serve` Server owns a bounded submission/response channel loop over
-that Engine. Its stdio adapter, ACP translator and in-process conformance
+that Engine. Its stdio adapter, ACP translator, attached terminal, headless `exec` and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
 vocabulary at the binary edge; its translator owns the exhaustive typed Tool
 projection and preserves serve's Move FileChange path while giving GhPrList an
@@ -72,7 +72,11 @@ Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
 it during admission, so the source dependency points from Engine to Tools.
 Engine permission selection, host session reuse and remembering eligibility live
 in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
-shared ask and dispatch flow.
+shared ask and dispatch flow. Focused definition-mode and typed-prefix approval
+tests live with that permission policy. Cancellation settlement evidence lives
+beside `settle_cancelled` in `step/intent.rs`; `step/ask.rs` owns the source check
+that human waits and pinned dispatch do not consult the system clock. Parent
+step tests retain cross-flow decision tables.
 The Engine composes per-dispatch queue progress, active-action and checkpoint
 senders through consuming ToolRuntime builders; Guard dispatch makes one owned
 copy from its borrowed runtime before consuming that chain.
@@ -92,9 +96,14 @@ separate provisional data. The tap belongs to Journal rather than the Store
 thread so persistence does not own observer delivery. [Execution](../specs/execution.md#committed-event-stream),
 [telemetry](../specs/telemetry.md) and [diagnostics](../specs/diagnostics.md) own
 their observable contracts.
-Provider-owned diagnostic stage, count and response-shape types live in
-`provider/diagnostics.rs`; root `diagnostics.rs` retains record formatting and
-the bounded private sink.
+Provider-owned diagnostic stage, count, response-shape and Tool argument shape
+types live in `provider/diagnostics.rs`, including argument shape construction
+and Debug formatting. Provider also owns stream/failure/context entry points and
+record construction; the Engine calls its context-exhaustion entry point.
+Root `diagnostics.rs` retains the bounded private sink, including activation,
+locking, sanitization and file admission, without a production Provider dependency
+or re-export. Provider depends on that inert-record sink in one direction only;
+unrelated root Engine/Event/Tool producers remain at root.
 
 ```mermaid
 flowchart LR
@@ -141,7 +150,8 @@ flowchart LR
 
 Provider is the substitutable semantic inference interface. Wire adapters stay
 behind it; SQLite, replay, reducers and Tool dispatch remain concrete owners.
-`ProviderKind` owns native profile names and custom-profile syntax; telemetry
+`ProviderKind` owns native profile names, credential classification, catalog/check
+dispatch and custom-profile syntax; public strings are parsed at those edges. Telemetry
 maps those closed categories to its existing fixed labels.
 The CLI depends on `arany`; the library never depends on CLI, terminal,
 presentation or accounts, and has no ratatui, crossterm or keyring dependency.
@@ -166,10 +176,12 @@ The [researcher contract](../specs/execution.md#researcher-children) owns their
 catalog, budgets, ordering and failure rules; children never inherit a broader
 grant than their parent.
 
-List, Read, Search and Glob use the admitted directory capability in process.
+Exact Read, exact-file Search and Skill text use the admitted directory capability
+in process.
 Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
-execution site. Mutations, typed Git reads, Skill loading and MCP stay behind
-the separate Guard. The [Tool contract](../specs/tools.md#in-process-reads) owns
+execution site. Typed Workspace mutations and changeset publication use the same admitted handle
+in process, with digest preconditions and journaled File receipts. Typed Git reads,
+Discovery, Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-file-operations) owns
 path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforcement-and-compatibility)
 and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
 native launch, supervision and recovery. Short-lived same-binary Guard and
@@ -205,7 +217,7 @@ modules.
 | Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
 | Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
 | SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
-| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
+| Lossy export, bounded private sink and Provider stream/failure/context records | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md#acceptance-and-evidence-owners) |
 
 [Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
 shared support. [Library](../../agents/arany.md) and
@@ -219,6 +231,10 @@ Guard helper entry points remain reachable from the binary's `main.rs`.
 `main.rs` selects attached chat, setup, `exec`, `show` or Provider operations. Private CLI callers resolve trusted inputs and call Engine operations; they do not implement Run transitions or wire decoding. Attached new/clear entry keeps a bounded empty conversation projection and its selected defaults/title local, with zero creation and last sequence; the first task submission delegates creation to the Engine before Run admission. Exit and resume discard that unsaved projection without deleting canonical state. No Events or resumable ID are invented. Continue/resume/fork delegate to the Engine, which revalidates the pinned Workspace and canonical lineage. Headless `exec` creates one Run in a new Session by default; append requires an explicit Session ID. `show` uses strict read-only replay. There is no `run` alias.
 
 The attached composer, slash handlers and quick selector share the compiled local controls and existing defaults/admission owners. Provider selection, saved-account identity, billing-route choice, catalog discovery and Run authority remain separate operations. Typed busy/defaults rejection can recover in chat, while State/replay/terminal failures retain their fatal boundary. A failed operation is not a rollback or retry grant.
+
+Attached setup keeps entry routing and setup-journal coordination in `cli/attached/setup.rs`. Its private `setup/error.rs` owns setup error classifications and conversions, including operation-specific native save/removal, ChatGPT removal/authorization/keyring and custom-write mappings and diagnostic recording. The error type is re-exported through the existing setup module path. Journal disposition and settlement remain with the flows; safe custom-check status vocabulary stays with its display owner. Native account presence lookup, inspection, saved-access resolution and selection live in its private `setup/native.rs` flow; credential storage and key access remain owned by `accounts/credentials/`.
+
+Native setup, catalog loading/default selection and its explicit-effort table, save/removal settlement and checked saved-setup reset also live in `setup/native.rs`; setup retains mixed-route dispatch and the shared uncertainty test bridge. The flow borrows the existing journal and terminal; the [credential contract](../specs/credentials.md#storage-replacement-and-recovery) owns setup ordering and recovery.
 
 Explicit `--tools` reaches the same private Engine/Policy/Guard admission from attached and headless composition. The CLI supplies the shipped executable identity and private configuration root, not an alternative Tool runtime or per-effect approval service.
 
@@ -260,7 +276,7 @@ The semantic Provider outcome is:
 
 - `Answer { text }`, a plain text answer;
 - `Delegate { children: bounded ordered objective/profile assignments }`; or
-- explicitly enabled primary-only `Tool { call: closed typed operation }`.
+- `Tools { calls: bounded ordered list of closed typed operations }`, under the existing per-role Tool restrictions ([execution contract](../specs/execution.md#accepted-outcomes)).
 
 In `single`, the primary finishes without delegating. In `auto`, it decides from the current task whether substantial independent read-only reasoning justifies the extra calls and duplicated context; routine edits, direct questions and tightly coupled work should remain with the primary. The shared native guidance requests the smallest useful team and distinct evidence-backed assignments; history and Skills never require a team. This is model guidance within the enforced ceiling, not a task classifier or a guarantee of optimal model judgment. In `team`, its first non-Tool outcome must be a nonempty bounded delegation. Every child is read-only: one reasoning call without Tools, or up to 16 read-only Tool calls before its report in a Tool-enabled Run; after all required children finish, primary synthesis may use the same remaining Goal budget before finishing. Without Tools, a successful team with `k` children uses `k + 2` Provider calls and a direct answer uses one. The [Goals contract](../specs/goals.md#lifecycle-budgets-and-recovery) owns shared defaults and selectable finite limits; a finite token limit admits only one concurrent Provider call. The Engine reserves each actual call/effect atomically with its bounded terminal tail; read-only inspection and Tool history compact within the admitted request budget instead of stopping at a fixed per-Run step count. Per-request, output, Tool, Run, Store and Guard bounds remain finite. Reported input usage above 1,000,000 tokens or output usage above the exact request cap fails at each public production adapter, including standalone library calls; Engine validation remains defense in depth. Native OpenAI can retain unknown usage, while exact custom transport requires positive reported usage. Transient Provider failures retry the same route within the [reliability bound](../specs/provider.md#usage-provenance-and-reliability) before configured, admitted [fallback chains](../specs/provider.md#per-role-selection-and-fallback) switch.
 
@@ -272,7 +288,7 @@ Context is isolated per AgentRun. Children receive explicit assignment capsules 
 
 The [Tool contract](../specs/tools.md) owns supported behavior and acceptance scenarios. [Guard research](../research/deterministic-harness-protection.md#linux-launch-and-syscall-rationale) and [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) retain alternatives and rationale; [dependency review](../security/local-tool-dependency-review.md) owns scoped security evidence. `tools.json` is private host configuration, not repository configuration. Its pinned scope/resource digests produce immutable primary-only one-use intents. The Engine commits each Provider request fact and intent before dispatch, then a correlated observation before inferring again. Uncertain, cancelled or unacknowledged effects stop without retry; public typed replay validates payloads as well as legal transitions. Replay accepts only the current Goal-linked format and never grants authority from an older or incomplete journal.
 
-The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. Native operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the native mutation Guard, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
+The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. In-process file operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the in-process file publisher, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
 
 Past effect records enter context/compaction only as bounded untrusted facts, including interrupted attempts and observed failures, never renewed permission or execution. The tool-enabled compiler reserves current observations from the remaining finite context budget. An active Goal may summarize only an acknowledged Tool prefix at a Run boundary; it retains every observation in canonical Events and sends the latest untrusted summary plus a bounded recent tail. Researcher children receive a read-only catalog and only their own observations; the primary receives their bounded reports.
 
@@ -342,7 +358,11 @@ The sole connection opens in a private owner-verified local state directory with
 
 [The terminal spec](../specs/terminal.md) owns modes, layout, keys, draft retention, selectors, setup presentation, paste, accessibility, process channels and acceptance scenarios. Clipboard and image rules live in its [paste and attachments](../specs/terminal.md#paste-and-attachments) section; implementation invariants live in tests.
 
-`presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. Tool summaries and approval actions dispatch over the library's closed Tool family and execution site; the CLI owns their per-family rendering, escaping and host disclosures. This is a presentation boundary only: operation facts and authority do not cross into presentation, and the journaled report formatter remains separate. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. None of these presentation types enters the Engine.
+`presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. Tool summaries and approval actions dispatch over the library's closed Tool family and execution site; the CLI owns their per-family rendering, escaping and host disclosures. This is a presentation boundary only: operation facts and authority do not cross into presentation, and the journaled report formatter remains separate. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. Its `Panels` groups selection, copy, cue, picker geometry and help state; private `Transcript` groups the distinct Fullscreen and Classic history indexes, native emission tracking, pager/dump state, Classic adjacency and kept-Tool suppression across release/reacquisition. Linear output, signals, secret echo, clipboard and graphics cleanup retain their separate owners and lifecycle order. None of these presentation types enters the Engine.
+
+The attached Run's private `Drafts` owns offered steering text, linear offers and the held draft, shared by Run input and settlement. Composer owns editing and capacity; the Server owns steering delivery and withdrawal.
+
+Attached Run budget, Escape, approval-reply, steering delivery, draft retention/overflow and current-Run exit-settlement tests live in [run/tests.rs](../../crates/arany-cli/src/cli/attached/run/tests.rs); process and macOS tests retain their separate inline owner in [run.rs](../../crates/arany-cli/src/cli/attached/run.rs).
 
 The presentation layer owns the committed budget-refusal lookup and Run feedback projection. `exec` retains its looser admission-refusal fallback, while committed receipts render the exact Run being reported.
 
@@ -352,7 +372,7 @@ The private attached model owner persists token-free `model-preferences.json` un
 
 The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed version 4, 1 KiB record holds slash completion, chat view, Goal usage limits, Build/command resource settings, mouse and copy-on-select; defaults use tabs and fullscreen, and an unsupported or invalid record leaves attached chat, task submission and `/settings` on those defaults until `/settings` replaces it (`exec` and `serve` refuse it). Attached startup reads it read-only before terminal acquisition without creating State; `--classic` pins Classic for that process without changing the record. Engine snapshots only the selected execution values into a Goal before Workspace disclosure; they do not widen Tool grants. The saved record itself never enters Events, account authority or Provider context. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner.
 
-The Engine publishes provisional display and capacity waits through a hints handle; committed facts come from the Engine's Event stream, reduced into the attached terminal's local SessionView. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
+The channel Server forwards provisional display and capacity waits from the Engine hints handle and committed Events from its Run subscription to the attached terminal over bounded in-process channels. The terminal reduces those canonical Events into its local SessionView and reconciles gaps through a Server snapshot request. The Server owns Run submission, approvals, steering, cancellation and settlement; idle Session operations retain their existing direct Engine calls. The Session shares its Engine with each connection and closes it only after the connection has settled and released its tasks. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
 
 Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
 against the committed pending Tool before display. It cannot enter history or
@@ -364,7 +384,7 @@ owns defaults, configuration, resource bounds and interruption semantics.
 
 A terminal-owned clipboard worker has bounded trusted OS-client ownership distinct from the reader and Engine. Immutable image values cross semantic Provider/Session boundaries; human drawing receives metadata. Canonical image bytes, multimodal context and compaction remain under the image/Session/Store owners.
 
-The released terminal owner retains signal listeners through committed output and transfers them to reacquisition. Raw/canonical input is stopped and joined before modes/flags are restored; suspension retains the pinned Run future and bounded draft. Lifecycle failures cannot manufacture a committed outcome. Detailed fault ownership remains in [Terminal spec](../specs/terminal.md); [next steps](../../NEXT_STEPS.md) owns unverified claims.
+`OwnedTerminal` acquires and owns the active renderer, reader and terminal-mode guards, and restores them in lifecycle order. `AttachedTerminal` keeps signal listeners through committed output and transfers them during reacquisition; secret echo and clipboard ownership stay separate. Suspension retains the pinned Run future and bounded draft; lifecycle failures cannot manufacture a committed outcome. [Terminal spec](../specs/terminal.md#interruption-suspension-and-restoration) owns restoration behavior; [next steps](../../NEXT_STEPS.md) owns unverified claims.
 
 ### Display observations and terminal continuity
 
@@ -413,7 +433,7 @@ A terminal refresh-token error also disconnects that registration under the acco
 
 The private OpenAI subscription transport has a data-free direct/delegate/compaction probe for an exact model/effort. `provider check chatgpt` first clears prior exact evidence, checks visibility under the selected account token, invokes the three bounded streamed calls after `--accept-cost`, and publishes a 24-hour fingerprint only if that same account remains selected with matching consent and registration. Attached setup and effort activation do not invoke this optional checker; the expected account UUID is checked under the account lock before token retrieval or renewal; attached catalog and Run admission use that same early identity guard. Fingerprints use the retained verified ID token and exact consent receipt rather than rotating access/refresh tokens, and live under the OS-user account root. A failed or incomplete probe does not create evidence for its tuple; cancellation after strict completion may leave an already-started atomic publication. The separate `provider models chatgpt` path lists visible slugs and sanitized display names without invoking inference. A Run revalidates selected-account identity and consent before Workspace input; its `RunStarted` and compaction Events preserve the account UUID, opaque fingerprint, and local-only output-bound category, not tokens. A local output cap is not a remote usage cap.
 
-Subscription inference always uses one bounded SSE decoder after its HTTP status, destination, encoding and length guards, independently of the response media label. Requests negotiate `text/event-stream`; missing or misleading labels cannot discard an otherwise valid stream or select a different decoder. Non-SSE JSON/HTML has no fallback. The decoder retains complete typed done items in contiguous index order with bounded unique IDs, under the existing stream byte/event ceilings. Matching created/completed identity gates reuse for empty terminal output; populated output must agree. Deltas remain transient and cannot provide accepted output. Success still requires typed `response.completed`, the expected model, a complete assistant message or the coding encoding's single completed function call, phase-specific outcome, positive bounded final usage and no selected-token reflection. Native and catalog media admission is unchanged. Both ChatGPT admission and optional checker fingerprints version this acceptance contract; changing it does not require a new model check or alter storage consent.
+Subscription inference always uses one bounded SSE decoder after its HTTP status, destination, encoding and length guards, independently of the response media label. Requests negotiate `text/event-stream`; missing or misleading labels cannot discard an otherwise valid stream or select a different decoder. Non-SSE JSON/HTML has no fallback. The decoder retains complete typed done items in contiguous index order with bounded unique IDs, under the existing stream byte/event ceilings. Matching created/completed identity gates reuse for empty terminal output; populated output must agree. Deltas remain transient and cannot provide accepted output. Success still requires typed `response.completed`, the expected model, a complete assistant message or permitted function-call items under the [Provider contract](../specs/provider.md#structured-outcomes-and-tool-encoding), phase-specific outcome, positive bounded final usage and no selected-token reflection. Native and catalog media admission is unchanged. Both ChatGPT admission and optional checker fingerprints version this acceptance contract; changing it does not require a new model check or alter storage consent.
 
 The shared Responses decoder validates all assistant text parts, distinguishes explicit `commentary` from exactly one final answer, and joins ordered final text parts without inserting or repairing bytes. Missing/null phase preserves legacy single-final-message support. Unknown phases, malformed/refusal blocks, extra finals, late commentary and non-null error/incomplete markers reject. Native, exact-custom and ChatGPT check versions reflect the shared acceptance contract. Subscription development diagnostics preserve received stream counts and distinguish closed final-decoding causes without retaining response content or changing canonical failure reasons.
 
@@ -433,7 +453,8 @@ CLI boundaries supply typed failure stages; optimized builds leave it disabled.
 ## 11. Security boundary
 
 Policy admits authority before project input; the separate native Guard enforces
-effects and returns evidence for validated publication. The Engine journals the
+program effects and returns evidence for validated publication. Typed file effects
+use admitted directory capabilities in process and return intent-bound receipts. The Engine journals the
 transition and never treats replay as permission to dispatch. Account setup and
 the credential helper own browser/callback and OS-store access respectively.
 

@@ -4,12 +4,12 @@
 "chatgpt.md" = 4000
 "credentials.md" = 3500
 "diagnostics.md" = 1500
-"execution.md" = 18000
+"execution.md" = 20000
 "goals.md" = 8500
 "limits.md" = 1000
-"provider.md" = 10250
-"serve.md" = 6500
+"provider.md" = 11000
+"serve.md" = 7500
 "session.md" = 7500
 "telemetry.md" = 1500
-"terminal.md" = 22500
-"tools.md" = 44750
+"terminal.md" = 23500
+"tools.md" = 46500

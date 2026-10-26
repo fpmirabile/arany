@@ -9,6 +9,8 @@ through the CLI or API.
 
 - **Problem:** <what happens today and why it matters; link the issue if one exists>
 - **Change:** <what happens after this PR>
+- **Slices:** <plan and exact slice IDs completed, or N/A>
+  **Left open:** <remaining plan slice IDs, or N/A>
 
 ## Verification
 

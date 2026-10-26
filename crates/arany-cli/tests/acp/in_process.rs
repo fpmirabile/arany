@@ -1840,6 +1840,7 @@ async fn move_live_and_permission_projection_preserves_file_change_details() {
         "/var/workspace/destination.txt"
     );
     let uncertain = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -1875,6 +1876,7 @@ async fn move_completion_preserves_denial_projection() {
     adapter.item(&intent, None).await;
     let _ = adapter.next().await;
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Denied,
         enforcement_cause: None,
@@ -1946,38 +1948,57 @@ async fn move_history_projection_preserves_file_change_details() {
 }
 
 #[tokio::test]
-async fn gh_pr_list_projects_as_bounded_read() {
+async fn host_pr_reads_project_as_bounded_reads() {
     let _deadline = crate::cli::serve::tests::deadline();
-    let mut adapter = Adapter::new().await;
-    adapter
-        .prompt(json!([{"type":"text","text":"List pull requests"}]))
-        .await;
     let repository = "github.com/team/\u{001b}[2J\nproject";
-    let intent = adapter.intent(arany::ToolCall::GhPrList {
-        repository: repository.into(),
-        state: arany::PrState::Open,
-        base: None,
-        head: None,
-        limit: 10,
-    });
-    adapter.item(&intent, None).await;
-    let update = adapter.next().await["params"]["update"].clone();
-    assert_eq!(update["kind"], "read");
-    assert_eq!(
-        update["title"],
-        "List GitHub pull requests github.com/team/\\u{001b}[2J project"
-    );
-    assert!(
-        !update["title"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .any(char::is_control)
-    );
-    assert_eq!(update["rawInput"]["operation"], "gh_pr_list");
-    assert_eq!(update["rawInput"]["repository"], repository);
-    assert_eq!(update["locations"], json!([]));
-    adapter.close().await;
+    for (call, operation, label) in [
+        (
+            arany::ToolCall::GhPrList {
+                repository: repository.into(),
+                state: arany::PrState::Open,
+                base: None,
+                head: None,
+                limit: 10,
+            },
+            "gh_pr_list",
+            "List GitHub pull requests",
+        ),
+        (
+            arany::ToolCall::GhPrView {
+                repository: repository.into(),
+                number: 17,
+            },
+            "gh_pr_view",
+            "Inspect GitHub pull request",
+        ),
+    ] {
+        let mut adapter = Adapter::new().await;
+        adapter
+            .prompt(json!([{"type":"text","text":"Read pull requests"}]))
+            .await;
+        let intent = adapter.intent(call);
+        adapter.item(&intent, None).await;
+        let update = adapter.next().await["params"]["update"].clone();
+        assert_eq!(update["kind"], "read");
+        assert_eq!(
+            update["title"],
+            format!("{label} github.com/team/\\u{{001b}}[2J project")
+        );
+        assert!(
+            !update["title"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .any(char::is_control)
+        );
+        assert_eq!(update["rawInput"]["operation"], operation);
+        assert_eq!(update["rawInput"]["repository"], repository);
+        if operation == "gh_pr_view" {
+            assert_eq!(update["rawInput"]["number"], 17);
+        }
+        assert_eq!(update["locations"], json!([]));
+        adapter.close().await;
+    }
 }
 
 #[tokio::test]
@@ -2654,6 +2675,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
     };
     assert_eq!(reply.id, Some(RequestId::Integer(22)));
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -2685,7 +2707,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         .await
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
-    let events:Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+    let events:Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
         "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
     })).collect();
     adapter
@@ -3097,6 +3119,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         assert!(update["params"]["update"].get("content").is_none());
     }
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Succeeded,
         enforcement_cause: None,
@@ -3392,7 +3415,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
-            Event::ToolPermissionDecided { verdict, .. }
+            Event::ToolStarted { verdict: Some(verdict), .. }
                 if verdict.source == arany::permissions::PermissionSource::UnavailableApproval
                     && !verdict.approved
         )));
@@ -3445,9 +3468,12 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             std::fs::read(workspace.join("new.txt")).unwrap(),
             b"Written"
         );
+        let intent_digest: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&tool.intent).unwrap()).into();
         assert!(matches!(
-            tool.observation.as_ref().unwrap().attestation,
-            Some(arany::Attestation::Guard(_))
+            &tool.observation.as_ref().unwrap().attestation,
+            Some(arany::Attestation::InProcess { receipt: Some(receipt), .. })
+                if receipt.intent_digest == intent_digest
         ));
     }
 }
@@ -3949,6 +3975,7 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
     let interrupt = adapter.request().await;
     assert_eq!(interrupt.method, "turn/interrupt");
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -4031,6 +4058,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .await;
     assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
     let observation = arany::ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
         enforcement_cause: None,
@@ -4050,7 +4078,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .await
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
-    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
         "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
     })).collect();
     let recover = adapter.request().await;

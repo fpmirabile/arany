@@ -5423,7 +5423,7 @@ async fn two_child_research_delegation_admission_covers_its_spawns() {
     assert!(
         arany::test_support::admissions::recorded(outcome.session_id)
             .iter()
-            .any(|(_, slots, kind)| {
+            .any(|(_, slots, kind, _)| {
                 *slots > 200 && *kind != arany::test_support::admissions::AdmissionKind::SealedData
             }),
         "the research delegation admission exceeds 200 slots"
@@ -7591,7 +7591,10 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     let verdicts: Vec<_> = events
         .iter()
         .filter_map(|envelope| match &envelope.event {
-            Event::ToolPermissionDecided { verdict, .. } => Some(verdict),
+            Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } => Some(verdict),
             _ => None,
         })
         .collect();
@@ -7995,7 +7998,7 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
 #[tokio::test]
 async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
     // The continuation tail includes its call's three same-route retry facts.
-    const REFUSED: usize = 10 + arany::MAX_PROVIDER_RETRIES as usize;
+    const REFUSED: usize = 9 + arany::MAX_PROVIDER_RETRIES as usize;
     async fn run(root: &Path, free: Option<(usize, usize)>) -> Vec<arany::EventEnvelope> {
         use std::os::unix::fs::PermissionsExt;
         let workspace = facts_workspace(root, "stable");
@@ -9437,5 +9440,603 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
                     if matches!(record.status, CompactionStatus::Succeeded { .. }))));
         }
         assert_action_bounds(&events, false, false);
+    }
+}
+
+#[tokio::test]
+async fn empty_tool_steps_fail_as_provider_calls_without_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = facts_workspace(temp.path(), "bounded facts");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Tools(
+        Vec::new(),
+    )]));
+    let mut input = request(&workspace, "Read the facts");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a malformed Tool response has a durable failed Run");
+    engine.close().await.unwrap();
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(*run, outcome.run);
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.failure, Some(arany::RunFailure::ProviderCall));
+    assert!(run.tools.is_empty());
+    assert!(run.assistant_message.is_none());
+    let calls = &run.agents[0].provider_calls;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].disposition,
+        ProviderCallDisposition::InvalidResponse
+    );
+    assert!(calls[0].refusal.is_none());
+    assert_eq!(calls[0].requested_tools, 0);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() {
+    for (case, count, invalid, duplicate, window) in [
+        ("four reads", 4, false, false, None),
+        ("over cap", 5, false, false, None),
+        ("invalid third call", 4, true, false, None),
+        ("duplicate id", 4, false, true, None),
+        ("context full", 4, false, false, Some(32_768)),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "bounded facts");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let requests = (0..count)
+            .map(|index| arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{}", if duplicate { 0 } else { index }))
+                    .unwrap(),
+                call: if invalid && index == 2 {
+                    arany::ToolCall::Read {
+                        path: "../outside".into(),
+                        offset: None,
+                        limit: None,
+                    }
+                } else {
+                    facts_read()
+                },
+            })
+            .collect();
+        let mut provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Tools(requests),
+            finish_with("Read step settled"),
+        ])
+        .with_context_window_snapshots(vec![window]);
+        if window.is_some() {
+            provider = provider.with_chatgpt_account(Uuid::now_v7(), [7; 32]);
+        }
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "Read the facts in one step");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect(case);
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        assert_eq!(view.runs[0], outcome.run, "{case}: durable result");
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
+            .map(|event| event.sequence)
+            .collect();
+        let finishes: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .map(|event| event.sequence)
+            .collect();
+        if case == "four reads" {
+            assert_eq!(starts.len(), 4);
+            assert_eq!(finishes.len(), 4);
+            let proposals: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event.event, Event::ToolProposed { .. }))
+                .map(|event| event.sequence)
+                .collect();
+            assert_eq!(proposals.len(), 4);
+            let reservations: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
+                .collect();
+            assert_eq!(reservations.len(), 4);
+            assert!(
+                arany::test_support::admissions::recorded(outcome.session_id)
+                    .iter()
+                    .all(|(count, _, _, _)| {
+                        *count < proposals[0] as usize || *count >= proposals[3] as usize
+                    }),
+                "initial intents commit without a second admission boundary"
+            );
+            let oversized_slots: Vec<_> =
+                arany::test_support::admissions::recorded(outcome.session_id)
+                    .into_iter()
+                    .filter(|(count, _, _, _)| *count + 1 == proposals[0] as usize)
+                    .map(|(_, _, _, observations)| observations)
+                    .collect();
+            let per_call = oversized_slots.iter().min().expect("per-call admission");
+            let batch = oversized_slots.iter().max().expect("batch admission");
+            assert!(
+                *batch >= count * per_call,
+                "batch admission must retain every call's oversized payload allowance"
+            );
+            for (index, reservation) in reservations.iter().enumerate() {
+                let intent_id = outcome.run.tools[index].intent.id;
+                let finish = events
+                    .iter()
+                    .find(|event| matches!(&event.event,
+                        Event::ToolFinished { observation, .. } if observation.intent.id == intent_id))
+                    .unwrap();
+                assert!(
+                    proposals[3] < reservation.sequence && reservation.sequence < starts[index]
+                );
+                assert!(starts[index] < finish.sequence, "call {index}");
+            }
+
+            assert!(
+                proposals[3] < starts[0],
+                "every intent commits before dispatch"
+            );
+            assert_eq!(outcome.run.status, RunStatus::Finished);
+            assert_eq!(outcome.run.agents[0].provider_calls[0].requested_tools, 4);
+            let calls = provider.requests.lock().unwrap();
+            let step = &calls[1].input.tools.as_ref().unwrap().steps[0];
+            assert_eq!(step.requests.len(), 4);
+            assert_eq!(step.observations.len(), 4);
+            assert!(
+                step.observations
+                    .iter()
+                    .all(|observed| observed.disposition == arany::ToolDisposition::Succeeded)
+            );
+        } else {
+            assert!(
+                starts.is_empty() && finishes.is_empty(),
+                "{case}: nothing dispatched"
+            );
+            if window.is_some() {
+                assert_eq!(
+                    outcome.run.failure,
+                    Some(arany::RunFailure::ToolContextFull)
+                );
+            } else {
+                assert_eq!(outcome.run.status, RunStatus::Finished);
+                let calls = provider.requests.lock().unwrap();
+                let step = &calls[1].input.tools.as_ref().unwrap().steps[0];
+                assert!(step.refusal.is_some());
+                assert_eq!(step.refusal_index, invalid.then_some(2));
+            }
+        }
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            if window.is_some() { 1 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn researcher_multi_call_steps_charge_each_call_and_keep_model_order() {
+    for exhausted in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "bounded facts");
+        let state = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        let batch = |count| {
+            ProviderOutcome::Tools(
+                (0..count)
+                    .map(|index| arany::ToolRequest {
+                        id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                        call: facts_read(),
+                    })
+                    .collect(),
+            )
+        };
+        let mut script = vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    objective: "Read the facts".into(),
+                    profile: None,
+                    editor: None,
+                }],
+            }),
+            batch(4),
+        ];
+        if exhausted {
+            script.extend([batch(4), batch(4), batch(2), batch(3)]);
+        } else {
+            script.extend([
+                finish_with("Research complete"),
+                finish_with("Facts collected"),
+            ]);
+        }
+        let provider = Arc::new(ScriptedProvider::new(script));
+        let mut input = request(&workspace, "Delegate the reading");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let (_, view) = replayed(&state, outcome.session_id).await;
+        assert_eq!(view.runs[0], outcome.run);
+        assert_eq!(
+            outcome.run.status,
+            if exhausted {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            }
+        );
+        let child = &outcome.run.agents[1];
+        assert_eq!(child.tools.len(), if exhausted { 14 } else { 4 });
+        assert_eq!(child.provider_calls[0].requested_tools, 4);
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), if exhausted { 6 } else { 4 });
+        let step = &calls[2].input.tools.as_ref().unwrap().steps[0];
+        assert_eq!(step.calls_remaining, Some(12));
+        assert_eq!(step.observations.len(), 4);
+        if exhausted {
+            assert_eq!(
+                calls[5]
+                    .input
+                    .tools
+                    .as_ref()
+                    .unwrap()
+                    .steps
+                    .last()
+                    .unwrap()
+                    .calls_remaining,
+                Some(2)
+            );
+            assert_eq!(
+                child.provider_calls.last().unwrap().disposition,
+                ProviderCallDisposition::InvalidResponse
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn researcher_deadline_records_every_batch_intent_before_non_dispatched_results() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+    const DELEGATION_ALLOWANCE: Duration = Duration::from_secs(20 * 60);
+    const REMAINING_TOOL_TIME: Duration = Duration::from_secs(5);
+    let _deadline = engine_support::deadline("researcher batch deadline", TEST_TIMEOUT);
+    for count in [1, 4] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "bounded facts");
+        let state = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        let mut provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    objective: "Read the facts".into(),
+                    profile: None,
+                    editor: None,
+                }],
+            }),
+            ProviderOutcome::Tools(
+                (0..count)
+                    .map(|index| arany::ToolRequest {
+                        id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                        call: facts_read(),
+                    })
+                    .collect(),
+            ),
+            finish_with("Unexpected child continuation"),
+            finish_with("Unexpected primary continuation"),
+        ])
+        .with_active_time_per_call(DELEGATION_ALLOWANCE - REMAINING_TOOL_TIME);
+        provider.identity.limits.deadline = DELEGATION_ALLOWANCE;
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "Delegate the reading");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state, outcome.session_id).await;
+        assert_eq!(view.runs[0], outcome.run);
+        assert_researcher_deadline_batch(&events, &view, count);
+    }
+}
+
+fn assert_researcher_deadline_batch(
+    events: &[arany::EventEnvelope],
+    view: &SessionView,
+    count: usize,
+) {
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolStopped));
+    assert!(!view.goals[0].budget_closed);
+    assert!(view.goals[0].budget_refusal.is_none());
+    assert!(run.tools.is_empty());
+    let child = &run.agents[1];
+    assert_eq!(child.tools.len(), count);
+    assert_eq!(child.provider_calls[0].requested_tools as usize, count);
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolStarted {
+                agent_run_id,
+                intent,
+                ..
+            } if *agent_run_id == child.id => Some((event.sequence, intent.id)),
+            _ => None,
+        })
+        .collect();
+    let finishes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolFinished {
+                agent_run_id,
+                observation,
+                ..
+            } if *agent_run_id == child.id => Some((event.sequence, observation.intent.id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), count);
+    assert_eq!(finishes.len(), count);
+    let declarations: Vec<_> = if count > 1 {
+        events
+            .iter()
+            .filter_map(|event| match &event.event {
+                Event::ToolProposed {
+                    agent_run_id,
+                    intent,
+                    ..
+                } if *agent_run_id == child.id => Some((event.sequence, intent.id)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        starts.clone()
+    };
+    assert_eq!(declarations.len(), count);
+    assert!(declarations.last().unwrap().0 < finishes[0].0);
+    for (index, tool) in child.tools.iter().enumerate() {
+        assert_eq!(starts[index].1, finishes[index].1);
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+        assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+        assert_eq!(
+            observation.output,
+            "Delegation deadline reached; no operation was dispatched"
+        );
+        assert!(observation.attestation.is_none());
+        assert!(tool.hooks.is_empty());
+    }
+    assert_action_bounds(events, false, false);
+}
+
+#[tokio::test]
+async fn concurrent_reads_commit_in_completion_order_and_settle_before_effects() {
+    for case in [
+        "four reads",
+        "read before effect",
+        "cancel reads",
+        "limit reads",
+    ] {
+        let _deadline = engine_support::deadline("concurrent read step", Duration::from_secs(180));
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "first\nsecond\nthird\nfourth\n");
+        let state = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        std::fs::write(state.join("tools.json"),
+            br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        let count = if case == "four reads" { 4 } else { 2 };
+        let reads: Vec<_> = (1..=count)
+            .map(|offset| arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: Some(offset),
+                limit: Some(1),
+            })
+            .collect();
+        let mut calls = reads.clone();
+        if count < 4 {
+            calls.insert(
+                0,
+                arany::ToolCall::Mkdir {
+                    path: "notes/created".into(),
+                },
+            );
+            calls.push(arany::ToolCall::Mkdir {
+                path: "notes/final".into(),
+            });
+        }
+        let requests = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                call: call.clone(),
+            })
+            .collect();
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Tools(requests),
+            finish_with("Step settled"),
+        ]);
+        let recorded = Arc::clone(&provider.requests);
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let send = Mutex::new(Some(send));
+        let provider = Arc::new(provider.with_before_call(0, move || {
+            let run = recorded.lock().unwrap()[0].run_id;
+            let gates: Vec<_> = reads
+                .iter()
+                .map(|call| arany::FaultPlan::gate_in_process_read(run, call.clone()))
+                .collect();
+            send.lock().unwrap().take().unwrap().send(gates).unwrap();
+        }));
+        let cancellation = RunCancellation::new();
+        let mut events = engine.subscribe();
+        let mut input = request(&workspace, "Read the facts concurrently");
+        input.include_paths.clear();
+        let drive = async {
+            let gates = receive.await.unwrap();
+            let mut releases = Vec::new();
+            for (entered, release) in gates {
+                entered.await.unwrap();
+                releases.push(Some(release));
+            }
+            assert!(
+                !workspace.join("notes/created").exists(),
+                "effect waits for every read"
+            );
+            if case == "cancel reads" {
+                cancellation.cancel();
+                return releases;
+            }
+            if case == "limit reads" {
+                let mut started = 0;
+                let mut runtime_ms = 0;
+                while started < calls.len() {
+                    let event = next_committed(&mut events, "read deadlines").await;
+                    if let Event::ToolProposed { intent, .. } = &event.event {
+                        started += 1;
+                        runtime_ms = runtime_ms.max(intent.limits.runtime_ms);
+                    }
+                }
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_millis(u64::from(runtime_ms) + 1)).await;
+                tokio::time::resume();
+                return releases;
+            }
+            let order = if count == 4 {
+                vec![2, 0, 3, 1]
+            } else {
+                vec![1, 0]
+            };
+            for index in order {
+                assert!(!workspace.join("notes/created").exists());
+                releases[index].take().unwrap().send(()).unwrap();
+                loop {
+                    let event = next_committed(&mut events, "read completion").await;
+                    if let Event::ToolFinished { observation, .. } = &event.event {
+                        assert!(matches!(&observation.intent.call,
+                            arany::ToolCall::Read { offset: Some(offset), .. } if *offset as usize == index + 1));
+                        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+                        break;
+                    }
+                }
+            }
+            releases
+        };
+        let (outcome, _held_releases) = tokio::join!(
+            run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    cancellation: cancellation.clone(),
+                    ..Default::default()
+                }
+            ),
+            drive
+        );
+        let outcome = outcome.unwrap();
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state, outcome.session_id).await;
+        assert_eq!(view.runs[0], outcome.run, "{case}: closed replay");
+        assert_eq!(outcome.run.tools.len(), 4);
+        assert!(
+            outcome
+                .run
+                .tools
+                .iter()
+                .all(|tool| tool.observation.is_some())
+        );
+        if matches!(case, "cancel reads" | "limit reads") {
+            assert_eq!(
+                outcome.run.status,
+                if case == "cancel reads" {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Failed
+                }
+            );
+            assert_eq!(provider.requests.lock().unwrap().len(), 1);
+            for tool in &outcome.run.tools {
+                let observation = tool.observation.as_ref().unwrap();
+                if matches!(tool.intent.call, arany::ToolCall::Mkdir { .. }) {
+                    assert!(observation.output.starts_with("not_dispatched:"));
+                } else {
+                    assert_eq!(
+                        observation.disposition,
+                        if case == "cancel reads" {
+                            arany::ToolDisposition::Cancelled
+                        } else {
+                            arany::ToolDisposition::Limit
+                        }
+                    );
+                }
+            }
+            assert!(!workspace.join("notes/created").exists());
+            assert!(!workspace.join("notes/final").exists());
+        } else {
+            assert_eq!(outcome.run.status, RunStatus::Finished);
+            let recorded = provider.requests.lock().unwrap();
+            let step = &recorded[1].input.tools.as_ref().unwrap().steps[0];
+            assert_eq!(
+                step.observations
+                    .iter()
+                    .map(|observation| &observation.intent.call)
+                    .collect::<Vec<_>>(),
+                calls.iter().collect::<Vec<_>>()
+            );
+            if count < 4 {
+                assert!(workspace.join("notes/created").is_dir());
+                assert!(workspace.join("notes/final").is_dir());
+                let last_read = events.iter().filter(|event| matches!(&event.event,
+                    Event::ToolFinished { observation, .. } if matches!(observation.intent.call, arany::ToolCall::Read { .. }))).map(|event| event.sequence).max().unwrap();
+                assert!(events.iter().filter(|event| matches!(&event.event,
+                    Event::ToolFinished { observation, .. } if matches!(observation.intent.call, arany::ToolCall::Mkdir { .. }))).all(|event| event.sequence > last_read));
+            }
+        }
     }
 }

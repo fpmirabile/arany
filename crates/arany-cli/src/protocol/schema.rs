@@ -29,6 +29,7 @@ pub fn protocol_schema() -> Value {
     let notifications = json!({
         "initialized": {"params": generator.subschema_for::<Empty>()},
         "thread/started": {"params": generator.subschema_for::<ThreadResult>()},
+        "turn/display": {"params": generator.subschema_for::<TurnDisplayNotification>()},
         "turn/started": {"params": generator.subschema_for::<TurnNotification>()},
         "turn/completed": {"params": generator.subschema_for::<TurnNotification>()},
         "item/started": {"params": generator.subschema_for::<ItemStartedNotification>()},
@@ -41,7 +42,7 @@ pub fn protocol_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$ref": message.as_value()["$ref"],
         "title": "arany-protocol",
-        "version": "1",
+        "version": "2",
         "$defs": generator.take_definitions(true),
         "methods": methods,
         "notifications": notifications,

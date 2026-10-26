@@ -2,7 +2,7 @@ use super::children::ChildWork;
 use super::stop::{StepEnd, StopCause};
 use super::{ActivePause, ActiveSegment, RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::hints::HintPublisher;
-use crate::engine::ledger::{ActiveDeadlineCause, Admission};
+use crate::engine::ledger::{ActiveDeadlineCause, Admission, MAX_NARROWINGS_PER_STEP};
 use crate::engine::{EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{ProviderRequest, ProviderTurn};
 use crate::session::Event;
@@ -22,17 +22,20 @@ mod dispatch;
 pub(super) mod hooks;
 mod intent;
 mod permission;
+mod reads;
 mod review;
 mod skills;
 
 use ask::{AskOptions, AskSite, Resolution, unguarded_gate};
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
-    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, Unguarded,
-    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
+    AfterAsk, Dispatch, DispatchFacts, DispatchSite, GuardCompletion, NotDispatched, StepDispatch,
+    Unguarded, Verdict, completion_deadline, decide_dispatch, decide_queue_pause, not_dispatched,
+    undispatched,
 };
 use intent::{
-    active_window, execute_cancellable, settle_cancelled, tool_action_bound, tool_action_ms,
+    PendingToolRefusal, active_window, execute_cancellable, settle_cancelled, tool_action_bound,
+    tool_action_ms,
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
@@ -105,8 +108,6 @@ impl Grant<'_> {
         }
     }
 }
-
-const MAX_NARROWINGS_PER_STEP: usize = 1;
 
 #[derive(Debug, Eq, PartialEq)]
 enum ReviewProgress {
@@ -232,26 +233,50 @@ pub(in crate::engine) type BoxedStep<'a, T> =
 
 pub(super) type IntentResult = Result<(ToolObservation, Option<ToolCall>), StopCause>;
 
+fn command_changeset(
+    observation: &ToolObservation,
+) -> Result<Option<crate::tools::CommandChangeset>, StopCause> {
+    if !matches!(observation.intent.call, ToolCall::Command { .. })
+        || !matches!(
+            observation.intent.target,
+            crate::worker::EffectTarget::Workspace
+        )
+        || observation.attestation.is_none()
+        || !matches!(
+            observation.disposition,
+            ToolDisposition::Succeeded | ToolDisposition::Failed
+        )
+    {
+        return Ok(None);
+    }
+    match serde_json::from_str::<CommandResult>(&observation.output) {
+        Ok(result) if result.valid() => Ok(Some(result.changeset)),
+        Err(_) if observation.disposition == ToolDisposition::Failed => Ok(None),
+        _ => Err(StopCause::InvalidCommandResult),
+    }
+}
+
 impl RunLoop<'_> {
     pub(super) async fn execute_step(
         &self,
         mut grant: Grant<'_>,
-        request: ToolRequest,
+        requests: Vec<ToolRequest>,
         turn: ProviderTurn,
     ) -> Result<StepEnd, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let source_call = request.call.clone();
-        let mut call = source_call.clone();
         let calls_remaining = match &grant {
             Grant::Primary { .. } => None,
-            Grant::Researcher { child, .. } => Some(child.tool_calls_remaining.saturating_sub(1)),
+            Grant::Researcher { child, .. } => {
+                Some(child.tool_calls_remaining.saturating_sub(requests.len()))
+            }
         };
-        let mut narrowings = 0;
         let mut step = ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: None,
             turn,
-            requests: vec![request],
+            requests,
             observations: Vec::new(),
             facts: None,
             steering_notes: Vec::new(),
@@ -259,63 +284,368 @@ impl RunLoop<'_> {
             cleared: false,
             hook_feedback: Default::default(),
         };
-        loop {
-            let intent = match self
-                .prepare_step_intent(&grant, runtime, &step, call.clone(), &source_call)
-                .await?
-            {
-                Ok(intent) => intent,
-                Err(cause) => return Ok(StepEnd::Stopped(cause)),
+        let intents = match self.prepare_step(&grant, runtime, &step).await? {
+            Ok(intents) => intents,
+            Err(cause) => return Ok(StepEnd::Stopped(cause)),
+        };
+        if intents.len() > 1 {
+            for intent in &intents {
+                self.propose_tool(intent).await?;
+            }
+        }
+        let end = self
+            .execute_step_intents(&grant, runtime, &mut step, intents)
+            .await?;
+        grant.context_mut()?.steps.push(step);
+        if let StepEnd::Stopped(_) = end {
+            return Ok(end);
+        }
+        if self.hook_requested_stop()? {
+            return Ok(StepEnd::Stopped(StopCause::HookStop));
+        }
+        if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
+            return Ok(StepEnd::Stopped(StopCause::ContextFull));
+        }
+        Ok(StepEnd::Continue)
+    }
+
+    async fn execute_step_intents(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        intents: Vec<EffectIntent>,
+    ) -> Result<StepEnd, EngineError> {
+        let mut reads = Vec::new();
+        let mut serial = Vec::new();
+        for (index, intent) in intents.into_iter().enumerate() {
+            let overhead = if step.requests.len() > 1 {
+                runtime.intent_reservation_overhead(&intent)
+            } else {
+                Duration::ZERO
             };
-            let command = matches!(intent.call, ToolCall::Command { .. })
-                && matches!(intent.target, crate::worker::EffectTarget::Workspace);
-            let source_intent_digest = intent.digest();
-            let narrowable =
-                matches!(grant, Grant::Primary { .. }) && narrowings < MAX_NARROWINGS_PER_STEP;
-            // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let (observation, narrowed) = match self
-                .run_intent(&grant, runtime, intent, &source_call, narrowable)
+            match StepDispatch::decide(step.requests.len(), &intent, overhead) {
+                StepDispatch::ConcurrentRead => reads.push((index, intent)),
+                StepDispatch::Serial => serial.push((index, intent)),
+            }
+        }
+        let mut order = Vec::new();
+        let mut end = self
+            .execute_reads(grant, runtime, step, reads, &mut order)
+            .await?;
+        let actor = match grant {
+            Grant::Primary { .. } => self.primary_id,
+            Grant::Researcher { child, .. } => child.agent_run_id,
+        };
+        if self.ledger().view(|view| {
+            view.runs
+                .last()
+                .and_then(|run| run.agents.iter().find(|agent| agent.id == actor))
+                .is_some_and(|agent| agent.tool_refusal.is_some())
+        })? {
+            reads::model_order(step, &order);
+            return Ok(end);
+        }
+        for (index, intent) in serial {
+            let start = step.observations.len();
+            match end {
+                StepEnd::Continue => {
+                    end = Box::pin(self.execute_step_call(grant, runtime, step, intent)).await?;
+                }
+                StepEnd::Stopped(StopCause::ToolRefused(_)) => {}
+                StepEnd::Stopped(_) => {
+                    let observation = self.finish_undispatched(grant, runtime, intent).await?;
+                    step.observations.push(observation);
+                }
+            }
+            order.extend(std::iter::repeat_n(index, step.observations.len() - start));
+        }
+        reads::model_order(step, &order);
+        Ok(end)
+    }
+
+    async fn prepare_step(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+    ) -> Result<Result<Vec<EffectIntent>, StopCause>, EngineError> {
+        let mut intents = Vec::with_capacity(step.requests.len());
+        for request in &step.requests {
+            let sized = self
+                .sized_intent(grant, runtime, step, request.call.clone(), &request.call)
+                .await?
+                .map_err(StopCause::from);
+            match sized {
+                Ok(intent) => {
+                    if let Err(cause) = self.validate_step_intent(runtime, &intent).await? {
+                        return Ok(Err(cause));
+                    }
+                    intents.push(intent);
+                }
+                Err(StopCause::DelegationDeadline) => {
+                    let calls: Vec<_> = step
+                        .requests
+                        .iter()
+                        .map(|request| request.call.clone())
+                        .collect();
+                    let cause = match self
+                        .record_delegation_deadline(grant, runtime, &calls)
+                        .await?
+                    {
+                        Ok(()) => StopCause::DelegationDeadline,
+                        Err(refusal) => refusal.into(),
+                    };
+                    return Ok(Err(cause));
+                }
+                Err(cause) => {
+                    if cause == StopCause::ActiveTime {
+                        self.active_time_floor
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Ok(Err(cause));
+                }
+            }
+        }
+
+        match self.admit_step(grant, runtime, step, &intents).await? {
+            Ok(()) => Ok(Ok(intents)),
+            Err(cause) => Ok(Err(cause)),
+        }
+    }
+
+    async fn admit_step(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        intents: &[EffectIntent],
+    ) -> Result<Result<(), StopCause>, EngineError> {
+        for intent in intents {
+            let permission = self.permission(grant, runtime, &intent.call);
+            let hooks = self.hook_admission(runtime, &intent.call, &intent.call).0;
+            if let Err(refusal) = self
+                .admit_tool(
+                    grant,
+                    runtime,
+                    intent,
+                    permission,
+                    hooks,
+                    matches!(grant, Grant::Primary { .. }),
+                )
                 .await?
             {
+                return Ok(Err(refusal.into()));
+            }
+        }
+        if intents.len() > 1 {
+            let calls: Vec<_> = intents.iter().map(|intent| &intent.call).collect();
+            let reserve = intents
+                .iter()
+                .map(|intent| {
+                    usize::try_from(intent.limits.result_bytes).unwrap_or(usize::MAX)
+                        + ToolRuntime::step_context_reserve(
+                            matches!(intent.call, ToolCall::Command { .. }),
+                            self.feedback_reserve(runtime, &intent.call),
+                        )
+                })
+                .sum::<usize>();
+            if grant
+                .context()?
+                .reserved_len(step, &calls)
+                .saturating_add(reserve)
+                > runtime.context_limit_bytes()
+            {
+                return Ok(Err(StopCause::ContextFull));
+            }
+        }
+        self.admit_step_journal(runtime, intents).await?;
+        Ok(Ok(()))
+    }
+
+    async fn admit_step_journal(
+        &self,
+        runtime: &ToolRuntime,
+        intents: &[EffectIntent],
+    ) -> Result<(), EngineError> {
+        if intents.len() > 1 {
+            let action = crate::engine::ledger::Action::ToolStep {
+                calls: intents.len(),
+            };
+            let hooks = intents
+                .iter()
+                .map(|intent| self.hook_admission(runtime, &intent.call, &intent.call).0)
+                .sum::<usize>();
+            let hook_occurrences = hooks.saturating_mul(1 + MAX_NARROWINGS_PER_STEP);
+            self.journal
+                .admit(
+                    self.session_id,
+                    action
+                        .max_events_for_admitted(&self.routing.providers)
+                        .saturating_add(self.ledger().verdicts(action))
+                        .saturating_add(self.ledger().drain_headroom())
+                        .saturating_add(2 * hook_occurrences),
+                    action
+                        .tool_observations()
+                        .saturating_add(
+                            intents
+                                .len()
+                                .saturating_mul(intent::MAX_INTENT_RECORDS_PER_TOOL),
+                        )
+                        .saturating_add(hook_occurrences),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_undispatched(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+    ) -> Result<ToolObservation, EngineError> {
+        let permission = self.permission(grant, runtime, &intent.call);
+        let mode = effective_permission_mode(runtime.permissions(), grant);
+        let records_permission = mode.is_some()
+            || intent.call.is_unguarded()
+            || intent.call.is_host()
+            || intent.call.is_git() && intent.call.facts().mutates;
+        self.append(Event::ToolStarted {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, &intent)?,
+            verdict: records_permission.then(|| PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                mode,
+                decision: permission.decision,
+                basis: permission.basis,
+                source: if permission.decision == Decision::Ask {
+                    PermissionSource::UnavailableApproval
+                } else {
+                    permission.basis
+                },
+                approved: false,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+        })
+        .await?;
+        let timeout = self.ledger().command_timeout_limit(&intent.call)?;
+        let observation = if let Some((requested, maximum)) = timeout {
+            not_dispatched(intent, &NotDispatched::TimeoutLimit { requested, maximum })
+        } else {
+            ToolObservation {
+                spill: None,
+                intent,
+                disposition: ToolDisposition::Denied,
+                output: crate::tools::types::UNDISPATCHED_STEP_OUTPUT.into(),
+                attestation: None,
+                cache_update: CacheUpdate::NotApplicable,
+                approval_cause: None,
+                limit_cause: None,
+                enforcement_cause: None,
+            }
+        };
+        self.append(Event::ToolFinished {
+            run_id: self.run_id,
+            agent_run_id: observation.intent.agent_run_id,
+            observation: observation.clone(),
+            checkpoint: None,
+        })
+        .await?;
+        Ok(observation)
+    }
+
+    async fn reserve_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        initial: &EffectIntent,
+    ) -> Result<(), EngineError> {
+        if step.requests.len() > 1 && matches!(grant, Grant::Primary { .. }) {
+            let (_, pre_ms, post_ms) = self.hook_admission(runtime, &initial.call, &initial.call);
+            let action_ms = tool_action_ms(runtime, initial)
+                .saturating_add(pre_ms)
+                .saturating_add(post_ms);
+            self.append(Event::ToolActiveTimeReserved {
+                run_id: self.run_id,
+                agent_run_id: initial.agent_run_id,
+                intent_digest: initial.digest(),
+                active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn execute_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        initial: EffectIntent,
+    ) -> Result<StepEnd, EngineError> {
+        self.reserve_step_call(grant, runtime, step, &initial)
+            .await?;
+        let source_call = initial.call.clone();
+        let narrowable = matches!(grant, Grant::Primary { .. })
+            && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
+        let observed = Box::pin(self.dispatch_intent(grant, runtime, initial, narrowable)).await?;
+        self.complete_step_call(grant, runtime, step, source_call, observed)
+            .await
+    }
+
+    async fn complete_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        source_call: ToolCall,
+        mut observed: IntentResult,
+    ) -> Result<StepEnd, EngineError> {
+        let mut narrowings = 0;
+        let source_index = step.observations.len();
+        loop {
+            let (observation, narrowed) = match observed {
                 Ok(observed) => observed,
                 Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
-            if observation.stops_run() || self.controls.cancellation.is_cancelled() {
-                return Ok(StepEnd::Stopped(Self::observation_stop(
-                    &observation,
-                    self.controls.cancellation.is_cancelled(),
-                )));
-            }
-            let changeset = if command
-                && observation.attestation.is_some()
-                && matches!(
-                    observation.disposition,
-                    ToolDisposition::Succeeded | ToolDisposition::Failed
-                ) {
-                match serde_json::from_str::<CommandResult>(&observation.output) {
-                    Ok(result) if result.valid() => Some(result.changeset),
-                    Err(_) if observation.disposition == ToolDisposition::Failed => None,
-                    _ => return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult)),
-                }
-            } else {
-                None
+            let source_intent_digest = observation.intent.digest();
+            let changeset = match command_changeset(&observation) {
+                Ok(changeset) => changeset,
+                Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
+            let stop = (observation.stops_run()
+                || step.requests.len() > 1 && observation.disposition == ToolDisposition::Limit
+                || self.controls.cancellation.is_cancelled())
+            .then(|| {
+                Self::observation_stop(&observation, self.controls.cancellation.is_cancelled())
+            });
             step.observations.push(observation);
+            if let Some(cause) = stop {
+                return Ok(StepEnd::Stopped(cause));
+            }
             if let Some(narrowed) = narrowed {
+                step.narrowed_observations
+                    .insert(step.observations.len() - 1);
                 narrowings += 1;
-                call = narrowed;
+                observed = self
+                    .replacement_observation(grant, runtime, step, narrowed, &source_call)
+                    .await?;
                 continue;
             }
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
                 break;
             };
-            if self.controls.cancellation.is_cancelled() {
-                return Ok(StepEnd::Stopped(StopCause::Cancelled));
+            if let StepEnd::Stopped(cause) = self.integration_end(grant, runtime, step)? {
+                return Ok(StepEnd::Stopped(cause));
             }
-            if grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes() {
-                return Ok(StepEnd::Stopped(StopCause::ContextFull));
-            }
-            call = ToolCall::ApplyChangeset {
+            let call = ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
                     source_intent_digest,
                     changeset,
@@ -324,14 +654,67 @@ impl RunLoop<'_> {
             if !call.valid() {
                 return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult));
             }
+            observed = self
+                .replacement_observation(grant, runtime, step, call, &source_call)
+                .await?;
         }
+        self.post_step_call(grant, runtime, step, source_index + narrowings)
+            .await
+    }
+
+    async fn replacement_observation(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        source: &ToolCall,
+    ) -> Result<IntentResult, EngineError> {
+        let intent = match self
+            .prepare_step_intent(grant, runtime, step, call, source)
+            .await?
+        {
+            Ok(intent) => intent,
+            Err(cause) => return Ok(Err(cause)),
+        };
+        let narrowable = matches!(grant, Grant::Primary { .. })
+            && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
+        self.run_intent(grant, runtime, intent, source, narrowable)
+            .await
+    }
+
+    fn integration_end(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+    ) -> Result<StepEnd, EngineError> {
+        Ok(if self.controls.cancellation.is_cancelled() {
+            StepEnd::Stopped(StopCause::Cancelled)
+        } else if grant.context()?.reserved_len(step, &[]) > runtime.context_limit_bytes() {
+            StepEnd::Stopped(StopCause::ContextFull)
+        } else {
+            StepEnd::Continue
+        })
+    }
+
+    async fn post_step_call(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &mut ToolStep,
+        index: usize,
+    ) -> Result<StepEnd, EngineError> {
         // The hooks see the published tree: a Command's changeset is integrated first.
         if let Some(config) = runtime.permissions()
-            && let Some(source) = step.observations.get(narrowings)
+            && let Some(source) = step.observations.get(index)
             && source.disposition == ToolDisposition::Succeeded
             && !source.intent.call.is_internal()
-            && step.observations[narrowings + 1..]
+            && step.observations[index + 1..]
                 .iter()
+                .take_while(|integration| matches!(&integration.intent.call,
+                    ToolCall::ApplyChangeset { source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. } }
+                    if *source_intent_digest == source.intent.digest()))
                 .all(|integration| integration.disposition == ToolDisposition::Succeeded)
         {
             let post =
@@ -339,7 +722,7 @@ impl RunLoop<'_> {
                     .await?;
             match post.stop {
                 HookStop::None if !post.feedback.is_empty() => {
-                    step.hook_feedback.insert(narrowings, post.feedback);
+                    step.hook_feedback.insert(index, post.feedback);
                 }
                 HookStop::None => {}
                 HookStop::Uncertain => return Ok(StepEnd::Stopped(StopCause::Uncertain)),
@@ -349,13 +732,6 @@ impl RunLoop<'_> {
                 }
                 HookStop::ActiveTime => return Ok(StepEnd::Stopped(StopCause::ActiveTime)),
             }
-        }
-        grant.context_mut()?.steps.push(step);
-        if self.hook_requested_stop()? {
-            return Ok(StepEnd::Stopped(StopCause::HookStop));
-        }
-        if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
-            return Ok(StepEnd::Stopped(StopCause::ContextFull));
         }
         Ok(StepEnd::Continue)
     }
@@ -384,24 +760,48 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         permission: Permission,
         narrowable: bool,
-    ) -> Result<Admission<Verdict>, EngineError> {
+        interrupted: Option<&RunCancellation>,
+    ) -> Result<Result<Admission<Verdict>, PendingToolRefusal>, EngineError> {
         let phase = self
-            .hook_gate(grant, runtime, intent, permission, narrowable)
+            .hook_gate(grant, runtime, intent, permission, narrowable, interrupted)
             .await?;
         let facts = self.dispatch_facts(grant, runtime, &phase).await?;
         let (approval, save) = match self
-            .dispatch_approval(grant, runtime, &phase, &facts)
+            .dispatch_approval(grant, runtime, &phase, &facts, interrupted)
             .await?
         {
             Admission::Reserved(approval) => approval,
-            Admission::Exhausted => return Ok(Admission::Exhausted),
+            Admission::Exhausted => (
+                Some(Resolution {
+                    approved: false,
+                    source: PermissionSource::UnavailableApproval,
+                    active_time_exhausted: true,
+                    save: None,
+                    withdrawal: None,
+                }),
+                None,
+            ),
         };
-        let decided = self.dispatch_decision(grant, &facts, approval);
-        let resolution = self.dispatch_verdict(&phase, decided, save)?;
-        self.record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
-            .await?;
+        let decided = self.dispatch_decision(
+            grant,
+            &facts,
+            approval,
+            interrupted.is_some_and(RunCancellation::is_cancelled),
+        );
+        let mut resolution = self.dispatch_verdict(&phase, decided, save)?;
+        if let Err(cause) = self
+            .record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
+            .await?
+        {
+            if let Verdict::Dispatch { queue_pause, .. } = &mut resolution.verdict
+                && let Some(pause) = queue_pause.take()
+            {
+                self.settle_active_pause(pause, None)?;
+            }
+            return Ok(Err(cause));
+        }
         self.save_remembered_rule(runtime, phase.site, resolution.verdict, resolution.save)
-            .map(Admission::Reserved)
+            .map(|verdict| Ok(Admission::Reserved(verdict)))
     }
 
     async fn hook_gate(
@@ -411,6 +811,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         permission: Permission,
         narrowable: bool,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<BeforeDispatch, EngineError> {
         let config = runtime.permissions();
         let site = grant.site();
@@ -437,8 +838,15 @@ impl RunLoop<'_> {
                     && goal_allows =>
             {
                 // Boxed like other Tool futures to avoid inflating each agent step.
-                Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent, narrowable))
-                    .await?
+                Box::pin(self.pre_tool_use_hooks(
+                    grant,
+                    runtime,
+                    config,
+                    &intent,
+                    narrowable,
+                    interrupted,
+                ))
+                .await?
             }
             _ => HookFold::none(),
         };
@@ -465,7 +873,7 @@ impl RunLoop<'_> {
     ) -> Result<DispatchFacts<'a>, EngineError> {
         let intent = &phase.intent;
         let typed_host_read = phase.site == DispatchSite::Primary
-            && matches!(intent.call, ToolCall::GhPrList { .. })
+            && intent.call.is_host_pr_read()
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::TypedPrefixRule;
         let host_prefix_allow = phase.site == DispatchSite::Primary
@@ -514,6 +922,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         phase: &BeforeDispatch,
         facts: &DispatchFacts<'_>,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<Admission<(Option<Resolution>, Option<RuleSave>)>, EngineError> {
         let config = runtime.permissions();
         let remember_prefix = remember_candidate(
@@ -523,7 +932,10 @@ impl RunLoop<'_> {
             &phase.hooks,
             &phase.intent.call,
         );
-        let approval = match facts.ask() {
+        let approval = match facts
+            .ask()
+            .filter(|_| !interrupted.is_some_and(RunCancellation::is_cancelled))
+        {
             Some(mode) => Box::pin(self.ask(
                 grant,
                 &phase.intent,
@@ -533,6 +945,7 @@ impl RunLoop<'_> {
                     allow_auto_edits: phase.allow_auto_edits
                         && phase.hooks.restriction != Some(Decision::Ask),
                     remember_prefix,
+                    interrupted: interrupted.cloned(),
                 },
             ))
             .await?
@@ -557,11 +970,13 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         facts: &DispatchFacts<'a>,
         approval: Option<Resolution>,
+        interrupted: bool,
     ) -> dispatch::DispatchDecision<'a> {
         decide_dispatch(
             facts,
             &AfterAsk {
                 approval,
+                interrupted,
                 paused: self.pause_requested(),
                 can_start_provider_call: self.ledger().can_start_provider_call(),
                 cancelled: self.controls.cancellation.is_cancelled(),
@@ -635,19 +1050,16 @@ impl RunLoop<'_> {
         phase: &BeforeDispatch,
         facts: &DispatchFacts<'_>,
         resolution: &DispatchResolution,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
         let unguarded = phase.intent.call.is_unguarded();
         let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
-        let primary_host_read = matches!(grant, Grant::Primary { .. })
-            && matches!(phase.intent.call, ToolCall::GhPrList { .. });
+        let primary_host_read =
+            matches!(grant, Grant::Primary { .. }) && phase.intent.call.is_host_pr_read();
         let mode = effective_permission_mode(runtime.permissions(), grant);
-        if mode.is_none()
-            && !unguarded
-            && !primary_host_read
-            && !(matches!(grant, Grant::Primary { .. }) && git_write)
-        {
-            return Ok(());
-        }
+        let records_permission = mode.is_some()
+            || unguarded
+            || primary_host_read
+            || matches!(grant, Grant::Primary { .. }) && git_write;
         let approved = matches!(resolution.verdict, Verdict::Dispatch { .. });
         // An approving review that did not lead to dispatch is not an AI approval.
         let source = if !approved && resolution.source == PermissionSource::AiReview {
@@ -655,25 +1067,36 @@ impl RunLoop<'_> {
         } else {
             resolution.source
         };
-        self.append(Event::ToolPermissionDecided {
+        let verdict = records_permission.then(|| PermissionVerdict {
+            host: phase
+                .host_permission
+                .verdict(approved, unguarded, resolution.save),
+            intent_digest: phase.intent.digest(),
+            decision: resolution.decision,
+            mode,
+            basis: facts.permission.basis,
+            source,
+            approved,
+            hook_restriction: phase.hooks.restriction,
+            hooks: phase.hooks.count,
+            narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
+        });
+        let mut event = Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: phase.intent.agent_run_id,
-            verdict: PermissionVerdict {
-                host: phase
-                    .host_permission
-                    .verdict(approved, unguarded, resolution.save),
-                intent_digest: phase.intent.digest(),
-                decision: resolution.decision,
-                mode,
-                basis: facts.permission.basis,
-                source,
-                approved,
-                hook_restriction: phase.hooks.restriction,
-                hooks: phase.hooks.count,
-                narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
-            },
-        })
-        .await
+            intent: phase.intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, &phase.intent)?,
+            verdict: verdict.clone(),
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        if let Err(cause) = self
+            .ledger()
+            .view(|view| crate::session::validate_tool_started(view, &event))?
+        {
+            return Ok(Err(PendingToolRefusal::new(&phase.intent, cause, verdict)));
+        }
+        self.append(event).await?;
+        Ok(Ok(()))
     }
 
     async fn dispatch_primary(
@@ -732,11 +1155,11 @@ impl RunLoop<'_> {
         };
         let runtime = &runtime;
         let (observation, segment, exhausted, checkpoint) =
-            if intent.call.facts().site == crate::tools::catalog::Site::Guard {
-                let Some(queue_pause) = queue_pause else {
-                    return Err(EngineError::CoordinatorFailed);
-                };
-                Box::pin(self.dispatch_guard(runtime, intent, queue_pause)).await?
+            if matches!(intent.call.facts().site, crate::tools::catalog::Site::Guard)
+                || intent.call.facts().mutates
+                    && intent.call.facts().site == crate::tools::catalog::Site::InProcess
+            {
+                Box::pin(self.dispatch_effect(runtime, intent, queue_pause)).await?
             } else {
                 match self.reserve_active_segment(
                     tool_action_bound(runtime, &intent),
@@ -769,11 +1192,11 @@ impl RunLoop<'_> {
         })
     }
 
-    async fn dispatch_guard(
+    async fn dispatch_effect(
         &self,
         runtime: &ToolRuntime,
         intent: EffectIntent,
-        queue_pause: ActivePause,
+        queue_pause: Option<ActivePause>,
     ) -> Result<
         (
             ToolObservation,
@@ -783,7 +1206,7 @@ impl RunLoop<'_> {
         ),
         EngineError,
     > {
-        let mut queue_pause = Some(queue_pause);
+        let mut queue_pause = queue_pause;
         let mut active_time_exhausted = false;
         let (active_sender, mut active_receiver) =
             tokio::sync::mpsc::channel::<ActiveActionRequest>(1);
@@ -801,7 +1224,11 @@ impl RunLoop<'_> {
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
             .saturating_add(crate::tools::worker::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);
-        let runtime_ms = intent.limits.runtime_ms;
+        let runtime_ms = if intent.call.facts().site == crate::tools::catalog::Site::InProcess {
+            0
+        } else {
+            intent.limits.runtime_ms
+        };
         let actor = intent.agent_run_id;
         let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
         let mut active_segment = None;
@@ -909,15 +1336,8 @@ impl RunLoop<'_> {
         {
             match self.reserve_active_pause()? {
                 Admission::Reserved(pause) => {
-                    let reply = self
-                        .human_reply(
-                            approvals,
-                            intent,
-                            options.unguarded_prompt.clone(),
-                            options.allow_auto_edits,
-                            options.remember_prefix,
-                        )
-                        .await;
+                    let (reply, withdrawal) = self.human_reply(approvals, intent, options).await;
+                    resolution.withdrawal = withdrawal;
                     resolution.source = if reply == ApprovalReply::Unavailable {
                         PermissionSource::UnavailableApproval
                     } else {
@@ -978,7 +1398,9 @@ impl RunLoop<'_> {
             None => {
                 let review = match site {
                     AskSite::Primary(_) => self.review_tool(objective, intent, None).await?,
-                    AskSite::Delegated { active_deadline } => {
+                    AskSite::Delegated {
+                        active_deadline, ..
+                    } => {
                         self.review_tool(objective, intent, active_deadline.as_ref())
                             .await?
                     }
@@ -1014,13 +1436,16 @@ impl RunLoop<'_> {
             }
             AskSite::Delegated {
                 active_deadline: Some(deadline),
+                ..
             } if deadline.reached() => Some(deadline.cause),
             AskSite::Primary(_)
             | AskSite::Delegated {
                 active_deadline: None,
+                ..
             }
             | AskSite::Delegated {
                 active_deadline: Some(_),
+                ..
             } => None,
         }
     }
@@ -1030,15 +1455,22 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         deadline: Option<&crate::engine::ledger::ActiveDeadline>,
         approvals: &crate::tools::ToolApprovals,
+        interrupted: Option<&RunCancellation>,
     ) -> Result<(ApprovalReply, Option<ApprovalWithdrawal>), EngineError> {
         use crate::tools::ApprovalWaitReply;
 
         let mut cancellation = self.controls.cancellation.clone();
         let activity_started = self.ledger().active_elapsed();
         let wall_started = Instant::now();
-        let mut pending = approvals.begin_local(intent, false, None).await;
+        let mut pending = tokio::select! {
+            biased;
+            () = ask::interrupted(interrupted) => return Ok((ApprovalReply::Unavailable, None)),
+            () = cancellation.cancelled() => return Ok((ApprovalReply::Unavailable, None)),
+            pending = approvals.begin_local(intent, false, None) => pending,
+        };
         let (reply, interrupted) = tokio::select! {
             biased;
+            () = ask::interrupted(interrupted) => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = cancellation.cancelled() => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = self.approval_paused() => (ApprovalWaitReply::Replied(ApprovalReply::Unavailable), true),
             () = async {
@@ -1159,197 +1591,6 @@ mod tests {
                 },
                 "review resolution row {index}"
             );
-        }
-    }
-
-    #[test]
-    fn agent_definition_modes_never_resolve_parent_asks_and_dont_ask_denies_them() {
-        use crate::tools::permissions::PermissionMode;
-        let read = ToolCall::Read {
-            path: "file".into(),
-            offset: None,
-            limit: Some(1),
-        };
-        let mut definition = crate::tools::definitions::AgentDefinition {
-            version: 1,
-            name: "reader".into(),
-            description: "Read".into(),
-            tools: None,
-            disallowed_tools: Vec::new(),
-            model: None,
-            permission_mode: None,
-            max_turns: crate::session::MAX_CHILD_TURNS,
-            isolation: None,
-            background: false,
-            body: String::new(),
-        };
-        for mode in [
-            PermissionMode::Default,
-            PermissionMode::AcceptEdits,
-            PermissionMode::Plan,
-            PermissionMode::Auto,
-            PermissionMode::DontAsk,
-        ] {
-            definition.permission_mode = Some(mode);
-            for decision in [Decision::Allow, Decision::Ask, Decision::Deny] {
-                let permission = Permission {
-                    decision,
-                    basis: PermissionSource::Rule,
-                    approval: (decision == Decision::Ask).then_some(ApprovalMode::Request),
-                }
-                .narrow_definition(&definition, &read);
-                let expected = if mode == PermissionMode::DontAsk && decision == Decision::Ask {
-                    Decision::Deny
-                } else {
-                    decision
-                };
-                assert_eq!(permission.decision, expected);
-                assert_eq!(
-                    permission.approval,
-                    (expected == Decision::Ask).then_some(ApprovalMode::Request)
-                );
-            }
-        }
-        definition.permission_mode = Some(PermissionMode::Auto);
-        let catalog = ToolCall::McpList {
-            server: "server".into(),
-        };
-        let restriction = Permission {
-            decision: Decision::Allow,
-            basis: PermissionSource::Rule,
-            approval: None,
-        }
-        .narrow_definition(&definition, &catalog);
-        assert_eq!(restriction.decision, Decision::Ask);
-        assert_eq!(restriction.basis, PermissionSource::Mode);
-        assert_eq!(restriction.approval, Some(ApprovalMode::Auto));
-    }
-
-    #[tokio::test]
-    async fn cancellation_refuses_buffered_and_late_active_window_requests() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        let permit = sender
-            .clone()
-            .reserve_owned()
-            .await
-            .expect("reserve a slot");
-        let (reply, receipt) = tokio::sync::oneshot::channel();
-        let execution = async move {
-            let _ = receipt.await;
-            "settled"
-        };
-        tokio::pin!(execution);
-        let late = tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            permit.send(ActiveActionRequest {
-                admitted_at: Instant::now(),
-                reply,
-            });
-        });
-        let settled = tokio::time::timeout(
-            Duration::from_secs(5),
-            settle_cancelled(execution.as_mut(), &mut receiver),
-        )
-        .await
-        .expect("the Guard must not wait for a reply nobody sends");
-        assert_eq!(settled, "settled");
-        late.await.expect("late sender");
-        let (again, _) = tokio::sync::oneshot::channel();
-        assert!(
-            sender
-                .send(ActiveActionRequest {
-                    admitted_at: Instant::now(),
-                    reply: again,
-                })
-                .await
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
-        let step = include_str!("step.rs");
-        let ask = include_str!("step/ask.rs");
-        let tools = include_str!("../../tools.rs");
-        let guard = include_str!("../../tools/guard.rs");
-        for (source, start, end) in [
-            (ask, "    pub(super) async fn human_reply(", "\n    }\n}"),
-            (ask, "    async fn resolve_ask(", "\n    }\n}"),
-            (
-                step,
-                "    async fn dispatch_primary(",
-                "    async fn dispatch_guard(",
-            ),
-            (tools, "    async fn run_unguarded(", "    fn pinned_root("),
-            (tools, "    fn pinned_root(", "    async fn run_in_process("),
-            (guard, "fn validate_task(", "fn restore_cache("),
-        ] {
-            let body = source
-                .split_once(start)
-                .unwrap()
-                .1
-                .split_once(end)
-                .unwrap()
-                .0;
-            for clock in ["now_ms(", "SystemTime", "expires_at_ms"] {
-                assert!(!body.contains(clock), "{start} reintroduced {clock}");
-            }
-        }
-    }
-
-    #[test]
-    fn typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review() {
-        let commit = ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec!["src/lib.rs".into()],
-            staged: false,
-        };
-        let typed = allow(PermissionSource::TypedPrefixRule);
-        for (mode, asks) in [
-            (ApprovalMode::Request, false),
-            (ApprovalMode::AutoEdits, false),
-            (ApprovalMode::Auto, true),
-        ] {
-            let narrowed = typed.narrow_terminal(Some(mode), &commit);
-            assert_eq!(narrowed.decision == Decision::Ask, asks, "{mode:?}");
-            if asks {
-                assert_eq!(narrowed.approval, Some(ApprovalMode::Auto));
-                assert_eq!(narrowed.basis, PermissionSource::Mode);
-            } else {
-                assert_eq!(narrowed.basis, PermissionSource::TypedPrefixRule);
-            }
-        }
-        let ordinary =
-            allow(PermissionSource::Rule).narrow_terminal(Some(ApprovalMode::Request), &commit);
-        assert_eq!(ordinary.decision, Decision::Ask);
-        let ask = Permission {
-            decision: Decision::Ask,
-            basis: PermissionSource::TypedPrefixRule,
-            approval: Some(ApprovalMode::Request),
-        }
-        .narrow_terminal(Some(ApprovalMode::AutoEdits), &commit);
-        assert_eq!(
-            (ask.decision, ask.approval),
-            (Decision::Ask, Some(ApprovalMode::Request))
-        );
-        let deny = deny(PermissionSource::TypedPrefixRule)
-            .narrow_terminal(Some(ApprovalMode::Request), &commit);
-        assert_eq!(deny.decision, Decision::Deny);
-    }
-
-    fn allow(basis: PermissionSource) -> Permission {
-        Permission {
-            decision: Decision::Allow,
-            basis,
-            approval: None,
-        }
-    }
-
-    fn deny(basis: PermissionSource) -> Permission {
-        Permission {
-            decision: Decision::Deny,
-            basis,
-            approval: None,
         }
     }
 }

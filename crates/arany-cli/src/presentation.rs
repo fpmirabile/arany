@@ -28,7 +28,8 @@ pub(crate) use model::{
 #[cfg(test)]
 pub(crate) use tool_rows::tool_summary;
 pub use tool_rows::{
-    ToolApprovalChoice, tool_approval_choices, tool_approval_lines, unguarded_approval_lines,
+    ToolApprovalChoice, ToolApprovalPrompt, tool_approval_choices, tool_approval_lines,
+    unguarded_approval_lines,
 };
 pub(crate) use tool_rows::{
     plain_tool_summary, settled_tool_groups, tool_detail_parts, tool_detail_text, tool_groups,
@@ -289,8 +290,8 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
 
 pub(crate) const RUNTIME_PROFILE_LINES: [&str; 4] = [
     "Optional runtime profiles (read only)",
-    "Check a toolchain to let commands use that exact version; its bin joins PATH. Check a cache to let commands read it. At most one version per runtime. Nothing is selected until you check it, and checking switches the choice to Trust.",
-    "For offline Cargo tests, select Rust and each required Cargo archive, source and index cache separately; macOS also needs its compiler and SDK. Build requests use one compilation job. Missing dependencies fail without downloading or expanding access.",
+    "Newest installed runtimes and their caches are proposed unless an exact version is saved. Review the paths and uncheck any profile to narrow access. Only Trust saves these exact selections; runtime bins join PATH.",
+    "For offline Cargo tests, review Rust and the proposed Cargo archive, source and index caches; macOS also proposes its compiler and newest SDK. Build requests use one compilation job. Missing dependencies fail without downloading or expanding access.",
     "Caches may hold private package data or credential URLs; a command can print them into bounded output that is journaled and sent to the Provider. Package-manager configuration and credential files stay excluded.",
 ];
 
@@ -412,7 +413,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
-            let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
+            let tool = run.stopping_tool().or_else(|| run.tools.last());
             if let Some(reason) = run.failure.and_then(run_failure_notice) {
                 let last_refusal = run
                     .agents
@@ -421,9 +422,19 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     .and_then(|agent| agent.provider_calls.last())
                     .and_then(|call| call.refusal.as_ref())
                     .map(|refusal| refusal_notice(refusal.cause));
-                let detail = match (run.failure, last_refusal) {
-                    (Some(arany::RunFailure::ProposalRefused), Some(cause)) => cause.to_owned(),
-                    (Some(arany::RunFailure::RefusalLimit), Some(cause)) => {
+                let preflight = run
+                    .agents
+                    .iter()
+                    .find(|agent| agent.role == arany::AgentRole::Primary)
+                    .and_then(|agent| agent.tool_refusal.as_ref());
+                let detail = match (run.failure, preflight, last_refusal) {
+                    (Some(arany::RunFailure::ProposalRefused), Some(record), _) => {
+                        format!("{} The refused action was not dispatched.", record.refusal)
+                    }
+                    (Some(arany::RunFailure::ProposalRefused), None, Some(cause)) => {
+                        cause.to_owned()
+                    }
+                    (Some(arany::RunFailure::RefusalLimit), _, Some(cause)) => {
                         format!("{reason} {cause}")
                     }
                     _ => reason.to_owned(),
@@ -438,25 +449,34 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 .filter(|agent| agent.status == AgentStatus::Failed)
                 .filter_map(|agent| agent.provider_calls.last())
                 .filter(|call| call.phase != arany::AgentPhase::ToolReview)
-                .filter(|_| !budget_stop)
                 .find_map(provider_failure_notice);
             if let Some(reason) = reason {
                 return Some(format!(
                     "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
                 ));
             }
-            if let Some(tool) = run.tools.last().filter(|tool| {
+            if let Some(tool) = tool.filter(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == arany::ToolDisposition::Failed
                         && observation.attestation.is_none()
                 })
             }) {
-                if tool.intent.call.site() == arany::Site::InProcess {
+                if tool.intent.call.site() == arany::Site::InProcess
+                    && matches!(
+                        tool.intent.call,
+                        arany::ToolCall::Read { .. }
+                            | arany::ToolCall::Search { .. }
+                            | arany::ToolCall::Skill { .. }
+                    )
+                {
                     return Some("Error: A Workspace read stopped before it started because the admitted Workspace or its intent no longer verified. Nothing was read; earlier completed actions remain. Use /agents to inspect this Run.".into());
+                }
+                if tool.intent.call.site() == arany::Site::InProcess {
+                    return Some("Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run.".into());
                 }
                 return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
             }
-            if run.tools.last().is_some_and(|tool| {
+            if tool.is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == arany::ToolDisposition::Succeeded
                         && observation.cache_update == arany::CacheUpdate::Uncertain
@@ -464,14 +484,12 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             }) {
                 return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
             }
-            if let Some(observation) = run
-                .tools
-                .last()
-                .and_then(|tool| tool.observation.as_ref())
-                .filter(|observation| {
-                    observation.disposition == arany::ToolDisposition::Denied
-                        && observation.attestation.is_none()
-                })
+            if let Some(observation) =
+                tool.and_then(|tool| tool.observation.as_ref())
+                    .filter(|observation| {
+                        observation.disposition == arany::ToolDisposition::Denied
+                            && observation.attestation.is_none()
+                    })
             {
                 let disposition = match observation.approval_cause {
                     Some(arany::ApprovalCause::Cancelled) => "Run cancelled.",
@@ -493,7 +511,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     "{disposition} No further action ran; earlier completed actions remain. {recovery}"
                 ));
             }
-            if let Some(tool) = run.tools.last()
+            if let Some(tool) = tool
+                && tool.started_sequence.is_some()
                 && tool.observation.as_ref().is_none_or(|observation| {
                     matches!(
                         observation.disposition,
@@ -506,14 +525,10 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             if run.primary_tool_limit_reached() {
                 return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
             }
-            Some(format!(
-                "Error: Run failed. {}No answer was committed. Use /agents to inspect this Run.",
-                if budget_stop {
-                    "The Goal budget refused the next action. "
-                } else {
-                    ""
-                }
-            ))
+            Some(
+                "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
+                    .into(),
+            )
         }
         RunStatus::StoppedByHook => Some(match run.hook_stop_reason().flatten() {
             Some(reason) => format!("Run stopped by hook: {}", escape_terminal(reason)),
@@ -521,8 +536,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
         }),
         RunStatus::Cancelled => {
             let notice = match run
-                .tools
-                .last()
+                .stopping_tool()
+                .or_else(|| run.tools.last())
                 .and_then(|tool| tool.observation.as_ref())
                 .and_then(|observation| observation.approval_cause)
             {
@@ -546,9 +561,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
 fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
     use arany::RunFailure;
     Some(match cause {
-        RunFailure::ProviderCall | RunFailure::ToolStopped | RunFailure::BudgetExhausted => {
-            return None;
-        }
+        RunFailure::ProviderCall | RunFailure::ToolStopped => return None,
+        RunFailure::BudgetExhausted => "The Goal budget refused the next action.",
         RunFailure::ProposalRefused => "Arany refused the proposed operation before dispatch.",
         RunFailure::DefinitionInvalid => "An agent definition could not be loaded.",
         RunFailure::PlanAdmission => {
@@ -981,7 +995,7 @@ pub(crate) fn escaped_terminal_width(value: &str) -> usize {
     }
 }
 
-fn escape_json_controls(value: &str) -> String {
+pub fn escape_json_controls(value: &str) -> String {
     let mut safe = String::with_capacity(value.len());
     for character in value.chars() {
         if unsafe_display_character(character) {
@@ -1093,6 +1107,7 @@ mod tests {
             failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
             tool_compaction_covered_count: 0,
             tool_results_cleared_count: 0,
             definitions: Default::default(),
@@ -1559,6 +1574,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
     arany::ToolView {
         checkpoint: None,
         observation: Some(arany::ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: arany::ToolDisposition::Succeeded,
             output: output.into(),
@@ -1570,7 +1586,10 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
         }),
         intent,
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
+        started_sequence: Some(0),
         hooks: Vec::new(),
         hook_sequence: None,
         finished_sequence: Some(1),

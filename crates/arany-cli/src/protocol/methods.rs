@@ -13,7 +13,7 @@ pub const CAPABILITIES: &[&str] = &[
     "interrupt_receipt_v1",
     "approvals_v2",
     "host_command_session_approval_v1",
-    "events_subscribe_v1",
+    "events_subscribe_v2",
     "receipt_get_v1",
     "thread_fork_v1",
     "turn_steer_v1",
@@ -22,6 +22,7 @@ pub const CAPABILITIES: &[&str] = &[
     "thread_unsubscribe_v1",
     "thread_list_v1",
     "thread_rewind_v2",
+    "provisional_display_v1",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -216,6 +217,8 @@ pub struct ClientInfo {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provisional_display: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub host_command_session_approval: bool,
     #[serde(
@@ -778,6 +781,41 @@ pub struct TurnNotification {
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TurnDisplayNotification {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub turn_id: RunId,
+    pub update: DisplayUpdate,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum DisplayUpdate {
+    Preview {
+        preview: Option<DisplayPreview>,
+    },
+    Waiting {
+        #[serde(rename = "intentId")]
+        #[schemars(with = "Option<String>")]
+        intent_id: Option<uuid::Uuid>,
+    },
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisplayPreview {
+    #[schemars(with = "String")]
+    pub agent_run_id: arany::AgentRunId,
+    pub call_index: u32,
+    pub answer: String,
+    pub commentary: Vec<String>,
+    pub commentary_limited: bool,
+    pub tentative: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ItemStartedNotification {
     #[schemars(with = "String")]
     pub thread_id: SessionId,
@@ -820,6 +858,8 @@ pub struct ApprovalParams {
     #[schemars(with = "serde_json::Map<String, Value>")]
     pub intent: Value,
     pub lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_auto_edits: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_decisions: Option<Vec<ApprovalDecision>>,
 }
@@ -835,6 +875,8 @@ pub struct ApprovalResult {
 pub enum ApprovalDecision {
     Accept,
     AcceptForSession,
+    AllowPrefixInFolder,
+    Unavailable,
     Decline,
     Cancel,
 }

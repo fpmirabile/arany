@@ -1529,7 +1529,7 @@ impl Engine {
             provisional_workspace_lock,
         } = admitted;
         let PreparedTurn {
-            tools,
+            mut tools,
             tool_context,
             mut inputs,
             images,
@@ -1555,6 +1555,10 @@ impl Engine {
             .await?;
         }
         let run_id = RunId::new();
+        if let Some(runtime) = &mut tools {
+            let events = self.journal.store().load_session(session_id).await?;
+            runtime.admit_spills(&self.state, run_id, &events);
+        }
         let agent_run_id = AgentRunId::new();
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);

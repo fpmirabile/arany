@@ -7,12 +7,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let call = &site.intent.call;
     let facts = call.facts();
     match facts.family {
-        Family::File if site.handover.is_some() => fs::apply_worker_changeset(
-            site.workspace,
-            site.handover.as_ref().ok_or(ToolError::Configuration)?,
-        ),
         Family::File if super::discovery::possible(call) => discover(site),
-        Family::File => fs::native(site.workspace, call, site.config),
+        Family::File if site.worker_paths.is_some() => {
+            fs::native(site.workspace, call, site.config)
+        }
+        Family::File => Err(ToolError::Configuration),
         Family::Process => process::run(site).await,
         Family::Skill => Err(ToolError::Configuration),
         Family::Mcp => {
@@ -22,6 +21,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                 site.root,
                 site.intent.limits.cache_bytes > 0,
                 site.intent.limits.result_bytes as usize,
+                &site.captured,
             )
             .await
         }
@@ -98,6 +98,9 @@ pub(super) fn outcome(
             ToolDisposition::Failed,
             format!("Search pattern refused: {cause}; nothing was read"),
         ),
+        Err(ToolError::SpillUnavailable) => {
+            (ToolDisposition::Failed, "no spill for this Run".into())
+        }
         Err(ToolError::Conflict) => (
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),
@@ -130,6 +133,10 @@ pub(super) fn outcome(
         Err(ToolError::Path | ToolError::FilesystemDenied | ToolError::NotFound) => (
             ToolDisposition::Denied,
             "File path is unavailable or outside the admitted regular-file boundary".into(),
+        ),
+        Err(ToolError::Cancelled) => (
+            ToolDisposition::Cancelled,
+            "File operation cancelled; nothing in the Workspace changed".into(),
         ),
         Err(ToolError::Uncertain) => (
             ToolDisposition::Uncertain,

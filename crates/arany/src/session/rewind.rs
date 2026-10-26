@@ -565,7 +565,7 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
             continue;
         };
         for t in &run.tools {
-            if super::checkpoint::publication(&t.intent) {
+            if t.started_sequence.is_some() && super::checkpoint::publication(&t.intent) {
                 match &t.observation {
                     None => blockers.push(t.finished_sequence.unwrap_or(started)),
                     Some(o) if o.disposition == ToolDisposition::Uncertain => {

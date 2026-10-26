@@ -1,9 +1,10 @@
 mod controls;
 mod serve_loop;
 
-pub(in crate::cli) use serve_loop::run_configured;
+pub(in crate::cli) use serve_loop::{run_configured, run_embedded};
 
 use super::{
+    embedded,
     items::{self, TurnState, notification},
     threads::{self, Threads},
 };
@@ -21,12 +22,14 @@ use tokio::sync::{mpsc, watch};
 pub(in crate::cli) enum ApprovalChannel {
     #[default]
     Human,
+    Terminal,
     Restricted,
 }
 
 pub(in crate::cli) enum ClientMessage {
     Message(Message),
     Eof,
+    Control(embedded::Control),
 }
 pub(in crate::cli) type ServerMessage = Message;
 
@@ -91,17 +94,50 @@ impl Fault {
 }
 
 struct ActiveTurn {
-    thread_id: SessionId,
+    thread_id: Option<SessionId>,
     result: tokio::task::AbortHandle,
     events: arany::Subscription,
+    display: Option<DisplayFollower>,
     cancel: RunCancellation,
     approvals: Arc<super::approvals::Approvals>,
-    approval_mode: ToolApprovals,
-    steering: RunSteering,
+    approval_mode: Option<ToolApprovals>,
+    steering: Option<RunSteering>,
     pending_start: Option<RequestId>,
     result_done: bool,
     pending_close: Option<RequestId>,
     state: TurnState,
+}
+
+struct DisplayFollower {
+    previews: arany::RunPreview,
+    waiting: arany::RunHints,
+}
+
+impl DisplayFollower {
+    fn new(hints: arany::RunHints) -> Self {
+        Self {
+            previews: hints.previews(),
+            waiting: hints,
+        }
+    }
+
+    async fn next(&mut self) -> (Option<arany::RunId>, DisplayUpdate) {
+        tokio::select! {
+            preview = self.previews.changed() => {
+                let run = preview.as_ref().map(|preview| preview.run_id);
+                let preview = preview.map(|preview| DisplayPreview {
+                    agent_run_id: preview.agent_run_id,
+                    call_index: preview.call_index,
+                    answer: preview.text.answer.clone(),
+                    commentary: preview.text.commentary.clone(),
+                    commentary_limited: preview.text.commentary_limited,
+                    tentative: preview.text.tentative,
+                });
+                (run, DisplayUpdate::Preview { preview })
+            }
+            intent_id = self.waiting.waiting_changed() => (None, DisplayUpdate::Waiting { intent_id }),
+        }
+    }
 }
 
 impl Drop for ActiveTurn {
@@ -113,7 +149,7 @@ impl Drop for ActiveTurn {
 
 #[derive(Clone)]
 struct OutputControl {
-    thread_id: SessionId,
+    thread_id: Option<SessionId>,
     run_id: Option<arany::RunId>,
     pending_completion: bool,
     result: tokio::task::AbortHandle,
@@ -139,14 +175,14 @@ impl OutputControl {
         match request.method.as_str() {
             "turn/interrupt" => {
                 params::<TurnInterruptParams>(request.params.clone()).is_ok_and(|p| {
-                    p.thread_id == self.thread_id
+                    Some(p.thread_id) == self.thread_id
                         && Some(p.turn_id) == self.run_id
                         && !self.pending_completion
                         && !self.result.is_finished()
                 })
             }
             "thread/unsubscribe" => params::<ThreadUnsubscribeParams>(request.params.clone())
-                .is_ok_and(|p| p.thread_id == self.thread_id),
+                .is_ok_and(|p| Some(p.thread_id) == self.thread_id),
             _ => false,
         }
     }
@@ -162,6 +198,7 @@ struct Inbound {
     pending: VecDeque<ClientMessage>,
     stopping: watch::Sender<bool>,
     ended: bool,
+    local: Option<(arany::RunControls, PathBuf)>,
 }
 
 impl Inbound {
@@ -198,7 +235,7 @@ impl Inbound {
                     stopped = true;
                     continue;
                 },
-                _ = stopping.wait_for(|stopping| *stopping), if !stopped => {
+                _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; }, if !stopped => {
                     if let Some(control) = &control { control.cancel(); }
                     stopped = true;
                     continue;
@@ -209,6 +246,10 @@ impl Inbound {
                         if let Some(control) = &control { control.cancel(); }
                         self.stopping.send_replace(true);
                         stopped = true;
+                        continue;
+                    }
+                    Some(ClientMessage::Control(command)) => {
+                        if let Some((local, state)) = &self.local { embedded::dispatch(command, local, state).await; }
                         continue;
                     }
                     Some(ClientMessage::Message(Message::Request(ref request)))
@@ -285,8 +326,9 @@ async fn observe(
     outbound: &mpsc::Sender<Message>,
     opt_out: &[String],
 ) -> Result<(), String> {
+    let thread_id = turn.thread_id.ok_or("Session identity unavailable")?;
     if let Tapped::Committed(envelope) = &tapped {
-        if envelope.session_id != turn.thread_id {
+        if envelope.session_id != thread_id {
             return Ok(());
         }
         if turn.state.pending_completion && matches!(envelope.event, Event::MessageAccepted { .. })
@@ -296,7 +338,7 @@ async fn observe(
         if let Event::MessageAccepted { run_id, .. } = envelope.event
             && turn.state.goal_id.is_none()
         {
-            let view = threads::load_view(state, turn.thread_id)
+            let view = threads::load_view(state, thread_id)
                 .await
                 .map_err(|e| e.message)?;
             turn.state.goal_id = Some(
@@ -308,7 +350,7 @@ async fn observe(
             );
         }
     }
-    let notes = items::project(&tapped, turn.thread_id, &mut turn.state);
+    let notes = items::project(&tapped, thread_id, &mut turn.state);
     if let Tapped::Committed(envelope) = tapped
         && let Event::MessageAccepted { run_id, .. } = envelope.event
         && let Some(id) = turn.pending_start.take()
@@ -342,10 +384,10 @@ pub(super) struct Refused {
 }
 
 impl Refused {
-    fn from_result(result: arany::RunResult) -> Option<Self> {
-        result.continuation_error.map(|error| Self {
+    fn from_result(result: &arany::RunResult) -> Option<Self> {
+        result.continuation_error.as_ref().map(|error| Self {
             run: result.run.run.id,
-            reason: Reason::from(&error),
+            reason: Reason::from(error),
             message: error.to_string(),
         })
     }
@@ -371,7 +413,8 @@ async fn complete(
         Completion::Progress => (false, false, None),
         Completion::Final { settled, refused } => (true, *settled, refused.as_ref()),
     };
-    let view = threads::load_view(state, turn.thread_id)
+    let thread_id = turn.thread_id.ok_or("Session identity unavailable")?;
+    let view = threads::load_view(state, thread_id)
         .await
         .map_err(|e| e.message)?;
     if finalizing && let Some(id) = turn.pending_start.take() {
@@ -455,7 +498,7 @@ async fn complete(
             notification(
                 "turn/completed",
                 TurnNotification {
-                    thread_id: turn.thread_id,
+                    thread_id,
                     turn: summary,
                 },
             ),
@@ -561,12 +604,28 @@ mod tests {
             pending: VecDeque::new(),
             stopping,
             ended: false,
+            local: Some((
+                RunControls {
+                    steering: Some(RunSteering::new()),
+                    ..Default::default()
+                },
+                PathBuf::new(),
+            )),
         };
         let (outbound, mut output) = mpsc::channel(1);
         outbound
             .try_send(response(RequestId::Integer(1), json!({})))
             .unwrap();
         let fill = async {
+            let (reply, paused) = tokio::sync::oneshot::channel();
+            sender
+                .send(ClientMessage::Control(embedded::Control::Pause(reply)))
+                .await
+                .unwrap();
+            assert!(
+                paused.await.unwrap(),
+                "local controls are serviced while output is full"
+            );
             for id in 0..=super::super::INBOUND_CAPACITY {
                 sender
                     .send(ClientMessage::Message(Message::Request(Request {
@@ -656,13 +715,14 @@ mod tests {
         let result = result.await.unwrap();
         let worker = tokio::spawn(async {});
         let mut turn = ActiveTurn {
-            thread_id: session,
+            thread_id: Some(session),
             result: worker.abort_handle(),
             events,
+            display: None,
             cancel,
-            approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
-            approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
-            steering: RunSteering::new(),
+            approvals: Arc::new(super::super::approvals::Approvals::closed()),
+            approval_mode: Some(ToolApprovals::new(arany::ApprovalMode::Request).0),
+            steering: Some(RunSteering::new()),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,
             pending_close: None,
@@ -755,13 +815,14 @@ mod tests {
         .unwrap();
         let worker = tokio::spawn(async {});
         let mut turn = ActiveTurn {
-            thread_id: session,
+            thread_id: Some(session),
             result: worker.abort_handle(),
             events: engine.subscribe(),
+            display: None,
             cancel: RunCancellation::new(),
-            approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
-            approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
-            steering: RunSteering::new(),
+            approvals: Arc::new(super::super::approvals::Approvals::closed()),
+            approval_mode: Some(ToolApprovals::new(arany::ApprovalMode::Request).0),
+            steering: Some(RunSteering::new()),
             pending_start: None,
             result_done: true,
             pending_close: None,

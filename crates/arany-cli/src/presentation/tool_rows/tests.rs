@@ -259,7 +259,11 @@ mod peer_row_tests {
     fn git_write_rows_show_their_receipt_and_approvals_the_exact_action() {
         assert_eq!(
             ToolApprovalChoice::GitPrefix(arany::permissions::TypedGitPrefix::PrList).label(),
-            "Yes, and allow gh pr list from the next Run"
+            "Yes, and allow gh pr list in this folder from the next Run"
+        );
+        assert_eq!(
+            ToolApprovalChoice::GitPrefix(arany::permissions::TypedGitPrefix::PrView).label(),
+            "Yes, and allow gh pr view in this folder from the next Run"
         );
         let oid = "a".repeat(40);
         for (call, output, expected) in [
@@ -398,6 +402,31 @@ mod peer_row_tests {
             ]
         );
         assert!(lines.contains(&"Repository hooks and configuration do not run".to_owned()));
+    }
+
+    #[test]
+    fn host_pr_view_summary_and_approval_preserve_disclosure() {
+        let tool = tool_fixture(
+            ToolCall::GhPrView {
+                repository: "github.com/example/project".into(),
+                number: 17,
+            },
+            "host: pull request inspected.",
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            "⏺ host PR view #17(github.com/example/project)\n  ⎿ host: pull request inspected."
+        );
+        assert_eq!(
+            tool_approval_lines(&tool.intent),
+            [
+                "Proposed action",
+                "host · remote operation · no automatic retry",
+                "Private GitHub PR data may be sent to the current Provider.",
+                "Repository: github.com/example/project",
+                "Pull request: #17",
+            ]
+        );
     }
 
     #[test]
@@ -1094,6 +1123,7 @@ mod enforcement_tests {
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(arany::ToolObservation {
+                spill: None,
                 intent,
                 disposition: arany::ToolDisposition::Denied,
                 output: String::new(),
@@ -1103,7 +1133,10 @@ mod enforcement_tests {
                 enforcement_cause: Some(arany::EnforcementCause::FilesystemDenied),
                 limit_cause: None,
             }),
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             review_call_index: None,
@@ -1271,6 +1304,7 @@ mod unguarded_tests {
         ToolView {
             checkpoint: None,
             observation: Some(ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: (disposition == arany::ToolDisposition::Limit)
                     .then_some(arany::LimitCause::Resource),
@@ -1292,7 +1326,10 @@ mod unguarded_tests {
             }),
             intent,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(0),
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,
@@ -1312,6 +1349,22 @@ mod unguarded_tests {
         assert_eq!(
             tool_summary(&host_tool(ToolDisposition::Denied, false)),
             "⏺ Unguarded command(sh -c exit 0)\n  ⎿ denied"
+        );
+        let mut tool = host_tool(ToolDisposition::Succeeded, true);
+        let reference = "f".repeat(64);
+        let observation = tool.observation.as_mut().unwrap();
+        observation.cache_update = CacheUpdate::Rejected;
+        observation.spill = Some(
+            serde_json::from_value(
+                serde_json::json!({"ref":reference,"bytes":64,"truncated":false}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            format!(
+                "⏺ Unguarded command(sh -c exit 0)\n  ⎿ 0 B · cache not saved (limit) · UNGUARDED\n  Output spill: spill:{reference}; 64 B; truncated: false"
+            )
         );
     }
 
@@ -1335,6 +1388,7 @@ mod unguarded_tests {
             failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
             tool_compaction_covered_count: 0,
             tool_results_cleared_count: 0,
             definitions: Default::default(),
@@ -1369,5 +1423,39 @@ mod unguarded_tests {
             render_answer(&run, "Arany · Answer:"),
             "Arany · Answer (host effects: 1):\n  Done\n"
         );
+    }
+}
+
+#[test]
+fn spill_summary_neutralizes_untrusted_reference_text() {
+    let mut tool = crate::presentation::tool_fixture(
+        arany::ToolCall::Read {
+            path: "file.txt".into(),
+            offset: None,
+            limit: None,
+        },
+        "",
+    );
+    for (bytes, truncated, expected) in [
+        (
+            64,
+            false,
+            r"  Output spill: spill:reference\u{001b}[31m; 64 B; truncated: false",
+        ),
+        (
+            1024,
+            true,
+            r"  Output spill: spill:reference\u{001b}[31m; 1.0 KB; truncated: true",
+        ),
+    ] {
+        tool.observation.as_mut().unwrap().spill = Some(
+            serde_json::from_value(
+                serde_json::json!({"ref":"reference\u{001b}[31m","bytes":bytes,"truncated":truncated}),
+            )
+            .unwrap(),
+        );
+        let summary = tool_summary(&tool);
+        assert_eq!(summary.lines().last().unwrap(), expected);
+        assert!(!summary.contains('\u{001b}'));
     }
 }
