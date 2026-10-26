@@ -168,10 +168,15 @@ fn session_compaction_does_not_reappend_a_covered_run_hint() {
         path: "src/file.txt".into(),
         digest: "b".repeat(64),
     }];
-    let CompactionStatus::Succeeded { summary, .. } = &record.status else {
-        panic!("successful summary fixture");
+    let summary = "Covered Session summary".to_owned();
+    let summary_bytes = summary.len() as u32;
+    record.status = CompactionStatus::Succeeded {
+        summary: summary.clone(),
+        content_digest: crate::validate::digest(summary.as_bytes()),
+        summary_bytes,
+        summary_tokens_estimate: summary_bytes.div_ceil(4),
     };
-    let summary = summary.clone();
+    assert!(record.validate().is_ok());
     view.runs = vec![earlier, covered];
     view.compactions = vec![CompactionView {
         event_sequence: view.last_sequence + 1,
