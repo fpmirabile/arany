@@ -47,6 +47,7 @@
 | <a id="max_ordinary_tool_argument_bytes"></a>[`MAX_ORDINARY_TOOL_ARGUMENT_BYTES`](#max_ordinary_tool_argument_bytes) | 16384 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_command_integration_argument_bytes"></a>[`MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES`](#max_command_integration_argument_bytes) | 65536 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_tool_result_bytes"></a>[`MAX_TOOL_RESULT_BYTES`](#max_tool_result_bytes) | 65536 | bytes | `crates/arany/src/tools/types.rs` |
+| <a id="sweep_time_ms"></a>[`SWEEP_TIME_MS`](#sweep_time_ms) | 30000 | milliseconds | `crates/arany/src/store/state/spill.rs` |
 | <a id="spill_persist_timeout_ms"></a>[`SPILL_PERSIST_TIMEOUT_MS`](#spill_persist_timeout_ms) | 5000 | milliseconds | `crates/arany/src/tools/spill.rs` |
 | <a id="max_spill_writers"></a>[`MAX_SPILL_WRITERS`](#max_spill_writers) | 1 | writers | `crates/arany/src/tools/spill.rs` |
 | <a id="max_spill_result_bytes"></a>[`MAX_SPILL_RESULT_BYTES`](#max_spill_result_bytes) | 8388608 | bytes | `crates/arany/src/tools/spill.rs` |

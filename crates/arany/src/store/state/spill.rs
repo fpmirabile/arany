@@ -198,7 +198,7 @@ fn checked_child(parent: &Dir, child: &Dir) -> Result<(), StoreError> {
     Ok(())
 }
 
-const SWEEP_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const SWEEP_TIME_MS: u64 = 30_000;
 
 pub(in crate::store) fn sweep(
     root: &StateRoot,
@@ -210,7 +210,7 @@ pub(in crate::store) fn sweep(
         Err(error) => return Err(error.into()),
     };
     checked_child(&root.dir, &spill)?;
-    let deadline = std::time::Instant::now() + SWEEP_TIME;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(SWEEP_TIME_MS);
     let mut remaining = crate::store::MAX_LIST_SCAN_EVENTS;
     let mut owner = connection
         .prepare("SELECT session_id FROM events WHERE run_id=?1 AND kind='RunStarted' LIMIT 1")?;
@@ -237,8 +237,23 @@ pub(in crate::store) fn sweep(
         let Ok(_lease) = root.lock_session_read_only(session) else {
             continue;
         };
-        let directory = spill.open_dir_nofollow(&name)?;
-        checked_child(&spill, &directory)?;
+        let directory = match spill.open_dir_nofollow(&name) {
+            Ok(directory) => directory,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) || error.raw_os_error() == Some(nix::libc::ELOOP) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match checked_child(&spill, &directory) {
+            Ok(()) => {}
+            Err(StoreError::StateNotPrivate | StoreError::InvalidStateDirectory) => continue,
+            Err(error) => return Err(error),
+        }
         let Ok(_writer) = writer_lock(&directory) else {
             continue;
         };
@@ -270,7 +285,15 @@ pub(in crate::store) fn sweep(
                 continue;
             };
             if crate::validate::valid_digest(reference) && !kept.contains(reference) {
-                directory.remove_file(name)?;
+                match directory.remove_file(&name) {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            || directory
+                                .symlink_metadata(&name)
+                                .is_ok_and(|metadata| !metadata.is_file()) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
     }
@@ -396,6 +419,16 @@ mod tests {
         let spill = root.path().join("spill");
         let stray_file = RunId::new();
         let stray_link = RunId::new();
+        let unadmitted_run = RunId::new();
+        let unadmitted_directory = spill.join(unadmitted_run.to_string());
+        std::fs::create_dir(&unadmitted_directory).unwrap();
+        std::fs::set_permissions(
+            &unadmitted_directory,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let unadmitted_file = unadmitted_directory.join(format!("{orphan}.txt"));
+        std::fs::write(&unadmitted_file, b"unadmitted output").unwrap();
         std::fs::write(spill.join(stray_file.to_string()), b"not a directory").unwrap();
         symlink(run.to_string(), spill.join(stray_link.to_string())).unwrap();
         let run_directory = spill.join(run.to_string());
@@ -411,7 +444,7 @@ mod tests {
                 "CREATE TABLE events(session_id TEXT, run_id TEXT, kind TEXT, payload TEXT)",
             )
             .unwrap();
-        for run in [run, stray_file, stray_link] {
+        for run in [run, stray_file, stray_link, unadmitted_run] {
             connection
                 .execute(
                     "INSERT INTO events VALUES (?1, ?2, 'RunStarted', '{}')",
@@ -435,6 +468,11 @@ mod tests {
         sweep(&root, &connection).unwrap();
         assert!(access.read(&kept).is_ok());
         assert!(access.read(&orphan).is_err());
+        assert_eq!(
+            std::fs::read(unadmitted_file).unwrap(),
+            b"unadmitted output"
+        );
+        assert!(!unadmitted_directory.join("writer.lock").exists());
         assert!(nested.is_dir());
         assert!(std::fs::symlink_metadata(linked).unwrap().is_symlink());
         assert!(std::fs::symlink_metadata(fifo).is_ok());

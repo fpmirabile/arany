@@ -314,6 +314,12 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/types.rs",
         },
         Limit {
+            name: "SWEEP_TIME_MS",
+            value: crate::store::SWEEP_TIME_MS,
+            unit: "milliseconds",
+            owner: "crates/arany/src/store/state/spill.rs",
+        },
+        Limit {
             name: "SPILL_PERSIST_TIMEOUT_MS",
             value: crate::tools::spill::SPILL_PERSIST_TIMEOUT_MS,
             unit: "milliseconds",
