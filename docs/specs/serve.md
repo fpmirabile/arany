@@ -25,6 +25,8 @@ live approval mode. These typed inputs are internal to the binary; JSON-RPC,
 repository content and child agents cannot construct them or acquire terminal
 approval authority. Provider and Tool admission still fail closed before a Run.
 
+Headless `exec` uses this same connection with its admitted Provider bundle and full Run request, including a request for a new Session. The Engine creates that Session during ordinary admission; the client never creates it ahead of a refusal. Headless startup supplies no human approval channel or provisional display hints, and receives canonical Events and the original typed settlement without the terminal's intermediate wire projections. It retains the [headless host policy](./tools.md#primary-host-commands).
+
 The terminal submits through the Server's turn-start flow. Its controls use
 request/reply messages on the connection's inbound channel, including before
 Run acceptance: cancellation, pause, permission mode, primary and exactly

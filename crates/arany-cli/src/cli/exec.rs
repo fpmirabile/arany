@@ -1,13 +1,14 @@
 use super::provider::select::{ProviderArg, validate_headless_selection};
 pub(in crate::cli) use super::run_outcome::SHUTDOWN_GRACE;
 use super::run_outcome::{StopSignals, StopStep, stop_after_answer, stop_step, stop_text};
+use super::serve::embedded::{self, Connection, Controls, RunAttemptError, RunFailure};
 use super::{CommandOutput, OutputArg};
 use crate::presentation::render_exec;
 use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
-    GoalId, GoalPhase, GoalRequest, GoalStatus, MAX_USER_MESSAGE_BYTES, Provider, RunCancellation,
-    RunControls, RunRequest, RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry,
-    ToolGrant, native_protection_supported,
+    GoalId, GoalPhase, GoalRequest, GoalStatus, MAX_USER_MESSAGE_BYTES, Provider, RunRequest,
+    RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
+    native_protection_supported,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr, sync::Arc};
@@ -353,37 +354,74 @@ async fn submit_and_wait(
     let mut goal = admission.goal;
     apply_saved_limits(&mut goal, goal_budget, resource_settings);
     let resumed_goal = goal.id;
-    let end = run_signalled(
-        &engine,
-        providers,
-        tools,
-        RunRequest {
-            skill,
-            session_id: admission.session_id,
-            title: None,
-            objective,
-            images: Vec::new(),
-            workspace: admission.workspace,
-            launch_directory: std::env::current_dir().ok(),
-            include_paths: args.include_paths,
-            policy: admission.policy,
-            goal,
-        },
-        signals,
-    )
-    .await;
-    engine
-        .close()
-        .await
-        .map_err(|_| "store shutdown failed".to_owned())?;
+    let request = RunRequest {
+        skill,
+        session_id: admission.session_id,
+        title: None,
+        objective,
+        images: Vec::new(),
+        workspace: admission.workspace,
+        launch_directory: std::env::current_dir().ok(),
+        include_paths: args.include_paths,
+        policy: admission.policy,
+        goal,
+    };
+    let signals = signals
+        .map_or_else(StopSignals::install, Ok)
+        .map_err(|_| "signal handling unavailable".to_owned())?;
+    let engine = Arc::new(engine);
+    let (connection, controls) =
+        connect(engine.clone(), state_dir.clone(), providers, request, tools);
+    let end = run_signalled(connection, controls, signals).await;
+    match Arc::try_unwrap(engine) {
+        Ok(engine) => engine
+            .close()
+            .await
+            .map_err(|_| "store shutdown failed".to_owned())?,
+        Err(_) => {
+            return Err(end
+                .err()
+                .unwrap_or_else(|| "Run did not release the Engine".to_owned()));
+        }
+    }
+    let signalled = end?;
     Ok(Submission {
         output,
         state_dir,
         session_id,
         resumed_goal,
         new_session,
-        signalled: end?,
+        signalled,
     })
+}
+
+fn connect(
+    engine: Arc<Engine>,
+    state: PathBuf,
+    providers: AdmittedProviders,
+    request: RunRequest,
+    tools: ToolGrant,
+) -> (Connection, Controls) {
+    let (controls, mut bootstrap) = Controls::new(arany::ApprovalMode::Request, false);
+    bootstrap.controls.approvals = None;
+    bootstrap.controls.hints = None;
+    bootstrap.controls.steering = None;
+    bootstrap.controls.tools = tools;
+    let connection = Connection::start(
+        engine,
+        state,
+        controls.clone(),
+        bootstrap,
+        move |controls, inbox| async move {
+            Ok(embedded::Submission {
+                providers,
+                request,
+                controls,
+                inbox,
+            })
+        },
+    );
+    (connection, controls)
 }
 
 struct ClassifiedSubmission {
@@ -417,10 +455,10 @@ async fn classify_submission(submission: Submission) -> Result<ClassifiedSubmiss
             stopped,
             continuation_error,
         }) => (run, stopped, continuation_error),
-        Err(EngineError::CancelledBeforeStart) if interrupted => {
+        Err(RunAttemptError::InterruptedBeforeRun) if interrupted => {
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
-        Err(EngineError::GoalBudgetExhausted) => {
+        Err(RunAttemptError::Failed(RunFailure::Engine(EngineError::GoalBudgetExhausted))) => {
             if let (Some(session), Some(goal_id)) = (session_id, resumed_goal) {
                 let root = StateRoot::open_existing(&state_dir)
                     .map_err(|_| "state directory unavailable or unsafe")?;
@@ -445,7 +483,11 @@ async fn classify_submission(submission: Submission) -> Result<ClassifiedSubmiss
             }
             return Err(crate::presentation::BUDGET_REFUSAL_UNCOMMITTED.into());
         }
-        Err(error) => return Err(error.to_string()),
+        Err(RunAttemptError::InterruptedBeforeRun) => {
+            return Err(EngineError::CancelledBeforeStart.to_string());
+        }
+        Err(RunAttemptError::Failed(error)) => return Err(error.to_string()),
+        Err(RunAttemptError::Stopped { reason, .. }) => return Err(reason),
     };
     Ok(ClassifiedSubmission {
         output,
@@ -469,6 +511,12 @@ struct CommittedOutcome {
     forced: Option<&'static str>,
     events: Vec<arany::EventEnvelope>,
     view: arany::SessionView,
+}
+
+impl CommittedOutcome {
+    fn budget_stopped(&self) -> bool {
+        self.view.budget_stop_goal(&self.outcome.run).is_some()
+    }
 }
 
 async fn load_committed_outcome(
@@ -553,7 +601,7 @@ fn classify_committed_state(
     )
     .map(|reason| format!("Goal stopped after a committed Run: {reason}"));
     if !run.status.is_outcome() {
-        if view.budget_stop_goal(run).is_some()
+        if committed.budget_stopped()
             && let Some(feedback) = crate::presentation::session_run_feedback(view, run)
         {
             return Err(feedback);
@@ -582,14 +630,7 @@ fn render_committed_outcome(
     );
     let stderr = match committed.output {
         OutputArg::Text => text_receipt(&committed)?,
-        OutputArg::Jsonl
-            if committed
-                .view
-                .budget_stop_goal(&committed.outcome.run)
-                .is_some() =>
-        {
-            jsonl_failure(&committed)
-        }
+        OutputArg::Jsonl if committed.budget_stopped() => jsonl_failure(&committed),
         OutputArg::Jsonl if classification.success => String::new(),
         OutputArg::Jsonl => jsonl_failure(&committed),
     };
@@ -672,7 +713,7 @@ fn text_receipt(committed: &CommittedOutcome) -> Result<String, String> {
         receipt.push_str(&notice);
         receipt.push('\n');
     }
-    if view.budget_stop_goal(run).is_some()
+    if committed.budget_stopped()
         && let Some(feedback) = crate::presentation::session_run_feedback(view, run)
     {
         receipt.push_str(&feedback);
@@ -684,7 +725,7 @@ fn text_receipt(committed: &CommittedOutcome) -> Result<String, String> {
 fn jsonl_failure(committed: &CommittedOutcome) -> String {
     let run = &committed.outcome.run;
     let view = &committed.view;
-    if view.budget_stop_goal(run).is_some() {
+    if committed.budget_stopped() {
         return format!(
             "{}\n",
             crate::presentation::session_run_feedback(view, run).unwrap_or_default()
@@ -743,34 +784,30 @@ fn resume_hint(session_id: SessionId, goal_id: GoalId, preset: Option<&str>) -> 
 }
 
 struct SignalledRun {
-    result: Result<RunResult, EngineError>,
+    result: Result<RunResult, RunAttemptError>,
     interrupted: bool,
     forced: Option<&'static str>,
 }
 
 async fn run_signalled(
-    engine: &Engine,
-    providers: AdmittedProviders,
-    tools: ToolGrant,
-    request: RunRequest,
-    signals: Option<StopSignals>,
+    mut connection: Connection,
+    controls: Controls,
+    mut signals: StopSignals,
 ) -> Result<SignalledRun, String> {
-    let mut signals = signals
-        .map_or_else(StopSignals::install, Ok)
-        .map_err(|_| "signal handling unavailable".to_owned())?;
-    let cancellation = RunCancellation::new();
-    let mut run = engine
-        .submit(
-            providers,
-            request,
-            RunControls {
-                tools,
-                cancellation: cancellation.clone(),
-                ..RunControls::default()
-            },
-        )
-        .map_err(|error| error.to_string())?
-        .result;
+    match wait_signalled(&mut connection, &controls, &mut signals).await {
+        Ok(run) => connection.close().await.map(|()| run),
+        Err(error) => {
+            connection.abort().await;
+            Err(error)
+        }
+    }
+}
+
+async fn wait_signalled(
+    connection: &mut Connection,
+    controls: &Controls,
+    signals: &mut StopSignals,
+) -> Result<SignalledRun, String> {
     let mut interrupted = false;
     let forced = loop {
         tokio::select! {
@@ -778,24 +815,34 @@ async fn run_signalled(
             signal = signals.next() => match stop_step(interrupted, signal) {
                 StopStep::Cancel => {
                     interrupted = true;
-                    cancellation.cancel();
+                    controls.cancel().await?;
                 }
                 StopStep::Force(reason) => {
-                    cancellation.cancel();
+                    controls.cancel().await?;
                     break reason;
                 }
             },
-            result = &mut run => {
-                return Ok(SignalledRun { result, interrupted, forced: None });
+            event = connection.next() => {
+                if let embedded::Event::Finished(result) = event? {
+                    return Ok(SignalledRun { result: *result, interrupted, forced: None });
+                }
             }
         }
     };
-    match tokio::time::timeout(SHUTDOWN_GRACE, &mut run).await {
-        Ok(result) => Ok(SignalledRun {
-            result,
-            interrupted: true,
-            forced: Some(forced),
-        }),
+    match tokio::time::timeout(SHUTDOWN_GRACE, async {
+        loop {
+            if let embedded::Event::Finished(result) = connection.next().await? {
+                return Ok(SignalledRun {
+                    result: *result,
+                    interrupted: true,
+                    forced: Some(forced),
+                });
+            }
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
         Err(_) => Err(format!(
             "{forced}; Run may be interrupted; check Session history"
         )),
@@ -1501,11 +1548,13 @@ mod tests {
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let engine = arany::test_support::engine::open(
-            StateRoot::admit(&state_dir).expect("state"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
+        let engine = Arc::new(
+            arany::test_support::engine::open(
+                StateRoot::admit(&state_dir).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("engine"),
+        );
         let provider = Arc::new(scripted(
             Ok(Answer {
                 text: "first".into(),
@@ -1520,28 +1569,35 @@ mod tests {
             GoalPhase::Implementation,
         );
         goal.finish_after_run = false;
-        let paused = engine
-            .submit(
-                AdmittedProviders::single(provider),
-                RunRequest {
-                    skill: None,
-                    session_id: None,
-                    title: Some("Exhausted".into()),
-                    objective: "Use the only Provider call".into(),
-                    images: Vec::new(),
-                    workspace: workspace.clone(),
-                    launch_directory: None,
-                    include_paths: Vec::new(),
-                    policy: CollaborationPolicy::Single,
-                    goal,
-                },
-                RunControls::default(),
-            )
-            .expect("idle Engine")
+        let paused = embedded::run_with_providers(
+            &engine,
+            AdmittedProviders::single(provider),
+            RunRequest {
+                skill: None,
+                session_id: None,
+                title: Some("Exhausted".into()),
+                objective: "Use the only Provider call".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                launch_directory: None,
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal,
+            },
+            &state_dir,
+            false,
+            None,
+            arany::ApprovalMode::Request,
+        )
+        .await
+        .expect("paused Goal Run")
+        .run;
+        Arc::try_unwrap(engine)
+            .ok()
+            .expect("Engine released")
+            .close()
             .await
-            .expect("paused Goal Run")
-            .run;
-        engine.close().await.expect("engine shutdown");
+            .expect("engine shutdown");
 
         let mut resume = args(state_dir.clone(), workspace.clone(), "unused");
         resume.prompt = None;
@@ -2028,22 +2084,26 @@ mod tests {
 
     #[tokio::test]
     async fn exec_jsonl_equals_the_event_stream() {
+        let _deadline = crate::cli::serve::tests::deadline();
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
-        let observed = Arc::new(Mutex::new(Vec::new()));
         let engine = arany::test_support::engine::open(
             StateRoot::admit(&state_dir).expect("state"),
             EngineConfig::default(),
         )
         .expect("engine");
-        let provider = Arc::new(scripted(
-            Ok(Answer {
-                text: "stream answer".into(),
-            }),
-            &observed,
-        ));
+        let mut provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "stream answer".into(),
+        })])
+        .with_profile("openai", "gpt-5.4");
+        provider.preview = Some(arany::PreviewText {
+            answer: "provisional answer".into(),
+            ..Default::default()
+        });
+        provider.preview_gate = Some(Arc::new(tokio::sync::Notify::new()));
+        let provider = Arc::new(provider);
         let mut stream = engine.subscribe();
         let mut command = args(state_dir.clone(), workspace, "Stream the Run");
         command.output = OutputArg::Jsonl;
@@ -2063,7 +2123,7 @@ mod tests {
             run_on_engine(
                 command,
                 admission,
-                AdmittedProviders::single(provider),
+                AdmittedProviders::single(provider.clone()),
                 engine,
                 None
             ),
@@ -2071,6 +2131,14 @@ mod tests {
         );
         let report = report.expect("JSONL exec");
         assert!(report.success);
+        assert!(report.stderr.is_empty());
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        assert!(provider.responses.lock().expect("responses").is_empty());
+        assert!(
+            !streamed
+                .iter()
+                .any(|envelope| matches!(envelope.event, Event::AssistantDisplayRecorded { .. }))
+        );
         let lines: Vec<serde_json::Value> = report
             .stdout
             .lines()
@@ -2105,6 +2173,152 @@ mod tests {
             ),
             "exec JSONL renders exactly the committed stream"
         );
+        let (expected_input, expected_usage, expected_events) = context_headroom_case(false).await;
+        let (actual_input, actual_usage, actual_events) = context_headroom_case(true).await;
+        assert!(
+            actual_input == expected_input,
+            "headless Provider inputs differ from default controls"
+        );
+        assert_eq!(actual_usage, expected_usage, "headless context reservation");
+        assert_eq!(
+            actual_events, expected_events,
+            "committed headless outcomes"
+        );
+    }
+
+    const CONTEXT_HEADROOM_BYTES: u32 = 1024;
+    const CONTEXT_WINDOW_TOKENS: u32 = 32 * 1024;
+
+    async fn context_headroom_case(
+        server: bool,
+    ) -> (arany::RunInput, arany::ContextUsage, Vec<String>) {
+        use arany::test_support::engine::run_to_end;
+        let temp = tempfile::tempdir().expect("context fixture");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("Workspace");
+        let state = temp.path().join("state");
+        let engine = arany::test_support::engine::open(
+            StateRoot::admit(&state).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("Engine");
+        let prior_answer = "Prior context. ".repeat(1024);
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                ProviderOutcome::Answer(Answer {
+                    text: prior_answer.clone(),
+                }),
+                ProviderOutcome::Answer(Answer {
+                    text: "Bounded answer".into(),
+                }),
+            ])
+            .with_profile("anthropic", "claude-sonnet-5")
+            .with_effort(Effort::Low)
+            .with_context_window(CONTEXT_WINDOW_TOKENS),
+        );
+        let mut input = arany::test_support::scenario::request(&workspace, "Prior question");
+        input.include_paths.clear();
+        input.title = None;
+        let seed = run_to_end(&engine, &provider, input)
+            .await
+            .expect("prior Run");
+        assert_eq!(
+            seed.run.config.as_ref().unwrap().context_window_tokens,
+            Some(CONTEXT_WINDOW_TOKENS),
+            "the headroom fixture must pin an admitted context window"
+        );
+        let budget = seed
+            .run
+            .config
+            .as_ref()
+            .unwrap()
+            .context_usage
+            .as_ref()
+            .unwrap()
+            .budget_bytes as usize;
+        const HISTORY_TURN_FRAMING_BYTES: usize = 64;
+        let history_bytes =
+            seed.run.objective.len() + prior_answer.len() + HISTORY_TURN_FRAMING_BYTES;
+        let objective = "Q".repeat(budget - history_bytes - CONTEXT_HEADROOM_BYTES as usize);
+        let mut command = args(state.clone(), workspace.clone(), &objective);
+        command.provider = Some(ProviderArg::Anthropic);
+        command.model = Some(provider.identity().model.clone());
+        command.effort = provider.identity().effort;
+        command.session_id = Some(seed.session_id.to_string());
+        command.output = OutputArg::Jsonl;
+        drive_context_case(server, command, engine, &provider).await;
+        context_headroom_result(&state, &provider, seed).await
+    }
+
+    async fn drive_context_case(
+        server: bool,
+        command: ExecArgs,
+        engine: Engine,
+        provider: &Arc<ScriptedProvider>,
+    ) {
+        use arany::test_support::engine::run_to_end;
+        let admission = command.admit().expect("context arguments");
+        if server {
+            let output = run_on_engine(
+                command,
+                admission,
+                AdmittedProviders::single(provider.clone()),
+                engine,
+                None,
+            )
+            .await
+            .expect("headless context Run");
+            assert!(output.success);
+            assert!(output.stderr.is_empty());
+        } else {
+            let mut input =
+                arany::test_support::scenario::request(&admission.workspace, &admission.objective);
+            input.session_id = admission.session_id;
+            input.title = None;
+            input.launch_directory = std::env::current_dir().ok();
+            input.include_paths.clear();
+            input.goal.budget = Some(GoalBudget::default());
+            run_to_end(&engine, provider, input)
+                .await
+                .expect("default-controls context Run");
+            engine.close().await.expect("closed Engine");
+        }
+    }
+
+    async fn context_headroom_result(
+        state: &std::path::Path,
+        provider: &ScriptedProvider,
+        seed: arany::RunOutcome,
+    ) -> (arany::RunInput, arany::ContextUsage, Vec<String>) {
+        let (events, view) = arany::test_support::goals::replayed(state, seed.session_id).await;
+        let run = view.runs.last().expect("context Run");
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.assistant_message.as_deref(), Some("Bounded answer"));
+        assert_eq!(view.goals.last().unwrap().status, GoalStatus::Completed);
+        let config = run.config.as_ref().unwrap();
+        assert_eq!(config.history_run_ids, vec![seed.run.id]);
+        assert_eq!(config.excluded_history_runs, 0);
+        let usage = config.context_usage.clone().unwrap();
+        assert_eq!(
+            usage.budget_bytes - usage.used_bytes,
+            CONTEXT_HEADROOM_BYTES
+        );
+        let requests = provider.requests.lock().expect("Provider requests");
+        assert_eq!(requests.len(), 2);
+        assert!(provider.responses.lock().expect("responses").is_empty());
+        assert_eq!(
+            requests[1].input.history,
+            vec![arany::HistoryTurn {
+                user: seed.run.objective,
+                assistant: seed.run.assistant_message.unwrap(),
+            }]
+        );
+        let kinds = events
+            .iter()
+            .filter(|event| event.sequence > seed.run.finished_sequence.unwrap())
+            .map(|event| event.event.kind().to_owned())
+            .collect();
+        (requests[1].input.clone(), usage, kinds)
     }
 
     #[tokio::test]
