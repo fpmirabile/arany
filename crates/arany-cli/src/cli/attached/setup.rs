@@ -5,9 +5,12 @@ mod native;
 mod roster;
 mod routing;
 
-use chatgpt_flow::{ChatGptSetupAccount, chatgpt_setup};
+use chatgpt_flow::{
+    ChatGptSetupAccount, chatgpt_defaults, chatgpt_setup, remove_chatgpt_saved_access,
+    selected_chatgpt_defaults,
+};
 pub(super) use error::SetupError;
-use error::{chatgpt_edit_is_uncertain, chatgpt_keyring_available};
+use error::chatgpt_keyring_available;
 
 use crate::accounts::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
@@ -400,29 +403,6 @@ async fn selected_keyring_slot(defaults: &SessionDefaults) -> Result<Option<Stri
     }
 }
 
-fn selected_chatgpt_defaults() -> Result<SavedDefaults, SetupError> {
-    match chatgpt::selected_account_id() {
-        Ok(id) => Ok(SavedDefaults::Selected(chatgpt_defaults(id))),
-        Err(chatgpt::AuthorizationError::NoSelectedAccount) => Ok(SavedDefaults::Unconfigured),
-        Err(error) => Err(SetupError::recoverable(error)),
-    }
-}
-
-fn chatgpt_defaults(account_id: uuid::Uuid) -> SessionDefaults {
-    SessionDefaults {
-        provider: Some(
-            ProviderKind::ChatGpt
-                .native_name()
-                .expect("native Provider name")
-                .into(),
-        ),
-        model: None,
-        effort: None,
-        account_id: Some(account_id),
-        policy: CollaborationPolicy::default(),
-    }
-}
-
 fn catalog_chatgpt_defaults(
     account_id: uuid::Uuid,
     selected_id: uuid::Uuid,
@@ -544,127 +524,6 @@ async fn remove_saved_access(
         _ => return Err("invalid account removal choice".into()),
     }
     Ok(())
-}
-
-async fn remove_chatgpt_saved_access(
-    terminal: &mut AttachedTerminal,
-    workspace: &Path,
-    journal: &mut SetupJournal,
-) -> Result<(), SetupError> {
-    let (selected, ids, expected_index) = match chatgpt::saved_account_index(workspace) {
-        Ok(accounts) => accounts,
-        Err(chatgpt::AuthorizationError::NoSelectedAccount) => {
-            await_setup_ack(terminal, "ChatGPT account", "No saved account").await?;
-            return Ok(());
-        }
-        Err(error) => return Err(SetupError::recoverable(error)),
-    };
-    let Some(account) =
-        choose_saved_chatgpt_id(terminal, Some(selected), &ids, "Select ChatGPT account").await?
-    else {
-        return Ok(());
-    };
-    if !review_warning(
-        terminal,
-        "Remove ChatGPT access?",
-        &format!("Clear local ChatGPT account {account}. No request is sent to the Provider, and remote access is unchanged."),
-        "Remove local ChatGPT access?",
-    )
-    .await?
-    {
-        return Ok(());
-    }
-    let operation = journal
-        .start(
-            ProviderSetupTargetKind::ChatGptAccount,
-            account.to_string(),
-            None,
-        )
-        .await?;
-    let outcome = match chatgpt::remove_account_locally(
-        workspace.to_owned(),
-        account,
-        expected_index,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let disposition = if chatgpt_edit_is_uncertain(&error) {
-                ProviderSetupDisposition::Uncertain
-            } else {
-                ProviderSetupDisposition::Failed
-            };
-            journal.finish(operation, None, disposition).await?;
-            return Err(SetupError::chatgpt_removal(error));
-        }
-    };
-    journal
-        .finish(
-            operation,
-            outcome.local_cleared.then(|| Sha256::digest([]).into()),
-            if outcome.local_cleared {
-                ProviderSetupDisposition::Applied
-            } else {
-                ProviderSetupDisposition::Uncertain
-            },
-        )
-        .await?;
-    let notice = if outcome.local_cleared {
-        "ChatGPT disconnected locally; remote access remains active"
-    } else {
-        "ChatGPT credential cleanup is uncertain; inspect saved access before retrying"
-    };
-    await_setup_ack(terminal, "ChatGPT account", notice).await?;
-    if !outcome.local_cleared {
-        return Err(SetupError::Presentation(
-            "ChatGPT account cleanup is uncertain; restart setup and inspect saved access before continuing".into(),
-        ));
-    }
-    Ok(())
-}
-
-async fn choose_saved_chatgpt_id(
-    terminal: &mut AttachedTerminal,
-    selected: Option<uuid::Uuid>,
-    ids: &[uuid::Uuid],
-    title: &str,
-) -> Result<Option<uuid::Uuid>, SetupError> {
-    let choices: Vec<_> = ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| {
-            (
-                u8::try_from(index + 1).unwrap_or(u8::MAX),
-                selected.map_or_else(
-                    || id.to_string(),
-                    |selected| chatgpt_account_label(*id, selected),
-                ),
-            )
-        })
-        .collect();
-    let rendered: Vec<_> = choices
-        .iter()
-        .map(|(value, label)| (*value, label.as_str()))
-        .collect();
-    let choice = choose(
-        terminal,
-        1,
-        title,
-        "Account IDs only; no token access",
-        &rendered,
-    )
-    .await?;
-    Ok(choice.and_then(|choice| {
-        choices
-            .iter()
-            .find(|(value, _)| *value == choice)
-            .map(|(index, _)| ids[usize::from(*index - 1)])
-    }))
-}
-
-fn chatgpt_account_label(id: uuid::Uuid, selected: uuid::Uuid) -> String {
-    format!("{id}{}", if id == selected { " · selected" } else { "" })
 }
 
 async fn custom_routes_setup(
@@ -1569,83 +1428,6 @@ async fn read_setup_value_inner(
             )?,
             TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
             _ => {}
-        }
-    }
-}
-
-async fn inspect_chatgpt_account(terminal: &mut AttachedTerminal) -> Result<(), SetupError> {
-    let (selected, accounts) = chatgpt::account_inspections().map_err(SetupError::recoverable)?;
-    if accounts.is_empty() {
-        await_setup_ack(terminal, "ChatGPT account", "No saved account").await?;
-        return Ok(());
-    }
-    let ids = accounts
-        .iter()
-        .map(|account| account.id)
-        .collect::<Vec<_>>();
-    let Some(id) =
-        choose_saved_chatgpt_id(terminal, selected, &ids, "Inspect ChatGPT account").await?
-    else {
-        return Ok(());
-    };
-    let account = accounts
-        .iter()
-        .find(|account| account.id == id)
-        .ok_or("saved ChatGPT account unavailable")?;
-    let backend = match account.storage {
-        AccountStorage::Keyring => "OS password store",
-        AccountStorage::PrivateFile => "private file (not encrypted)",
-    };
-    let access = match account.access {
-        chatgpt::AccountAccess::Connected => "connected; saved metadata only, not checked",
-        chatgpt::AccountAccess::Disconnected => "unavailable; disconnected",
-        chatgpt::AccountAccess::PlanDisabled => "unavailable; plan permission disabled",
-        chatgpt::AccountAccess::RenewalPending => "unavailable; renewal incomplete or uncertain",
-        chatgpt::AccountAccess::SignOutPending => "unavailable; sign-out incomplete or uncertain",
-    };
-    await_setup_ack(terminal, "ChatGPT account details", &format!(
-        "Provider: ChatGPT\nAccount: {}\nBackend: {backend}\nBilling: ChatGPT plan; no API-key billing\nAccess: {access}", account.id,
-    )).await?;
-    Ok(())
-}
-
-async fn select_chatgpt_account(
-    workspace: &Path,
-    selected: uuid::Uuid,
-    target: uuid::Uuid,
-    journal: &mut SetupJournal,
-) -> Result<(), SetupError> {
-    let operation = journal
-        .start(
-            ProviderSetupTargetKind::ChatGptAccount,
-            target.to_string(),
-            None,
-        )
-        .await?;
-    match chatgpt::select_saved_account(workspace.to_path_buf(), selected, target).await {
-        Ok(()) => {
-            journal
-                .finish(
-                    operation,
-                    Some(Sha256::digest(target.as_bytes()).into()),
-                    ProviderSetupDisposition::Applied,
-                )
-                .await
-        }
-        Err(error) => {
-            let uncertain = chatgpt_edit_is_uncertain(&error);
-            let disposition = if uncertain {
-                ProviderSetupDisposition::Uncertain
-            } else {
-                ProviderSetupDisposition::Failed
-            };
-            journal.finish(operation, None, disposition).await?;
-            if uncertain {
-                return Err(SetupError::Presentation(
-                    "ChatGPT account selection is uncertain; restart setup and inspect saved access before continuing".into(),
-                ));
-            }
-            Err(SetupError::recoverable(error))
         }
     }
 }
@@ -2769,17 +2551,6 @@ pub(super) mod tests {
                 .all(|page| page.chars().count() <= SETUP_MESSAGE_PAGE_CHARS)
         );
         assert_eq!(pages.concat(), message.replace('\n', ""));
-    }
-
-    #[test]
-    fn chatgpt_accounts_with_colliding_prefixes_have_distinct_labels() {
-        let first = uuid::Uuid::parse_str("019ad2a1-0000-7000-8000-000000000001").unwrap();
-        let second = uuid::Uuid::parse_str("019ad2a1-0000-7000-8000-000000000002").unwrap();
-        assert_ne!(
-            chatgpt_account_label(first, first),
-            chatgpt_account_label(second, first)
-        );
-        assert!(chatgpt_account_label(second, first).contains(&second.to_string()));
     }
 
     #[test]
