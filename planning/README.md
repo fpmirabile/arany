@@ -49,7 +49,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Architecture homogenization](./architecture-homogenization/README.md) | `In progress`: J1–J2/K1–K2 plus fifteen approved post-refactor families in ≤600-line code/test/spec/architecture PRs; P5 before K1, G5/C2 after J1, terminal after image-hover-preview S2, setup U1a/U2 after provider-setup-ui S3 with U1b–U1o following U2; C1–C3 clone cleanups; final slice deletes the plan |
 | [Image chip hover preview](./image-hover-preview/README.md) | `Ready`; after image attachment chips (#425); S1 Kitty-protocol balloon with any-motion capture, S2 iTerm2 inline images, S3 Sixel gated on `png` dependency approval |
 | [Spec limits generation](./spec-limits-generation/README.md) | `Ready`: S1 generated `limits.md` for Tool bounds, S2 Session/execution/Goal/Provider rows (after K1/K2), S3 spec word-budget and restatement check in CI, S4 `tools.md` native split (after C3) |
 | [Context budgets](./context-budgets/README.md) | `Ready`: S1 compaction summary budget, S2 recent-files list on the compaction record (after J2/K1), S3 output spill file and `spill:` Read (after J1/J2, E8a–E8c, C3; security pass) |
