@@ -1283,10 +1283,17 @@ mod goal_request_tests {
         let mut view = session_with_goal(true);
         view.goals[0].status = arany::GoalStatus::Interrupted;
         let id = view.goals[0].id;
-        assert_eq!(
-            goal_request(&view, GoalStart::Resume, Default::default()),
-            Ok(arany::GoalRequest::resume(id, true))
-        );
+        for build_jobs in [None, Some(2)] {
+            let mut settings = crate::cli::attached::controls::Preferences::default();
+            settings.resources.build_jobs = build_jobs;
+            assert_eq!(
+                goal_request(&view, GoalStart::Resume, settings),
+                Ok(arany::GoalRequest {
+                    resource_settings: settings.resources,
+                    ..arany::GoalRequest::resume(id, true)
+                })
+            );
+        }
         assert_eq!(
             goal_request(&view, GoalStart::Plain, Default::default()),
             Ok(arany::GoalRequest::default())

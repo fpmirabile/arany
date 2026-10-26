@@ -1147,7 +1147,18 @@ pub(super) fn draw_history_rows(
             ));
             spans
         } else {
-            vec![Span::styled(line.text.as_str(), style)]
+            if line.spans.is_empty() {
+                vec![Span::styled(line.text.as_str(), style)]
+            } else {
+                line.spans
+                    .iter()
+                    .cloned()
+                    .map(|span| {
+                        let merged = span.style.patch(style);
+                        span.style(merged)
+                    })
+                    .collect()
+            }
         };
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
@@ -1499,6 +1510,9 @@ pub(super) fn draw_image_preview(frame: &mut Frame, area: Rect, title: &str) {
 }
 
 pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Line<'static> {
+    if !row.spans.is_empty() {
+        return Line::from(row.spans.clone());
+    }
     let quoted = matches!(row.speaker, MessageKind::User | MessageKind::Assignment);
     let marker = if quoted && !row.heading && row.text.is_empty() {
         ""
