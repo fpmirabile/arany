@@ -897,16 +897,22 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                     .iter()
                     .position(|event| matches!(event.event, Event::ToolStarted { .. }))
                     .unwrap();
-                let decided = events
+                let proposed = events
                     .iter()
-                    .position(|event| matches!(event.event, Event::ToolStarted { .. }))
-                    .unwrap();
+                    .position(|event| matches!(event.event, Event::ToolProposed { .. }));
                 let finished = events
                     .iter()
                     .position(|event| matches!(event.event, Event::ToolFinished { .. }))
                     .unwrap();
-                assert_eq!(started, decided, "{case}");
-                assert!(decided < finished, "{case}");
+                if ai || human {
+                    assert!(
+                        proposed.is_some_and(|proposed| proposed < started),
+                        "{case}"
+                    );
+                } else {
+                    assert!(proposed.is_none(), "{case}");
+                }
+                assert!(started < finished, "{case}");
             }
         }
     }
