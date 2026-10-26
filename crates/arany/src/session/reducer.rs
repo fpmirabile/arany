@@ -20,6 +20,8 @@ mod rewind;
 pub(crate) mod rewind_tests;
 mod run;
 mod session;
+#[cfg(test)]
+mod test_support;
 mod tool;
 pub(crate) use tool::{
     validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
