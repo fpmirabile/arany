@@ -1318,6 +1318,58 @@ async fn offline_cargo_helper() {
     )
     .await;
 }
+
+struct SpillJourney {
+    script: arany::test_support::scenario::ScriptedProvider,
+    command: ToolCall,
+}
+
+#[async_trait::async_trait]
+impl Provider for SpillJourney {
+    fn identity(&self) -> &arany::ProviderIdentity {
+        self.script.identity()
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let observations = request
+            .input
+            .tools
+            .as_ref()
+            .map(|tools| tools.observations())
+            .unwrap_or_default();
+        let outcome = match observations.as_slice() {
+            [] if !crate::planned(&request) => arany::test_support::scenario::plan_outcome(
+                proposal_plan_contract(&self.command).ok_or(ProviderError::InvalidOutcome)?,
+            ),
+            [] => crate::tool_outcome(self.command.clone()),
+            [command] => {
+                let spill = command
+                    .spill
+                    .as_ref()
+                    .ok_or(ProviderError::InvalidOutcome)?;
+                crate::tool_outcome(ToolCall::Read {
+                    path: format!("spill:{}", spill.r#ref),
+                    offset: Some(2),
+                    limit: Some(1),
+                })
+            }
+            [_, _] => ProviderOutcome::Answer(Answer {
+                text: "Paged retained output".into(),
+            }),
+            _ => return Err(ProviderError::InvalidOutcome),
+        };
+        self.script.responses.lock().unwrap().push_back(Ok(outcome));
+        self.script.invoke(request).await
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.script.compact(request).await
+    }
+}
+
 struct SpillFixture {
     _temp: tempfile::TempDir,
     workspace: PathBuf,
@@ -1365,6 +1417,150 @@ impl SpillFixture {
 
 const SPILL_JOURNEY_WAIT: Duration = Duration::from_secs(120);
 const SPILL_SETTLE_WAIT: Duration = Duration::from_secs(10);
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux output capture and private spill paging"
+)]
+fn command_spill_pages_private_output_and_survives_reopen() {
+    if !super::super::isolation::enter_account_isolated_test() {
+        return;
+    }
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _deadline = arany::test_support::engine::deadline("spill paging", SPILL_JOURNEY_WAIT);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(spill_read_journey());
+}
+
+async fn spill_read_journey() {
+    let SpillFixture {
+        _temp,
+        workspace,
+        state: state_path,
+        engine,
+        command,
+    } = SpillFixture::new();
+    let provider = Arc::new(SpillJourney {
+        script: arany::test_support::scenario::ScriptedProvider::new(vec![]),
+        command,
+    });
+    let outcome = run_with(
+        &engine,
+        &provider,
+        proposal_request(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let command = outcome.run.tools[0].observation.as_ref().unwrap();
+    let spill = command.spill.as_ref().unwrap();
+    assert!(!spill.truncated);
+    assert!(!command.output.contains("PRIVATE_SPILL_CANARY"));
+    let read = outcome.run.tools[1].observation.as_ref().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&read.output).unwrap()["text"],
+        "2\tPRIVATE_SPILL_CANARY\n"
+    );
+    assert!(matches!(
+        read.attestation,
+        Some(arany::Attestation::InProcess { .. })
+    ));
+    let path = state_path
+        .join("spill")
+        .join(outcome.run.id.to_string())
+        .join(format!("{}.txt", spill.r#ref));
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), spill.bytes);
+    engine.close().await.unwrap();
+    let orphan = path
+        .parent()
+        .unwrap()
+        .join(format!("{}.txt", "f".repeat(64)));
+    private_file(&orphan, b"UNCOMMITTED_SPILL_CANARY");
+    let (events, replay) =
+        arany::test_support::goals::replayed(&state_path, outcome.session_id).await;
+    assert_eq!(replay.runs[0], outcome.run);
+    let text = arany_cli::presentation::render_session(
+        &replay,
+        &events,
+        arany_cli::presentation::Output::Text,
+    );
+    assert!(text.contains(&format!("spill:{}", spill.r#ref)));
+    assert!(
+        events
+            .iter()
+            .all(|event| { !event.event.payload().unwrap().contains("\"capture\"") })
+    );
+    let engine = arany::test_support::engine::open(
+        StateRoot::open_existing(&state_path).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!orphan.exists());
+    assert_spill_session_scope(&engine, &workspace, outcome.session_id, &spill.r#ref).await;
+    engine.close().await.unwrap();
+}
+
+async fn assert_spill_session_scope(
+    engine: &arany::Engine,
+    workspace: &Path,
+    session: arany::SessionId,
+    reference: &str,
+) {
+    for same_session in [true, false] {
+        let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+            crate::tool_outcome(ToolCall::Read {
+                path: format!("spill:{}", reference),
+                offset: Some(2),
+                limit: Some(1),
+            }),
+            ProviderOutcome::Answer(Answer {
+                text: "Read checked".into(),
+            }),
+        ]));
+        let mut request = proposal_request(workspace);
+        request.session_id = same_session.then_some(session);
+        let result = run_with(
+            engine,
+            &provider,
+            request,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let read = result.run.tools[0].observation.as_ref().unwrap();
+        assert_eq!(
+            read.disposition,
+            if same_session {
+                ToolDisposition::Succeeded
+            } else {
+                ToolDisposition::Failed
+            }
+        );
+        if !same_session {
+            assert_eq!(read.output, "no spill for this Run");
+        }
+    }
+}
 
 #[test]
 #[cfg_attr(

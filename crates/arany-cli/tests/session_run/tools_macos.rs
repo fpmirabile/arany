@@ -2500,6 +2500,19 @@ int main(void) {
             let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
             let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
             assert_eq!(result["stdout_total"]["bytes"], 1048591);
+            let spill = observation
+                .spill
+                .as_ref()
+                .expect("macOS retains excerpted output");
+            assert_eq!(spill.bytes, 1048591);
+            assert!(!spill.truncated);
+            let file = state_path
+                .join("spill")
+                .join(replay.runs[0].id.to_string())
+                .join(format!("{}.txt", spill.r#ref));
+            let raw = std::fs::read(file).unwrap();
+            assert_eq!(raw.len() as u64, spill.bytes);
+            assert!(raw.starts_with(b"payload-started"));
             assert!(
                 result["stdout"]
                     .as_str()

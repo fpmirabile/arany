@@ -1409,3 +1409,24 @@ mod unguarded_tests {
         );
     }
 }
+
+#[test]
+fn spill_summary_neutralizes_untrusted_reference_text() {
+    let mut tool = crate::presentation::tool_fixture(
+        arany::ToolCall::Read {
+            path: "file.txt".into(),
+            offset: None,
+            limit: None,
+        },
+        "",
+    );
+    tool.observation.as_mut().unwrap().spill = Some(
+        serde_json::from_value(
+            serde_json::json!({"ref":"reference\u{001b}[31m","bytes":64,"truncated":false}),
+        )
+        .unwrap(),
+    );
+    let summary = tool_summary(&tool);
+    assert!(summary.contains("Output spill: spill:"));
+    assert!(!summary.contains('\u{001b}'));
+}

@@ -31,7 +31,7 @@ Done when a normal engineering day in this repository needs no fallback to anoth
 ### Pursue, in order
 
 1. **Multi-call Tool steps and constant tool list.** Up to four calls per model step with concurrent in-process reads, Anthropic and OpenAI parallel calls, and the constant OpenAI/ChatGPT function list ([plan](./planning/multi-call-steps/README.md)).
-2. **Context budgets.** Compaction summary budget, recent-files list on the compaction record and the approved full-output spill file that `Read` pages ([plan](./planning/context-budgets/README.md)).
+2. **Context budgets.** Remaining output-spill storage-report rows ([plan](./planning/context-budgets/README.md)).
 3. **Tool-step Event folding and lenient `show`.** Permission verdict folded into `ToolStarted`, Engine pre-validation through the reducer, read-only inspection of invalid histories ([plan](./planning/tool-event-folding/README.md)).
 4. **Spec limits generation.** Generated `docs/specs/limits.md` from the owning constants, spec word budgets in CI, `tools.md` native split ([plan](./planning/spec-limits-generation/README.md)).
 5. **Workspace Tools on custom routes (deferred).** Custom routes remain read-only; adding Workspace Tools across custom protocol families is a separate feature ([Provider contract](./docs/specs/provider.md#custom-destinations-and-routing)).

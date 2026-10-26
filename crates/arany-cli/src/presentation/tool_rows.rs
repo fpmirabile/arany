@@ -80,6 +80,18 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         },
     };
     let mut summary = format!("⏺ {}\n  ⎿ {result}", safe_truncate(&operation, 160));
+    if let Some(spill) = tool
+        .observation
+        .as_ref()
+        .and_then(|observation| observation.spill.as_ref())
+    {
+        summary.push_str(&format!(
+            "\n  Output spill: spill:{}; {}; truncated: {}",
+            safe_truncate(&spill.r#ref, 160),
+            format_bytes(spill.bytes),
+            spill.truncated
+        ));
+    }
     if let Some(label) = tool
         .observation
         .as_ref()
