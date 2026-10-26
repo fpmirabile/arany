@@ -4,6 +4,7 @@ use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::thread::{self, CapabilitySet, CapabilitySets};
 use sha2::{Digest, Sha256};
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
@@ -33,12 +34,35 @@ const ENTRY_ARGS: &[&str] = &[
     "--",
 ];
 
+#[derive(Clone, Copy)]
+enum Route {
+    InProcess,
+    AfterUnshare,
+}
+
+impl Route {
+    const ALL: [Self; 2] = [Self::InProcess, Self::AfterUnshare];
+
+    fn parse(flag: &OsStr) -> Option<Self> {
+        Self::ALL.into_iter().find(|route| flag == route.flag())
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Self::InProcess => "--in-process",
+            Self::AfterUnshare => "--after-unshare",
+        }
+    }
+}
+
 pub(super) fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
-        [mode, root, descriptor] if mode == "--in-process" || mode == "--after-unshare" => {
+        [mode, root, descriptor] => {
+            let route =
+                Route::parse(mode).ok_or("run without arguments to compare both entries")?;
             admit_inherited_executable(descriptor)?;
-            let result = entry(mode == "--in-process", Path::new(root));
+            let result = entry(route, Path::new(root));
             if result.is_err() {
                 snapshot("entry failure")?;
             }
@@ -50,7 +74,7 @@ pub(super) fn run() -> Result<()> {
     }
 }
 
-fn admit_inherited_executable(descriptor: &std::ffi::OsStr) -> Result<()> {
+fn admit_inherited_executable(descriptor: &OsStr) -> Result<()> {
     let descriptor: RawFd = descriptor
         .to_str()
         .ok_or("invalid executable descriptor")?
@@ -184,18 +208,18 @@ fn compare_entries() -> Result<()> {
     // A parent procfs executable link is inaccessible after entering a child user namespace.
     let executable = nix::unistd::dup(File::open("/proc/self/exe")?)?;
     let pinned = format!("/proc/self/fd/{}", executable.as_raw_fd());
-    let mut passed = [false; 2];
-    for (index, in_process) in [true, false].into_iter().enumerate() {
-        let mut command = Command::new(if in_process { &pinned } else { LAUNCHER });
-        if !in_process {
-            command.args(ENTRY_ARGS).arg(&pinned);
-        }
+    let mut passed = [false; Route::ALL.len()];
+    for (index, route) in Route::ALL.into_iter().enumerate() {
+        let mut command = match route {
+            Route::InProcess => Command::new(&pinned),
+            Route::AfterUnshare => {
+                let mut command = Command::new(LAUNCHER);
+                command.args(ENTRY_ARGS).arg(&pinned);
+                command
+            }
+        };
         command
-            .arg(if in_process {
-                "--in-process"
-            } else {
-                "--after-unshare"
-            })
+            .arg(route.flag())
             .arg(&mountpoint)
             .arg(executable.as_raw_fd().to_string())
             .current_dir(root.path())
@@ -238,17 +262,20 @@ fn compare_entries() -> Result<()> {
     Ok(())
 }
 
-fn entry(in_process: bool, root: &Path) -> Result<()> {
+fn entry(route: Route, root: &Path) -> Result<()> {
     snapshot("probe entry (after launcher exec when selected)")?;
     executable_identity("/proc/self/exe")?;
     println!("{ENTRY_REACHED}");
-    if in_process {
-        let uid = nix::unistd::getuid();
-        let gid = nix::unistd::getgid();
-        unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
-        fs::write("/proc/self/setgroups", "deny")?;
-        fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
-        fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    match route {
+        Route::InProcess => {
+            let uid = nix::unistd::getuid();
+            let gid = nix::unistd::getgid();
+            unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
+            fs::write("/proc/self/setgroups", "deny")?;
+            fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
+            fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+        }
+        Route::AfterUnshare => {}
     }
     snapshot("before private propagation and mount")?;
     rustix::mount::mount_change(
