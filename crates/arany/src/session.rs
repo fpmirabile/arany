@@ -55,7 +55,8 @@ pub use events::{
     MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
     ProviderCallRecord, ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind,
     RecentFile, ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults,
-    SessionId, ToolIntentRecord, WorkspaceIdentity,
+    SessionId, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason,
+    WorkspaceIdentity,
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
@@ -93,6 +94,7 @@ pub use reducer::{
 pub(crate) use reducer::{
     ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,
     evidence_admitted, private_criterion_evidence, private_failure, validate_editor_request,
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
     verification_passed, wave_settled,
 };
 pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};

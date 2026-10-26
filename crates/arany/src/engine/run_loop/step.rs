@@ -33,7 +33,8 @@ use dispatch::{
     Unguarded, Verdict, decide_dispatch, decide_queue_pause, not_dispatched, undispatched,
 };
 use intent::{
-    active_window, execute_cancellable, settle_cancelled, tool_action_bound, tool_action_ms,
+    PendingToolRefusal, active_window, execute_cancellable, settle_cancelled, tool_action_bound,
+    tool_action_ms,
 };
 use permission::{Permission, RuleSave, effective_permission_mode, remember_candidate};
 use review::ToolReviewDecision;
@@ -331,12 +332,26 @@ impl RunLoop<'_> {
         let mut end = self
             .execute_reads(grant, runtime, step, reads, &mut order)
             .await?;
+        let actor = match grant {
+            Grant::Primary { .. } => self.primary_id,
+            Grant::Researcher { child, .. } => child.agent_run_id,
+        };
+        if self.ledger().view(|view| {
+            view.runs
+                .last()
+                .and_then(|run| run.agents.iter().find(|agent| agent.id == actor))
+                .is_some_and(|agent| agent.tool_refusal.is_some())
+        })? {
+            reads::model_order(step, &order);
+            return Ok(end);
+        }
         for (index, intent) in serial {
             let start = step.observations.len();
             match end {
                 StepEnd::Continue => {
                     end = Box::pin(self.execute_step_call(grant, runtime, step, intent)).await?;
                 }
+                StepEnd::Stopped(StopCause::ToolRefused(_)) => {}
                 StepEnd::Stopped(_) => {
                     let observation = self.finish_undispatched(grant, runtime, intent).await?;
                     step.observations.push(observation);
@@ -361,7 +376,12 @@ impl RunLoop<'_> {
                 .await?
                 .map_err(StopCause::from);
             match sized {
-                Ok(intent) => intents.push(intent),
+                Ok(intent) => {
+                    if let Err(cause) = self.validate_step_intent(runtime, &intent).await? {
+                        return Ok(Err(cause));
+                    }
+                    intents.push(intent);
+                }
                 Err(StopCause::DelegationDeadline) => {
                     let calls: Vec<_> = step
                         .requests
@@ -739,7 +759,7 @@ impl RunLoop<'_> {
         permission: Permission,
         narrowable: bool,
         interrupted: Option<&RunCancellation>,
-    ) -> Result<Admission<Verdict>, EngineError> {
+    ) -> Result<Result<Admission<Verdict>, PendingToolRefusal>, EngineError> {
         let phase = self
             .hook_gate(grant, runtime, intent, permission, narrowable, interrupted)
             .await?;
@@ -766,11 +786,20 @@ impl RunLoop<'_> {
             approval,
             interrupted.is_some_and(RunCancellation::is_cancelled),
         );
-        let resolution = self.dispatch_verdict(&phase, decided, save)?;
-        self.record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
-            .await?;
+        let mut resolution = self.dispatch_verdict(&phase, decided, save)?;
+        if let Err(cause) = self
+            .record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
+            .await?
+        {
+            if let Verdict::Dispatch { queue_pause, .. } = &mut resolution.verdict
+                && let Some(pause) = queue_pause.take()
+            {
+                self.settle_active_pause(pause, None)?;
+            }
+            return Ok(Err(cause));
+        }
         self.save_remembered_rule(runtime, phase.site, resolution.verdict, resolution.save)
-            .map(Admission::Reserved)
+            .map(|verdict| Ok(Admission::Reserved(verdict)))
     }
 
     async fn hook_gate(
@@ -1019,7 +1048,7 @@ impl RunLoop<'_> {
         phase: &BeforeDispatch,
         facts: &DispatchFacts<'_>,
         resolution: &DispatchResolution,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
         let unguarded = phase.intent.call.is_unguarded();
         let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
         let primary_host_read =
@@ -1036,27 +1065,36 @@ impl RunLoop<'_> {
         } else {
             resolution.source
         };
-        self.append(Event::ToolStarted {
+        let verdict = records_permission.then(|| PermissionVerdict {
+            host: phase
+                .host_permission
+                .verdict(approved, unguarded, resolution.save),
+            intent_digest: phase.intent.digest(),
+            decision: resolution.decision,
+            mode,
+            basis: facts.permission.basis,
+            source,
+            approved,
+            hook_restriction: phase.hooks.restriction,
+            hooks: phase.hooks.count,
+            narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
+        });
+        let mut event = Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: phase.intent.agent_run_id,
             intent: phase.intent.clone().into(),
             active_ceiling_ms: self.tool_ceiling(runtime, &phase.intent)?,
-            verdict: records_permission.then(|| PermissionVerdict {
-                host: phase
-                    .host_permission
-                    .verdict(approved, unguarded, resolution.save),
-                intent_digest: phase.intent.digest(),
-                decision: resolution.decision,
-                mode,
-                basis: facts.permission.basis,
-                source,
-                approved,
-                hook_restriction: phase.hooks.restriction,
-                hooks: phase.hooks.count,
-                narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
-            }),
-        })
-        .await
+            verdict: verdict.clone(),
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        if let Err(cause) = self
+            .ledger()
+            .view(|view| crate::session::validate_tool_started(view, &event))?
+        {
+            return Ok(Err(PendingToolRefusal::new(&phase.intent, cause, verdict)));
+        }
+        self.append(event).await?;
+        Ok(Ok(()))
     }
 
     async fn dispatch_primary(

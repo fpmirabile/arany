@@ -49,6 +49,30 @@ pub(super) fn sizing_deadline_refusal(cause: Option<ActiveDeadlineCause>) -> Siz
     }
 }
 
+pub(super) struct PendingToolRefusal {
+    agent_run_id: crate::session::AgentRunId,
+    intent_id: uuid::Uuid,
+    pub(super) record: Box<crate::session::ToolPreflightRefusal>,
+}
+
+impl PendingToolRefusal {
+    pub(super) fn new(
+        intent: &EffectIntent,
+        refusal: crate::session::ToolRefusal,
+        verdict: Option<PermissionVerdict>,
+    ) -> Self {
+        Self {
+            agent_run_id: intent.agent_run_id,
+            intent_id: intent.id,
+            record: Box::new(crate::session::ToolPreflightRefusal {
+                intent_digest: intent.digest(),
+                refusal,
+                verdict,
+            }),
+        }
+    }
+}
+
 impl RunLoop<'_> {
     pub(in crate::engine::run_loop) async fn primary_intent(
         &self,
@@ -270,6 +294,27 @@ impl RunLoop<'_> {
         call: ToolCall,
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
+        let intent = match self
+            .size_step_intent(grant, runtime, step, call, post_call)
+            .await?
+        {
+            Ok(intent) => intent,
+            Err(cause) => return Ok(Err(cause)),
+        };
+        Ok(self
+            .validate_step_intent(runtime, &intent)
+            .await?
+            .map(|()| intent))
+    }
+
+    pub(super) async fn size_step_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        post_call: &ToolCall,
+    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
         let sized = self
             .sized_intent(grant, runtime, step, call.clone(), post_call)
             .await?;
@@ -292,6 +337,52 @@ impl RunLoop<'_> {
             Err(refusal @ SizingRefusal::Cancelled) => Ok(Err(refusal.into())),
             Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
         }
+    }
+
+    pub(super) async fn validate_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), StopCause>, EngineError> {
+        match self.preflight_step_intent(runtime, intent)? {
+            Ok(()) => Ok(Ok(())),
+            Err(record) => {
+                let cause = record.record.refusal;
+                self.record_tool_refusal(record).await?;
+                Ok(Err(StopCause::ToolRefused(cause)))
+            }
+        }
+    }
+
+    pub(super) fn preflight_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
+        let mut event = Event::ToolProposed {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        self.ledger().view(|view| {
+            crate::session::validate_tool_started(view, &event)
+                .map_err(|refusal| PendingToolRefusal::new(intent, refusal, None))
+        })
+    }
+
+    pub(super) async fn record_tool_refusal(
+        &self,
+        pending: PendingToolRefusal,
+    ) -> Result<(), EngineError> {
+        self.append(Event::ToolPreflightRefused {
+            run_id: self.run_id,
+            agent_run_id: pending.agent_run_id,
+            record: *pending.record,
+        })
+        .await?;
+        self.commit_approval_withdrawal(pending.intent_id)
     }
 
     pub(super) async fn sized_intent(
@@ -636,11 +727,17 @@ impl RunLoop<'_> {
         let permission = self.permission(grant, runtime, &intent.call);
         let mut narrowed = None;
         let mut candidate = None;
-        let Admission::Reserved(verdict) = self
+        let verdict = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable, None)
             .await?
-        else {
-            return Ok(Err(StopCause::ActiveTime));
+        {
+            Ok(Admission::Reserved(verdict)) => verdict,
+            Ok(Admission::Exhausted) => return Ok(Err(StopCause::ActiveTime)),
+            Err(record) => {
+                let cause = record.record.refusal;
+                self.record_tool_refusal(record).await?;
+                return Ok(Err(StopCause::ToolRefused(cause)));
+            }
         };
         if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
             self.worker

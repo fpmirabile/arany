@@ -464,6 +464,8 @@ mod tests {
                 tool_policy: None,
             }),
             agents: std::iter::once(AgentView {
+                tool_refusal: None,
+                tool_refusal_sequence: None,
                 profile: None,
                 assignment: None,
                 definition: None,
@@ -480,6 +482,8 @@ mod tests {
                 status: AgentStatus::Active,
             })
             .chain((1..=5).map(|ordinal| AgentView {
+                tool_refusal: None,
+                tool_refusal_sequence: None,
                 profile: None,
                 assignment: None,
                 definition: None,

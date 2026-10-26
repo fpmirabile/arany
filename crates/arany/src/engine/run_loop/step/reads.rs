@@ -29,6 +29,22 @@ struct ReadBatch<'a> {
     end: StepEnd,
     phase: ReadPhase,
     post_hooks: Vec<usize>,
+    refusal: Option<PendingToolRefusal>,
+}
+
+impl ReadBatch<'_> {
+    fn refuse(&mut self, record: PendingToolRefusal) {
+        self.end = self.end.merge(StepEnd::Stopped(StopCause::ToolRefused(
+            record.record.refusal,
+        )));
+        self.refusal = Some(record);
+    }
+}
+
+enum ReadPreparation {
+    Ready(Box<EffectIntent>),
+    Stopped(StopCause),
+    Refused(PendingToolRefusal),
 }
 
 impl RunLoop<'_> {
@@ -47,6 +63,7 @@ impl RunLoop<'_> {
             end: StepEnd::Continue,
             phase: ReadPhase::Collecting,
             post_hooks: Vec::new(),
+            refusal: None,
         };
         let result = async {
             for (index, intent) in reads {
@@ -54,6 +71,9 @@ impl RunLoop<'_> {
                     let (index, answer) = result.map_err(|_| EngineError::CoordinatorFailed)?;
                     self.settle_read(grant, step, (index, answer, None), &mut batch)
                         .await?;
+                }
+                if batch.refusal.is_some() {
+                    continue;
                 }
                 if self.controls.cancellation.is_cancelled() {
                     batch.end = batch.end.merge(StepEnd::Stopped(StopCause::Cancelled));
@@ -74,6 +94,12 @@ impl RunLoop<'_> {
                 let (index, answer) = result.map_err(|_| EngineError::CoordinatorFailed)?;
                 self.settle_read(grant, step, (index, answer, None), &mut batch)
                     .await?;
+            }
+            if let Some(record) = batch.refusal.take() {
+                if batch.end != StepEnd::Stopped(StopCause::Uncertain) {
+                    self.record_tool_refusal(record).await?;
+                }
+                return Ok(batch.end);
             }
             self.finish_read_hooks(grant, runtime, step, &mut batch)
                 .await?;
@@ -99,9 +125,16 @@ impl RunLoop<'_> {
             .await?;
         let source = intent.call.clone();
         loop {
-            let verdict = self
+            let verdict = match self
                 .read_admission(grant, runtime, step, &intent, batch)
-                .await?;
+                .await?
+            {
+                Ok(verdict) => verdict,
+                Err(record) => {
+                    batch.refuse(record);
+                    return Ok(());
+                }
+            };
             while let Some(result) = batch.calls.try_join_next() {
                 let (index, answer) = result.map_err(|_| EngineError::CoordinatorFailed)?;
                 self.settle_read(grant, step, (index, answer, None), batch)
@@ -141,11 +174,14 @@ impl RunLoop<'_> {
                             .start_read_replacement(grant, runtime, step, call, &source)
                             .await?
                         {
-                            Ok(replacement) => {
-                                intent = replacement;
+                            ReadPreparation::Ready(replacement) => {
+                                intent = *replacement;
                                 continue;
                             }
-                            Err(cause) => batch.end = StepEnd::Stopped(cause),
+                            ReadPreparation::Stopped(cause) => batch.end = StepEnd::Stopped(cause),
+                            ReadPreparation::Refused(record) => {
+                                batch.refuse(record);
+                            }
                         }
                     }
                 }
@@ -161,21 +197,28 @@ impl RunLoop<'_> {
         step: &ToolStep,
         call: ToolCall,
         source: &ToolCall,
-    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
+    ) -> Result<ReadPreparation, EngineError> {
         let intent = match self
-            .prepare_step_intent(grant, runtime, step, call, source)
+            .size_step_intent(grant, runtime, step, call, source)
             .await?
         {
             Ok(intent) => intent,
-            Err(cause) => return Ok(Err(cause)),
+            Err(cause) => return Ok(ReadPreparation::Stopped(cause)),
         };
+        if let Err(record) = self.preflight_step_intent(runtime, &intent)? {
+            return Ok(ReadPreparation::Refused(record));
+        }
         let narrowable = matches!(grant, Grant::Primary { .. })
             && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
-        Ok(self
-            .start_intent(grant, runtime, &intent, source, narrowable)
-            .await?
-            .map(|()| intent)
-            .map_err(StopCause::from))
+        Ok(
+            match self
+                .start_intent(grant, runtime, &intent, source, narrowable)
+                .await?
+            {
+                Ok(()) => ReadPreparation::Ready(Box::new(intent)),
+                Err(cause) => ReadPreparation::Stopped(cause.into()),
+            },
+        )
     }
 
     async fn stop_read(
@@ -233,7 +276,7 @@ impl RunLoop<'_> {
         step: &mut ToolStep,
         intent: &EffectIntent,
         batch: &mut ReadBatch<'_>,
-    ) -> Result<Admission<Verdict>, EngineError> {
+    ) -> Result<Result<Admission<Verdict>, PendingToolRefusal>, EngineError> {
         let interrupted = RunCancellation::new();
         let permission = self.permission(grant, runtime, &intent.call);
         let narrowable = matches!(grant, Grant::Primary { .. })
@@ -492,6 +535,7 @@ fn post_hook_progress(end: StepEnd, cancelled: bool, paused: bool) -> StepEnd {
             | StopCause::ContextFull
             | StopCause::DelegationDeadline
             | StopCause::Refused(_)
+            | StopCause::ToolRefused(_)
             | StopCause::InvalidCommandResult,
         ) => end,
     }
@@ -624,6 +668,7 @@ mod tests {
             StopCause::ContextFull,
             StopCause::DelegationDeadline,
             StopCause::Refused(crate::session::ProposalRefusalCause::Phase),
+            StopCause::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION),
             StopCause::ToolStopped,
             StopCause::InvalidCommandResult,
         ] {

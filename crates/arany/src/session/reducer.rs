@@ -21,6 +21,9 @@ pub(crate) mod rewind_tests;
 mod run;
 mod session;
 mod tool;
+pub(crate) use tool::{
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
+};
 mod usage;
 pub use usage::{PlanUsage, TokenCount, UsageGroup, UsageView};
 
@@ -210,6 +213,8 @@ pub(crate) mod worker_tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentView {
+    pub tool_refusal_sequence: Option<u64>,
+    pub tool_refusal: Option<super::ToolPreflightRefusal>,
     pub profile: Option<String>,
     pub assignment: Option<WorkerView>,
     pub definition: Option<String>,
@@ -1381,7 +1386,8 @@ impl SessionView {
             | Event::WorkerVerificationRecorded { .. } => {
                 worker::apply(current, &envelope.event, prior)?
             }
-            Event::ToolStarted { .. }
+            Event::ToolPreflightRefused { .. }
+            | Event::ToolStarted { .. }
             | Event::ToolActiveTimeReserved { .. }
             | Event::ToolFinished { .. }
             | Event::ToolProposed { .. }

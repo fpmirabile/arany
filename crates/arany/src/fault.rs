@@ -10,6 +10,12 @@ use tokio::time::Instant;
 pub use injection::FaultPlan;
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::tool_preflight(session, event);
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn append(session: SessionId, event: &Event) -> Result<(), StoreError> {
     #[cfg(any(test, feature = "test-support"))]
     if FaultPlan::append_fails(session, event) {
@@ -317,6 +323,7 @@ mod injection {
             oneshot::Sender<()>,
             oneshot::Receiver<()>,
         ),
+        ToolPreflight(SessionId, &'static str, oneshot::Sender<()>),
         CheckAcknowledgment(
             crate::CheckId,
             fn(&crate::CheckView) -> bool,
@@ -401,6 +408,38 @@ mod injection {
             ) {
                 Some(Fault::InProcessRead(_, _, entered, release)) => Some((entered, release)),
                 _ => None,
+            }
+        }
+
+        pub fn corrupt_tool_preflight(
+            session: SessionId,
+            kind: &'static str,
+        ) -> oneshot::Receiver<()> {
+            let (entered, wait) = oneshot::channel();
+            plan().push(Fault::ToolPreflight(session, kind, entered));
+            wait
+        }
+
+        pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
+            if let Some(Fault::ToolPreflight(_, _, entered)) = take(
+                |fault| matches!(fault, Fault::ToolPreflight(id, kind, _) if *id == session && *kind == event.kind()),
+            ) {
+                if let Event::ToolProposed { intent, .. } | Event::ToolStarted { intent, .. } =
+                    event
+                {
+                    intent.workspace_inode = intent.workspace_inode.saturating_add(1);
+                }
+                if let Event::ToolStarted {
+                    intent,
+                    verdict: Some(verdict),
+                    ..
+                } = event
+                {
+                    // Keep the payload valid so the changed Workspace pin reaches the reducer.
+                    verdict.intent_digest =
+                        crate::tools::EffectIntent::from(intent.clone()).digest();
+                }
+                let _ = entered.send(());
             }
         }
 
