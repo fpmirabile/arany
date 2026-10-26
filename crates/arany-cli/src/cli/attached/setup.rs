@@ -4,6 +4,7 @@ mod roster;
 mod routing;
 
 pub(super) use error::SetupError;
+use error::{chatgpt_edit_is_uncertain, chatgpt_keyring_available};
 
 use crate::accounts::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
@@ -721,7 +722,7 @@ async fn remove_chatgpt_saved_access(
                 ProviderSetupDisposition::Failed
             };
             journal.finish(operation, None, disposition).await?;
-            return Err(chatgpt_removal_error(error));
+            return Err(SetupError::chatgpt_removal(error));
         }
     };
     journal
@@ -747,15 +748,6 @@ async fn remove_chatgpt_saved_access(
         ));
     }
     Ok(())
-}
-
-fn chatgpt_removal_error(error: chatgpt::AuthorizationError) -> SetupError {
-    match error {
-        error if chatgpt_edit_is_uncertain(&error) => SetupError::Presentation(
-            "ChatGPT account cleanup is uncertain; restart setup and inspect saved access before continuing.".into(),
-        ),
-        error => SetupError::recoverable_unrecorded(error),
-    }
 }
 
 async fn choose_saved_chatgpt_id(
@@ -1083,17 +1075,6 @@ async fn add_custom_route(
     Ok(())
 }
 
-fn custom_write_error(error: CustomProfileError) -> SetupError {
-    if matches!(&error, CustomProfileError::PublicationUncertain) {
-        SetupError::Presentation(
-            "Custom route publication is uncertain. Inspect saved routes before continuing; no retry was attempted."
-                .into(),
-        )
-    } else {
-        SetupError::recoverable_unrecorded(error)
-    }
-}
-
 async fn write_custom_profiles(
     context: &mut CustomRouteContext<'_>,
     drafts: &[CustomProfileDraft],
@@ -1125,7 +1106,7 @@ async fn write_custom_profiles(
                 ProviderSetupDisposition::Failed
             };
             context.journal.finish(operation, None, disposition).await?;
-            Err(custom_write_error(error))
+            Err(SetupError::custom_write(error))
         }
     }
 }
@@ -2340,7 +2321,8 @@ async fn begin_chatgpt_authorization(
     target: Option<&chatgpt::ReauthorizationTarget>,
     acknowledgment: RiskAcknowledgment,
 ) -> Result<Option<(CallbackListener, chatgpt::AuthorizationAttempt)>, SetupError> {
-    let registration = Registration::open_or_create(workspace).map_err(chatgpt_setup_error)?;
+    let registration =
+        Registration::open_or_create(workspace).map_err(SetupError::chatgpt_authorization)?;
     if target
         .as_ref()
         .is_some_and(|selected| selected.host_id != registration.host_id())
@@ -2363,12 +2345,12 @@ async fn begin_chatgpt_authorization(
     }
     let listener = CallbackListener::bind(acknowledgment)
         .await
-        .map_err(chatgpt_setup_error)?;
+        .map_err(SetupError::chatgpt_authorization)?;
     let attempt = match &target {
         Some(selected) => chatgpt::AuthorizationAttempt::for_existing(selected, listener.port()),
         None => registration.authorization_attempt(listener.port()),
     }
-    .map_err(chatgpt_setup_error)?;
+    .map_err(SetupError::chatgpt_authorization)?;
     chatgpt::open_authorization_url(&attempt.authorization_url())
         .await
         .map_err(|_| {
@@ -2462,39 +2444,7 @@ async fn save_chatgpt_authorization(
             local_cleared: outcome.local_cleared,
         }),
     }
-    .map_err(chatgpt_setup_error)
-}
-
-fn chatgpt_setup_error(error: chatgpt::AuthorizationError) -> SetupError {
-    if chatgpt_edit_is_uncertain(&error) {
-        SetupError::Uncertain(error.to_string())
-    } else {
-        SetupError::recoverable(error)
-    }
-}
-
-fn chatgpt_edit_is_uncertain(error: &chatgpt::AuthorizationError) -> bool {
-    matches!(
-        error,
-        chatgpt::AuthorizationError::SignOutStorageUncertain
-            | chatgpt::AuthorizationError::RefreshCleanupUncertain
-            | chatgpt::AuthorizationError::RenewalStorageUncertain
-            | chatgpt::AuthorizationError::CredentialStore(
-                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
-            )
-    )
-}
-
-fn chatgpt_keyring_available(probe: Result<(), CredentialError>) -> Result<bool, SetupError> {
-    match probe {
-        Ok(()) => Ok(true),
-        Err(CredentialError::Unavailable | CredentialError::TimedOut) => Ok(false),
-        Err(CredentialError::Locked) => Err(
-            "OS credential store is locked. Unlock your desktop password store, then retry /setup"
-                .into(),
-        ),
-        Err(error) => Err(SetupError::recoverable(error)),
-    }
+    .map_err(SetupError::chatgpt_authorization)
 }
 
 async fn configure_chatgpt(
@@ -2792,7 +2742,7 @@ async fn await_chatgpt_step<T>(
     await_operation(terminal, title, instruction, operation)
         .await?
         .transpose()
-        .map_err(chatgpt_setup_error)
+        .map_err(SetupError::chatgpt_authorization)
 }
 
 pub(super) async fn await_operation<T>(
@@ -3282,9 +3232,12 @@ pub(super) mod tests {
                 matches!(result, Err(SetupError::Presentation(message)) if message == expected)
             );
         } else {
-            let result =
-                settle_chatgpt_authorization(&journal, operation, Err(chatgpt_setup_error(error)))
-                    .await;
+            let result = settle_chatgpt_authorization(
+                &journal,
+                operation,
+                Err(SetupError::chatgpt_authorization(error)),
+            )
+            .await;
             assert!(matches!(result, Err(SetupError::Uncertain(_))));
         }
         let id = journal.session_id().unwrap();
@@ -3328,7 +3281,7 @@ pub(super) mod tests {
             ),
             (Ok(None), ProviderSetupDisposition::Cancelled),
             (
-                Err(chatgpt_setup_error(
+                Err(SetupError::chatgpt_authorization(
                     chatgpt::AuthorizationError::CredentialStore(
                         CredentialError::WriteOutcomeUnknown,
                     ),
@@ -3560,22 +3513,5 @@ pub(super) mod tests {
         );
         assert!(catalog_chatgpt_defaults(account_id, account_id, &[]).is_err());
         assert!(catalog_chatgpt_defaults(account_id, uuid::Uuid::now_v7(), &models,).is_err());
-    }
-
-    #[test]
-    fn chatgpt_file_fallback_never_treats_locked_keyring_as_missing() {
-        assert!(matches!(chatgpt_keyring_available(Ok(())), Ok(true)));
-        assert!(matches!(
-            chatgpt_keyring_available(Err(CredentialError::Unavailable)),
-            Ok(false)
-        ));
-        assert!(matches!(
-            chatgpt_keyring_available(Err(CredentialError::TimedOut)),
-            Ok(false)
-        ));
-        assert!(matches!(
-            chatgpt_keyring_available(Err(CredentialError::Locked)),
-            Err(SetupError::Recoverable(_))
-        ));
     }
 }
