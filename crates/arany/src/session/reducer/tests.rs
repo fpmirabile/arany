@@ -9185,6 +9185,68 @@ mod goal_replay_tests {
         }
     }
 
+    fn reserved_read_pair() -> (SessionView, [EffectIntent; 2]) {
+        const ACTIVE_CEILING_MS: u64 = 1000;
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let intents = [
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/main.rs"),
+        ];
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        for intent in &intents {
+            apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
+        }
+        for intent in &intents {
+            apply(
+                &mut view,
+                Event::ToolActiveTimeReserved {
+                    run_id: run,
+                    agent_run_id: agent,
+                    intent_digest: intent.digest(),
+                    active_ceiling_ms: ACTIVE_CEILING_MS,
+                },
+            )
+            .unwrap();
+            apply(&mut view, batch_start(intent, None, true)).unwrap();
+        }
+        (view, intents)
+    }
+
+    #[test]
+    fn stopping_tool_keeps_the_batch_cause_after_siblings_settle() {
+        for disposition in [
+            ToolDisposition::Failed,
+            ToolDisposition::Uncertain,
+            ToolDisposition::Limit,
+        ] {
+            for succeeded in [false, true] {
+                let (mut view, [first, second]) = reserved_read_pair();
+                let (run, agent) = (first.run_id, first.agent_run_id);
+                let mut stopped = tool_finished(run, agent, &first, b"stopped");
+                if let Event::ToolFinished { observation, .. } = &mut stopped {
+                    observation.disposition = disposition;
+                    observation.attestation = None;
+                    observation.limit_cause = (disposition == ToolDisposition::Limit)
+                        .then_some(crate::tools::LimitCause::Timeout);
+                }
+                apply(&mut view, stopped).unwrap();
+                let mut settled = tool_finished(run, agent, &second, b"settled");
+                if !succeeded && let Event::ToolFinished { observation, .. } = &mut settled {
+                    observation.disposition = ToolDisposition::Denied;
+                    observation.attestation = None;
+                    observation.output = crate::tools::types::UNDISPATCHED_STEP_OUTPUT.into();
+                }
+                apply(&mut view, settled).unwrap();
+                assert_eq!(
+                    view.runs[0].stopping_tool().map(|tool| tool.intent.id),
+                    Some(first.id),
+                    "{disposition:?}, succeeded sibling: {succeeded}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_in_process_attestation_cannot_finish_a_write() {
         let (mut view, goal, run, agent) = primary_tool_session(true);

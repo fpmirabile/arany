@@ -657,15 +657,12 @@ fn all_children_finished(run: &RunView) -> bool {
 
 impl ToolView {
     fn undispatched_suffix(&self) -> bool {
-        !self.active_time_reserved
-            && self.hooks.is_empty()
-            && self.review_call_index.is_none()
-            && self.observation.as_ref().is_some_and(|observation| {
-                observation.attestation.is_none()
-                    && observation.approval_cause.is_none()
-                    && observation.disposition == crate::tools::ToolDisposition::Denied
-                    && observation.output == crate::tools::types::UNDISPATCHED_STEP_OUTPUT
-            })
+        self.observation.as_ref().is_some_and(|observation| {
+            observation.attestation.is_none()
+                && observation.approval_cause.is_none()
+                && observation.disposition == crate::tools::ToolDisposition::Denied
+                && observation.output == crate::tools::types::UNDISPATCHED_STEP_OUTPUT
+        })
     }
 
     // The journaled acceptance: the verdict says the Engine narrowed this Tool and the hook result names the call.
@@ -832,27 +829,36 @@ impl RunView {
     pub fn stopping_tool(&self) -> Option<&ToolView> {
         self.tools
             .iter()
-            .enumerate()
             .rev()
-            .find_map(|(index, tool)| {
-                tool.observation
-                    .as_ref()
-                    .is_some_and(|observation| {
+            .find(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.stops_run()
+                        || tool.active_time_reserved
+                            && observation.disposition == crate::tools::ToolDisposition::Limit
+                        || matches!(
+                            observation.approval_cause,
+                            Some(
+                                crate::tools::ApprovalCause::Paused
+                                    | crate::tools::ApprovalCause::Cancelled
+                                    | crate::tools::ApprovalCause::ChildTimeout
+                            )
+                        )
+                })
+            })
+            .or_else(|| {
+                self.tools
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, tool)| {
                         (tool.active_time_reserved
+                            && tool.observation.is_some()
+                            && !tool.undispatched_suffix()
                             && self.tools[index + 1..]
                                 .iter()
                                 .all(ToolView::undispatched_suffix))
-                            || observation.stops_run()
-                            || matches!(
-                                observation.approval_cause,
-                                Some(
-                                    crate::tools::ApprovalCause::Paused
-                                        | crate::tools::ApprovalCause::Cancelled
-                                        | crate::tools::ApprovalCause::ChildTimeout
-                                )
-                            )
+                        .then_some(tool)
                     })
-                    .then_some(tool)
             })
     }
 
