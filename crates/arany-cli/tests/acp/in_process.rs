@@ -1418,7 +1418,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
         ))
         .await
         .unwrap();
-    events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"item/completed".into(), params:Some(json!({"threadId":session,"turnId":run,"completedAtMs":0,"item":{"type":"agentMessage","id":format!("{run}:answer"),"text":"Committed","phase":"final_answer"}})) })).await.unwrap();
+    events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"item/completed".into(), params:Some(json!({"threadId":session,"turnId":run,"completedAtMs":0,"item":{"type":"agentMessage","id":format!("{run}:answer"),"text":"# Committed","phase":"final_answer"}})) })).await.unwrap();
     drop(events.reserve_many(256).await.unwrap());
     let cancel = wire::decode(
         &encode_line(
@@ -1441,7 +1441,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
     }
     let answer = output.recv().await.unwrap();
     validate(&answer);
-    assert_eq!(answer["params"]["update"]["content"]["text"], "Committed");
+    assert_eq!(answer["params"]["update"]["content"]["text"], "# Committed");
     events.send(reply(9, json!({}))).await.unwrap();
     events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"turn/completed".into(), params:Some(json!({"threadId":session,"turn":{"id":run,"goalId":goal,"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
     let cancelled = output.recv().await.unwrap();
@@ -2219,7 +2219,7 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             .unwrap()
             .record(arany::RecordKind::UiPreferences)
             .replace(
-                &serde_json::to_vec(&json!({"version":6,"preferences":{
+                &serde_json::to_vec(&json!({"version":7,"preferences":{
                     "completion":"tabs","view":"classic","goal_budget":budget,
                     "resources":arany::ToolResourceSettings::default(),
                     "copy_on_select":true,"newline":"shift_enter"

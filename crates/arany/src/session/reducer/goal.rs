@@ -228,6 +228,8 @@ impl SessionView {
             || goal.active_run != Some(*run_id)
             || goal.plan_contract.is_some()
             || !goal.awaiting_plan_contract
+            || contract.resource_class == crate::tools::ToolResourceClass::Build
+                && goal.resource_settings.build_jobs.is_none()
             || !valid_contract_call
             || !contract.budget.is_within(&goal.budget)
             || contract

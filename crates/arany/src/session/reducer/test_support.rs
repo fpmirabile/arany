@@ -1010,30 +1010,34 @@ pub(super) fn covering_compaction(
         goal_id: goal,
         run_id: run,
         covered_tool_count: count,
-        record: crate::session::events::CompactionRecord {
-            rate_limits: None,
-            covered_run_id: run,
-            covered_sequence: covered.finished_sequence.expect("observed Tool"),
-            source_digest: [0; 32],
-            recent_files: Vec::new(),
-            provider: "openai".into(),
-            model: "gpt-5.4".into(),
-            prompt_version: 1,
-            schema_version: 1,
-            compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
-            source_bytes: 1,
-            source_tokens_estimate: 1,
-            input_tokens: None,
-            output_tokens: None,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
-            response_id: None,
-            wire_provenance: None,
-            chatgpt_provenance: None,
-            output_token_bound: OutputTokenBound::ProviderEnforced,
-            status: crate::session::events::CompactionStatus::Failed {
-                reason: crate::session::events::CompactionFailure::ProviderUnavailable,
-            },
+        record: failed_compaction_record(run, covered.finished_sequence.expect("observed Tool")),
+    }
+}
+
+pub(super) fn failed_compaction_record(run: RunId, covered_sequence: u64) -> CompactionRecord {
+    CompactionRecord {
+        rate_limits: None,
+        covered_run_id: run,
+        covered_sequence,
+        source_digest: [0; 32],
+        recent_files: Vec::new(),
+        provider: "openai".into(),
+        model: "gpt-5.4".into(),
+        prompt_version: 1,
+        schema_version: 1,
+        compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
+        source_bytes: 1,
+        source_tokens_estimate: 1,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        response_id: None,
+        wire_provenance: None,
+        chatgpt_provenance: None,
+        output_token_bound: OutputTokenBound::ProviderEnforced,
+        status: crate::session::events::CompactionStatus::Failed {
+            reason: crate::session::events::CompactionFailure::ProviderUnavailable,
         },
     }
 }

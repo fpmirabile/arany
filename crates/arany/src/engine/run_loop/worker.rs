@@ -437,6 +437,12 @@ impl RunLoop<'_> {
             if class == crate::tools::ToolResourceClass::Build {
                 intent.limits.memory_bytes = settings.build_memory_bytes;
                 intent.limits.max_processes = settings.build_processes;
+                intent.limits.build_jobs =
+                    settings.build_jobs.ok_or(EngineError::InvalidRequest)?;
+                self.controls
+                    .tools
+                    .ok_or(EngineError::InvalidRequest)?
+                    .bind_build_jobs(intent)?;
                 intent.limits.cache_requested_bytes = settings.build_cache_bytes;
             }
             intent.limits.cache_bytes = self

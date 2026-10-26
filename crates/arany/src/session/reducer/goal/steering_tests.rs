@@ -133,13 +133,15 @@ fn steering_note_is_accepted_only_inside_an_open_primary_reservation() {
 
     // Each note charges its text plus its label, so exactly the per-Run byte cap is accepted.
     let label = crate::session::MAX_STEERING_LABEL_BYTES;
+    let first_bytes = crate::session::MAX_STEERING_NOTE_BYTES / 2 - label;
+    let second_bytes = crate::session::MAX_STEERING_NOTE_BYTES - first_bytes - 2 * label;
     let mut exact = open();
-    exact.push(note(goal_id, &"a".repeat(4 * 1024 - label)));
-    exact.push(note(goal_id, &"b".repeat(4 * 1024 - label)));
+    exact.push(note(goal_id, &"a".repeat(first_bytes)));
+    exact.push(note(goal_id, &"b".repeat(second_bytes)));
     assert!(accepts(exact.clone()));
     let mut oversized = open();
-    oversized.push(note(goal_id, &"a".repeat(4 * 1024 - label)));
-    oversized.push(note(goal_id, &"b".repeat(4 * 1024 - label + 1)));
+    oversized.push(note(goal_id, &"a".repeat(first_bytes)));
+    oversized.push(note(goal_id, &"b".repeat(second_bytes + 1)));
     assert!(!accepts(oversized));
 
     let mut finished_prefix = open();
@@ -182,38 +184,16 @@ fn steering_note_is_accepted_only_inside_an_open_primary_reservation() {
     let mut review = SessionView::replay_open(session, &session_with(session, open()))
         .expect("open reservation replays")
         .expect("Session exists");
-    let intent = crate::tools::EffectIntent {
-        host: None,
-        host_command: None,
-        target: crate::session::worker::EffectTarget::Workspace,
-        id: uuid::Uuid::now_v7(),
-        run_id,
-        agent_run_id,
-        policy_digest: [1; 32],
-        enforcement_digest: [2; 32],
-        workspace_device: 1,
-        workspace_inode: 2,
-        call: crate::tools::ToolCall::Read {
-            path: "src/main.rs".into(),
-            offset: None,
-            limit: Some(32),
-        },
-        limits: crate::tools::ToolLimits::default(),
-        use_count: 1,
-    };
-    review.runs[0].tools.push(ToolView {
-        checkpoint: None,
-        active_time_reserved: false,
-        narrowing_source: None,
-        permission_verdict: None,
-        started_sequence: Some(0),
-        hooks: Vec::new(),
-        hook_sequence: None,
-        intent,
-        observation: None,
-        review_call_index: None,
-        finished_sequence: None,
-    });
+    assert!(
+        review
+            .clone()
+            .record_goal_steering_note(&goal_id, &run_id, "control")
+            .is_ok()
+    );
+    let mut pending = pending_plan_view(None).runs[0].tools[0].clone();
+    pending.intent.run_id = run_id;
+    pending.intent.agent_run_id = agent_run_id;
+    review.runs[0].tools.push(pending);
     assert!(
         review
             .record_goal_steering_note(&goal_id, &run_id, "during a Tool review")
@@ -603,20 +583,24 @@ fn steering_notes_have_no_count_cap_but_keep_the_run_byte_bound() {
         run_id,
         text: "n".repeat(len),
     };
+    let count = 9;
+    let note_bytes = 800;
+    let label = crate::session::MAX_STEERING_LABEL_BYTES;
+    let final_bytes =
+        crate::session::MAX_STEERING_NOTE_BYTES - count * (note_bytes + label) - label;
     let mut events = open();
-    events.extend((0..9).map(|_| note(800)));
+    events.extend((0..count).map(|_| note(note_bytes)));
     let view = SessionView::replay_open(session, &session_with(session, events.clone()))
-        .expect("nine notes within 8 KiB replay")
+        .expect("notes within the Run byte bound replay")
         .expect("Session exists");
-    assert_eq!(view.runs[0].steering_notes.len(), 9);
-    // Nine notes of 800 bytes charge 9 x (800 + 8) = 7272; a 912-byte tenth charges 920 and
-    // reaches exactly 8192, while 913 bytes would charge 921 and reach 8193.
-    events.push(note(912));
+    assert_eq!(view.runs[0].steering_notes.len(), count);
+    let mut exact = events.clone();
+    exact.push(note(final_bytes));
     assert!(
-        SessionView::replay_open(session, &session_with(session, events.clone())).is_ok(),
-        "the Run's notes together reach exactly 8 KiB with labels"
+        SessionView::replay_open(session, &session_with(session, exact)).is_ok(),
+        "the Run's notes together reach exactly the byte bound with labels"
     );
-    events.push(note(913));
+    events.push(note(final_bytes + 1));
     assert!(
         SessionView::replay_open(session, &session_with(session, events)).is_err(),
         "one more byte exceeds the Run's bound"

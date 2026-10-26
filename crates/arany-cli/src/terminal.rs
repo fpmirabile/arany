@@ -34,6 +34,8 @@ mod history;
 mod input;
 mod linear;
 mod local_report;
+mod markdown;
+pub const MARKDOWN_LIMITS: &[arany::limits::Limit] = markdown::LIMITS;
 mod rewind;
 pub use rewind::RewindPanelError;
 mod view;

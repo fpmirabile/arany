@@ -358,28 +358,38 @@ impl Task {
         intent_enforcement_digest(
             self.intent.call.is_process(),
             &self.config.runtime_grants,
+            self.intent.limits.build_jobs,
             #[cfg(target_os = "macos")]
             self.system_programs.as_ref(),
         )
     }
 }
 
-fn intent_enforcement_digest(
+pub(super) fn intent_enforcement_digest(
     is_process: bool,
     runtime_grants: &[RuntimeGrant],
+    build_jobs: u32,
     #[cfg(target_os = "macos")] programs: Option<&SystemPrograms>,
 ) -> Result<[u8; 32], ToolError> {
     #[cfg(target_os = "macos")]
     {
         if is_process {
-            macos_runtime_enforcement_digest(programs, runtime_grants)
+            bind_runtime_grants(
+                macos_enforcement_digest(programs)?,
+                runtime_grants,
+                build_jobs,
+            )
         } else {
             enforcement_digest(&[])
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        enforcement_digest(if is_process { runtime_grants } else { &[] })
+        bind_runtime_grants(
+            enforcement_digest(&[])?,
+            if is_process { runtime_grants } else { &[] },
+            build_jobs,
+        )
     }
 }
 
@@ -585,13 +595,15 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8; 32], ToolError> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let jobs = ToolLimits::default().build_jobs;
     #[cfg(target_os = "linux")]
     {
-        bind_runtime_grants(linux::enforcement_digest()?, runtime_grants)
+        bind_runtime_grants(linux::enforcement_digest()?, runtime_grants, jobs)
     }
     #[cfg(target_os = "macos")]
     {
-        bind_runtime_grants(macos::enforcement_digest()?, runtime_grants)
+        bind_runtime_grants(macos::enforcement_digest()?, runtime_grants, jobs)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -604,12 +616,14 @@ pub(super) fn macos_runtime_enforcement_digest(
     programs: Option<&SystemPrograms>,
     runtime_grants: &[RuntimeGrant],
 ) -> Result<[u8; 32], ToolError> {
-    bind_runtime_grants(macos_enforcement_digest(programs)?, runtime_grants)
+    let jobs = ToolLimits::default().build_jobs;
+    bind_runtime_grants(macos_enforcement_digest(programs)?, runtime_grants, jobs)
 }
 
 fn bind_runtime_grants(
     profile: [u8; 32],
     runtime_grants: &[RuntimeGrant],
+    build_jobs: u32,
 ) -> Result<[u8; 32], ToolError> {
     validate_selection(runtime_grants)?;
     if runtime_grants.is_empty() {
@@ -621,7 +635,8 @@ fn bind_runtime_grants(
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
     {
         bytes.extend_from_slice(
-            b";selected-rust:build-offline=true;build-jobs=1;encoded-rustflags=",
+            format!(";selected-rust:build-offline=true;build-jobs={build_jobs};encoded-rustflags=")
+                .as_bytes(),
         );
         bytes.extend_from_slice(RUST_GUARD_FLAGS.as_bytes());
     }
@@ -2177,7 +2192,7 @@ pub(super) fn payload(
     root: &Path,
     runtime_grants: &[RuntimeGrant],
     cache_enabled: bool,
-    resource_class: ToolResourceClass,
+    limits: &ToolLimits,
 ) -> Result<Command, ToolError> {
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
@@ -2252,10 +2267,10 @@ pub(super) fn payload(
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
     {
         command.env("CARGO_ENCODED_RUSTFLAGS", RUST_GUARD_FLAGS);
-        if resource_class == ToolResourceClass::Build {
+        if limits.resource_class == ToolResourceClass::Build {
             command
                 .env("CARGO_NET_OFFLINE", "true")
-                .env("CARGO_BUILD_JOBS", "1");
+                .env("CARGO_BUILD_JOBS", limits.build_jobs.to_string());
         }
         // Cargo's libcurl otherwise initializes LibreSSL, which reads /private/etc/ssl and fails under Seatbelt.
         if cfg!(target_os = "macos") {
@@ -2493,6 +2508,7 @@ mod tests {
             device: 1,
             inode: 1,
         };
+        let args = ["build".into(), "--jobs=3".into()];
         for selected in [false, true] {
             for class in [ToolResourceClass::Default, ToolResourceClass::Build] {
                 let grants = if selected {
@@ -2500,7 +2516,26 @@ mod tests {
                 } else {
                     &[]
                 };
-                let command = payload(&program, &[], "", &root, grants, false, class).unwrap();
+                let command = payload(
+                    &program,
+                    &args,
+                    "",
+                    &root,
+                    grants,
+                    false,
+                    &ToolLimits {
+                        resource_class: class,
+                        build_jobs: u32::from(class == ToolResourceClass::Build) + 1,
+                        ..ToolLimits::default()
+                    },
+                )
+                .unwrap();
+                assert!(
+                    command
+                        .as_std()
+                        .get_args()
+                        .eq(args.iter().map(std::ffi::OsStr::new))
+                );
                 let environment = command
                     .as_std()
                     .get_envs()
@@ -2517,7 +2552,7 @@ mod tests {
                 );
                 assert_eq!(
                     environment.get("CARGO_BUILD_JOBS").copied(),
-                    build.then_some("1")
+                    build.then_some("2")
                 );
                 for absent in [
                     "RUSTUP_HOME",
@@ -2535,11 +2570,18 @@ mod tests {
             }
         }
         let profile = [7; 32];
-        assert_eq!(bind_runtime_grants(profile, &[]).unwrap(), profile);
-        let mut old = b"arany-runtime-profile-v2:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
-        old.extend_from_slice(&profile);
-        old.extend_from_slice(&serde_json::to_vec(std::slice::from_ref(&rust)).unwrap());
-        assert_ne!(bind_runtime_grants(profile, &[rust]).unwrap(), digest(&old));
+        assert_eq!(bind_runtime_grants(profile, &[], 1).unwrap(), profile);
+        let mut expected = b"arany-runtime-profile-v3:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+        expected.extend_from_slice(b";selected-rust:build-offline=true;build-jobs=1;encoded-rustflags=--cfg\x1farany_guard;private-output-capture-v1");
+        expected
+            .extend_from_slice(&(super::super::spill::MAX_SPILL_RESULT_BYTES as u64).to_le_bytes());
+        expected.extend_from_slice(&(super::super::spill::MAX_REPORT_BYTES as u64).to_le_bytes());
+        expected.extend_from_slice(&profile);
+        expected.extend_from_slice(&serde_json::to_vec(std::slice::from_ref(&rust)).unwrap());
+        let one = bind_runtime_grants(profile, std::slice::from_ref(&rust), 1).unwrap();
+        assert_eq!(one, digest(&expected));
+        assert_ne!(bind_runtime_grants(profile, &[rust], 2).unwrap(), one);
+        assert_eq!(bind_runtime_grants(profile, &[], 2).unwrap(), profile);
     }
 
     #[test]
@@ -3379,6 +3421,7 @@ mod tests {
         let non_process_profile = intent_enforcement_digest(
             false,
             &grants,
+            1,
             #[cfg(target_os = "macos")]
             None,
         )
@@ -3386,6 +3429,7 @@ mod tests {
         let process_profile = intent_enforcement_digest(
             true,
             &grants,
+            1,
             #[cfg(target_os = "macos")]
             None,
         )
