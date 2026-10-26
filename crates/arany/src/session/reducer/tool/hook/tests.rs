@@ -1635,6 +1635,7 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
     use crate::tools::permissions::{
         HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
     };
+    const ACTIVE_CEILING_MS: u64 = 1000;
     let (mut view, goal, run, actor) = primary_tool_session(true);
     view.runs[0]
         .config
@@ -1680,7 +1681,7 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
                 subject_digest: stop_subject(actor, last_call),
                 input_digest: [9; 32],
                 intent: intent.clone(),
-                active_ceiling_ms: Some(1000),
+                active_ceiling_ms: Some(ACTIVE_CEILING_MS),
             },
         },
     )
@@ -1713,12 +1714,16 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
             }
         ));
     }
-    assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    assert_eq!(
+        view.goals[0].resume_usage(&view).active_ms,
+        ACTIVE_CEILING_MS
+    );
 }
 
 #[test]
 fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
     use crate::tools::permissions::{HookEvent, HookInvocation, compact_subject};
+    const ACTIVE_CEILING_MS: u64 = 1000;
     let (mut view, _, run, actor) = primary_tool_session(true);
     let current = &mut view.runs[0];
     current.status = RunStatus::Finished;
@@ -1759,7 +1764,7 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
                 subject_digest: compact_subject("manual", 1),
                 input_digest: [9; 32],
                 intent,
-                active_ceiling_ms: Some(1000),
+                active_ceiling_ms: Some(ACTIVE_CEILING_MS),
             },
         },
     )
@@ -1776,5 +1781,8 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
     }
     assert_eq!(view.runs.len(), 2);
     assert!(!view.runs[0].hooks_settled());
-    assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    assert_eq!(
+        view.goals[0].resume_usage(&view).active_ms,
+        ACTIVE_CEILING_MS
+    );
 }
