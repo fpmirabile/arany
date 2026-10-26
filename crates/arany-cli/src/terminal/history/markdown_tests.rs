@@ -189,10 +189,23 @@ fn syntax_controls_limits_and_nonretaining_counts_agree() {
             }
         }
     }
+    for kind in [MessageKind::Preview, MessageKind::Incomplete] {
+        for source in [&over_bytes, &over_rows, &over_depth] {
+            let rows = display_rows(kind, source, 80, None);
+            assert!(
+                rows.iter()
+                    .any(|row| row.text.contains(markdown::LIMIT_CUE))
+            );
+            assert_eq!(
+                markdown_cost(kind, source, 80),
+                (rows.iter().map(|row| row.text.len()).sum(), rows.len())
+            );
+        }
+    }
     for kind in [
-        MessageKind::Preview,
-        MessageKind::Incomplete,
         MessageKind::User,
+        MessageKind::Commentary,
+        MessageKind::Tool,
     ] {
         assert!(
             display_rows(kind, "# Result", 80, None)
@@ -282,7 +295,12 @@ fn tables_fit_or_use_records_with_source_copy_find_and_exact_classic_costs() {
                     user.len() + rows.len() + 2,
                 )
             );
-            for kind in [MessageKind::Assistant, MessageKind::AgentResult] {
+            for kind in [
+                MessageKind::Assistant,
+                MessageKind::AgentResult,
+                MessageKind::Preview,
+                MessageKind::Incomplete,
+            ] {
                 let rows = display_rows(kind, source, width, None);
                 let palette = Palette { color: false };
                 let area = Rect::new(0, 0, width as u16, rows.len() as u16);
@@ -449,4 +467,250 @@ fn classic_rejects_the_whole_run_when_generated_records_exceed_its_budget() {
     );
     assert!(rows.iter().map(|row| row.text.len()).sum::<usize>() > MAX_CLASSIC_HISTORY_BYTES);
     assert!(classic_projection(&view, 40).first_run_index.is_none());
+    view.runs[0].assistant_message = None;
+    view.runs[0].status = arany::RunStatus::Interrupted;
+    view.runs[0].display.push(arany::DisplayChunk {
+        call_index: 0,
+        phase: arany::AgentPhase::RootPlan,
+        offset: 0,
+        category: arany::DisplayCategory::Answer,
+        item: 0,
+        text: source,
+    });
+    assert!(classic_projection(&view, 40).first_run_index.is_none());
+}
+
+#[test]
+fn streaming_snapshots_replace_partial_markdown_and_keep_source_on_resize() {
+    for source in [
+        "# Result\n\n*unfinished emphasis*",
+        "# Result\n\n[label](https://example.test)",
+        "# Result\n\n```rust\n  中 e\u{301} value\n```",
+        "# Result\n\n| Name | Value |\n| --- | --- |\n| **first** | second |",
+    ] {
+        for width in [16, 40, 50, 80, 120] {
+            for agent in [false, true] {
+                let mut view = session();
+                let mut active = run("objective", "");
+                active.status = arany::RunStatus::Active;
+                active.assistant_message = None;
+                view.runs.push(active);
+                let mut history = History {
+                    agent,
+                    ..History::default()
+                };
+                history.sync(&view, width, 100);
+                let actor = arany::AgentRunId::new();
+                replace_prefixes(&mut history, &view, source, actor, width);
+                assert!(
+                    history
+                        .visible(&view)
+                        .iter()
+                        .any(|row| row.text == "  Result")
+                );
+                assert!(history.search(&view, "Result"));
+                history.top = history.messages[1].start;
+                history.select_at(&view, 1, 0, 1);
+                history.extend_selection(&view, history.messages[1].rows - 1, width);
+                history.follow_tail = false;
+                history.sync(&view, 24, 100);
+                assert_eq!(history.selection_text(&view).unwrap().unwrap(), source);
+                assert!(
+                    history
+                        .visible(&view)
+                        .iter()
+                        .any(|row| row.matched && row.text.contains("Result"))
+                );
+                view.runs[0].assistant_message = Some(source.into());
+                view.runs[0].status = arany::RunStatus::Finished;
+                view.last_sequence += 1;
+                history.set_preview(None);
+                history.sync(&view, 24, 100);
+                assert_eq!(history.selection_text(&view).unwrap().unwrap(), source);
+                assert_eq!(history.messages.len(), 2);
+                assert_eq!(
+                    history.messages[1].kind,
+                    if agent {
+                        MessageKind::AgentResult
+                    } else {
+                        MessageKind::Assistant
+                    }
+                );
+                assert!(history.live_rows(&view).is_empty());
+            }
+        }
+    }
+}
+
+fn replace_prefixes(
+    history: &mut History,
+    view: &SessionView,
+    source: &str,
+    actor: arany::AgentRunId,
+    width: usize,
+) {
+    for end in source.char_indices().map(|(byte, ch)| byte + ch.len_utf8()) {
+        let snapshot = arany::DisplayUpdate {
+            run_id: view.runs[0].id,
+            agent_run_id: actor,
+            call_index: 0,
+            text: std::sync::Arc::new(arany::PreviewText {
+                answer: source[..end].into(),
+                ..Default::default()
+            }),
+        };
+        assert!(history.set_preview(Some(snapshot.clone())));
+        history.sync(view, width, 100);
+        assert!(!history.set_preview(Some(snapshot)));
+        assert!(!history.preview_dirty);
+        history.sync(view, width, 100);
+        assert_eq!(history.messages.len(), 2);
+        let expected = display_rows(MessageKind::Preview, &source[..end], width, None);
+        assert_eq!(history.messages[1].rows, expected.len());
+        assert_eq!(history.total_rows, history.visible(view).len());
+        assert_eq!(
+            history
+                .live_rows(view)
+                .iter()
+                .map(|row| (&row.text, &row.spans))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|row| (&row.text, &row.spans))
+                .collect::<Vec<_>>()
+        );
+        let committed = display_rows(MessageKind::Assistant, &source[..end], width, None);
+        assert_eq!(
+            expected
+                .iter()
+                .skip(1)
+                .map(|row| (&row.text, &row.spans))
+                .collect::<Vec<_>>(),
+            committed
+                .iter()
+                .skip(1)
+                .map(|row| (&row.text, &row.spans))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn incomplete_checkpoints_format_with_exact_classic_costs_and_withdraw_on_rejection() {
+    use arany::ProviderCallDisposition;
+    let source = "# Result\n\n```rust\n  retained body";
+    let view = checkpoint_view(source);
+    for width in [16, 40, 50, 80, 120] {
+        let mut history = History::default();
+        history.sync(&view, width, 100);
+        let preview = arany::DisplayUpdate {
+            run_id: view.runs[0].id,
+            agent_run_id: view.runs[0].agents[0].id,
+            call_index: 0,
+            text: std::sync::Arc::new(arany::PreviewText {
+                answer: format!("{source}\nunacknowledged suffix"),
+                ..Default::default()
+            }),
+        };
+        history.set_preview(Some(preview.clone()));
+        history.sync(&view, width, 100);
+        for status in [arany::RunStatus::Cancelled, arany::RunStatus::Interrupted] {
+            let mut reopened = view.clone();
+            reopened.runs[0].status = status;
+            reopened.last_sequence += 1;
+            let mut recovered = History::default();
+            recovered.sync(&reopened, width, 100);
+            assert_eq!(recovered.messages[1].kind, MessageKind::Incomplete);
+            assert!(
+                recovered
+                    .visible(&reopened)
+                    .iter()
+                    .all(|row| !row.text.contains("unacknowledged"))
+            );
+            assert!(
+                recovered
+                    .visible(&reopened)
+                    .iter()
+                    .any(|row| row.text == "  Result")
+            );
+            let linear = super::super::linear::transcript_details(&reopened.runs[0]);
+            assert_eq!(linear, [format!("Arany · incomplete:\n{source}")]);
+            let rows = display_rows(MessageKind::User, "objective", width, None)
+                .into_iter()
+                .chain(display_rows(MessageKind::Incomplete, source, width, None))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                classic_run_cost(&reopened.runs[0], width),
+                (
+                    rows.iter()
+                        .map(
+                            |row| native_line(row, width as u16, Palette { color: false })
+                                .to_string()
+                                .len()
+                        )
+                        .sum(),
+                    rows.len() + 2
+                )
+            );
+        }
+        assert!(history.set_preview(None));
+        history.sync(&view, width, 100);
+        assert!(
+            history
+                .visible(&view)
+                .iter()
+                .all(|row| !row.text.contains("unacknowledged"))
+        );
+        history.set_preview(Some(preview));
+        let mut rejected = view.clone();
+        rejected.runs[0].agents[0].provider_calls[0].disposition =
+            ProviderCallDisposition::InvalidResponse;
+        rejected.last_sequence += 1;
+        history.sync(&rejected, width, 100);
+        assert_eq!(history.messages.len(), 1);
+        assert!(history.live_rows(&rejected).is_empty());
+        assert_eq!(rejected.runs[0].display[0].text, source);
+        history.set_preview(None);
+        rejected.runs[0].display.clear();
+        rejected.last_sequence += 1;
+        history.sync(&rejected, width, 100);
+        assert_eq!(history.messages.len(), 1);
+    }
+}
+
+fn checkpoint_view(source: &str) -> SessionView {
+    use arany::{DisplayCategory, DisplayChunk, ProviderCallDisposition};
+    let mut view = crate::presentation::team_view();
+    let mut active = view.runs.remove(0);
+    active.objective = "objective".into();
+    active.tools.clear();
+    active.supervisor = Default::default();
+    active.assistant_message = None;
+    active.status = arany::RunStatus::Active;
+    active.agents.truncate(1);
+    active.agents[0].provider_calls = vec![arany::ProviderCallRecord {
+        phase: arany::AgentPhase::RootPlan,
+        disposition: ProviderCallDisposition::Cancelled,
+        rate_limits: None,
+        delegation: None,
+        requested_tools: 0,
+        response_id: None,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        wire_provenance: None,
+        failure_reason: None,
+        refusal: None,
+    }];
+    active.display = vec![DisplayChunk {
+        call_index: 0,
+        phase: arany::AgentPhase::RootPlan,
+        offset: 0,
+        category: DisplayCategory::Answer,
+        item: 0,
+        text: source.into(),
+    }];
+    view.runs.push(active);
+    view
 }
