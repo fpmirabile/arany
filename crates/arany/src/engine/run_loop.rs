@@ -280,6 +280,7 @@ impl<'a> RunLoop<'a> {
     }
 
     async fn append_inner(&self, event: Event) -> Result<(), EngineError> {
+        let writer = self.journal.writer().await;
         let fact = matches!(
             event,
             Event::AgentSpawned { .. } | Event::AgentFinished { .. } | Event::RunFinished { .. }
@@ -287,9 +288,9 @@ impl<'a> RunLoop<'a> {
         .then(|| event.clone());
         let committed = self
             .ledger
-            .append_committed(self.journal, self.session_id, event)
+            .append_committed_in(&writer, self.session_id, event)
             .await?;
-        self.record_supervisor_verdict(&committed).await?;
+        self.record_supervisor_verdict(&writer, &committed).await?;
         if let (Some(steering), Some(fact)) = (&self.controls.steering, fact) {
             match fact {
                 Event::AgentSpawned {
@@ -324,6 +325,7 @@ impl<'a> RunLoop<'a> {
 
     async fn record_supervisor_verdict(
         &self,
+        writer: &crate::journal::JournalWriter<'_>,
         committed: &crate::session::EventEnvelope,
     ) -> Result<(), EngineError> {
         let decision = self.ledger.view(|view| {
@@ -340,8 +342,8 @@ impl<'a> RunLoop<'a> {
                 verdict,
             } => {
                 self.ledger
-                    .append(
-                        self.journal,
+                    .append_committed_in(
+                        writer,
                         self.session_id,
                         Event::SupervisorVerdictRecorded {
                             run_id,
@@ -410,6 +412,8 @@ impl<'a> RunLoop<'a> {
             .active_elapsed()
             .saturating_sub(pause.activity_started);
         let sampled_at = pause.paused_at + active_during;
+        let resume_at =
+            resume_at.or_else(|| self.ledger().activity_in_progress().then(Instant::now));
         self.settle_active_segment_at(pause.segment, sampled_at, resume_at)
     }
 

@@ -1,7 +1,7 @@
 # Linux Tool latency corpus
 
-The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports Read and
-in-process Edit rows offline. Command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
+The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports single-Read,
+four-Read-step and in-process Edit rows offline. Command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
 This is measurement evidence for [Tools](../../../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners)
 and [Execution](../../../../docs/specs/execution.md#committed-event-stream), not a
 new runtime deadline, CLI reporting feature or native support claim.
@@ -11,20 +11,21 @@ new runtime deadline, CLI reporting feature or native support claim.
 `tool_receipt_to_commit_us` uses `std::time::Instant`. It starts when the Engine
 receives a complete typed primary Provider response, before response validation,
 `ProviderCallRecorded`, intent admission and `ToolStarted`. It ends immediately
-after the Store acknowledges the matching `ToolFinished` durable append. This
-includes permission journaling, admitted Read execution and result fitting. Read
-uses its real in-process path; it does not launch a Guard. No timestamps come from
+after the Store acknowledges the final matching `ToolFinished` durable append for
+the step. This includes permission journaling, admitted Read or Edit execution and result fitting. Both
+use their real in-process paths; neither launches a Guard. No timestamps come from
 the lossy Journal subscription or telemetry.
 
 Provider inference, transport and wire decoding, Engine/fixture startup, final
 answer, post-result hooks, rendering and `show` are outside the interval. The
 scripted Provider is the only behavior double. There are no hooks, approval waits,
-telemetry, children, concurrent Tools, retries, compactions or fallback routes.
+telemetry, children, retries, compactions or fallback routes. The four-Read row
+runs the four reads concurrently.
 The recorder is opt-in under `test-support`, disabled by default and absent from
 production builds. Its timed callbacks do no I/O or async sends and retain only
 scoped identities, closed operation/outcome values, sequences and timing.
 
-Each operation has 10 labeled warm-ups followed by 100 measured samples,
+Each row has 10 labeled warm-ups followed by 100 measured steps,
 without outlier removal or replacement attempts. Every sample uses a fresh private
 State and Workspace, a fresh current-thread Engine runtime, identical short
 history and the existing 53,248-byte, 4,096-line fixture. Setup reads the complete
@@ -46,7 +47,8 @@ reconstructed from journal bytes: preserve `report.json` with the closed journal
 
 Integer microsecond samples stay in attempt order. Sorting their measured-success
 durations reproduces nearest-rank p50/p95/max (`ceil(p*n)-1`, p95 index 94 for 100).
-Only a complete, audited invocation gets a target comparison. Invalid proposals,
+Only a complete, audited single-call row gets a target comparison. The four-Read
+row reports step percentiles without a provisional target. Invalid proposals,
 denial, failure, cancellation, uncertainty and missing acknowledgements cannot
 become successful samples. Failure stops the invocation without retry, preserves
 partial counts/captures and emits no valid percentile or target verdict. A missed
@@ -56,21 +58,22 @@ owns the rationale and peer comparison.
 
 ## Bounds and retained evidence
 
-The recorder allows one pending measurement and at most 330 retained attempts;
-overlap, unmatched completion and overflow invalidate capture. Each row attempts
-at most 110 Read or Edit operations, two scripted calls per successful Run (a finite four-call Goal
+The recorder allows one pending step measurement and at most 330 retained attempts;
+overlapping steps, unmatched completion and overflow invalidate capture. Each row attempts
+at most 110 steps of one or four Reads or one Edit, two scripted calls per successful Run (a finite four-call Goal
 ceiling), one 53,248-byte Workspace file, the ordinary 64 KiB Tool result bound,
 32,768 Goal tokens, 120 seconds active time and one Run. The report records the
 effective Tool limits and default resource settings. Read has no checkpoint or publication. Edit replaces a unique final function,
 checks its FileReceipt and checkpoint, and audits closed replay and fresh show.
-The two rows retain independent reports and the same per-row bounds.
+The three rows retain independent reports and the same per-row bounds.
 
 The parent serially supervises each helper for at most 120 seconds and the whole
 invocation for 30 minutes. Existing bounded process owners kill and reap helpers
-on timeout/capture failure; `show` has its separate 10-second bound. Each captured
-channel is limited to 64 KiB. Sample evidence above 8 MiB fails; the parent reserves
-8 MiB before each attempt within a 256 MiB aggregate retention ceiling. Timing and
-metadata reports are capped at 1 MiB. Warm-up fixtures are removed only after
+on timeout/capture failure; `show` has its separate 10-second bound. Each helper
+capture channel is limited to 64 KiB; `show` allows 64 KiB per requested Tool.
+Sample evidence above 8 MiB fails; the parent reserves 8 MiB before each attempt
+within a 256 MiB aggregate retention ceiling divided equally among the three rows.
+Timing and metadata reports are capped at 1 MiB. Warm-up fixtures are removed only after
 closed replay and inspection succeed; measured and failed fixtures remain private.
 No cleanup of failed evidence is implied by a missing timing endpoint.
 

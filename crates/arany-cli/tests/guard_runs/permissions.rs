@@ -3596,6 +3596,120 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
 }
 
 #[tokio::test]
+async fn hook_post_tool_use_finishes_successful_reads_after_a_sibling_limit() {
+    let fixture = Fixture::new(
+        Some(&read_post_settings(vec![shell_hook(
+            "echo checked >&2; exit 2",
+        )])),
+        false,
+    );
+    let calls: Vec<_> = ["facts", "limited", "other"]
+        .into_iter()
+        .map(|name| {
+            std::fs::write(fixture.workspace.join(format!("notes/{name}.txt")), "Fact").unwrap();
+            arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{name}")).unwrap(),
+                call: arany::ToolCall::Read {
+                    path: format!("notes/{name}.txt"),
+                    offset: None,
+                    limit: Some(32),
+                },
+            }
+        })
+        .collect();
+    let limited = calls[1].call.clone();
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tools(calls)]);
+    let requests = Arc::clone(&provider.requests);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let send = Mutex::new(Some(send));
+    let provider = Arc::new(provider.with_before_call(0, move || {
+        let run = requests.lock().unwrap()[0].run_id;
+        let gate = arany::FaultPlan::gate_in_process_read(run, limited.clone());
+        send.lock().unwrap().take().unwrap().send(gate).unwrap();
+    }));
+    let mut events = fixture.engine.subscribe();
+    let drive = async {
+        let (entered, release) = receive.await.unwrap();
+        entered.await.unwrap();
+        expire_read_after_successes(&mut events).await;
+        release
+    };
+    let ((result, requests, humans), _held_release) =
+        tokio::join!(fixture.run_provider(provider, None, false, budget()), drive);
+    assert_eq!(result.run.status, RunStatus::Failed);
+    assert_eq!(result.run.failure, Some(arany::RunFailure::ToolStopped));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(humans, 0);
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(view.runs[0], result.run);
+    assert_read_post_hooks_after_limit(&events, &view.runs[0]);
+}
+
+async fn expire_read_after_successes(events: &mut arany::Subscription) {
+    let mut succeeded = 0;
+    let mut runtime_ms = None;
+    while succeeded < 2 || runtime_ms.is_none() {
+        let Some(arany::Tapped::Committed(event)) = events.next().await else {
+            panic!("read completion tap must not lag");
+        };
+        match &event.event {
+            Event::ToolStarted { intent, .. } if matches!(&intent.call, arany::ToolCall::Read { path, .. } if path == "notes/limited.txt") =>
+            {
+                runtime_ms = Some(intent.limits.runtime_ms);
+            }
+            Event::ToolFinished { observation, .. }
+                if observation.disposition == arany::ToolDisposition::Succeeded =>
+            {
+                succeeded += 1;
+            }
+            _ => {}
+        }
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(u64::from(runtime_ms.unwrap()) + 1)).await;
+    tokio::time::resume();
+}
+
+fn assert_read_post_hooks_after_limit(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 3);
+    for tool in &run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        if observation.disposition == arany::ToolDisposition::Succeeded {
+            assert_eq!(tool.hook_feedback(), ["hook feedback: checked"]);
+            assert_eq!(tool.hooks.len(), 1);
+            let hook = &tool.hooks[0];
+            assert_eq!(
+                hook.invocation.event,
+                arany::permissions::HookEvent::PostToolUse
+            );
+            let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&tool.intent).unwrap()).into();
+            assert_eq!(hook.invocation.subject_digest, digest);
+            assert!(
+                hook.outcome
+                    .as_ref()
+                    .unwrap()
+                    .observation
+                    .attestation
+                    .is_some()
+            );
+        } else {
+            assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+            assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+            assert!(tool.hooks.is_empty());
+        }
+    }
+    let last_read = events
+        .iter()
+        .rposition(|e| matches!(e.event, Event::ToolFinished { .. }))
+        .unwrap();
+    let first_hook = events
+        .iter()
+        .position(|e| matches!(e.event, Event::HookStarted { .. }))
+        .unwrap();
+    assert!(last_read < first_hook);
+}
+
+#[tokio::test]
 async fn hook_post_tool_use_continue_false_stops_after_the_committed_effect() {
     let case = post_run(shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"review required","decision":"block","reason":"not model feedback"}'"#), true).await;
     assert_eq!(case.status, RunStatus::StoppedByHook);
@@ -4479,6 +4593,144 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
         limit: Some(32),
     };
     assert!(SessionView::replay(case.session, &forged).is_err());
+}
+
+#[tokio::test]
+async fn hook_narrowed_read_batch_commits_replacement_before_sibling_reservations() {
+    let narrowed = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: None,
+        limit: Some(8),
+    };
+    let fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(&narrowing_script(
+                &json!(narrowed),
+                "\"limit\":32",
+            ))],
+        )),
+        true,
+    );
+    let requests = (0..4)
+        .map(|index| arany::ToolRequest {
+            id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+            call: if index == 0 {
+                call("read")
+            } else {
+                arany::ToolCall::Read {
+                    path: "notes/facts.txt".into(),
+                    offset: None,
+                    limit: Some(16),
+                }
+            },
+        })
+        .collect();
+    let (result, requests, humans) = fixture
+        .run(
+            vec![ProviderOutcome::Tools(requests), finish("answer")],
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert_eq!(humans, 0);
+    assert_eq!(requests.len(), 2);
+    let step = &requests[1].input.tools.as_ref().unwrap().steps[0];
+    assert_eq!(step.requests.len(), 4);
+    assert_eq!(step.observations.len(), 5);
+    assert_eq!(
+        step.narrowed_observations
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+    assert_eq!(step.observations[0].intent.call, step.requests[0].call);
+    assert_eq!(
+        step.observations[0].disposition,
+        arany::ToolDisposition::Denied
+    );
+    assert!(step.observations[0].attestation.is_none());
+    assert_eq!(step.observations[1].intent.call, narrowed);
+    for (observation, request) in step.observations[2..].iter().zip(&step.requests[1..]) {
+        assert_eq!(observation.intent.call, request.call);
+    }
+    assert!(
+        step.observations[1..]
+            .iter()
+            .all(
+                |observation| observation.disposition == arany::ToolDisposition::Succeeded
+                    && matches!(
+                        observation.attestation,
+                        Some(arany::Attestation::InProcess { .. })
+                    )
+            )
+    );
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(
+        view.runs[0], result.run,
+        "closed replay preserves the complete batch"
+    );
+    assert_narrowed_read_batch_order(&events, &view.runs[0]);
+}
+
+fn assert_narrowed_read_batch_order(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 5);
+    let (original, replacement) = (&run.tools[0], &run.tools[1]);
+    assert!(original.permission_verdict.as_ref().unwrap().narrowed);
+    assert_eq!(
+        replacement.narrowing_source,
+        Some(original.permission_verdict.as_ref().unwrap().intent_digest)
+    );
+    assert!(
+        !replacement.active_time_reserved,
+        "the replacement reserves through its own ToolStarted"
+    );
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolStarted { intent, .. } => Some((event.sequence, intent.id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 5);
+    assert_eq!(starts[0].1, original.intent.id);
+    assert_eq!(starts[1].1, replacement.intent.id);
+    assert_eq!(
+        starts[2..].iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        run.tools[2..]
+            .iter()
+            .map(|tool| tool.intent.id)
+            .collect::<Vec<_>>()
+    );
+    let first_finish = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. }
+                if observation.intent.id == original.intent.id =>
+            {
+                Some(event.sequence)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let proposals: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolProposed { .. }))
+        .collect();
+    assert!(proposals.len() >= 4);
+    assert!(proposals[3].sequence < starts[0].0);
+    assert!(starts[0].0 < first_finish && first_finish < starts[1].0);
+    let reservations: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
+        .collect();
+    assert_eq!(reservations.len(), 4);
+    assert!(
+        reservations[1].sequence > starts[1].0,
+        "the replacement restores request accounting before sibling reservation"
+    );
 }
 
 #[tokio::test]

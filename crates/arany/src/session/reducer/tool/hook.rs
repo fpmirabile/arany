@@ -17,6 +17,10 @@ pub(super) fn started(
         return start_lifecycle(current, run_id, agent_run_id, hook, prior);
     }
     let previous = current.previous_subject_sequence();
+    let no_provider_pending = super::active_run_goal(current, run_id).is_some_and(|goal| {
+        !goal.unobserved_provider_calls.contains(&agent_run_id)
+            && goal.compaction_call_reserved.is_none()
+    });
     let run = active_run(current, run_id)?;
     if !permissions_pinned(run) || hook.intent.agent_run_id != agent_run_id {
         return Err(ReplayError::InvalidTransition);
@@ -26,7 +30,13 @@ pub(super) fn started(
     }
     let post = hook.event == HookEvent::PostToolUse;
     let (tool, state_allows) = if post {
-        let (tool, adjacent) = post_target(run, agent_run_id, &hook.subject_digest, previous)?;
+        let (tool, adjacent) = post_target(
+            run,
+            agent_run_id,
+            &hook.subject_digest,
+            previous,
+            no_provider_pending,
+        )?;
         let succeeded = tool.observation.as_ref().is_some_and(|observation| {
             observation.disposition == crate::tools::ToolDisposition::Succeeded
         });
@@ -59,6 +69,15 @@ pub(super) fn started(
         || hook.intent.workspace_inode != tool.intent.workspace_inode
         || hook.intent.id == tool.intent.id
         || same_event >= crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
+        || post
+            && tool
+                .hooks
+                .iter()
+                .rev()
+                .find(|view| view.invocation.event == hook.event)
+                .is_some_and(|view| {
+                    (hook.group, hook.handler) <= (view.invocation.group, view.invocation.handler)
+                })
         || finished_restriction
         || tool
             .hooks

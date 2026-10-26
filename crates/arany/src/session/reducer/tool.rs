@@ -211,18 +211,34 @@ pub(super) fn apply(
             active_ceiling_ms,
         } => {
             let run = active_run(current, *run_id)?;
+            let read = |call: &crate::tools::ToolCall| {
+                call.site() == crate::tools::catalog::Site::InProcess && !call.mutates()
+            };
+            let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
+            if tool.active_time_reserved {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let pending_read = read(&tool.intent.call);
             if run
                 .primary()
                 .is_none_or(|primary| primary.id != *agent_run_id)
                 || super::pending_tool_requests(run) != Some(0)
                 || !run.hooks_settled()
-                || run.tools.iter().any(ToolView::dispatch_in_progress)
+                || run.tools.iter().any(|tool| {
+                    tool.dispatch_in_progress() && !(pending_read && read(&tool.intent.call))
+                })
             {
                 return Err(ReplayError::InvalidTransition);
             }
             let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
             tool.active_time_reserved = true;
-            record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
+            record_tool_ceiling(
+                current,
+                *run_id,
+                *agent_run_id,
+                intent_digest,
+                *active_ceiling_ms,
+            )?;
         }
         Event::HookStarted {
             run_id,
@@ -260,14 +276,80 @@ fn permissions_pinned(run: &RunView) -> bool {
         .is_some_and(|policy| policy.permissions_digest.is_some())
 }
 
-// The Tool a PostToolUse hook follows: the last Tool, or the source of the changeset the last Tool
-// integrated. The hook must directly follow that Tool's latest journaled step.
+fn concurrent_post_source(
+    run: &RunView,
+    actor: crate::session::AgentRunId,
+    subject: &[u8; 32],
+) -> bool {
+    let Some(agent) = run.agents.iter().find(|agent| agent.id == actor) else {
+        return false;
+    };
+    let Some(call) = agent
+        .provider_calls
+        .iter()
+        .rev()
+        .find(|call| call.phase != AgentPhase::ToolReview)
+    else {
+        return false;
+    };
+    if call.disposition != ProviderCallDisposition::ToolRequested
+        || call.requested_tools < 2
+        || !run.hooks_settled()
+    {
+        return false;
+    }
+    let tools = if run.primary().is_some_and(|primary| primary.id == actor) {
+        &run.tools[run.initial_tool_count()..]
+    } else {
+        &agent.tools[..]
+    };
+    let original = |tool: &&ToolView| {
+        tool.narrowing_source.is_none()
+            && !tool.intent.call.is_internal()
+            && !matches!(
+                tool.intent.call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+            )
+    };
+    if tools.iter().filter(original).count() != super::requested_tool_total(agent) {
+        return false;
+    }
+    let step: Vec<_> = tools
+        .iter()
+        .rev()
+        .filter(original)
+        .take(usize::from(call.requested_tools))
+        .collect();
+    let Some(source) = tools.iter().find(|tool| tool.intent.digest() == *subject) else {
+        return false;
+    };
+    step.iter().any(|tool| {
+        tool.intent.digest() == *subject || source.narrowing_source == Some(tool.intent.digest())
+    }) && step.iter().all(|tool| {
+        tool.intent.call.site() == crate::tools::catalog::Site::InProcess
+            && !tool.intent.call.mutates()
+            && tool.observation.as_ref().is_none_or(|observation| {
+                !matches!(
+                    observation.attestation,
+                    Some(crate::tools::Attestation::Guard(_))
+                )
+            })
+            || !tool.active_time_reserved
+                && tool.permission_verdict.is_none()
+                && tool.hooks.is_empty()
+                && tool.review_call_index.is_none()
+                && tool.observation.is_none()
+    })
+}
+
 fn post_target<'a>(
     run: &'a mut RunView,
     actor: crate::session::AgentRunId,
     subject: &[u8; 32],
     previous: u64,
+    no_provider_pending: bool,
 ) -> Result<(&'a mut ToolView, bool), ReplayError> {
+    let concurrent = no_provider_pending && concurrent_post_source(run, actor, subject);
     let tools = if run
         .primary()
         .is_some_and(|agent| agent.id == actor && agent.status == AgentStatus::Active)
@@ -338,8 +420,37 @@ fn post_target<'a>(
         .finished_sequence
         .max(tools[index].hook_sequence)
         .max(capture_sequence);
-    let adjacent = !awaiting_integration && tail == Some(previous);
+    let adjacent = !awaiting_integration
+        && (tail == Some(previous) || concurrent && deferred_read_post(tools, index));
     Ok((&mut tools[index], adjacent))
+}
+
+fn deferred_read_post(tools: &[ToolView], index: usize) -> bool {
+    let source = &tools[index];
+    source.intent.call.site() == crate::tools::catalog::Site::InProcess
+        && !source.intent.call.mutates()
+        && source.observation.as_ref().is_some_and(|observation| {
+            matches!(
+                observation.attestation,
+                Some(crate::tools::Attestation::InProcess { .. })
+            )
+        })
+        && !source
+            .hooks
+            .iter()
+            .any(|hook| hook.invocation.event == HookEvent::PostToolUse)
+        && tools
+            .iter()
+            .filter(|tool| {
+                tool.hooks
+                    .iter()
+                    .any(|hook| hook.invocation.event == HookEvent::PostToolUse)
+            })
+            .all(|tool| {
+                tool.finished_sequence
+                    .zip(source.finished_sequence)
+                    .is_some_and(|(before, after)| before < after)
+            })
 }
 
 fn tool_by_digest<'a>(
@@ -417,6 +528,38 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
                 && observed_command_changeset(observation)
                     .is_some_and(|source| source == *changeset)
         })
+}
+
+fn record_tool_ceiling(
+    current: &mut SessionView,
+    run_id: crate::session::RunId,
+    actor: crate::session::AgentRunId,
+    digest: &[u8; 32],
+    ceiling_ms: u64,
+) -> Result<(), ReplayError> {
+    let run = active_run(current, run_id)?;
+    let read = |tool: &ToolView| {
+        tool.intent.call.site() == crate::tools::catalog::Site::InProcess
+            && !tool.intent.call.mutates()
+    };
+    let overlaps = run.primary().is_some_and(|primary| primary.id == actor)
+        && run
+            .tools
+            .iter()
+            .rev()
+            .any(|tool| read(tool) && tool.intent.digest() == *digest)
+        && run.tools.iter().any(|tool| {
+            tool.dispatch_in_progress() && read(tool) && tool.intent.digest() != *digest
+        });
+    let ceiling_ms = if overlaps {
+        active_run_goal(current, run_id)
+            .ok_or(ReplayError::InvalidTransition)?
+            .active_ceiling_ms
+            .max(ceiling_ms)
+    } else {
+        ceiling_ms
+    };
+    record_run_ceiling(current, run_id, ceiling_ms)
 }
 
 fn record_run_ceiling(

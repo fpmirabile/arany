@@ -152,6 +152,15 @@ pub(crate) async fn retry_backoff(session: SessionId, delay: Duration) {
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn in_process_read(intent: &crate::tools::EffectIntent) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((entered, release)) = FaultPlan::in_process_read_gate(intent) {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) async fn autonomous_continuation(session: SessionId) {
     #[cfg(any(test, feature = "test-support"))]
     if let Some((entered, release)) = FaultPlan::autonomous_continuation_gate(session) {
@@ -308,6 +317,12 @@ mod injection {
     type Admits = fn(&Event) -> bool;
 
     enum Fault {
+        InProcessRead(
+            crate::session::RunId,
+            crate::tools::ToolCall,
+            oneshot::Sender<()>,
+            oneshot::Receiver<()>,
+        ),
         ToolPreflight(SessionId, &'static str, oneshot::Sender<()>),
         CheckAcknowledgment(
             crate::CheckId,
@@ -375,6 +390,27 @@ mod injection {
     pub struct FaultPlan;
 
     impl FaultPlan {
+        pub fn gate_in_process_read(
+            run: crate::session::RunId,
+            call: crate::tools::ToolCall,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait_entered) = oneshot::channel();
+            let (release, wait_release) = oneshot::channel();
+            plan().push(Fault::InProcessRead(run, call, entered, wait_release));
+            (wait_entered, release)
+        }
+
+        pub(crate) fn in_process_read_gate(
+            intent: &crate::tools::EffectIntent,
+        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::InProcessRead(run, call, ..) if *run == intent.run_id && *call == intent.call),
+            ) {
+                Some(Fault::InProcessRead(_, _, entered, release)) => Some((entered, release)),
+                _ => None,
+            }
+        }
+
         pub fn corrupt_tool_preflight(
             session: SessionId,
             kind: &'static str,
