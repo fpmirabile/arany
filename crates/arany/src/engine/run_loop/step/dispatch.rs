@@ -1245,6 +1245,8 @@ mod tests {
                 intent: observation.intent.clone(),
                 observation: Some(observation),
                 review_call_index: None,
+                active_time_reserved: false,
+                narrowing_source: None,
                 permission_verdict: None,
                 started_sequence: Some(0),
                 hooks: Vec::new(),

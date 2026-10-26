@@ -9,8 +9,8 @@ use arany::{EngineConfig, RunControls, ToolGrant};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
+#[tokio::test]
+async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     use arany::{
         AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, OutputTokenBound,
         ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
@@ -293,6 +293,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                         agent_run_id,
                         ..
                     }
+                    | Event::ToolActiveTimeReserved {
+                        run_id,
+                        agent_run_id,
+                        ..
+                    }
                     | Event::ToolFinished {
                         run_id,
                         agent_run_id,
@@ -322,6 +327,226 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(all.clone()).unwrap().unwrap().runs[0].status,
         RunStatus::Finished
     );
+    let mut batch = all[..TOOL_STARTED].to_vec();
+    if let Event::ProviderCallRecorded { record, .. } = &mut batch[TOOL_STARTED - 1] {
+        record.requested_tools = 4;
+    }
+    let observations: Vec<_> = (0..4)
+        .map(|_| {
+            let Event::ToolFinished { observation, .. } = &all[TOOL_FINISHED] else {
+                unreachable!()
+            };
+            let mut observation = observation.clone();
+            observation.intent.id = uuid::Uuid::now_v7();
+            if let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation {
+                receipt.intent_digest =
+                    Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
+            }
+            observation
+        })
+        .collect();
+    for observation in &observations {
+        batch.push(Event::ToolStarted {
+            run_id: run,
+            agent_run_id: primary,
+            intent: observation.intent.clone().into(),
+            active_ceiling_ms: 0,
+        });
+    }
+    let mut premature = batch[..TOOL_STARTED + 2].to_vec();
+    premature.push(Event::ToolFinished {
+        checkpoint: None,
+        run_id: run,
+        agent_run_id: primary,
+        observation: observations[0].clone(),
+    });
+    assert!(
+        replay(premature).is_err(),
+        "all declared intents must precede the first observation"
+    );
+    let crashed = replay(batch[..TOOL_STARTED + 2].to_vec()).unwrap().unwrap();
+    assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(crashed.runs[0].tools.len(), 2);
+    assert!(
+        crashed.runs[0]
+            .tools
+            .iter()
+            .all(|tool| tool.observation.is_none())
+    );
+    for order in [[0, 1, 2, 3], [2, 0, 3, 1]] {
+        let mut completed = batch.clone();
+        for index in order {
+            completed.push(Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: primary,
+                observation: observations[index].clone(),
+            });
+        }
+        let mut duplicate = completed.clone();
+        duplicate.push(completed.last().unwrap().clone());
+        assert!(
+            replay(duplicate).is_err(),
+            "an observation is consumed only once"
+        );
+        let mut partial = completed[..completed.len() - 1].to_vec();
+        partial.extend(suffix.clone());
+        assert!(
+            replay(partial).is_err(),
+            "no Provider continuation with an open intent"
+        );
+        completed.extend(suffix.clone());
+        let view = replay(completed).unwrap().unwrap();
+        assert_eq!(view.runs[0].status, RunStatus::Finished);
+        assert_eq!(view.runs[0].tools.len(), 4);
+        for (tool, observation) in view.runs[0].tools.iter().zip(&observations) {
+            assert_eq!(tool.observation.as_ref(), Some(observation));
+        }
+    }
+    const ACTIVE_TIME_LIMIT_MS: u64 = 100_000;
+    const COMMAND_ACTIVE_CEILING_MS: u64 = 70_000;
+    const QUEUED_READ_ACTIVE_CEILING_MS: u64 = 15_000;
+    const DISPATCHED_READ_ACTIVE_CEILING_MS: u64 = 65_000;
+    for after_first in [false, true] {
+        let mut accounting = all[..TOOL_STARTED].to_vec();
+        if let Event::ProviderCallRecorded { record, .. } = &mut accounting[TOOL_STARTED - 1] {
+            record.requested_tools = 2;
+        }
+        for event in &mut accounting {
+            match event {
+                Event::GoalStarted { budget, .. } => {
+                    budget.max_active_ms = Some(ACTIVE_TIME_LIMIT_MS)
+                }
+                Event::GoalPlanContractRecorded { contract, .. } => {
+                    contract.budget.max_active_ms = Some(ACTIVE_TIME_LIMIT_MS)
+                }
+                Event::RunStarted {
+                    active_deadline_ms, ..
+                } => *active_deadline_ms = Some(ACTIVE_TIME_LIMIT_MS),
+                _ => {}
+            }
+        }
+        let mut command = observations[0].clone();
+        command.intent.limits.runtime_ms = 60_000;
+        if let Some(arany::Attestation::Guard(receipt)) = &mut command.attestation {
+            receipt.limits = command.intent.limits.clone();
+            receipt.intent_digest =
+                Sha256::digest(serde_json::to_vec(&command.intent).unwrap()).into();
+        }
+        let mut read = observations[1].intent.clone();
+        read.call = ToolCall::Read {
+            path: "src/facts.txt".into(),
+            offset: None,
+            limit: None,
+        };
+        read.limits.runtime_ms = 5_000;
+        for (intent, ceiling) in [
+            (&command.intent, COMMAND_ACTIVE_CEILING_MS),
+            (&read, QUEUED_READ_ACTIVE_CEILING_MS),
+        ] {
+            accounting.push(Event::ToolStarted {
+                run_id: run,
+                agent_run_id: primary,
+                intent: intent.clone().into(),
+                active_ceiling_ms: ceiling,
+            });
+        }
+        let reservation = Event::ToolActiveTimeReserved {
+            run_id: run,
+            agent_run_id: primary,
+            intent_digest: Sha256::digest(serde_json::to_vec(&command.intent).unwrap()).into(),
+            active_ceiling_ms: COMMAND_ACTIVE_CEILING_MS,
+        };
+        let mut unmatched = accounting.clone();
+        unmatched.push(Event::ToolActiveTimeReserved {
+            run_id: run,
+            agent_run_id: primary,
+            intent_digest: [9; 32],
+            active_ceiling_ms: COMMAND_ACTIVE_CEILING_MS,
+        });
+        assert!(
+            replay(unmatched).is_err(),
+            "active-time refresh must name a pending intent"
+        );
+        accounting.push(reservation.clone());
+        let mut duplicate = accounting.clone();
+        duplicate.push(reservation);
+        assert!(
+            replay(duplicate).is_err(),
+            "one active-time refresh per intent"
+        );
+        if after_first {
+            accounting.push(Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: primary,
+                observation: command,
+            });
+            accounting.push(Event::ToolActiveTimeReserved {
+                run_id: run,
+                agent_run_id: primary,
+                intent_digest: Sha256::digest(serde_json::to_vec(&read).unwrap()).into(),
+                active_ceiling_ms: DISPATCHED_READ_ACTIVE_CEILING_MS,
+            });
+        }
+        let expected = if after_first {
+            DISPATCHED_READ_ACTIVE_CEILING_MS
+        } else {
+            COMMAND_ACTIVE_CEILING_MS
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let store = arany::Store::open(StateRoot::admit(&state).unwrap()).unwrap();
+        for event in accounting {
+            store.append(session, event).await.unwrap();
+        }
+        store.close().await.unwrap();
+        let store = arany::Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let view = store.load_view(session).await.unwrap().unwrap();
+        assert_eq!(
+            view.goals[0].active_ceiling_ms, expected,
+            "crash after earlier call: {after_first}"
+        );
+        let Event::GoalStarted {
+            workspace_identity, ..
+        } = all[1]
+        else {
+            unreachable!()
+        };
+        store
+            .append(
+                session,
+                Event::GoalStarted {
+                    goal_id: arany::GoalId::new(),
+                    objective: "New task after inspection".into(),
+                    include_paths: Some(Vec::new()),
+                    workspace_identity,
+                    budget: arany::GoalBudget::default(),
+                    phase: arany::GoalPhase::Implementation,
+                    resource_settings: arany::ToolResourceSettings::default(),
+                    autonomous: false,
+                    continues: None,
+                },
+            )
+            .await
+            .unwrap();
+        let sealed = store.load_view(session).await.unwrap().unwrap();
+        let goal = &sealed.goals[0];
+        assert_eq!(goal.status, arany::GoalStatus::Interrupted);
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
+        assert_eq!(goal.active_ceiling_ms, expected);
+        let mut bounded = goal.clone();
+        for (limit, admitted) in [(expected, false), (expected + 1, true)] {
+            bounded.plan_contract.as_mut().unwrap().budget.max_active_ms = Some(limit);
+            assert_eq!(
+                bounded.admits_resume(&sealed),
+                admitted,
+                "crash after earlier call: {after_first}, active-time limit: {limit}"
+            );
+        }
+        assert!(sealed.runs[0].tools.last().unwrap().observation.is_none());
+        store.close().await.unwrap();
+    }
     for stream in ["stdout", "stderr"] {
         for fault in ["missing", "bytes", "lines"] {
             let mut row = all.clone();
@@ -2145,4 +2370,100 @@ fn assert_refused_integration_continues(
     );
     assert_eq!(observations[1].disposition, ToolDisposition::Denied);
     assert!(observations[1].attestation.is_none());
+}
+
+#[tokio::test]
+async fn four_call_step_show_bytes_survive_engine_close_and_store_reopen() {
+    use arany::test_support::{engine, goals, scenario};
+    for replaced in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = goals::facts_workspace(temp.path(), "four durable reads");
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).unwrap();
+        crate::private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        let engine = engine::open(
+            state,
+            arany::EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let requests = (0..4)
+            .map(|index| arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                call: ToolCall::Read {
+                    path: "notes/facts.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+            })
+            .collect();
+        let mut provider = scenario::ScriptedProvider::new(vec![
+            arany::ProviderOutcome::Tools(requests),
+            goals::finish_with("Four reads completed"),
+        ]);
+        if replaced {
+            let path = workspace.clone();
+            provider = provider.with_before_call(0, move || {
+                std::fs::rename(&path, path.with_file_name("admitted-workspace")).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            });
+        }
+        let provider = std::sync::Arc::new(provider);
+        let mut input = scenario::request(&workspace, "Read the facts four times in one step");
+        input.include_paths.clear();
+        let outcome = engine::run_with(
+            &engine,
+            &provider,
+            input,
+            arany::RunControls {
+                tools: arany::ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let show = || {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
+            command
+                .env_clear()
+                .current_dir(&workspace)
+                .args(["show", "--output", "text", "--state-dir"])
+                .arg(&state_path)
+                .arg(outcome.session_id.to_string());
+            crate::process_output_before_deadline(command)
+        };
+        let before = show();
+        engine.close().await.unwrap();
+        let (events, view) = goals::replayed(&state_path, outcome.session_id).await;
+        let after = show();
+        assert!(before.status.success() && after.status.success());
+        assert!(before.stderr.is_empty() && after.stderr.is_empty());
+        assert_eq!(before.stdout, after.stdout);
+        assert_eq!(
+            after.stdout,
+            arany_cli::presentation::render_session(
+                &view,
+                &events,
+                arany_cli::presentation::Output::Text
+            )
+            .as_bytes()
+        );
+        assert_eq!(view.runs[0], outcome.run);
+        assert_eq!(view.runs[0].tools.len(), 4);
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            if replaced { 1 } else { 2 }
+        );
+        if replaced {
+            let feedback = arany_cli::presentation::run_feedback(&view.runs[0]).unwrap();
+            assert!(feedback.contains("Workspace read stopped before it started"));
+            assert!(!feedback.contains("/permissions"));
+            assert_eq!(
+                arany_cli::presentation::run_feedback(&outcome.run).as_ref(),
+                Some(&feedback)
+            );
+        }
+    }
 }

@@ -1072,6 +1072,7 @@ impl From<&Event> for TraceEventKind {
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
             | Event::ToolProposed { .. }
+            | Event::ToolActiveTimeReserved { .. }
             | Event::HookStarted { .. }
             | Event::HookFinished { .. }
             | Event::ToolFinished { .. }

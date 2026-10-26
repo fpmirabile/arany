@@ -193,6 +193,34 @@ pub(super) fn run_finished(run: &RunView) -> Result<(), ReplayError> {
     Ok(())
 }
 
+fn primary_intents_idle(run: &RunView) -> bool {
+    quiescent(run)
+        || run.workers.capture.is_none()
+            && run.primary().is_some_and(|primary| {
+                primary
+                    .provider_calls
+                    .iter()
+                    .rev()
+                    .find(|call| call.phase != AgentPhase::ToolReview)
+                    .is_some_and(|call| {
+                        call.disposition == ProviderCallDisposition::ToolRequested
+                            && call.requested_tools > 1
+                    })
+            })
+            && run.tools.iter().all(|tool| {
+                tool.observation.is_some()
+                    || !tool.dispatch_in_progress()
+                        && tool.narrowing_source.is_none()
+                        && !tool.intent.call.is_internal()
+                        && !matches!(tool.intent.call, ToolCall::ApplyChangeset { .. })
+            })
+            && run
+                .agents
+                .iter()
+                .flat_map(|agent| &agent.tools)
+                .all(|tool| tool.observation.is_some())
+}
+
 pub(super) fn tool_started(
     run: &RunView,
     agent_run_id: &AgentRunId,
@@ -205,7 +233,7 @@ pub(super) fn tool_started(
         return Err(ReplayError::InvalidTransition);
     }
     if primary(run, *agent_run_id) {
-        if intent.target != EffectTarget::Workspace || !quiescent(run) {
+        if intent.target != EffectTarget::Workspace || !primary_intents_idle(run) {
             return Err(ReplayError::InvalidTransition);
         }
         if let ToolCall::ApplyChangeset {

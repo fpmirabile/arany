@@ -884,3 +884,85 @@ async fn hook_free_permission_step_commits_four_events_and_replays_its_verdict()
     assert!(verdict.approved);
     assert_eq!(view.runs[0].tools, outcome.run.tools);
 }
+
+#[tokio::test]
+async fn multi_call_cancellation_settles_the_undispatched_suffix() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+    let _deadline = engine_support::deadline("multi-call cancellation", TEST_TIMEOUT);
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+    for name in ["pending", "final"] {
+        std::fs::write(workspace.join(format!("notes/{name}.txt")), "Fact").unwrap();
+    }
+    let state = temp.path().join("state");
+    let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+    private_file(
+        &state.join("permissions.json"),
+        br#"{"permissions":{"ask":["Read(./notes/pending.txt)"]}}"#,
+    );
+    let requests = ["facts", "facts", "pending", "final"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| arany::ToolRequest {
+            id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+            call: arany::ToolCall::Read {
+                path: format!("notes/{name}.txt"),
+                offset: None,
+                limit: None,
+            },
+        })
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Tools(
+        requests,
+    )]));
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let cancellation = RunCancellation::new();
+    let mut input = request(&workspace, "Read four files");
+    input.include_paths.clear();
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: Some(approvals),
+        cancellation: cancellation.clone(),
+        ..Default::default()
+    };
+    let cancel = async {
+        let approval = inbox.next().await.expect("pending read approval");
+        assert!(
+            matches!(&approval.intent.call, arany::ToolCall::Read { path, .. } if path == "notes/pending.txt")
+        );
+        cancellation.cancel();
+        approval.decide(true);
+    };
+    let (outcome, ()) = tokio::join!(run_with(&engine, &provider, input, controls), cancel);
+    let outcome = outcome.unwrap();
+    engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+    assert_eq!(view.runs[0], outcome.run);
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let observations: Vec<_> = outcome
+        .run
+        .tools
+        .iter()
+        .map(|tool| tool.observation.as_ref().unwrap())
+        .collect();
+    assert_eq!(observations.len(), 4);
+    assert!(
+        observations[..2]
+            .iter()
+            .all(|observation| observation.disposition == arany::ToolDisposition::Succeeded)
+    );
+    assert!(
+        observations[2..]
+            .iter()
+            .all(|observation| observation.attestation.is_none())
+    );
+    assert!(observations[3].output.starts_with("not_dispatched:"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .count(),
+        4
+    );
+}

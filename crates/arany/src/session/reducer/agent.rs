@@ -16,7 +16,8 @@ pub(super) fn child_tool_requests(agent: &AgentView) -> usize {
         .provider_calls
         .iter()
         .filter(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-        .count()
+        .map(|call| usize::from(call.requested_tools))
+        .sum()
 }
 
 pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> bool {
@@ -37,10 +38,7 @@ pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> b
                     })
                     .count()
                     == child_tool_requests(agent)
-                && agent
-                    .tools
-                    .last()
-                    .is_some_and(ToolView::settled_without_stop)))
+                && agent.tools.iter().all(ToolView::settled_without_stop)))
 }
 
 pub(super) fn names_child(view: &SessionView, run_id: RunId, agent_run_id: AgentRunId) -> bool {
@@ -69,9 +67,11 @@ fn child_tool_is_admissible(
         && matches!(child.grant, Some(ChildGrant::ReadOnly { .. }))
         && child
             .provider_calls
-            .last()
+            .iter()
+            .rev()
+            .find(|call| call.phase != AgentPhase::ToolReview)
             .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-        && child_tool_requests(child) == child.tools.len() + 1
+        && child_tool_requests(child) > child.tools.len()
         && config
             .tool_policy
             .as_ref()
@@ -89,7 +89,10 @@ fn child_tool_is_admissible(
             .tools
             .iter()
             .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
-            .all(|tool| tool.observation.is_some() && tool.intent.id != intent.id)
+            .all(|tool| {
+                tool.intent.id != intent.id
+                    && (tool.intent.agent_run_id == agent_run_id || tool.observation.is_some())
+            })
 }
 
 impl SessionView {
@@ -122,6 +125,8 @@ impl SessionView {
             intent: intent.clone(),
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             started_sequence: None,
             hooks: Vec::new(),
@@ -165,7 +170,10 @@ impl SessionView {
         }
         let tool = child
             .tools
-            .last_mut()
+            .iter_mut()
+            .find(|tool| {
+                tool.observation.is_none() && tool.intent.digest() == observation.intent.digest()
+            })
             .ok_or(ReplayError::InvalidTransition)?;
         if tool.intent != observation.intent || tool.observation.is_some() {
             return Err(ReplayError::InvalidTransition);

@@ -1,6 +1,6 @@
 use super::{
-    HookView, SessionView, active_run, pending_tool, permissions_pinned, post_target,
-    start_lifecycle,
+    HookView, SessionView, active_run, permissions_pinned, post_target, start_lifecycle,
+    tool_by_digest,
 };
 use crate::session::events::ReplayError;
 use crate::session::{AgentRunId, GoalStatus, RunId};
@@ -32,7 +32,7 @@ pub(super) fn started(
         });
         (tool, adjacent && succeeded)
     } else {
-        let tool = pending_tool(run, agent_run_id)?;
+        let tool = tool_by_digest(run, agent_run_id, &hook.subject_digest)?;
         let fresh = tool.started_sequence.is_none()
             && tool.permission_verdict.is_none()
             && tool.observation.is_none();
@@ -154,10 +154,17 @@ pub(super) fn finished(
         run.tools
             .iter_mut()
             .rev()
-            .take(2)
             .find(|tool| tool.hooks.last().is_some_and(|view| view.outcome.is_none()))
     } else {
-        Some(pending_tool(run, agent_run_id)?)
+        run.agents
+            .iter_mut()
+            .find(|agent| agent.id == agent_run_id)
+            .and_then(|agent| {
+                agent
+                    .tools
+                    .iter_mut()
+                    .find(|tool| tool.hooks.last().is_some_and(|view| view.outcome.is_none()))
+            })
     }
     .ok_or(ReplayError::InvalidTransition)?;
     let observed = tool.observation.is_some();

@@ -75,6 +75,7 @@ event_kinds!(
     AgentSteeringNoteRecorded,
     AssistantDisplayRecorded,
     ToolStarted,
+    ToolActiveTimeReserved,
     ToolFinished,
     SupervisorVerdictRecorded,
     ToolProposed,

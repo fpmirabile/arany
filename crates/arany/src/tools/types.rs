@@ -1514,6 +1514,8 @@ pub struct ToolRequest {
 pub struct ToolStep {
     pub cleared: bool,
     pub refusal: Option<crate::session::ProposalRefusal>,
+    pub refusal_index: Option<usize>,
+    pub narrowed_observations: std::collections::BTreeSet<usize>,
     pub plan: Option<crate::provider::PlanRequest>,
     pub turn: crate::provider::ProviderTurn,
     /// Empty for a Delegate step.
@@ -1548,17 +1550,12 @@ impl ToolStep {
 
     // A Tool a hook narrowed is denied and directly followed by its replacement, which answers the request.
     pub(crate) fn narrowed(&self, index: usize) -> bool {
-        let (Some(denied), Some(next)) = (
-            self.observations.get(index),
-            self.observations.get(index + 1),
-        ) else {
-            return false;
-        };
-        denied.disposition == ToolDisposition::Denied
-            && super::permissions::narrows(&denied.intent.call, &next.intent.call)
+        self.narrowed_observations.contains(&index)
     }
 }
 
+pub(crate) const UNDISPATCHED_STEP_OUTPUT: &str =
+    "not_dispatched: step stopped before this call; no operation was dispatched";
 pub(crate) const MAX_TOOL_REFUSAL_BYTES: usize = 2048;
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
@@ -1620,7 +1617,9 @@ impl ToolContext {
 
     fn step_len(&self, step: &ToolStep) -> usize {
         step.turn.len()
-            + usize::from(step.refusal.is_some()) * (MAX_TOOL_REFUSAL_BYTES + RESULT_ENVELOPE_BYTES)
+            + usize::from(step.refusal.is_some())
+                * step.requests.len().max(1)
+                * (MAX_TOOL_REFUSAL_BYTES + RESULT_ENVELOPE_BYTES)
             + step.plan.as_ref().map_or(0, |plan| {
                 plan.result().to_string().len() + RESULT_ENVELOPE_BYTES
             })

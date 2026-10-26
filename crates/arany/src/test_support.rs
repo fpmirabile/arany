@@ -1164,6 +1164,8 @@ fn host_admission_tool(
             cache_update: crate::CacheUpdate::NotApplicable,
         }),
         started_sequence: Some(0),
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: Some(crate::permissions::PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),

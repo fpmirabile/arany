@@ -1,7 +1,7 @@
 use super::super::agent::names_child;
 use super::super::{
     AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal,
-    current_goal_mut, pending_tool_requests,
+    current_goal_mut, pending_original_tool_requests, pending_tool_requests,
 };
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError, RunConfig};
 use crate::session::{AgentRunId, RunId};
@@ -23,10 +23,13 @@ pub(super) fn validate_finished(
     };
     super::super::super::checkpoint::validate_finished(current, observation, checkpoint.as_ref())?;
     let run = active_run(current, *run_id)?;
-    if super::pending_tool(run, *agent_run_id)?
+    if super::tool_by_digest(run, *agent_run_id, &observation.intent.digest())?
         .started_sequence
         .is_none()
     {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if declared_intents_pending(run, *agent_run_id, &observation.intent.call) {
         return Err(ReplayError::InvalidTransition);
     }
     let configured = run
@@ -39,7 +42,7 @@ pub(super) fn validate_finished(
     let unguarded = observation.intent.call.is_unguarded();
     let git_write = observation.intent.call.is_git() && observation.intent.call.facts().mutates;
     let first_use_verdict = git_write
-        && super::pending_tool(run, *agent_run_id)
+        && super::tool_by_digest(run, *agent_run_id, &observation.intent.digest())
             .is_ok_and(|tool| tool.permission_verdict.is_some());
     if configured
         || definition_mode.is_some()
@@ -52,6 +55,28 @@ pub(super) fn validate_finished(
     Ok(())
 }
 
+fn declared_intents_pending(
+    run: &RunView,
+    agent_run_id: AgentRunId,
+    call: &crate::tools::ToolCall,
+) -> bool {
+    if run
+        .primary()
+        .is_some_and(|primary| primary.id == agent_run_id)
+    {
+        !call.is_internal()
+            && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. })
+            && pending_original_tool_requests(run) != Some(0)
+    } else {
+        run.agents
+            .iter()
+            .find(|agent| agent.id == agent_run_id && agent.assignment.is_none())
+            .is_some_and(|agent| {
+                super::super::agent::child_tool_requests(agent) != agent.tools.len()
+            })
+    }
+}
+
 fn validate_permission_verdict(
     run: &mut RunView,
     agent_run_id: AgentRunId,
@@ -59,7 +84,7 @@ fn validate_permission_verdict(
     restrictions: Vec<PermissionMode>,
     unguarded: bool,
 ) -> Result<(), ReplayError> {
-    let tool = super::pending_tool(run, agent_run_id)?;
+    let tool = super::tool_by_digest(run, agent_run_id, &observation.intent.digest())?;
     let verdict = tool
         .permission_verdict
         .as_ref()
@@ -186,7 +211,8 @@ fn validate_timeout_limit(
                     (
                         limit,
                         run.tools
-                            .last()
+                            .iter()
+                            .find(|tool| tool.intent == observation.intent)
                             .is_some_and(|tool| tool.review_call_index.is_none()),
                     )
                 })
@@ -230,7 +256,7 @@ fn apply_primary_finished(
         {
             return Err(ReplayError::InvalidTransition);
         }
-        let tool = run.tools.last_mut().ok_or(ReplayError::InvalidTransition)?;
+        let tool = super::tool_by_digest(run, *agent_run_id, &observation.intent.digest())?;
         if tool.intent != observation.intent || tool.observation.is_some() {
             return Err(ReplayError::InvalidTransition);
         }
@@ -327,26 +353,40 @@ fn start_primary_tool(
         || primary.status != AgentStatus::Active
         || !valid_origin
         || !run.hooks_settled()
-        || run
-            .tools
-            .iter()
-            .any(|tool| tool.intent.id == intent.id || tool.observation.is_none())
+        || run.tools.iter().any(|tool| tool.intent.id == intent.id)
         || intent.workspace_device != config.workspace_device
         || intent.workspace_inode != config.workspace_inode
     {
         return Err(ReplayError::InvalidTransition);
     }
-    run.tools.push(ToolView {
-        checkpoint: None,
-        intent: intent.clone(),
-        observation: None,
-        review_call_index: None,
-        permission_verdict: None,
-        started_sequence: None,
-        hooks: Vec::new(),
-        hook_sequence: None,
-        finished_sequence: None,
+    let after = super::pending_narrowing_source(run)
+        .filter(|(_, source)| source.narrowed_call() == Some(&intent.call))
+        .map(|(index, _)| index)
+        .or_else(|| run.tools.iter().position(|tool| matches!(&intent.call,
+            crate::tools::ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
+            } if *source_intent_digest == tool.intent.digest())));
+    let narrowing_source = after.and_then(|index| {
+        let source = &run.tools[index];
+        source.narrowed_call().map(|_| source.intent.digest())
     });
+    let index = after.map_or(run.tools.len(), |index| index + 1);
+    run.tools.insert(
+        index,
+        ToolView {
+            checkpoint: None,
+            intent: intent.clone(),
+            observation: None,
+            review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source,
+            permission_verdict: None,
+            started_sequence: None,
+            hooks: Vec::new(),
+            hook_sequence: None,
+            finished_sequence: None,
+        },
+    );
     Ok(())
 }
 
@@ -384,15 +424,17 @@ fn valid_origin(
     } else {
         primary
             .provider_calls
-            .last()
+            .iter()
+            .rev()
+            .find(|call| call.phase != crate::provider::AgentPhase::ToolReview)
             .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
             && pending_tool_requests(run).is_some_and(|pending| pending >= 1)
             && super::valid_narrowing_source(run, intent)
             && run
                 .tools
-                .last()
-                .and_then(|tool| tool.observation.as_ref())
-                .is_none_or(|observation| !observation.stops_run())
+                .iter()
+                .filter_map(|tool| tool.observation.as_ref())
+                .all(|observation| !observation.stops_run())
     }
 }
 
@@ -411,8 +453,12 @@ pub(super) fn started(
     else {
         return Err(ReplayError::InvalidTransition);
     };
-    let pending = super::pending_tool(active_run(current, *run_id)?, *agent_run_id)
-        .is_ok_and(|tool| tool.intent.id == intent.id && tool.started_sequence.is_none());
+    let pending = super::tool_by_digest(
+        active_run(current, *run_id)?,
+        *agent_run_id,
+        &EffectIntent::from(intent.clone()).digest(),
+    )
+    .is_ok_and(|tool| tool.intent.id == intent.id && tool.started_sequence.is_none());
     if active_run(current, *run_id)?.hook_stop_reason().is_some()
         && (!pending || verdict.as_ref().is_none_or(|verdict| verdict.approved))
     {
@@ -434,7 +480,14 @@ pub(super) fn started(
             *active_ceiling_ms,
         )?;
     }
-    let tool = super::pending_tool(active_run(current, *run_id)?, *agent_run_id)?;
+    if declared_intents_pending(active_run(current, *run_id)?, *agent_run_id, &intent.call) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let tool = super::tool_by_digest(
+        active_run(current, *run_id)?,
+        *agent_run_id,
+        &EffectIntent::from(intent.clone()).digest(),
+    )?;
     if tool.intent != intent.clone().into() || tool.started_sequence.is_some() {
         return Err(ReplayError::InvalidTransition);
     }
@@ -451,8 +504,12 @@ pub(super) fn started(
             return Err(ReplayError::InvalidTransition);
         }
     }
-    super::pending_tool(active_run(current, *run_id)?, *agent_run_id)?.started_sequence =
-        Some(prior);
+    super::tool_by_digest(
+        active_run(current, *run_id)?,
+        *agent_run_id,
+        &EffectIntent::from(intent.clone()).digest(),
+    )?
+    .started_sequence = Some(prior);
     super::record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
     Ok(())
 }

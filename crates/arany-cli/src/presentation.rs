@@ -412,7 +412,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
-            let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
+            let tool = run.stopping_tool().or_else(|| run.tools.last());
             if let Some(reason) = run.failure.and_then(run_failure_notice) {
                 let last_refusal = run
                     .agents
@@ -438,14 +438,13 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 .filter(|agent| agent.status == AgentStatus::Failed)
                 .filter_map(|agent| agent.provider_calls.last())
                 .filter(|call| call.phase != arany::AgentPhase::ToolReview)
-                .filter(|_| !budget_stop)
                 .find_map(provider_failure_notice);
             if let Some(reason) = reason {
                 return Some(format!(
                     "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
                 ));
             }
-            if let Some(tool) = run.tools.last().filter(|tool| {
+            if let Some(tool) = tool.filter(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == arany::ToolDisposition::Failed
                         && observation.attestation.is_none()
@@ -456,7 +455,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 }
                 return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
             }
-            if run.tools.last().is_some_and(|tool| {
+            if tool.is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == arany::ToolDisposition::Succeeded
                         && observation.cache_update == arany::CacheUpdate::Uncertain
@@ -464,14 +463,12 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             }) {
                 return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
             }
-            if let Some(observation) = run
-                .tools
-                .last()
-                .and_then(|tool| tool.observation.as_ref())
-                .filter(|observation| {
-                    observation.disposition == arany::ToolDisposition::Denied
-                        && observation.attestation.is_none()
-                })
+            if let Some(observation) =
+                tool.and_then(|tool| tool.observation.as_ref())
+                    .filter(|observation| {
+                        observation.disposition == arany::ToolDisposition::Denied
+                            && observation.attestation.is_none()
+                    })
             {
                 let disposition = match observation.approval_cause {
                     Some(arany::ApprovalCause::Cancelled) => "Run cancelled.",
@@ -493,7 +490,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     "{disposition} No further action ran; earlier completed actions remain. {recovery}"
                 ));
             }
-            if let Some(tool) = run.tools.last()
+            if let Some(tool) = tool
                 && tool.started_sequence.is_some()
                 && tool.observation.as_ref().is_none_or(|observation| {
                     matches!(
@@ -507,14 +504,10 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             if run.primary_tool_limit_reached() {
                 return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
             }
-            Some(format!(
-                "Error: Run failed. {}No answer was committed. Use /agents to inspect this Run.",
-                if budget_stop {
-                    "The Goal budget refused the next action. "
-                } else {
-                    ""
-                }
-            ))
+            Some(
+                "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
+                    .into(),
+            )
         }
         RunStatus::StoppedByHook => Some(match run.hook_stop_reason().flatten() {
             Some(reason) => format!("Run stopped by hook: {}", escape_terminal(reason)),
@@ -522,8 +515,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
         }),
         RunStatus::Cancelled => {
             let notice = match run
-                .tools
-                .last()
+                .stopping_tool()
+                .or_else(|| run.tools.last())
                 .and_then(|tool| tool.observation.as_ref())
                 .and_then(|observation| observation.approval_cause)
             {
@@ -547,9 +540,8 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
 fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
     use arany::RunFailure;
     Some(match cause {
-        RunFailure::ProviderCall | RunFailure::ToolStopped | RunFailure::BudgetExhausted => {
-            return None;
-        }
+        RunFailure::ProviderCall | RunFailure::ToolStopped => return None,
+        RunFailure::BudgetExhausted => "The Goal budget refused the next action.",
         RunFailure::ProposalRefused => "Arany refused the proposed operation before dispatch.",
         RunFailure::DefinitionInvalid => "An agent definition could not be loaded.",
         RunFailure::PlanAdmission => {
@@ -1571,6 +1563,8 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
         }),
         intent,
         review_call_index: None,
+        active_time_reserved: false,
+        narrowing_source: None,
         permission_verdict: None,
         started_sequence: Some(0),
         hooks: Vec::new(),

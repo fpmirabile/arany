@@ -2017,7 +2017,13 @@ mod payload_version_tests {
                 narrowed: false,
             }),
         };
-        for event in [&started, &verdict] {
+        let reservation = Event::ToolActiveTimeReserved {
+            run_id: run,
+            agent_run_id: agent,
+            intent_digest: [3; 32],
+            active_ceiling_ms: 7_000,
+        };
+        for event in [&started, &verdict, &reservation] {
             let payload = event.payload().expect("payload");
             let version = payload_version(event.kind()).expect("known kind");
             assert_eq!(
