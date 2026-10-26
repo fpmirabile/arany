@@ -6,6 +6,8 @@ use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+#[path = "retired_worker_tests.rs"]
+mod retired_worker;
 #[path = "shared_editors_tests.rs"]
 mod shared_editors;
 
@@ -16,7 +18,7 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 75] = [
     (
         "AgentSpawned",
         15,
@@ -258,6 +260,60 @@ const EVENT_FIXTURES: [EventFixture<'static>; 66] = [
         GLOBAL_RUNSTARTED,
         include_str!("runstarted-v24.json"),
     ),
+    (
+        "ToolProposed",
+        1,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        23,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        29,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        12,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        18,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        13,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        24,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    (
+        "AgentSpawned",
+        16,
+        include_str!("agentspawned-v15.json"),
+        include_str!("agentspawned-v15.json"),
+    ),
+    (
+        "SupervisorVerdictRecorded",
+        1,
+        include_str!("supervisorverdictrecorded-v1.json"),
+        include_str!("supervisorverdictrecorded-v1.json"),
+    ),
 ];
 
 #[test]
@@ -275,7 +331,7 @@ fn migrated_intent_records_preserve_runtime_bytes() {
             intent.is_some(),
             matches!(
                 kind,
-                "ToolStarted" | "ToolFinished" | "HookStarted" | "HookFinished"
+                "ToolProposed" | "ToolStarted" | "ToolFinished" | "HookStarted" | "HookFinished"
             ),
             "{kind} v{from}"
         );
@@ -1492,7 +1548,7 @@ fn unsupported_refused_or_forged_history_is_archived_intact() {
                 unsupported_tool_row(
                     connection,
                     "ToolStarted",
-                    crate::test_support::payload_version("ToolStarted") - 1,
+                    REGISTRY.event_floor("ToolStarted").unwrap() - 1,
                     include_str!("toolstarted-without-expiry.json"),
                 );
             },

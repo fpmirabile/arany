@@ -1152,12 +1152,6 @@ fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publicatio
                     "prefix {end}"
                 );
             }
-            if worker.private_outcome_unknown {
-                assert!(
-                    text.contains("private_outcome_unknown=true"),
-                    "prefix {end}"
-                );
-            }
         }
         assert!(
             serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES

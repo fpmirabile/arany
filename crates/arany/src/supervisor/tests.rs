@@ -271,8 +271,7 @@ fn supervisor_call_equality_excludes_intent_identity_and_hashes_content() {
 }
 
 #[test]
-fn supervisor_worker_command_outcomes_ignore_seal_sequences_and_keep_the_exit_class() {
-    use crate::worker::{PrivateCapture, WorkerCommandResult, WorkerDataPurpose, WorkerDataRef};
+fn supervisor_editor_command_outcomes_ignore_sequences_and_keep_the_exit_class() {
     let fixture = crate::session::worker_protocol_fixture();
     let view = SessionView::replay(fixture.session, &fixture.envelopes())
         .unwrap()
@@ -294,23 +293,14 @@ fn supervisor_worker_command_outcomes_ignore_seal_sequences_and_keep_the_exit_cl
         };
         observation.attestation = None;
         observation.disposition = ToolDisposition::Succeeded;
-        observation.output = serde_json::to_string(&WorkerCommandResult {
+        observation.output = serde_json::to_string(&CommandResult {
             exit_code: Some(exit_code),
             stdout: String::new(),
             stderr: String::new(),
             stdout_total: Default::default(),
             stderr_total: Default::default(),
-            private_capture: PrivateCapture::Sealed {
-                data: WorkerDataRef {
-                    assignment_id: fixture.child,
-                    purpose: WorkerDataPurpose::Mutation,
-                    first_sequence: n,
-                    seal_sequence: n + 1,
-                    chunks: 1,
-                    bytes: 1,
-                    sha256: [1; 32],
-                },
-            },
+            changeset: Default::default(),
+            selection: None,
         })
         .unwrap();
         subject(&view.runs[0], fixture.child, &envelope, 1)
@@ -439,12 +429,10 @@ fn supervisor_roots_initialize_once_and_refresh_only_at_plan_and_run_boundaries(
         .unwrap()
         .paths
         .push("docs".into());
-    for envelope in envelopes.iter().filter(|e| {
-        matches!(
-            e.event,
-            Event::WorkerDataChunk { .. } | Event::ToolFinished { .. }
-        )
-    }) {
+    for envelope in envelopes
+        .iter()
+        .filter(|e| matches!(e.event, Event::ToolFinished { .. }))
+    {
         live.decide_verdict(&view, envelope);
         corpus.decide_verdict(&view, envelope);
         assert_eq!(live, corpus);
@@ -515,14 +503,12 @@ fn supervisor_one_crossing_journals_one_verdict_not_a_stream() {
             s.alias = true;
         }
         window.push_back(s);
-        let signals = new_facts(evaluate(&window, None, &policy), Site::ToolOutcome, n);
+        let signals = new_facts(evaluate(&window, None, &policy), n);
         if !signals.is_empty() {
             journaled.push(n);
         }
     }
     assert_eq!(journaled, [2]);
-    let capture = new_facts(evaluate(&window, None, &policy), Site::WorkerCapture, 2);
-    assert!(capture.is_empty());
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::catalog::{Family, Site};
-use crate::session::worker::{ChangesetSource, WorkerDataRef, WorkerMutation, WorkerPreparation};
+use crate::session::worker::ChangesetSource;
 use crate::session::{AgentRunId, EffectTarget, RunId};
 use crate::validate::{digest, forbidden, hex_digest, valid_digest, valid_relative};
 use base64::Engine as _;
@@ -327,9 +327,6 @@ pub enum ToolCall {
     ApplyChangeset {
         source: ChangesetSource,
     },
-    PrepareWorker {
-        preparation: WorkerPreparation,
-    },
     Skill {
         name: String,
         #[serde(deserialize_with = "required_nullable")]
@@ -579,7 +576,6 @@ impl ToolCall {
             Self::Move { .. }
             | Self::ParseAgentDefinition { .. }
             | Self::ApplyChangeset { .. }
-            | Self::PrepareWorker { .. }
             | Self::Skill { .. }
             | Self::McpList { .. }
             | Self::McpCall { .. }
@@ -608,7 +604,6 @@ impl ToolCall {
             Family::Git => super::git::valid(self),
             Family::Preparation => {
                 matches!(self, Self::ParseAgentDefinition { index, .. } if usize::from(*index) < 128)
-                    || matches!(self, Self::PrepareWorker { preparation } if preparation.valid())
             }
         }
     }
@@ -1058,24 +1053,6 @@ pub enum Attestation {
         workspace_inode: u64,
     },
     Guard(GuardReceipt),
-    WorkerCommand {
-        receipt: GuardReceipt,
-    },
-    WorkerRead {
-        intent_digest: [u8; 32],
-        #[serde(deserialize_with = "Option::deserialize")]
-        guard: Option<Box<GuardReceipt>>,
-    },
-    WorkerMutation {
-        receipt: GuardReceipt,
-        mutation: Box<WorkerMutation>,
-    },
-    WorkerData {
-        #[serde(deserialize_with = "Option::deserialize")]
-        guard: Option<Box<GuardReceipt>>,
-        intent_digest: [u8; 32],
-        data: WorkerDataRef,
-    },
     Unguarded(UnguardedReceipt),
     Host(UnguardedReceipt),
 }
@@ -1083,59 +1060,6 @@ pub enum Attestation {
 impl Attestation {
     pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
         match self {
-            Self::WorkerCommand { receipt } => {
-                matches!(intent.target, EffectTarget::WorkerView { .. })
-                    && matches!(intent.call, ToolCall::Command { .. })
-                    && receipt.valid_for(intent)
-            }
-            Self::WorkerRead {
-                intent_digest,
-                guard,
-            } => {
-                matches!(intent.target, EffectTarget::WorkerView { .. })
-                    && !intent.call.mutates()
-                    && intent.call.is_child_research()
-                    && *intent_digest == intent.digest()
-                    && match intent.call.facts().site {
-                        Site::InProcess => {
-                            guard.is_none()
-                                || super::discovery::possible(&intent.call)
-                                    && guard.as_ref().is_some_and(|r| r.valid_for(intent))
-                        }
-                        Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
-                        Site::Unguarded | Site::Host => false,
-                    }
-            }
-            Self::WorkerMutation { receipt, mutation } => {
-                matches!(intent.target, EffectTarget::WorkerView { revision, .. } if revision == mutation.previous_revision && revision.checked_add(1) == Some(mutation.next_revision) && mutation.next_revision <= 16)
-                    && matches!(
-                        intent.call,
-                        ToolCall::Mkdir { .. }
-                            | ToolCall::Write { .. }
-                            | ToolCall::Edit { .. }
-                            | ToolCall::MultiEdit { .. }
-                            | ToolCall::Delete { .. }
-                            | ToolCall::Move { .. }
-                    )
-                    && receipt.valid_for(intent)
-                    && mutation.data.assignment_id == intent.agent_run_id
-                    && mutation.data.valid()
-                    && mutation.data.purpose == crate::session::worker::WorkerDataPurpose::Mutation
-            }
-            Self::WorkerData {
-                guard,
-                intent_digest,
-                data,
-            } => {
-                matches!(&intent.call, ToolCall::PrepareWorker { preparation } if preparation.assignment_id == data.assignment_id && (preparation.purpose == data.purpose || preparation.purpose == crate::session::worker::WorkerDataPurpose::Handover && data.purpose == crate::session::worker::WorkerDataPurpose::Mutation))
-                    && *intent_digest == intent.digest()
-                    && data.valid()
-                    && match intent.call.site() {
-                        Site::InProcess => guard.is_none(),
-                        Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
-                        Site::Unguarded | Site::Host => false,
-                    }
-            }
             Self::InProcess {
                 receipt,
                 policy_digest,
@@ -1155,7 +1079,6 @@ impl Attestation {
             }
             Self::Guard(receipt) => {
                 intent.target == EffectTarget::Workspace
-                    && !matches!(intent.call, ToolCall::PrepareWorker { .. })
                     && (intent.call.facts().site == Site::Guard
                         || super::discovery::possible(&intent.call)
                         || intent.call.facts().family == super::catalog::Family::File
@@ -1230,13 +1153,7 @@ impl Attestation {
     pub fn guard(&self) -> Option<&GuardReceipt> {
         match self {
             Self::Guard(receipt) => Some(receipt),
-            Self::InProcess { .. }
-            | Self::Unguarded(_)
-            | Self::Host(_)
-            | Self::WorkerCommand { .. }
-            | Self::WorkerRead { .. }
-            | Self::WorkerMutation { .. }
-            | Self::WorkerData { .. } => None,
+            Self::InProcess { .. } | Self::Unguarded(_) | Self::Host(_) => None,
         }
     }
 }
@@ -1417,8 +1334,7 @@ impl ToolObservation {
             && matches!(&self.intent.call, ToolCall::Command { .. }))
             || (self.disposition == ToolDisposition::Failed
                 && self.attestation.is_none()
-                && self.enforcement_cause != Some(EnforcementCause::GuardBootstrap)
-                && !matches!(&self.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == crate::session::worker::WorkerDataPurpose::Base))
+                && self.enforcement_cause != Some(EnforcementCause::GuardBootstrap))
             || self.cache_update == CacheUpdate::Uncertain
     }
 
@@ -2262,19 +2178,11 @@ mod internal_call_tests {
 
     #[test]
     fn engine_preparation_calls_are_internal_and_model_calls_are_not() {
-        let preparation = ToolCall::PrepareWorker {
-            preparation: crate::session::worker::WorkerPreparation {
-                assignment_id: crate::session::AgentRunId::new(),
-                purpose: crate::session::worker::WorkerDataPurpose::Base,
-                max_bytes: 1,
-                max_chunks: 1,
-            },
-        };
         let parse = ToolCall::ParseAgentDefinition {
             index: 0,
             raw_digest: [1; 32],
         };
-        assert!(preparation.is_internal() && parse.is_internal());
+        assert!(parse.is_internal());
         assert!(
             !ToolCall::Read {
                 path: "a".into(),

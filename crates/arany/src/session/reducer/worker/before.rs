@@ -216,17 +216,7 @@ pub(super) fn tool_finished(
     _actor: &AgentRunId,
     o: &crate::tools::ToolObservation,
 ) -> Result<(), ReplayError> {
-    if o.intent.target != EffectTarget::Workspace
-        || matches!(
-            o.attestation,
-            Some(
-                Attestation::WorkerData { .. }
-                    | Attestation::WorkerMutation { .. }
-                    | Attestation::WorkerRead { .. }
-                    | Attestation::WorkerCommand { .. }
-            )
-        )
-    {
+    if o.intent.target != EffectTarget::Workspace {
         return Err(ReplayError::InvalidTransition);
     }
     Ok(())
@@ -388,7 +378,6 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::GoalProviderCallReserved { .. }
         | Event::ProviderFallbackUsed { .. }
         | Event::ProviderRetryScheduled { .. }
-        | Event::WorkerHandoverRecorded { .. }
         | Event::WorkerVerificationRecorded { .. } => return Err(ReplayError::InvalidTransition),
         Event::ToolPreflightRefused { .. }
         | Event::WorkspaceRewindStarted { .. }
@@ -418,10 +407,6 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::HookStarted { .. }
         | Event::HookFinished { .. }
         | Event::AgentFinished { .. }
-        | Event::WorkerDataChunk { .. }
-        | Event::WorkerDataSealed { .. }
-        | Event::WorkerIntegrationRecorded { .. }
-        | Event::WorkerHandoverDiscarded { .. }
         | Event::WorkerLeaseReleased { .. }
         | Event::WorkerStopObserved { .. }
         | Event::MessageCommitted { .. }

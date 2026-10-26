@@ -72,7 +72,7 @@ pub(super) fn goal_report(
         .collect();
     workers.sort_by_key(|w| {
         use crate::worker::WorkerPublication;
-        if w.publication == WorkerPublication::Unknown || w.private_outcome_unknown {
+        if w.publication == WorkerPublication::Unknown {
             0
         } else if w.publication == WorkerPublication::Confirmed && !w.verified {
             1
@@ -82,9 +82,9 @@ pub(super) fn goal_report(
             3
         }
     });
-    let (critical, workers): (Vec<_>, Vec<_>) = workers.into_iter().partition(|w| {
-        w.publication == crate::worker::WorkerPublication::Unknown || w.private_outcome_unknown
-    });
+    let (critical, workers): (Vec<_>, Vec<_>) = workers
+        .into_iter()
+        .partition(|w| w.publication == crate::worker::WorkerPublication::Unknown);
     for worker in &critical {
         push_goal_report_item(
             &mut report,
@@ -702,10 +702,6 @@ fn push_success_facts(
             }
             let call = &tool.intent.call;
             match call {
-                crate::tools::ToolCall::PrepareWorker { .. } => {}
-                crate::tools::ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-                } => {}
                 crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. }
@@ -859,10 +855,6 @@ fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
 
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     match call {
-        crate::tools::ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
-        crate::tools::ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-        } => "Worker changeset publication".into(),
         crate::tools::ToolCall::ParseAgentDefinition { .. } => {
             "Agent definition preparation".into()
         }
@@ -926,10 +918,6 @@ fn goal_report_evidence(
         _ => "Guard",
     };
     match call {
-        crate::tools::ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
-        crate::tools::ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-        } => "Worker changeset publication".into(),
         crate::tools::ToolCall::ParseAgentDefinition { .. } => {
             "Agent definition preparation".into()
         }

@@ -1672,10 +1672,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
                 && task.intent.call.facts().family == super::catalog::Family::File
             || super::discovery::possible(&task.intent.call))
         || task.intent.policy_digest != task.config.digest()
-        || !(task.config.allows(&task.intent.call)
-            || task.worker.is_some()
-                && transfer::handover_call(&task.intent.call, task.intent.agent_run_id)
-            || task.handover.is_some() && task.config.write)
+        || !(task.config.allows(&task.intent.call) || task.handover.is_some() && task.config.write)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
         || task.hook_stdin.as_ref().is_some_and(|stdin| {

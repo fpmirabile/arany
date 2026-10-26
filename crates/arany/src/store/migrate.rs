@@ -171,6 +171,27 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("ToolProposed", 1, crate::session::retired_worker_payload),
+        variant_step!("ToolStarted", 23, crate::session::retired_worker_payload),
+        variant_step!("ToolFinished", 29, crate::session::retired_worker_payload),
+        variant_step!("HookStarted", 12, crate::session::retired_worker_payload),
+        variant_step!("HookFinished", 18, crate::session::retired_worker_payload),
+        variant_step!(
+            "GoalPlanContractRecorded",
+            13,
+            crate::session::retired_worker_payload
+        ),
+        variant_step!(
+            "ProviderCallRecorded",
+            24,
+            crate::session::retired_worker_payload
+        ),
+        variant_step!("AgentSpawned", 16, crate::session::retired_worker_payload),
+        variant_step!(
+            "SupervisorVerdictRecorded",
+            1,
+            crate::session::retired_worker_payload
+        ),
         variant_step!(
             "AgentSpawned",
             15,
@@ -342,7 +363,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
 };
 
 // Payload versions when migrations landed; older history is archived, never upgraded.
-const EVENT_FLOOR: [(&str, i64); 46] = [
+const EVENT_FLOOR: [(&str, i64); 41] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -361,14 +382,9 @@ const EVENT_FLOOR: [(&str, i64); 46] = [
     ("AgentSpawned", 11),
     ("AgentFinished", 10),
     ("ProviderCallRecorded", 13),
-    ("WorkerDataChunk", 1),
-    ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
-    ("WorkerIntegrationRecorded", 1),
-    ("WorkerHandoverDiscarded", 1),
     ("WorkerLeaseReleased", 2),
     ("WorkerVerificationRecorded", 1),
-    ("WorkerHandoverRecorded", 2),
     ("ToolResultsCleared", 1),
     ("GoalStarted", 7),
     ("GoalFinished", 7),

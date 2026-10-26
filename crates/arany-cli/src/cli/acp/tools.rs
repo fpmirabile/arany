@@ -166,7 +166,6 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                 | ToolCall::Move { .. }
                 | ToolCall::Command { .. }
                 | ToolCall::ApplyChangeset { .. }
-                | ToolCall::PrepareWorker { .. }
                 | ToolCall::McpList { .. }
                 | ToolCall::McpCall { .. }
                 | ToolCall::GitPush { .. }

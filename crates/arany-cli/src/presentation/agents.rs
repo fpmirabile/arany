@@ -290,14 +290,7 @@ fn agent_lines(
             "Worker: {}; cause: {:?}",
             worker.status, worker.cause
         ));
-        lines.push(format!(
-            "Publication: {:?}; integration: {:?}; discarded: {:?}",
-            worker.publication, worker.integration, worker.discarded
-        ));
-        lines.push(format!(
-            "Private outcome unknown: {}; cleanup confirmed: {}",
-            worker.private_outcome_unknown, worker.cleanup_confirmed
-        ));
+        lines.push(format!("Publication: {:?}", worker.publication));
         lines.push(format!(
             "Lease released: {}; verified: {}",
             worker.lease_released, worker.verified
@@ -677,12 +670,12 @@ fn narrow_cost(text: &str) -> (usize, usize) {
 }
 
 fn agent_status_notice(run: &RunView, agent: &AgentView, label: &str) -> String {
-    let unknown = run
-        .worker_history()
-        .iter()
-        .any(|worker| worker.assignment_id == agent.id && worker.private_outcome_unknown);
+    let unknown = run.worker_history().iter().any(|worker| {
+        worker.assignment_id == agent.id
+            && worker.publication == arany::worker::WorkerPublication::Unknown
+    });
     let qualification = if unknown {
-        "; private outcome unknown"
+        "; Workspace outcome unknown"
     } else {
         ""
     };

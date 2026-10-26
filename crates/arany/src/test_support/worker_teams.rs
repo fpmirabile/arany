@@ -650,14 +650,6 @@ async fn run_live(
             "{case}: expected {expected:?}"
         );
     }
-    assert!(!events.iter().any(|e| matches!(
-        e.event,
-        Event::WorkerDataChunk { .. }
-            | Event::WorkerDataSealed { .. }
-            | Event::WorkerIntegrationRecorded { .. }
-            | Event::WorkerHandoverRecorded { .. }
-            | Event::WorkerHandoverDiscarded { .. }
-    )));
     assert_action_bounds(&events, false, false);
     TeamObservation {
         directory,

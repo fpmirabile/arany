@@ -430,9 +430,6 @@ mod tests {
         });
         for mut event in crate::session::worker_protocol_fixture().events {
             match &mut event {
-                crate::session::Event::WorkerDataChunk { record, .. } => {
-                    record.content = CANARY.into()
-                }
                 crate::session::Event::AgentSpawned {
                     assignment: Some(pins),
                     ..

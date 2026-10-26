@@ -95,7 +95,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 28] = [
+pub(crate) static ALL: [OperationFacts; 27] = [
     read_row(
         "list",
         Family::File,
@@ -208,7 +208,6 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         prelude: true,
         ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
     },
-    facts_row("prepare_worker", Family::Preparation, 16, ""),
     read_row(
         "glob",
         Family::File,
@@ -294,11 +293,6 @@ static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
     ..git_write_row("git_branch", 19, "")
 };
 
-static WORKER_BASE: OperationFacts = OperationFacts {
-    site: Site::InProcess,
-    ..facts_row("prepare_worker", Family::Preparation, 16, "")
-};
-
 impl ToolCall {
     pub const fn family(&self) -> Family {
         self.facts().family
@@ -310,15 +304,6 @@ impl ToolCall {
 
     pub(crate) const fn facts(&self) -> &'static OperationFacts {
         match self {
-            Self::PrepareWorker { preparation }
-                if matches!(
-                    preparation.purpose,
-                    crate::session::worker::WorkerDataPurpose::Base
-                ) =>
-            {
-                &WORKER_BASE
-            }
-            Self::PrepareWorker { .. } => &ALL[16],
             Self::ParseAgentDefinition { .. } => &ALL[15],
             Self::List { .. } => &ALL[0],
             Self::Read { .. } => &ALL[1],
@@ -326,9 +311,9 @@ impl ToolCall {
             Self::Mkdir { .. } => &ALL[3],
             Self::Write { .. } => &ALL[4],
             Self::Edit { .. } => &ALL[5],
-            Self::MultiEdit { .. } => &ALL[21],
-            Self::Delete { .. } => &ALL[24],
-            Self::Move { .. } => &ALL[25],
+            Self::MultiEdit { .. } => &ALL[20],
+            Self::Delete { .. } => &ALL[23],
+            Self::Move { .. } => &ALL[24],
             Self::Command { .. } => &ALL[6],
             Self::ApplyChangeset { .. } => &ALL[7],
             Self::CommandUnguarded { .. } => &ALL[14],
@@ -338,15 +323,15 @@ impl ToolCall {
             Self::GitStatus { .. } => &ALL[11],
             Self::GitDiff { .. } => &ALL[12],
             Self::GitLog { .. } => &ALL[13],
-            Self::Glob { .. } => &ALL[17],
-            Self::GitCommit { .. } => &ALL[18],
+            Self::Glob { .. } => &ALL[16],
+            Self::GitCommit { .. } => &ALL[17],
             Self::GitBranch { name: None, .. } => &GIT_BRANCH_LIST,
-            Self::GitBranch { .. } => &ALL[19],
-            Self::GitSwitch { .. } => &ALL[20],
-            Self::GitPush { .. } => &ALL[22],
-            Self::GhPrCreate { .. } => &ALL[23],
-            Self::GhPrList { .. } => &ALL[26],
-            Self::GhPrView { .. } => &ALL[27],
+            Self::GitBranch { .. } => &ALL[18],
+            Self::GitSwitch { .. } => &ALL[19],
+            Self::GitPush { .. } => &ALL[21],
+            Self::GhPrCreate { .. } => &ALL[22],
+            Self::GhPrList { .. } => &ALL[25],
+            Self::GhPrView { .. } => &ALL[26],
         }
     }
 }
@@ -708,14 +693,6 @@ mod tests {
                 index: 0,
                 raw_digest: [1; 32],
             },
-            ToolCall::PrepareWorker {
-                preparation: crate::session::worker::WorkerPreparation {
-                    assignment_id: crate::session::AgentRunId::new(),
-                    purpose: crate::session::worker::WorkerDataPurpose::Handover,
-                    max_bytes: 1,
-                    max_chunks: 1,
-                },
-            },
             ToolCall::Glob {
                 pattern: "**/*.rs".into(),
                 path: path(),
@@ -940,10 +917,7 @@ mod tests {
         assert!(
             ALL.iter()
                 .filter(|facts| facts.schema().is_none())
-                .all(|facts| matches!(
-                    facts.name,
-                    "apply_changeset" | "parse_agent_definition" | "prepare_worker"
-                ))
+                .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
         );
     }
 }

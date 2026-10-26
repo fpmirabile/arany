@@ -295,15 +295,7 @@ impl PermissionConfig {
         &self,
         call: &ToolCall,
     ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
-        self.evaluate_worker_paths(call, None)
-    }
-
-    pub(crate) fn evaluate_worker_paths(
-        &self,
-        call: &ToolCall,
-        paths: Option<&[crate::session::worker::WorkerFileFact]>,
-    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
-        let (decision, source) = self.decision_with_worker_paths(call, paths);
+        let (decision, source) = self.decision_with_source(call);
         let approval = (decision == Decision::Ask).then_some(
             if self.mode == PermissionMode::Auto
                 && !matches!(
@@ -346,7 +338,7 @@ impl PermissionConfig {
                 .filter(|(decision, rule)| {
                     *decision != Decision::Allow
                         && rule.matches_tool(call, *decision)
-                        && !rule.matches_worker_paths(call, *decision, None)
+                        && !rule.matches_call(call, *decision)
                 })
                 .filter_map(|(_, rule)| rule.pattern.clone())
                 .collect(),
@@ -385,14 +377,6 @@ impl PermissionConfig {
     }
 
     fn decision_with_source(&self, call: &ToolCall) -> (Decision, PermissionSource) {
-        self.decision_with_worker_paths(call, None)
-    }
-
-    fn decision_with_worker_paths(
-        &self,
-        call: &ToolCall,
-        paths: Option<&[crate::session::worker::WorkerFileFact]>,
-    ) -> (Decision, PermissionSource) {
         if !valid_call(call) {
             return (Decision::Deny, PermissionSource::Mode);
         }
@@ -418,8 +402,7 @@ impl PermissionConfig {
             if *decision == Decision::Allow && (!allow_skips_approval || typed_host_read) {
                 None
             } else {
-                rule.matches_worker_paths(call, *decision, paths)
-                    .then_some(*decision)
+                rule.matches_call(call, *decision).then_some(*decision)
             }
         });
         let typed = self
@@ -848,12 +831,7 @@ impl Rule {
         }
     }
 
-    fn matches_worker_paths(
-        &self,
-        call: &ToolCall,
-        decision: Decision,
-        paths: Option<&[crate::session::worker::WorkerFileFact]>,
-    ) -> bool {
+    fn matches_call(&self, call: &ToolCall, decision: Decision) -> bool {
         if !self.matches_tool(call, decision) {
             return false;
         }
@@ -919,21 +897,8 @@ impl Rule {
             // A staged or whole-repository commit and a switch publish paths unknown before dispatch.
             ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
-                source:
-                    crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                    | crate::session::worker::ChangesetSource::Rewind { .. },
-            } => paths.map_or(decision != Decision::Allow, |paths| {
-                if decision == Decision::Allow {
-                    !paths.is_empty()
-                        && paths
-                            .iter()
-                            .all(|file| path_matches(pattern, &file.path, decision))
-                } else {
-                    paths
-                        .iter()
-                        .any(|file| path_matches(pattern, &file.path, decision))
-                }
-            }),
+                source: crate::session::worker::ChangesetSource::Rewind { .. },
+            } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
             } => {

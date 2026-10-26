@@ -13,8 +13,6 @@ pub const WORKER_DATA_BYTES: usize = 48 * 1024 * 1024;
 pub const WORKER_MANIFEST_BYTES: usize = 3 * 1024 * 1024;
 pub const WORKER_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 pub const WORKER_FILES: usize = 2048;
-pub const WORKER_CHUNKS: usize = WORKER_DATA_BYTES.div_ceil(WORKER_CHUNK_BYTES);
-pub const WORKER_MANIFEST_CHUNKS: usize = WORKER_MANIFEST_BYTES.div_ceil(WORKER_CHUNK_BYTES);
 pub(crate) const MAX_EDITOR_CONTINUATIONS: u8 = 3;
 pub(crate) const MAX_WORKER_EVIDENCE: usize = 8;
 
@@ -367,54 +365,6 @@ impl WorkerDataRef {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerDataChunk {
-    pub assignment_id: AgentRunId,
-    pub purpose: WorkerDataPurpose,
-    pub tool_id: uuid::Uuid,
-    pub ordinal: u16,
-    pub bytes: u32,
-    pub sha256: [u8; 32],
-    pub content: String,
-}
-impl WorkerDataChunk {
-    pub(crate) fn decoded(&self) -> Option<Vec<u8>> {
-        if !self.assignment_id.valid()
-            || self.tool_id.get_version() != Some(uuid::Version::SortRand)
-            || self.bytes == 0
-            || self.bytes as usize > WORKER_CHUNK_BYTES
-            || usize::from(self.ordinal) >= self.purpose.limit().div_ceil(WORKER_CHUNK_BYTES)
-            || self.content.len() > WORKER_CHUNK_BYTES.div_ceil(3) * 4
-        {
-            return None;
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&self.content)
-            .ok()?;
-        (bytes.len() == self.bytes as usize
-            && crate::validate::digest(&bytes) == self.sha256
-            && base64::engine::general_purpose::STANDARD.encode(&bytes) == self.content)
-            .then_some(bytes)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerDataSealed {
-    pub tool_id: uuid::Uuid,
-    pub data: WorkerDataRef,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerHandover {
-    pub criterion_evidence: Vec<u64>,
-    pub assignment_id: AgentRunId,
-    pub base_digest: [u8; 32],
-    pub data: WorkerDataRef,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerStopReason {
@@ -460,15 +410,6 @@ pub struct WorkerOutcome {
     pub disposition: WorkerDisposition,
     pub cause: WorkerCause,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerIntegrationOutcome {
-    Integrated,
-    Conflict,
-    Denied,
-    Uncertain,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerPublication {
@@ -486,10 +427,6 @@ pub struct WorkerHistory {
     pub status: String,
     pub cause: Option<WorkerCause>,
     pub publication: WorkerPublication,
-    pub integration: Option<WorkerIntegrationOutcome>,
-    pub discarded: Option<WorkerSettlementReason>,
-    pub private_outcome_unknown: bool,
-    pub cleanup_confirmed: bool,
     pub lease_released: bool,
     pub verified: bool,
     pub report: String,
@@ -499,15 +436,11 @@ pub struct WorkerHistory {
 impl WorkerHistory {
     pub fn description(&self) -> String {
         format!(
-            "Worker {}: {}; cause={:?}; publication={:?}; integration={:?}; discard={:?}; private_outcome_unknown={}; cleanup_confirmed={}; lease_released={}; verified={}; resumes={}; supersedes={}",
+            "Worker {}: {}; cause={:?}; publication={:?}; lease_released={}; verified={}; resumes={}; supersedes={}",
             self.assignment_id,
             self.status,
             self.cause,
             self.publication,
-            self.integration,
-            self.discarded,
-            self.private_outcome_unknown,
-            self.cleanup_confirmed,
             self.lease_released,
             self.verified,
             self.resumes
@@ -516,36 +449,6 @@ impl WorkerHistory {
                 .map_or_else(|| "none".into(), |id| id.to_string()),
         )
     }
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerIntegration {
-    pub assignment_id: AgentRunId,
-    pub handover_sequence: u64,
-    pub tool_id: uuid::Uuid,
-    pub finished_sequence: u64,
-    pub outcome: WorkerIntegrationOutcome,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerSettlementReason {
-    Integrated,
-    Failed,
-    Cancelled,
-    Stopped,
-    Conflict,
-    Denied,
-    NoChange,
-    PrivateUncertain,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerSettlement {
-    pub assignment_id: AgentRunId,
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub handover_sequence: Option<u64>,
-    pub reason: WorkerSettlementReason,
-    pub cause_sequence: u64,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -575,11 +478,6 @@ pub enum ChangesetSource {
         source_intent_digest: [u8; 32],
         changeset: crate::tools::CommandChangeset,
     },
-    WorkerHandover {
-        assignment_id: AgentRunId,
-        handover_sequence: u64,
-        data: WorkerDataRef,
-    },
 }
 impl ChangesetSource {
     pub(crate) fn valid(&self) -> bool {
@@ -600,49 +498,8 @@ impl ChangesetSource {
             } => {
                 *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid()
             }
-            Self::WorkerHandover {
-                assignment_id,
-                handover_sequence,
-                data,
-            } => {
-                assignment_id.valid()
-                    && *assignment_id == data.assignment_id
-                    && *handover_sequence > data.seal_sequence
-                    && matches!(
-                        data.purpose,
-                        WorkerDataPurpose::Handover | WorkerDataPurpose::Mutation
-                    )
-                    && data.valid()
-            }
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerPreparation {
-    pub assignment_id: AgentRunId,
-    pub purpose: WorkerDataPurpose,
-    pub max_chunks: u16,
-    pub max_bytes: u32,
-}
-impl WorkerPreparation {
-    pub(crate) fn valid(&self) -> bool {
-        self.assignment_id.valid()
-            && self.purpose != WorkerDataPurpose::Mutation
-            && self.max_bytes > 0
-            && self.max_bytes as usize <= self.purpose.limit()
-            && usize::from(self.max_chunks)
-                == (self.max_bytes as usize).div_ceil(WORKER_CHUNK_BYTES)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerMutation {
-    pub previous_revision: u32,
-    pub next_revision: u32,
-    pub data: WorkerDataRef,
 }
 
 pub(crate) fn writable_path(path: &str) -> bool {
@@ -971,10 +828,6 @@ pub struct WorkerCommandResult {
 }
 
 impl WorkerCommandResult {
-    pub(crate) fn parse(output: &str) -> Option<Self> {
-        serde_json::from_str(output).ok()
-    }
-
     pub(crate) fn valid(&self) -> bool {
         self.stdout_total.valid_for(&self.stdout)
             && self.stderr_total.valid_for(&self.stderr)

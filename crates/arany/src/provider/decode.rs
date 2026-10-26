@@ -127,9 +127,7 @@ pub(crate) fn tool_request(
     let call: ToolCall = serde_json::from_value(Value::Object(fields)).map_err(invalid)?;
     if matches!(
         call,
-        ToolCall::ApplyChangeset { .. }
-            | ToolCall::ParseAgentDefinition { .. }
-            | crate::tools::ToolCall::PrepareWorker { .. }
+        ToolCall::ApplyChangeset { .. } | ToolCall::ParseAgentDefinition { .. }
     ) {
         return Err(ProviderError::InvalidOutcome);
     }

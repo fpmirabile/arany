@@ -81,6 +81,8 @@ for a reply to the client's own request.
 Protocol fields use camelCase. Embedded journal vocabulary (`EventLine`, Event
 payloads, Tool calls and intents) retains its existing snake_case bytes; receipt
 budgets, usage and reports use camelCase.
+The closed Event kind schema excludes retired worker transfer, handover, integration and discard kinds; [journal migration](./execution.md#journal-migration) owns historical archival.
+
 `EventLine.payload` is an open object: exporting a schema does not redefine the
 journal format. JSON is data; clients must render untrusted content inertly.
 

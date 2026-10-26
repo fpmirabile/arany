@@ -352,13 +352,7 @@ impl Permission {
 
 impl RunLoop<'_> {
     pub(super) fn plan_allows(&self, call: &ToolCall) -> Result<bool, EngineError> {
-        Ok(self.primary_lease_allows(call)?.is_ok()
-            && (matches!(
-                call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            ) || self.ledger().allows_tool(call)))
+        Ok(self.primary_lease_allows(call)?.is_ok() && self.ledger().allows_tool(call))
     }
 
     pub(in crate::engine::run_loop) fn primary_lease_allows(

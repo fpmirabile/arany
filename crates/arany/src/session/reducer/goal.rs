@@ -41,16 +41,7 @@ pub(super) fn observe_tool(
         .ok_or(ReplayError::InvalidTransition)?;
     let goal = current_goal_mut(current, goal_id)?;
     if let Some(contract) = goal.plan_contract.as_ref() {
-        if matches!(
-            observation.intent.call,
-            crate::tools::ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-            }
-        ) {
-            goal.success_state = contract.initial_success_state();
-        } else {
-            contract.observe_success(&mut goal.success_state, observation);
-        }
+        contract.observe_success(&mut goal.success_state, observation);
         goal.success_criterion_satisfied = contract.success_state_satisfied(&goal.success_state);
     }
     Ok(())
@@ -1062,26 +1053,16 @@ pub(super) fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
             .tools
             .get(covered_count)
             .is_some_and(is_integration_tool)
-        || run.tools.get(covered_count - 1).is_some_and(|tool| {
-            tool.narrowed_call().is_some()
-                || matches!(
-                    tool.intent.call,
-                    crate::tools::ToolCall::PrepareWorker { .. }
-                )
-        })
+        || run
+            .tools
+            .get(covered_count - 1)
+            .is_some_and(|tool| tool.narrowed_call().is_some())
     {
         return false;
     }
     let covered = run.tools[run.initial_tool_count()..covered_count]
         .iter()
-        .filter(|tool| {
-            !is_integration_tool(tool)
-                && tool.narrowed_call().is_none()
-                && !matches!(
-                    tool.intent.call,
-                    crate::tools::ToolCall::PrepareWorker { .. }
-                )
-        })
+        .filter(|tool| !is_integration_tool(tool) && tool.narrowed_call().is_none())
         .count();
     let step_ends = primary
         .provider_calls

@@ -600,35 +600,6 @@ impl ToolRuntime {
                     Ok((path.clone(), before.bytes().ok_or(ToolError::ChangedInput)?))
                 })
                 .collect::<Result<Vec<_>, ToolError>>()?,
-            ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-            } => {
-                let changes = guard::transfer::decode_handover(
-                    intent,
-                    self.handover.as_deref().ok_or(ToolError::ChangedInput)?,
-                    &self.config,
-                )?;
-                paths
-                    .iter()
-                    .map(|(path, expected)| {
-                        let before = changes
-                            .files
-                            .iter()
-                            .find(|f| &f.path == path)
-                            .and_then(|f| f.before.as_ref())
-                            .ok_or(ToolError::ChangedInput)?;
-                        if &before.sha256 != expected {
-                            return Err(ToolError::ChangedInput);
-                        }
-                        Ok((
-                            path.clone(),
-                            before
-                                .bytes_with_limit(types::MAX_FILE_BYTES)
-                                .ok_or(ToolError::ChangedInput)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, ToolError>>()?
-            }
             _ => return Err(ToolError::Configuration),
         };
         self.pinned_root(intent)?;
@@ -749,10 +720,6 @@ impl ToolRuntime {
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         match call {
-            ToolCall::PrepareWorker { .. } => self.worker_policy().is_some(),
-            ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-            } => self.config.write,
             _ if call.is_host() => {
                 self.config.allows(call)
                     && self
@@ -1546,12 +1513,6 @@ impl ToolRuntime {
         }
         if intent.target != crate::session::worker::EffectTarget::Workspace
             || !self.config.allows(&intent.call)
-            || matches!(
-                intent.call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            )
         {
             return ToolObservation {
                 spill: None,

@@ -20,3 +20,21 @@ pub(crate) fn pre_shared_editor_payload(kind: &str, payload: &str) -> Option<Str
     .ok()?;
     event.payload().ok()
 }
+
+pub(crate) fn retired_worker_payload(kind: &str, payload: &str) -> Option<String> {
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
+        serialize(&parse::<T>(payload).ok()?).ok()
+    }
+    match kind {
+        "ToolProposed" => again::<ToolProposedPayload>(payload),
+        "ToolStarted" => again::<ToolStartedPayload>(payload),
+        "ToolFinished" => again::<ToolFinishedPayload>(payload),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
+        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
+        "AgentSpawned" => again::<SpawnPayload>(payload),
+        "SupervisorVerdictRecorded" => again::<crate::supervisor::SupervisorVerdict>(payload),
+        _ => None,
+    }
+}
