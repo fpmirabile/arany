@@ -5,6 +5,7 @@ use crate::tools::{Attestation, ToolCall, ToolDisposition};
 
 mod apply;
 mod before;
+mod command;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorkerState {
@@ -88,6 +89,7 @@ impl RunView {
                     cleanup_confirmed: false,
                     lease_released: w.released.is_some(),
                     verified: w.verification.as_ref().is_some_and(|(_, v)| v.passed),
+                    changed_paths: crate::session::worker::changed_paths(self, a),
                     report,
                 })
             })
@@ -132,9 +134,11 @@ pub(crate) fn coordination_ready(run: &RunView) -> bool {
                 .assignment
                 .as_ref()
                 .map_or(agent.status == AgentStatus::Finished, |worker| {
-                    agent.status != AgentStatus::Active
-                        && worker.released.is_some()
-                        && worker.outcome.is_some()
+                    (worker.pins.request.mode == WorkerMode::Background
+                        && agent.status == AgentStatus::Active
+                        || agent.status != AgentStatus::Active
+                            && worker.released.is_some()
+                            && worker.outcome.is_some())
                         && !agent.tools.iter().any(ToolView::outcome_unknown)
                 })
         })
@@ -194,12 +198,6 @@ pub(crate) fn validate_request(
     spawning: Option<AgentRunId>,
 ) -> Result<(), crate::session::ProposalRefusalCause> {
     use crate::session::ProposalRefusalCause::*;
-    if request.mode != WorkerMode::Foreground {
-        return Err(DelegateInvalid);
-    }
-    if !request.commands.is_empty() {
-        return Err(EditorCommands);
-    }
     let config = run.config.as_ref().ok_or(Phase)?;
     let policy = config.worker_policy.as_ref().ok_or(EditorGrant)?;
     let goal = active_run_goal(view, run.id).ok_or(Phase)?;
@@ -236,19 +234,16 @@ pub(crate) fn validate_request(
     {
         return Err(EditorLease);
     }
-    if ![
-        WorkerTool::Write,
-        WorkerTool::Edit,
-        WorkerTool::MultiEdit,
-        WorkerTool::Delete,
-        WorkerTool::Move,
-    ]
-    .iter()
-    .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
-    {
+    let grant = policy
+        .parent_grant
+        .clone()
+        .narrowed_for_editor(request, &plan.commands, |tool| {
+            definition.allows_worker_tool(tool)
+        });
+    if !grant.valid() {
         return Err(EditorGrant);
     }
-    validate_editor_criterion(request, policy, plan, definition)?;
+    validate_editor_criterion(request, &grant, plan)?;
     for source in request.resumes.iter().chain(request.supersedes.iter()) {
         if Some(*source) == spawning || view.worker_resume_source(goal.id, *source).is_none() {
             return Err(EditorResume);
@@ -259,17 +254,10 @@ pub(crate) fn validate_request(
 
 fn validate_editor_criterion(
     request: &EditorAssignment,
-    policy: &WorkerPolicy,
+    grant: &WorkerGrant,
     plan: &GoalPlanContract,
-    definition: &crate::tools::definitions::AgentDefinition,
 ) -> Result<(), crate::session::ProposalRefusalCause> {
     use crate::session::ProposalRefusalCause::EditorCriterion;
-    let grant = policy
-        .parent_grant
-        .clone()
-        .narrowed_for_editor(request, &plan.commands, |tool| {
-            definition.allows_worker_tool(tool)
-        });
     if match &request.criterion {
         GoalSuccessCriterion::ToolCallSucceeded { call } => {
             !plan.allows_call(call)
@@ -451,11 +439,11 @@ pub(super) fn child_tool_admissible(
             .iter()
             .any(|t| t.intent.id == intent.id || editor_tool_failed(t))
         && a.provider_calls
-            .last()
+            .iter()
+            .rev()
+            .find(|record| record.phase != AgentPhase::ToolReview)
             .is_some_and(|r| r.disposition == ProviderCallDisposition::ToolRequested)
-        && super::agent::child_tool_requests(a) == a.tools.len() + 1
-        && w.pins.grant.allows(&intent.call)
-        && !matches!(intent.call, ToolCall::Command { .. })
+        && command::admissible(run, a, intent)
         && super::tool::validate_tool_lease(run, id, &intent.call).is_ok()
 }
 
@@ -721,8 +709,20 @@ pub(crate) fn editor_criterion_evidence(
             return Ok(Vec::new());
         };
         if o.disposition == ToolDisposition::Succeeded && o.attested_for(&o.intent) {
+            if let GoalSuccessCriterion::ToolCallSucceeded { call } = &w.pins.request.criterion
+                && let Some(source) = command::criterion_command(a, t, call)
+            {
+                return Ok(vec![
+                    source,
+                    t.finished_sequence.ok_or(ReplayError::InvalidTransition)?,
+                ]);
+            }
             let passed = match &w.pins.request.criterion {
-                GoalSuccessCriterion::ToolCallSucceeded { call } => o.intent.call == **call,
+                GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                    o.intent.call == **call
+                        && (!matches!(call.as_ref(), ToolCall::Command { .. })
+                            || command::succeeded(o, true))
+                }
                 GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
                     file_digest(o, path).as_ref() == Some(sha256)
                 }

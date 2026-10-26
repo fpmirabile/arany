@@ -387,18 +387,21 @@ impl RunLoop<'_> {
                         let (run, agent) = v.worker_resume_source(self.goal_id?, source)?;
                         let mut report = agent.result.clone().unwrap_or_default();
                         report.truncate(crate::tools::types::truncate_utf8(&report, 2048).len());
-                        let disposition = run
+                        let history = run
                             .worker_history()
                             .into_iter()
-                            .find(|w| w.assignment_id == source)
-                            .map_or_else(
-                                || format!("Child {}: {}", agent.id, agent.status),
-                                |w| w.description(),
-                            );
+                            .find(|w| w.assignment_id == source);
+                        let disposition = history.as_ref().map_or_else(
+                            || format!("Child {}: {}", agent.id, agent.status),
+                            |w| w.description(),
+                        );
+                        let changes = history
+                            .map(|worker| worker.changed_paths)
+                            .unwrap_or_default();
                         Some(crate::provider::ChildResult {
                             objective: agent.objective.clone().unwrap_or_default(),
                             summary: agent.summary.clone().unwrap_or_else(|| disposition.clone()),
-                            result: format!("{disposition}\n{report}"),
+                            result: format!("{disposition}\n{changes}\n{report}"),
                         })
                     })?
                     .ok_or(EngineError::InvalidHistory)?,

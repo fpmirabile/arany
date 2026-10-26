@@ -4,6 +4,10 @@ use crate::tools::{FileChange, ToolCall};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+mod report;
+pub(crate) use report::changed_paths;
+pub const MAX_EDITOR_CHANGE_REPORT_BYTES: usize = 2048;
+
 pub const WORKER_CHUNK_BYTES: usize = 45 * 1024;
 pub const WORKER_DATA_BYTES: usize = 48 * 1024 * 1024;
 pub const WORKER_MANIFEST_BYTES: usize = 3 * 1024 * 1024;
@@ -110,16 +114,17 @@ impl WorkerGrant {
                 .iter()
                 .enumerate()
                 .all(|(i, t)| !self.tools[..i].contains(t))
-            && self.tools.iter().any(|t| {
-                matches!(
-                    t,
-                    WorkerTool::Write
-                        | WorkerTool::Edit
-                        | WorkerTool::MultiEdit
-                        | WorkerTool::Delete
-                        | WorkerTool::Move
-                )
-            })
+            && (!self.commands.is_empty()
+                || self.tools.iter().any(|t| {
+                    matches!(
+                        t,
+                        WorkerTool::Write
+                            | WorkerTool::Edit
+                            | WorkerTool::MultiEdit
+                            | WorkerTool::Delete
+                            | WorkerTool::Move
+                    )
+                }))
             && self.write_paths.iter().all(|p| within(p, &self.read_paths))
             && [&self.skills, &self.mcp_servers].iter().all(|names| {
                 names.len() <= 64
@@ -488,6 +493,7 @@ pub struct WorkerHistory {
     pub lease_released: bool,
     pub verified: bool,
     pub report: String,
+    pub changed_paths: String,
 }
 
 impl WorkerHistory {

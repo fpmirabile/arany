@@ -1072,3 +1072,6 @@ fn refused(f: &Fixture, event: Event, name: &str) {
 
 #[path = "worker/workspace_tests.rs"]
 mod workspace_tests;
+
+#[path = "worker/command_tests.rs"]
+mod command_tests;

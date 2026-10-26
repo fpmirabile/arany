@@ -350,7 +350,6 @@ pub(crate) fn commit_latency(recorder: &LatencyRecorder, envelope: &EventEnvelop
 #[cfg(any(test, feature = "test-support"))]
 mod injection {
     use crate::session::{Event, SessionId};
-    #[cfg(test)]
     use crate::store::BuildCacheIdentity;
     use std::io;
     use std::sync::Mutex;
@@ -403,7 +402,6 @@ mod injection {
             std::sync::mpsc::Receiver<()>,
             oneshot::Sender<()>,
         ),
-        #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
         CommitMarker(String),
         // Without a gate the Session's retry backoffs end at once; a gate holds one backoff.
         RetryBackoff(
@@ -642,7 +640,6 @@ mod injection {
             (wait_entered, release, wait_finished)
         }
 
-        #[cfg(test)]
         pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
             plan().push(Fault::CommitMarker(identity.token()));
         }

@@ -2415,6 +2415,9 @@ impl RunLoop<'_> {
                                     history
                                         .map(|history| history.description())
                                         .unwrap_or_default(),
+                                    history
+                                        .map(|history| history.changed_paths.clone())
+                                        .unwrap_or_default(),
                                     tool_facts,
                                     result.to_owned(),
                                 ]

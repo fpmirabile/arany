@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 pub(super) const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
+const COMMAND_CACHE_PHASES: u64 = 3;
 
 #[must_use]
 pub(super) enum AdmissionRefusal {
@@ -76,42 +77,36 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         call: ToolCall,
     ) -> Result<Option<EffectIntent>, EngineError> {
+        self.workspace_intent(runtime, self.primary_id, call).await
+    }
+
+    async fn workspace_intent(
+        &self,
+        runtime: &ToolRuntime,
+        actor: crate::session::AgentRunId,
+        call: ToolCall,
+    ) -> Result<Option<EffectIntent>, EngineError> {
         let command = matches!(call, ToolCall::Command { .. });
         let timeout_limit = self.ledger().command_timeout_limit(&call)?;
         let mut intent = if call.is_unguarded() {
             let runtime = runtime.clone();
-            let (run, actor) = (self.run_id, self.primary_id);
+            let run = self.run_id;
             tokio::task::spawn_blocking(move || runtime.intent(run, actor, call))
                 .await
                 .map_err(|_| ToolError::Operation)?
         } else {
-            runtime.intent(self.run_id, self.primary_id, call)
+            runtime.intent(self.run_id, actor, call)
         };
         let (resource_class, requested_runtime_ms, resource_settings) =
             self.ledger().requested_command_resources()?;
         if command {
-            intent.limits.resource_class = resource_class;
-            intent.limits.project_bytes = crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES;
-            let requested_cache_bytes = if resource_class == ToolResourceClass::Build {
-                resource_settings.build_cache_bytes
-            } else {
-                intent.limits.cache_requested_bytes
-            };
-            intent.limits.cache_requested_bytes = requested_cache_bytes;
-            if timeout_limit.is_some() {
-                intent.limits.cache_bytes = 0;
-                intent.limits.cache_candidate_bytes = 0;
-            } else {
-                let (cache_view_bytes, cache_candidate_bytes) =
-                    runtime.effective_cache_bytes(requested_cache_bytes)?;
-                intent.limits.cache_bytes = cache_view_bytes;
-                intent.limits.cache_candidate_bytes = cache_candidate_bytes;
-            }
-            if resource_class == ToolResourceClass::Build {
-                intent.limits.memory_bytes = resource_settings.build_memory_bytes;
-                intent.limits.max_processes = resource_settings.build_processes;
-                intent.limits.project_bytes = resource_settings.build_project_bytes;
-            }
+            command_limits(
+                runtime,
+                &mut intent,
+                resource_class,
+                resource_settings,
+                timeout_limit.is_some(),
+            )?;
         }
         let fixed_overhead_ms = duration_ms(
             runtime
@@ -133,7 +128,7 @@ impl RunLoop<'_> {
                     source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
                 }
             ) {
-            3
+            COMMAND_CACHE_PHASES
         } else {
             1
         };
@@ -167,21 +162,39 @@ impl RunLoop<'_> {
         call: ToolCall,
         deadline: Instant,
     ) -> Option<EffectIntent> {
-        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        let intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        self.limit_child_intent(runtime, intent, deadline)
+    }
+
+    fn limit_child_intent(
+        &self,
+        runtime: &ToolRuntime,
+        mut intent: EffectIntent,
+        deadline: Instant,
+    ) -> Option<EffectIntent> {
         let overhead = runtime.reservation_overhead(&intent.call);
         let available = deadline
             .saturating_duration_since(Instant::now())
             .saturating_sub(overhead + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD);
         let available = available.saturating_sub(self.hook_time(runtime, &intent.call, available));
         // Half for the post-approval Guard capacity wait, half for the run itself.
+        let transfers =
+            if matches!(intent.call, ToolCall::Command { .. }) && intent.limits.cache_bytes > 0 {
+                COMMAND_CACHE_PHASES
+            } else {
+                1
+            };
         let runtime_ms = intent
             .limits
             .runtime_ms
-            .min(u32::try_from(duration_ms(available) / 2).unwrap_or(u32::MAX));
+            .min(u32::try_from(duration_ms(available) / (2 * transfers)).unwrap_or(u32::MAX));
         if runtime_ms < 1_000 {
             return None;
         }
         intent.limits.runtime_ms = runtime_ms;
+        if intent.limits.cache_transfer_ms > 0 {
+            intent.limits.cache_transfer_ms = runtime_ms;
+        }
         Some(intent)
     }
 
@@ -382,7 +395,14 @@ impl RunLoop<'_> {
                         .map(|deadline| deadline.cause),
                 );
                 let deadline = grant.deadline().unwrap_or(*deadline);
-                let Some(intent) = self.researcher_intent(runtime, child, call, deadline) else {
+                let intent = if child.kind.is_editor() && matches!(call, ToolCall::Command { .. }) {
+                    self.workspace_intent(runtime, child.agent_run_id, call)
+                        .await?
+                        .and_then(|intent| self.limit_child_intent(runtime, intent, deadline))
+                } else {
+                    self.researcher_intent(runtime, child, call, deadline)
+                };
+                let Some(intent) = intent else {
                     return Ok(Err(deadline_refusal));
                 };
                 Some(intent)
@@ -468,7 +488,11 @@ impl RunLoop<'_> {
                     .and_then(|run| {
                         run.tools
                             .iter()
-                            .find(|tool| tool.intent.digest() == *source_intent_digest)
+                            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                            .find(|tool| {
+                                tool.intent.agent_run_id == intent.agent_run_id
+                                    && tool.intent.digest() == *source_intent_digest
+                            })
                     })
                     .map(|tool| tool.intent.call.clone())
             })?,
@@ -784,6 +808,38 @@ pub(super) async fn execute_cancellable(
         }
         observation = &mut execution => observation,
     }
+}
+
+fn command_limits(
+    runtime: &ToolRuntime,
+    intent: &mut EffectIntent,
+    resource_class: ToolResourceClass,
+    resource_settings: crate::tools::ToolResourceSettings,
+    timeout_refused: bool,
+) -> Result<(), ToolError> {
+    intent.limits.resource_class = resource_class;
+    intent.limits.project_bytes = crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES;
+    let requested_cache_bytes = if resource_class == ToolResourceClass::Build {
+        resource_settings.build_cache_bytes
+    } else {
+        intent.limits.cache_requested_bytes
+    };
+    intent.limits.cache_requested_bytes = requested_cache_bytes;
+    if timeout_refused {
+        intent.limits.cache_bytes = 0;
+        intent.limits.cache_candidate_bytes = 0;
+    } else {
+        let (cache_view_bytes, cache_candidate_bytes) =
+            runtime.effective_cache_bytes(requested_cache_bytes)?;
+        intent.limits.cache_bytes = cache_view_bytes;
+        intent.limits.cache_candidate_bytes = cache_candidate_bytes;
+    }
+    if resource_class == ToolResourceClass::Build {
+        intent.limits.memory_bytes = resource_settings.build_memory_bytes;
+        intent.limits.max_processes = resource_settings.build_processes;
+        intent.limits.project_bytes = resource_settings.build_project_bytes;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
