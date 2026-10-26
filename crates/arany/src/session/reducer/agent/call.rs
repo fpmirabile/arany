@@ -47,7 +47,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             &mut run.agents[index].tools
         };
         tools
-            .last_mut()
+            .iter_mut()
+            .find(|tool| tool.observation.is_none())
             .ok_or(ReplayError::InvalidTransition)?
             .review_call_index = Some(review_index);
     }
@@ -66,31 +67,36 @@ fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord)
             )
             && agent
                 .provider_calls
-                .last()
+                .iter()
+                .rev()
+                .find(|call| call.phase != AgentPhase::ToolReview)
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-            && agent.tools.last().is_some_and(|tool| {
-                tool.observation.is_none()
-                    && tool.review_call_index.is_none()
-                    && tool.permission_verdict.is_none()
-            });
+            && agent
+                .tools
+                .iter()
+                .find(|tool| tool.observation.is_none())
+                .is_some_and(|tool| {
+                    tool.observation.is_none()
+                        && tool.review_call_index.is_none()
+                        && tool.permission_verdict.is_none()
+                });
     }
     agent.role == AgentRole::Primary
         && record.phase == AgentPhase::ToolReview
         && agent.provider_calls.last().is_some_and(|call| {
             call.disposition == ProviderCallDisposition::ToolRequested
                 || call.phase == AgentPhase::ToolReview
-                    && run.tools.last().is_some_and(|tool| {
-                        matches!(
-                            tool.intent.call,
-                            crate::tools::ToolCall::ApplyChangeset { .. }
-                        )
-                    })
+                    && run.tools.iter().any(|tool| tool.observation.is_none())
         })
-        && run.tools.last().is_some_and(|tool| {
-            tool.observation.is_none()
-                && tool.review_call_index.is_none()
-                && tool.permission_verdict.is_none()
-        })
+        && run
+            .tools
+            .iter()
+            .find(|tool| tool.observation.is_none())
+            .is_some_and(|tool| {
+                tool.observation.is_none()
+                    && tool.review_call_index.is_none()
+                    && tool.permission_verdict.is_none()
+            })
 }
 
 fn validate_attempt_role(
@@ -261,9 +267,10 @@ fn tool_request_fits(run: &RunView, agent: &AgentView, record: &ProviderCallReco
                     agent.grant,
                     Some(ChildGrant::ReadOnly { .. } | ChildGrant::EditOnly { .. })
                 )
-                && record.requested_tools == 1
+                && (agent.assignment.is_none() || record.requested_tools == 1)
                 && child_definition_allows_turn(run, agent)
-                && child_tool_requests(agent) < crate::session::MAX_CHILD_TOOL_CALLS
+                && child_tool_requests(agent).saturating_add(usize::from(record.requested_tools))
+                    <= crate::session::MAX_CHILD_TOOL_CALLS
         }
     }
 }

@@ -53,6 +53,7 @@ impl Event {
             | Self::GoalFinished { .. }
             | Self::GoalProviderCallReserved { .. } => Event::validate_goal(self),
             Self::ToolStarted { .. }
+            | Self::ToolActiveTimeReserved { .. }
             | Self::ToolFinished { .. }
             | Self::HookStarted { .. }
             | Self::HookFinished { .. }

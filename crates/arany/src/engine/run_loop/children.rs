@@ -791,6 +791,8 @@ impl RunLoop<'_> {
     fn append_delegation_turn(root_request: &mut ProviderRequest, delegate_turn: &ProviderTurn) {
         if let Some(tools) = root_request.input.tools.as_mut() {
             tools.steps.push(ToolStep {
+                narrowed_observations: Default::default(),
+                refusal_index: None,
                 refusal: None,
                 plan: None,
                 turn: delegate_turn.clone(),
@@ -1564,7 +1566,7 @@ impl RunLoop<'_> {
         if let Some(segment) = wave.segments.take() {
             self.settle_active_segment(segment)?;
         }
-        // Wave validity admits exactly one request.
+        // Wave validity admits a bounded request list.
         let request = self
             .begin_tool_step(requests)
             .await?
@@ -1720,7 +1722,7 @@ impl RunLoop<'_> {
         &self,
         child: &mut ChildWork,
         queue: &mut ChildQueue,
-        mut requests: Vec<ToolRequest>,
+        requests: Vec<ToolRequest>,
         turn: ProviderTurn,
         deadline: Instant,
     ) -> Result<(Option<StopCause>, bool), EngineError> {
@@ -1731,7 +1733,7 @@ impl RunLoop<'_> {
                 deadline,
                 active_deadline,
             },
-            requests.pop().ok_or(EngineError::CoordinatorFailed)?,
+            requests,
             turn,
         ))
         .await?
@@ -1976,7 +1978,11 @@ impl RunLoop<'_> {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(requests),
                     ..
-                }) => self.valid_child_tools(&wave.children[index], requests),
+                }) => self.valid_child_tools(
+                    &wave.children[index],
+                    requests,
+                    self.ledger().plan_contract()?.as_ref(),
+                ),
                 CallResult::Response(ProviderResponse {
                     outcome:
                         ProviderOutcome::Delegate(_)
@@ -2127,14 +2133,14 @@ impl RunLoop<'_> {
     async fn run_researcher_tool(
         &self,
         child: &mut ChildWork,
-        mut requests: Vec<ToolRequest>,
+        requests: Vec<ToolRequest>,
         turn: ProviderTurn,
         deadline: Instant,
     ) -> Result<Admission<Option<AgentDisposition>>, EngineError> {
         let agent_run_id = child.agent_run_id;
 
         self.ledger().child_call_finished()?;
-        let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
+        let calls = requests.len();
         // Boxed: the Tool future is large and would overflow the caller's stack.
         let active_deadline = child.active_deadline.clone();
         let end = Box::pin(self.execute_step(
@@ -2143,13 +2149,13 @@ impl RunLoop<'_> {
                 deadline,
                 active_deadline,
             },
-            request,
+            requests,
             turn,
         ))
         .await?;
         match end {
             StepEnd::Continue => {
-                child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
+                child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(calls);
                 return Ok(Admission::Reserved(None));
             }
             StepEnd::Stopped(StopCause::ActiveTime) => {
@@ -2437,6 +2443,8 @@ impl RunLoop<'_> {
                     .is_none_or(|step| !step.requests.is_empty() || step.cleared)
                 {
                     tools.steps.push(ToolStep {
+                        narrowed_observations: Default::default(),
+                        refusal_index: None,
                         refusal: None,
                         plan: None,
                         turn: ProviderTurn::scripted(),
@@ -2968,20 +2976,40 @@ impl RunLoop<'_> {
         }
     }
 
-    fn valid_child_tools(&self, child: &ChildWork, requests: &[ToolRequest]) -> bool {
-        matches!(requests, [request]
-        if child.tools.is_some()
-            && child.tool_calls_remaining > 0 && child.turns_remaining > 0
-            && request.call.valid()
-            && self.model_may_propose(&request.call)
-            && (if child.kind.is_editor() {
-                self.proposed_editor(child.agent_run_id)
-                    .and_then(|a| self.editor_grant(&a))
-                    .is_ok_and(|g| g.allows(&request.call))
-            } else {
-                request.call.is_child_research()
-                    && child.definition.as_ref().is_none_or(|definition| definition.allows(&request.call))
-            }))
+    fn valid_child_tools(
+        &self,
+        child: &ChildWork,
+        requests: &[ToolRequest],
+        contract: Option<&crate::session::GoalPlanContract>,
+    ) -> bool {
+        !requests.is_empty()
+            && requests.len() <= usize::from(crate::session::MAX_STEP_TOOL_CALLS)
+            && (!child.kind.is_editor() || requests.len() == 1)
+            && !requests.iter().enumerate().any(|(index, request)| {
+                requests[..index].iter().any(|prior| prior.id == request.id)
+            })
+            && requests.len() <= child.tool_calls_remaining
+            && (requests.len() == 1
+                || requests.iter().all(|request| {
+                    contract.is_none_or(|contract| contract.allows_call(&request.call))
+                }))
+            && child.tools.is_some()
+            && child.turns_remaining > 0
+            && requests.iter().all(|request| {
+                request.call.valid()
+                    && self.model_may_propose(&request.call)
+                    && (if child.kind.is_editor() {
+                        self.proposed_editor(child.agent_run_id)
+                            .and_then(|a| self.editor_grant(&a))
+                            .is_ok_and(|g| g.allows(&request.call))
+                    } else {
+                        request.call.is_child_research()
+                            && child
+                                .definition
+                                .as_ref()
+                                .is_none_or(|definition| definition.allows(&request.call))
+                    })
+            })
     }
 
     async fn finish_child(
@@ -3198,6 +3226,8 @@ mod child_tool_report_tests {
                 cache_update: CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: Some(PermissionVerdict {
                 host: None,
                 intent_digest: intent.digest(),

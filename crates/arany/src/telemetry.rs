@@ -1074,6 +1074,7 @@ impl From<&Event> for TraceEventKind {
             | Event::ProviderRetryScheduled { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
+            | Event::ToolActiveTimeReserved { .. }
             | Event::ToolPermissionDecided { .. }
             | Event::HookStarted { .. }
             | Event::HookFinished { .. }

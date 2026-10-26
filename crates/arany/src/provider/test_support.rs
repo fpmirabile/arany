@@ -151,6 +151,8 @@ pub(crate) fn observed_step(
         panic!("a Tool response");
     };
     crate::tools::ToolStep {
+        narrowed_observations: Default::default(),
+        refusal_index: None,
         refusal: None,
         plan: None,
         turn: response.turn,
@@ -200,4 +202,41 @@ pub(crate) fn assignment_shapes() -> Vec<(Value, bool)> {
             false,
         ),
     ]
+}
+
+pub(crate) fn four_read_step(adapter: &'static str) -> crate::tools::ToolStep {
+    let requests: Vec<_> = (0..4)
+        .map(|index| crate::ToolRequest {
+            id: super::ToolUseId::new(format!("call_{index}")).unwrap(),
+            call: crate::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: None,
+            },
+        })
+        .collect();
+    let items: Vec<_> = requests.iter().map(|request| {
+        let arguments = json!({"path":"notes/facts.txt","offset":null,"limit":null});
+        if adapter == "anthropic" {
+            json!({"type":"tool_use","id":request.id.as_str(),"name":"arany_read","input":arguments})
+        } else {
+            json!({"type":"function_call","id":format!("item_{}", request.id.as_str()),"call_id":request.id.as_str(),"name":"arany_read","arguments":arguments.to_string(),"status":"completed"})
+        }
+    }).collect();
+    observed_step(
+        super::ProviderResponse {
+            turn: super::ProviderTurn::new(
+                adapter,
+                &serde_json::to_string(&items).unwrap(),
+                "synthetic-secret",
+                4096,
+            )
+            .unwrap(),
+            outcome: super::ProviderOutcome::Tools(requests),
+            response_id: None,
+            usage: super::Usage::default(),
+            wire_provenance: None,
+        },
+        "bounded facts",
+    )
 }

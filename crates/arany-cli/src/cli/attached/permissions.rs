@@ -951,6 +951,8 @@ mod tests {
             checkpoint: None,
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,

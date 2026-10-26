@@ -1027,7 +1027,7 @@ pub enum ProviderOutcome {
     Answer(Answer),
     Review(ReviewVerdict),
     Delegate(Delegate),
-    /// Non-empty, in model order; the Engine accepts exactly one per step.
+    /// Non-empty, in model order; the Engine accepts up to MAX_STEP_TOOL_CALLS per step.
     Tools(Vec<crate::tools::ToolRequest>),
 }
 

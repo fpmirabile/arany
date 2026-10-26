@@ -1777,6 +1777,8 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: None,
             turn: decoded.turn,
@@ -1912,6 +1914,8 @@ fn optional_plan_is_separate_from_effect_schemas_and_has_a_correlated_result() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            narrowed_observations: Default::default(),
+            refusal_index: None,
             refusal: None,
             plan: Some(*plan),
             turn: decoded.turn,
@@ -2502,4 +2506,37 @@ async fn probe_stops_leave_intent_and_result_acknowledgments_confirmed() {
             store.close().await.unwrap();
         }
     }
+}
+
+#[test]
+fn multi_call_replay_keeps_all_paired_outputs_and_drops_server_ids() {
+    let mut request = crate::provider::test_support::primary_request("model-a");
+    request
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(crate::provider::test_support::four_read_step("openai"));
+    let body: Value = serde_json::from_slice(&body_for(&request, Effort::Low).unwrap()).unwrap();
+    let results = crate::provider::render::semantic::tool_results(&body);
+    assert_eq!(results.len(), 4);
+    let paired: Vec<_> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect();
+    for (index, item) in paired.iter().enumerate() {
+        assert_eq!(item["call_id"], format!("call_{index}"));
+    }
+    let calls: Vec<_> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect();
+    assert_eq!(calls.len(), 4);
+    assert!(calls.iter().all(|item| item.get("id").is_none()));
+    assert_eq!(body["parallel_tool_calls"], false);
 }
