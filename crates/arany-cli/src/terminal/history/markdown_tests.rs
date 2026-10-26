@@ -5,13 +5,16 @@ use crate::terminal::markdown;
 use crate::terminal::view::{Palette, draw_history_rows, native_line};
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 
-const HEADING_CASES: &[(&str, &str, bool)] = &[
+const MARKDOWN_CASES: &[(&str, &str, bool)] = &[
     (
         "# Result ###\r\n\r\n```\r\nraw\r\n```\r\n\r\nnext",
         "Result",
         true,
     ),
     (r"  ## \*Result", r"\*Result", true),
+    ("```Result\n  中 e\u{301} 👩‍💻\n```", "Result", true),
+    ("~~~Result&#27;\nbody\n~~~", "Result&#27;", true),
+    ("    Result\n      value", "Result", false),
     (
         "# Result\rretained text",
         r"# Result\u{000d}retained text",
@@ -21,8 +24,8 @@ const HEADING_CASES: &[(&str, &str, bool)] = &[
 ];
 
 #[test]
-fn committed_headings_share_consumers_counts_source_copy_find_and_reflow() {
-    for &(source, expected, heading) in HEADING_CASES {
+fn committed_markdown_shares_consumers_counts_source_copy_find_and_reflow() {
+    for &(source, expected, heading) in MARKDOWN_CASES {
         for width in [16, 40, 50, 80, 120] {
             let mut view = session();
             view.runs.push(run("objective", source));
@@ -49,7 +52,18 @@ fn committed_headings_share_consumers_counts_source_copy_find_and_reflow() {
                 let first = buffer.cell((2, 4)).unwrap();
                 assert_eq!(first.modifier.contains(Modifier::BOLD), heading);
                 for (line, row) in buffer.content.chunks(width).zip(&rows) {
-                    let text: String = line.iter().map(|cell| cell.symbol()).collect();
+                    let mut skip = 0;
+                    let text: String = line
+                        .iter()
+                        .filter_map(|cell| {
+                            if skip > 0 {
+                                skip -= 1;
+                                return None;
+                            }
+                            skip = cell.symbol().width().saturating_sub(1);
+                            Some(cell.symbol())
+                        })
+                        .collect();
                     let native = native_line(row, area.width, palette).to_string();
                     assert_eq!(text.trim_end(), native.trim_end());
                 }
@@ -88,13 +102,16 @@ fn committed_headings_share_consumers_counts_source_copy_find_and_reflow() {
 }
 
 #[test]
-fn unsupported_syntax_controls_limits_and_nonretaining_counts_stay_literal() {
+fn syntax_controls_limits_and_nonretaining_counts_agree() {
     let over_bytes = "a".repeat(markdown::MAX_MARKDOWN_PARSE_BYTES + 1);
     let over_rows = "line\n".repeat(markdown::MAX_MARKDOWN_ROWS);
     let over_depth = format!("{}answer", "> ".repeat(markdown::MAX_MARKDOWN_DEPTH));
     for source in [
         "```\r\nraw\r\n```\r\n\r\nnext",
         "    x\r\n\r\nnext",
+        "- ~~~\n  code\n  ~~~",
+        "7. ~~~\n   code\n   ~~~",
+        "- - ~~~\n    code\n    ~~~",
         "**word** `code` [site](https://e.test/a&amp;b)",
         "# &#27; \u{1b}]52;c;text\u{7}\u{202e}",
         "<script>image</script>\n\n![image](file:///image.png)",
@@ -123,7 +140,12 @@ fn unsupported_syntax_controls_limits_and_nonretaining_counts_stay_literal() {
                     limited
                 );
                 let short = source.len() < width;
-                if !limited && short && !source.trim_start().starts_with('#') {
+                if !limited
+                    && short
+                    && !source.trim_start().starts_with('#')
+                    && !source.starts_with("```")
+                    && !source.starts_with("    ")
+                {
                     let expected: Vec<_> = source
                         .split('\n')
                         .map(|line| format!("  {}", escape_terminal(line)))
@@ -149,5 +171,49 @@ fn unsupported_syntax_controls_limits_and_nonretaining_counts_stay_literal() {
                 .iter()
                 .any(|row| row.text.contains("# Result"))
         );
+    }
+}
+
+#[test]
+fn code_whitespace_info_strings_and_narrow_geometry() {
+    for (source, expected) in [
+        (
+            "```rust\n  Result 中 e\u{301} 👩‍💻\n\n    value\n```\nnext",
+            vec!["rust", "  Result 中 e\u{301} 👩‍💻", "", "    value", "next"],
+        ),
+        (
+            "    Result\n      value\n\nnext",
+            vec!["Result", "  value", "", "next"],
+        ),
+        ("```\n\tResult\n```", vec!["    Result"]),
+        (
+            "~~~&#27;]52;c;unsafe&#7;\nResult\n~~~",
+            vec!["&#27;]52;c;unsafe&#7;", "Result"],
+        ),
+        (
+            "~~~rust\u{1b}\nResult\n~~~",
+            vec![r"rust\u{001b}", "Result"],
+        ),
+    ] {
+        for width in [0, 1, 2, 3, 16, 40, 50, 80, 120] {
+            let rows = display_rows(MessageKind::Assistant, source, width, None);
+            assert_eq!(
+                markdown_cost(MessageKind::Assistant, source, width),
+                (rows.iter().map(|row| row.text.len()).sum(), rows.len())
+            );
+            assert!(
+                rows.iter().all(|row| row.text.width() <= width
+                    && !row.text.contains(['\r', '\u{1b}', '\u{7}']))
+            );
+            if width == 80 {
+                assert_eq!(
+                    rows[1..rows.len() - 1]
+                        .iter()
+                        .map(|row| row.text.strip_prefix("  ").unwrap())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
     }
 }
