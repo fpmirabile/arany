@@ -5812,6 +5812,7 @@ mod goal_replay_tests {
     fn preflight_refusal_closes_proposals_but_never_unknown_started_effects() {
         for stage in ["prepared", "proposed", "reserved", "started"] {
             let (mut view, _, run, actor) = primary_tool_session(false);
+            view.goals[0].active_deadline = Some((run, None));
             view.runs[0].agents[0].provider_calls.push(record(
                 AgentPhase::RootPlan,
                 ProviderCallDisposition::ToolRequested,
