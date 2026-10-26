@@ -1534,8 +1534,7 @@ impl ToolRuntime {
         if matches!(
             intent.call,
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                    | crate::session::worker::ChangesetSource::Rewind { .. }
+                source: crate::session::worker::ChangesetSource::Rewind { .. }
             }
         ) && let Some(bytes) = &self.handover
         {
@@ -1547,6 +1546,12 @@ impl ToolRuntime {
         }
         if intent.target != crate::session::worker::EffectTarget::Workspace
             || !self.config.allows(&intent.call)
+            || matches!(
+                intent.call,
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
+            )
         {
             return ToolObservation {
                 spill: None,

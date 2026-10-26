@@ -166,6 +166,22 @@ pub(super) struct RunFacts {
     pub(super) outcome_correction_pending: bool,
 }
 
+fn uncertain_tool_outcomes(run: &crate::session::RunView) -> bool {
+    run.tools
+        .iter()
+        .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+        .any(|tool| {
+            tool.observation
+                .iter()
+                .chain(
+                    tool.hooks.iter().filter_map(|hook| {
+                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
+                    }),
+                )
+                .any(|observation| observation.disposition == ToolDisposition::Uncertain)
+        })
+}
+
 impl RunFacts {
     pub(super) fn observe(run: &RunLoop<'_>) -> Result<Self, EngineError> {
         let ledger = run.ledger();
@@ -191,14 +207,8 @@ impl RunFacts {
                     outcome.observation.stops_run()
                         && outcome.observation.disposition != ToolDisposition::Cancelled
                 })
-            }) || current.tools.iter().any(|tool| {
-                tool.observation
-                    .iter()
-                    .chain(tool.hooks.iter().filter_map(|hook| {
-                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
-                    }))
-                    .any(|observation| observation.disposition == ToolDisposition::Uncertain)
-            }) || run.uncertain_hook_in(current);
+            }) || uncertain_tool_outcomes(current)
+                || run.uncertain_hook_in(current);
             let action_cancelled = current.lifecycle_hooks.iter().any(|hook| {
                 hook.outcome.as_ref().is_some_and(|outcome| {
                     outcome.observation.disposition == ToolDisposition::Cancelled
@@ -411,6 +421,33 @@ impl RunFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_editor_observation_overrides_every_primary_stop_without_settlement() {
+        let fixture = crate::session::worker_protocol_fixture();
+        let mut run = crate::SessionView::replay_open(fixture.session, &fixture.envelopes())
+            .unwrap()
+            .unwrap()
+            .runs
+            .remove(0);
+        assert!(!uncertain_tool_outcomes(&run));
+        let child = run
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == fixture.child)
+            .unwrap();
+        child.tools[0].observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
+        assert!(uncertain_tool_outcomes(&run));
+        let mut facts = RunFacts::ready();
+        facts.uncertain = uncertain_tool_outcomes(&run);
+        facts.settleable = false;
+        for cause in CAUSES {
+            assert_eq!(
+                settle(PrimaryEnd::Stopped(cause), &facts),
+                Settlement::Unknown
+            );
+        }
+    }
 
     const CAUSES: [StopCause; 14] = [
         StopCause::Uncertain,

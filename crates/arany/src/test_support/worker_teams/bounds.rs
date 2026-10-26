@@ -9,9 +9,13 @@ pub(super) fn is_timed(case: &str) -> bool {
     matches!(case, "active_time" | "delegation_deadline")
 }
 
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).expect("duration fits u64 milliseconds")
+}
+
 pub(super) fn budget(case: &str) -> GoalBudget {
     GoalBudget {
-        max_active_ms: (case == "active_time").then_some(ACTIVE_BUDGET.as_millis() as u64),
+        max_active_ms: (case == "active_time").then_some(millis(ACTIVE_BUDGET)),
         ..Default::default()
     }
 }
@@ -29,9 +33,12 @@ pub(super) async fn exhaust(case: &str) {
 
 pub(super) async fn capacity_case(guard: &Path) -> TeamObservation {
     let baseline = run_case_inner(guard, "success", None).await;
-    let finished = baseline.view.runs[0].agents[1].tools[0]
-        .finished_sequence
-        .unwrap() as usize;
+    let finished = usize::try_from(
+        baseline.view.runs[0].agents[1].tools[0]
+            .finished_sequence
+            .unwrap(),
+    )
+    .expect("journal sequence fits usize");
     let admissions = super::super::admissions::recorded(baseline.session);
     let (count, slots, _, _) = *admissions
         .iter()
@@ -125,10 +132,7 @@ pub(super) fn assert_stopped(
         assert!(!view.goals[0].budget_closed);
         assert!(view.goals[0].budget_refusal.is_none());
         if case == "delegation_deadline" {
-            assert!(
-                view.goals[0].active_ms
-                    >= crate::engine::MAX_DELEGATION_DEADLINE.as_millis() as u64
-            );
+            assert!(view.goals[0].active_ms >= millis(crate::engine::MAX_DELEGATION_DEADLINE));
             assert!(events.iter().any(|event| matches!(
                 &event.event,
                 Event::GoalFinished {
@@ -153,7 +157,7 @@ fn assert_active_time(view: &SessionView) {
     assert_eq!(goal.status, GoalStatus::Failed);
     assert!(goal.report.is_some());
     assert!(goal.budget_closed);
-    assert!(goal.active_ms >= ACTIVE_BUDGET.as_millis() as u64);
+    assert!(goal.active_ms >= millis(ACTIVE_BUDGET));
     assert_eq!(
         goal.budget_refusal.as_ref().unwrap().dimension,
         GoalLimit::ActiveTime

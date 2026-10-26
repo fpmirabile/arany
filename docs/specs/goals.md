@@ -60,7 +60,7 @@ The shared `budget_refusal_feedback` lookup requires a committed refusal record.
 
 ## Worker accounting and verification
 
-Each [editor](./execution.md#worker-journal-protocol) requires Implementation, a committed plan and a write-capable parent. Its lease/catalog intersect parent, plan and definition. The Goal's Workspace writer lock covers editor work and primary verification. Child calls, typed effects, delegated hooks, approvals and Store work consume the shared ledger; queued assignments spend no calls, and overlapping active work is charged once. The existing delegation deadline and per-action limits remain finite. An idle approval pauses active-time charging, and cancellation/pause take precedence over approval acceptance.
+Each [editor](./execution.md#worker-journal-protocol) requires Implementation, a committed plan and a write-capable parent. Its lease/catalog intersect parent, plan and definition. The Goal's Workspace writer lock covers editor work and primary verification. Shared [call and active-time accounting](#lifecycle-budgets-and-recovery) applies to editor work.
 
 After the editor's answer and causal lease release, the primary obtains fresh Workspace Tool evidence for its criterion. WorkerVerificationRecorded pins the criterion digest and at most eight exact primary observation sequences; replay independently derives the result. A report or child receipt cannot pass verification. Later Workspace mutations invalidate it. Missing/failed verification blocks successful answer and the next delegation even if the Goal's own criterion passes. A no-change assignment has the same requirement; failed assignments require explicit replacement.
 
