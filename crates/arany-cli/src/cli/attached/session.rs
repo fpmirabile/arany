@@ -17,7 +17,7 @@ use std::{io::Write, time::Instant};
 pub(super) struct AttachedSession {
     ui: IdleUi,
     files: super::files::Files,
-    engine: Engine,
+    engine: std::sync::Arc<Engine>,
     view: SessionView,
     archived_history: Option<arany::ArchivedHistory>,
     composer: Composer,
@@ -38,7 +38,7 @@ struct IdleUi {
 pub(super) struct SessionParts {
     pub(super) notice: Option<Feedback>,
     pub(super) archive_notice: Option<String>,
-    pub(super) engine: Engine,
+    pub(super) engine: std::sync::Arc<Engine>,
     pub(super) view: SessionView,
     pub(super) archived_history: Option<arany::ArchivedHistory>,
     pub(super) composer: Composer,
@@ -257,7 +257,7 @@ impl AttachedSession {
             TerminalInput::QuickActions if !self.terminal.is_linear() => {
                 self.quick_action().await?
             }
-            TerminalInput::Submit => return self.submit().await,
+            TerminalInput::Submit => return self.submit_task().await,
             TerminalInput::Interrupt => return Ok(self.interrupt()),
             TerminalInput::EndOfInput if self.composer.is_empty() => return Ok(IdleAction::Exit),
             TerminalInput::EndOfInput => {
@@ -419,7 +419,7 @@ impl AttachedSession {
         Ok(())
     }
 
-    async fn submit(&mut self) -> Result<IdleAction, String> {
+    async fn submit_task(&mut self) -> Result<IdleAction, String> {
         if !self.terminal.is_linear() && self.composer.continue_line() {
             self.ui.empty_interrupt = None;
             return Ok(IdleAction::Continue);
@@ -579,7 +579,7 @@ impl AttachedSession {
             skill,
             draft: Some(submitted),
         }
-        .submit(&mut self.terminal, &mut self.view, &mut self.composer)
+        .run(&mut self.terminal, &mut self.view, &mut self.composer)
         .await
     }
 

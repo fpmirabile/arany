@@ -20,7 +20,7 @@ mod agents;
 pub(crate) mod controls;
 mod files;
 pub(crate) mod models;
-mod permissions;
+pub(in crate::cli) mod permissions;
 mod picker;
 mod rewind;
 pub(crate) mod run;
@@ -334,8 +334,19 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     }
 }
 
-// A failed exit drops the Engine instead, which still stops its Store thread.
-async fn close_engine(engine: Engine) -> Result<(), String> {
+async fn close_engine(engine: std::sync::Arc<Engine>) -> Result<(), String> {
+    let engine = tokio::time::timeout(crate::cli::run_outcome::SHUTDOWN_GRACE, async {
+        let mut shared = engine;
+        loop {
+            match std::sync::Arc::try_unwrap(shared) {
+                Ok(engine) => return engine,
+                Err(engine) => shared = engine,
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "Run did not release the Engine".to_owned())?;
     engine
         .close()
         .await

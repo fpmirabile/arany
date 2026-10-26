@@ -690,6 +690,13 @@ pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>
     )
 }
 
+pub struct ToolApprovalPrompt {
+    pub intent_id: uuid::Uuid,
+    pub lines: Vec<String>,
+    pub choices: Vec<ToolApprovalChoice>,
+    pub unguarded: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolApprovalChoice {
     Yes,
