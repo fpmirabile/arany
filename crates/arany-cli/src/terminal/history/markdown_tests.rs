@@ -5,27 +5,44 @@ use crate::terminal::markdown;
 use crate::terminal::view::{Palette, draw_history_rows, native_line};
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 
-const MARKDOWN_CASES: &[(&str, &str, bool)] = &[
+const MARKDOWN_CASES: &[(&str, &str, bool, &str)] = &[
     (
         "# Result ###\r\n\r\n```\r\nraw\r\n```\r\n\r\nnext",
         "Result",
         true,
+        "Result",
     ),
-    (r"  ## \*Result", r"\*Result", true),
-    ("```Result\n  中 e\u{301} 👩‍💻\n```", "Result", true),
-    ("~~~Result&#27;\nbody\n~~~", "Result&#27;", true),
-    ("    Result\n      value", "Result", false),
+    (r"  ## \*Result", r"\*Result", true, "Result"),
+    ("```Result\n  中 e\u{301} 👩‍💻\n```", "Result", true, "Result"),
+    ("~~~Result&#27;\nbody\n~~~", "Result&#27;", true, "Result"),
+    ("~~~Result\nbody\n~~~", "Result", true, "Result"),
+    ("  ~~~~Result\nbody\n  ~~~~", "Result", true, "Result"),
+    ("~~~\nResult\n~~~", "Result", false, "Result"),
+    ("~~~\n~Result~\n~~~", "~Result~", false, "~Result~"),
+    ("    Result\n      value", "Result", false, "Result"),
     (
         "# Result\rretained text",
         r"# Result\u{000d}retained text",
         false,
+        "Result",
     ),
-    ("Result\r# Heading", r"Result\u{000d}# Heading", false),
+    (
+        "Result\r# Heading",
+        r"Result\u{000d}# Heading",
+        false,
+        "Result",
+    ),
+    (
+        "~~~Result\rraw",
+        r"~~~Result\u{000d}raw",
+        false,
+        "~~~Result",
+    ),
 ];
 
 #[test]
 fn committed_markdown_shares_consumers_counts_source_copy_find_and_reflow() {
-    for &(source, expected, heading) in MARKDOWN_CASES {
+    for &(source, expected, heading, selected) in MARKDOWN_CASES {
         for width in [16, 40, 50, 80, 120] {
             let mut view = session();
             view.runs.push(run("objective", source));
@@ -83,7 +100,11 @@ fn committed_markdown_shares_consumers_counts_source_copy_find_and_reflow() {
                 );
                 history.top = history.messages[1].start;
                 history.select_at(&view, 1, expected.find("Result").unwrap() + 2, 2);
-                assert_eq!(history.selection_text(&view).unwrap().unwrap(), "Result");
+                assert_eq!(
+                    history.selection_text(&view).unwrap().unwrap(),
+                    selected,
+                    "source {source:?}, width {width}, agent {agent}"
+                );
             }
             let rows = display_rows(MessageKind::Assistant, source, width, None);
             let (bytes, count) = markdown_cost(MessageKind::Assistant, source, width);
