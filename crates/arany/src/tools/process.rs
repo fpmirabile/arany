@@ -374,6 +374,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_jobs_bind_selected_rust_before_workspace_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = super::super::tests::in_process_runtime(
+            directory.path(),
+            json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+        );
+        runtime.config.commands = serde_json::from_value(json!([{"name":"sh","executable":"/unavailable","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}])).unwrap();
+        let version = "1.98.1-x86_64-unknown-linux-gnu";
+        runtime.config.runtime_grants = serde_json::from_value(json!([{"kind":"rust","manager":"rustup","version":version,"path":directory.path().join(".rustup/toolchains").join(version),"device":1,"inode":1}])).unwrap();
+        runtime.process_enforcement_digest =
+            super::super::guard::enforcement_digest(&runtime.config.runtime_grants).unwrap();
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        );
+        intent.limits.resource_class = super::super::ToolResourceClass::Build;
+        intent.limits.build_jobs = 2;
+        intent.limits.cache_bytes = 0;
+        intent.limits.cache_candidate_bytes = 0;
+        runtime.bind_build_jobs(&mut intent).unwrap();
+        assert_ne!(
+            intent.enforcement_digest,
+            runtime.process_enforcement_digest
+        );
+        let mut forged = intent.clone();
+        forged.enforcement_digest = runtime.process_enforcement_digest;
+        assert!(matches!(
+            runtime.pinned_root(&forged),
+            Err(ToolError::Configuration)
+        ));
+        assert!(runtime.pinned_root(&intent).is_ok());
+    }
+
+    #[test]
     fn command_output_fits_changeset_first_and_never_cuts_it() {
         let changeset = CommandChangeset {
             files: vec![FileChange {
