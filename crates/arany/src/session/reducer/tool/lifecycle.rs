@@ -276,6 +276,14 @@ pub(super) fn proposed(
     intent: &EffectIntent,
     active_ceiling_ms: u64,
 ) -> Result<(), ReplayError> {
+    if intent.limits.resource_class == crate::tools::ToolResourceClass::Build {
+        let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
+        if !matches!(intent.call, crate::tools::ToolCall::Command { .. })
+            || goal.resource_settings.build_jobs != Some(intent.limits.build_jobs)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
     if names_child(current, run_id, agent_run_id) {
         current.start_child_tool(run_id, agent_run_id, intent)?;
     } else {

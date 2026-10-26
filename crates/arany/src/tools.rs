@@ -1780,7 +1780,7 @@ impl ToolRuntime {
                 != if fs::in_process_mutation(intent) {
                     FileReceipt::enforcement_digest()
                 } else if intent.call.is_process() {
-                    self.process_enforcement_digest
+                    self.build_jobs_digest(intent)?
                 } else {
                     self.enforcement_digest
                 }
