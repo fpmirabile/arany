@@ -1053,6 +1053,10 @@ pub(super) fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
 #[cfg(test)]
 mod budget_tests;
 #[cfg(test)]
+mod compaction_tests;
+#[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod steering_tests;

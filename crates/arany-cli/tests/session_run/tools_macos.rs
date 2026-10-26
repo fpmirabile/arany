@@ -14,6 +14,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "tools_macos/repository.rs"]
+mod repository;
+
 const MCP_SCRIPT: &str = r#"set -eu
 while IFS= read -r request; do
     case "$request" in
@@ -367,19 +370,29 @@ fn guarded_runtime_profile_checks_mount_topology_before_dispatch() {
 }
 
 #[test]
-#[ignore = "requires an explicit local Rust sysroot; native offline Guard build journey"]
+#[ignore = "requires physical Rust sysroot; set ARANY_TEST_CARGO_REGISTRY for repository acceptance"]
 fn guarded_offline_rust_build_uses_selected_runtime_and_sdk() {
     let sysroot = std::env::var_os("ARANY_TEST_RUST_SYSROOT")
         .expect("set ARANY_TEST_RUST_SYSROOT to one physical versioned macOS Rust sysroot");
     let sysroot = validate_rust_sysroot(Path::new(&sysroot));
-    native_journey_with_rust_sysroot("tools::native_offline_rust_build_helper", Some(&sysroot));
+    let registry = std::env::var_os("ARANY_TEST_CARGO_REGISTRY")
+        .map(|path| std::fs::canonicalize(path).unwrap());
+    native_journey_with_rust_sysroot(
+        "tools::native_offline_rust_build_helper",
+        Some(&sysroot),
+        registry.as_deref(),
+    );
 }
 
 pub(super) fn native_journey(helper: &str) {
-    native_journey_with_rust_sysroot(helper, None);
+    native_journey_with_rust_sysroot(helper, None, None);
 }
 
-fn native_journey_with_rust_sysroot(helper: &str, rust_sysroot: Option<&Path>) {
+fn native_journey_with_rust_sysroot(
+    helper: &str,
+    rust_sysroot: Option<&Path>,
+    registry: Option<&Path>,
+) {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -426,9 +439,18 @@ fn native_journey_with_rust_sysroot(helper: &str, rust_sysroot: Option<&Path>) {
     if let Some(rust_sysroot) = rust_sysroot {
         command.env("ARANY_TEST_RUST_SYSROOT", rust_sysroot);
     }
+    if let Some(registry) = registry {
+        command.env("ARANY_TEST_CARGO_REGISTRY", registry);
+    }
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         command.bounded_output_for(
-            Duration::from_secs(if rust_sysroot.is_some() { 1200 } else { 360 }),
+            Duration::from_secs(if registry.is_some() {
+                1500
+            } else if rust_sysroot.is_some() {
+                1200
+            } else {
+                360
+            }),
             32 * 1024,
         )
     }))
@@ -448,6 +470,14 @@ fn native_journey_with_rust_sysroot(helper: &str, rust_sysroot: Option<&Path>) {
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
+    if registry.is_some() {
+        for line in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("repository "))
+        {
+            println!("{line}");
+        }
+    }
     assert!(
         output.stderr.is_empty(),
         "native journey stderr: {:?}",
@@ -1180,6 +1210,10 @@ async fn native_offline_rust_build_helper() {
         rust_sysroot
     );
 
+    if std::env::var_os("ARANY_TEST_CARGO_REGISTRY").is_some() {
+        repository::run(root).await;
+        return;
+    }
     let workspace = root.join("workspace");
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -1239,16 +1273,22 @@ async fn native_offline_rust_build_helper() {
         ],
         cwd: String::new(),
     };
-    let (denied, denied_requests) = run_offline_build_case(
-        root,
+    let mut requested = arany::test_support::scenario::request(
         &workspace,
-        "state-denied-apple",
-        "Unselected Apple runtimes",
         "Verify Apple compiler and SDK access remain denied without those profiles",
+    );
+    requested.title = Some("Unselected Apple runtimes".into());
+    requested.include_paths.clear();
+    requested.goal = build_goal_request();
+    let (denied, denied_requests) = run_offline_build_case(
+        &root.join("state-denied-apple"),
+        requested,
         rust_only,
         denied_apple.clone(),
+        60_000,
     )
     .await;
+    assert_eq!(denied.run.status, RunStatus::Finished);
     assert_eq!(denied.run.tools.len(), 1);
     let denied_observation = denied.run.tools[0]
         .observation
@@ -1281,23 +1321,21 @@ async fn native_offline_rust_build_helper() {
 }
 
 async fn run_offline_build_case(
-    root: &Path,
-    workspace: &Path,
-    state_name: &str,
-    title: &str,
-    objective: &str,
+    state: &Path,
+    request: RunRequest,
     permissions: arany::WorkspacePermissions,
     call: ToolCall,
+    timeout_ms: u32,
 ) -> (arany::RunOutcome, Arc<Mutex<Vec<ProviderRequest>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(RuntimeJourney {
         requests: requests.clone(),
         calls: vec![call.clone()],
         resource_class: arany::ToolResourceClass::Build,
-        command_timeout_ms: Some(60_000),
+        command_timeout_ms: Some(timeout_ms),
     });
     let engine = arany::test_support::engine::open(
-        StateRoot::admit(&root.join(state_name)).unwrap(),
+        StateRoot::admit(state).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
             ..Default::default()
@@ -1308,18 +1346,7 @@ async fn run_offline_build_case(
     let run = run_with(
         &engine,
         &provider,
-        RunRequest {
-            skill: None,
-            session_id: None,
-            title: Some(title.into()),
-            objective: objective.into(),
-            images: Vec::new(),
-            workspace: workspace.to_path_buf(),
-            launch_directory: None,
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-            goal: build_goal_request(),
-        },
+        request,
         RunControls {
             tools: ToolGrant::Trusted(permissions),
             approvals: Some(approvals),
@@ -1342,28 +1369,14 @@ async fn run_offline_build_case(
         }
         calls
     };
-    let (outcome, approved_calls) = tokio::time::timeout(Duration::from_secs(120), async {
-        tokio::join!(run, approve)
-    })
+    let (outcome, approved_calls) = tokio::time::timeout(
+        Duration::from_millis(u64::from(timeout_ms)) + Duration::from_secs(60),
+        async { tokio::join!(run, approve) },
+    )
     .await
     .expect("bounded native offline build run");
     engine.close().await.unwrap();
     let outcome = outcome.unwrap_or_else(|error| panic!("native build Engine failed: {error}"));
-    let failure = outcome.run.tools.first().and_then(|tool| {
-        tool.observation.as_ref().map(|observation| {
-            (
-                observation.output.chars().take(4096).collect::<String>(),
-                arany::test_support::recorded_tool_failure(observation.intent.id)
-                    .map(|failure| failure.chars().take(512).collect::<String>()),
-            )
-        })
-    });
-    assert_eq!(
-        outcome.run.status,
-        RunStatus::Finished,
-        "native build case {state_name} failed: {}; failure={failure:?}",
-        crate::safe_run_diagnostics(&outcome.run),
-    );
     assert_eq!(approved_calls, [call], "one exact native build approval");
     (outcome, requests)
 }

@@ -1,10 +1,11 @@
 use super::{
-    SavedDefaults, SetupError, SetupJournal, SetupSelection, await_setup_ack, choose,
-    configure_chatgpt, connect_chatgpt, error::chatgpt_edit_is_uncertain, native,
-    reconnect_chatgpt, review_warning,
+    SavedDefaults, SetupError, SetupJournal, SetupSelection, await_operation, await_setup_ack,
+    choose, configure_chatgpt,
+    error::{chatgpt_edit_is_uncertain, chatgpt_keyring_available},
+    native, review_chatgpt_risk, review_warning,
 };
 use crate::accounts::{
-    chatgpt,
+    chatgpt::{self, CallbackListener, RiskAcknowledgment, registration::Registration},
     credentials::{self, AccountStorage},
 };
 use crate::terminal::AttachedTerminal;
@@ -13,6 +14,7 @@ use arany::{
     SessionDefaults,
 };
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::path::Path;
 
 pub(super) enum ChatGptSetupAccount {
@@ -474,6 +476,246 @@ async fn select_chatgpt_account(
             Err(SetupError::recoverable(error))
         }
     }
+}
+
+async fn connect_chatgpt(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    terminal.draw_setup(
+        0,
+        "Checking keyring",
+        "Selecting protected account storage",
+        0,
+        None,
+    )?;
+    let storage = if chatgpt_keyring_available(credentials::probe_keyring().await)? {
+        AccountStorage::Keyring
+    } else {
+        let Some(b'1') = choose(
+            terminal,
+            1,
+            "Choose storage",
+            "Password store unavailable. Unencrypted file",
+            &[(b'2', "Cancel"), (b'1', "Use private file")],
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        AccountStorage::PrivateFile
+    };
+    authorize_chatgpt(terminal, workspace, storage, None, journal).await
+}
+
+async fn reconnect_chatgpt(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    target: chatgpt::ReauthorizationTarget,
+    journal: &mut SetupJournal,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    if target.storage == AccountStorage::Keyring
+        && !chatgpt_keyring_available(credentials::probe_keyring().await)?
+    {
+        return Err("Saved ChatGPT keyring is unavailable. Unlock your desktop password store and retry Reconnect; or choose Connect new, then Use private file (not encrypted)".into());
+    }
+    authorize_chatgpt(terminal, workspace, target.storage, Some(target), journal).await
+}
+
+async fn authorize_chatgpt(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    storage: AccountStorage,
+    target: Option<chatgpt::ReauthorizationTarget>,
+    journal: &mut SetupJournal,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    let Some(acknowledgment) = review_chatgpt_risk(terminal, storage).await? else {
+        return Ok(None);
+    };
+    let operation = journal
+        .start(
+            ProviderSetupTargetKind::ChatGptAccount,
+            target.as_ref().map_or_else(
+                || "new-chatgpt-account".to_owned(),
+                |selected| selected.id.to_string(),
+            ),
+            None,
+        )
+        .await?;
+    let result = complete_chatgpt_authorization(terminal, workspace, target, acknowledgment).await;
+    settle_chatgpt_authorization(journal, operation, result).await
+}
+
+pub(super) async fn settle_chatgpt_authorization(
+    journal: &SetupJournal,
+    operation: uuid::Uuid,
+    result: Result<Option<ChatGptSetupAccount>, SetupError>,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    let (digest, disposition) = match &result {
+        Ok(Some(ChatGptSetupAccount::PermissionDisabled {
+            local_cleared: false,
+            ..
+        }))
+        | Err(SetupError::Uncertain(_)) => (None, ProviderSetupDisposition::Uncertain),
+        Ok(Some(account)) => (
+            Some(Sha256::digest(account.id().as_bytes()).into()),
+            ProviderSetupDisposition::Applied,
+        ),
+        Ok(None) | Err(SetupError::Shutdown(_)) => (None, ProviderSetupDisposition::Cancelled),
+        Err(_) => (None, ProviderSetupDisposition::Failed),
+    };
+    journal.finish(operation, digest, disposition).await?;
+    if disposition == ProviderSetupDisposition::Uncertain {
+        return Err(SetupError::Uncertain(
+            "ChatGPT account storage is uncertain; inspect saved access before continuing".into(),
+        ));
+    }
+    result
+}
+
+async fn begin_chatgpt_authorization(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    target: Option<&chatgpt::ReauthorizationTarget>,
+    acknowledgment: RiskAcknowledgment,
+) -> Result<Option<(CallbackListener, chatgpt::AuthorizationAttempt)>, SetupError> {
+    let registration =
+        Registration::open_or_create(workspace).map_err(SetupError::chatgpt_authorization)?;
+    if target
+        .as_ref()
+        .is_some_and(|selected| selected.host_id != registration.host_id())
+    {
+        return Err("ChatGPT registration changed; restart /setup".into());
+    }
+    if target.is_none()
+        && registration.has_unfinished_sign_in()
+        && choose(
+            terminal,
+            4,
+            "Resume sign-in?",
+            "Reuse saved registration",
+            &[(b'0', "Back"), (b'1', "Resume")],
+        )
+        .await?
+            != Some(b'1')
+    {
+        return Ok(None);
+    }
+    let listener = CallbackListener::bind(acknowledgment)
+        .await
+        .map_err(SetupError::chatgpt_authorization)?;
+    let attempt = match &target {
+        Some(selected) => chatgpt::AuthorizationAttempt::for_existing(selected, listener.port()),
+        None => registration.authorization_attempt(listener.port()),
+    }
+    .map_err(SetupError::chatgpt_authorization)?;
+    chatgpt::open_authorization_url(&attempt.authorization_url())
+        .await
+        .map_err(|_| {
+            SetupError::from("Could not open the system browser; no ChatGPT account was changed")
+        })?;
+    Ok(Some((listener, attempt)))
+}
+
+async fn complete_chatgpt_authorization(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    target: Option<chatgpt::ReauthorizationTarget>,
+    acknowledgment: RiskAcknowledgment,
+) -> Result<Option<ChatGptSetupAccount>, SetupError> {
+    let Some((listener, attempt)) =
+        begin_chatgpt_authorization(terminal, workspace, target.as_ref(), acknowledgment).await?
+    else {
+        return Ok(None);
+    };
+    let Some((exchange, acknowledgment)) = await_chatgpt_step(
+        terminal,
+        "Waiting for ChatGPT",
+        if target.is_some() {
+            "Choose the same account in browser; Esc cancels"
+        } else {
+            "Complete sign-in in your browser; Esc cancels"
+        },
+        listener.receive(attempt),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(credentials) = await_chatgpt_step(
+        terminal,
+        "Verifying ChatGPT",
+        "Checking the signed account and plan permission",
+        exchange.redeem(workspace),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    terminal.draw_setup(
+        6,
+        "Saving ChatGPT account",
+        "Keep Arany open until protected storage confirms",
+        0,
+        None,
+    )?;
+    save_chatgpt_authorization(
+        workspace,
+        target.as_ref().map(|selected| selected.id),
+        credentials,
+        acknowledgment,
+    )
+    .await
+    .map(Some)
+}
+
+async fn save_chatgpt_authorization(
+    workspace: &Path,
+    expected: Option<uuid::Uuid>,
+    credentials: chatgpt::VerifiedSignIn,
+    acknowledgment: RiskAcknowledgment,
+) -> Result<ChatGptSetupAccount, SetupError> {
+    match credentials {
+        chatgpt::VerifiedSignIn::PlanEnabled(credentials) => chatgpt::save_verified(
+            workspace.to_path_buf(),
+            credentials,
+            acknowledgment,
+            expected,
+        )
+        .await
+        .map(|id| {
+            if expected.is_some() {
+                ChatGptSetupAccount::Reauthorized(id)
+            } else {
+                ChatGptSetupAccount::Connected(id)
+            }
+        }),
+        chatgpt::VerifiedSignIn::PlanDisabled(identity) => chatgpt::save_without_plan_permission(
+            workspace.to_path_buf(),
+            identity,
+            acknowledgment,
+            expected,
+        )
+        .await
+        .map(|outcome| ChatGptSetupAccount::PermissionDisabled {
+            id: outcome.id,
+            local_cleared: outcome.local_cleared,
+        }),
+    }
+    .map_err(SetupError::chatgpt_authorization)
+}
+
+pub(super) async fn await_chatgpt_step<T>(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+    operation: impl Future<Output = Result<T, chatgpt::AuthorizationError>>,
+) -> Result<Option<T>, SetupError> {
+    await_operation(terminal, title, instruction, operation)
+        .await?
+        .transpose()
+        .map_err(SetupError::chatgpt_authorization)
 }
 
 #[cfg(test)]
