@@ -5,7 +5,7 @@
 - Status: `In progress`
 - Owner: harness maintainers
 - Last updated: 2026-10-26
-- Next action: release independent R1–R5 tracks under the gates below; start R3p1 → R3p2, and hold R2c5/R6b for final closeout.
+- Next action: release independent R1–R5 tracks under the gates below; continue R2 at R2p4, start R3p1 → R3p2, and hold R2c5/R6b for final closeout.
 
 ## Outcome and scope
 
@@ -98,7 +98,7 @@ Use the R1 evidence row for every increment's affected producers; R1c closes onl
 
 ### R2 — Finish U1/U2 with stable setup entry points
 
-R2p1 → R2p2 precede every remaining flow move, as the original U2-before-U1 sequencing required. Then execute R2p3 → R2p4 → R2p5 → R2a1–R2a4 → R2b1–R2b4 → R2c1–R2c5 serially: one setup entry-point/test owner at a time. Original U1a/U2a, roster/routing feature setup and Provider prefix construction are already present; do not redo them.
+R2p1 → R2p2 precede every remaining flow move, as the original U2-before-U1 sequencing required. R2p3 is implemented; continue R2p4 → R2p5 → R2a1–R2a4 → R2b1–R2b4 → R2c1–R2c5 serially: one setup entry-point/test owner at a time. Original U1a/U2a, roster/routing feature setup and Provider prefix construction are already present; do not redo them.
 
 Each inventory below refers to current `cli/attached/setup.rs`. Private sibling calls may temporarily use narrow imports from setup until their own operation moves; remove superseded helpers/re-exports as the last consumer transfers. No wrapper-only module, duplicate error enum or copied process fixture.
 
@@ -106,7 +106,6 @@ Each inventory below refers to current `cli/attached/setup.rs`. Private sibling 
 |---|---|---|
 | R2p1 / U2b | Finish native operation-specific conversion ownership: move `native_removal_error` (:761–772) and native-save uncertainty message construction (:2045–2059) behind narrow `error.rs` methods; keep journal disposition/settlement in the flow. Audit saved-access/native calls already converted by #463 without rewriting them. Preserve exact text and diagnostic side effects. | ≤200 |
 | R2p2 / U2c | Finish operation-specific mappings through `error.rs`: `chatgpt_removal_error` (:752), `custom_write_error` (:1098), authorization/uncertainty/keyring mappings (:2485–2516) and their focused fallback assertion. Audit existing routing/roster conversions from #463 without redoing them. Keep safe custom-check status vocabulary with its display owner; retain exact messages, logging and cancellation paths. | ≤300 |
-| R2p3 / U1b | Move `remove_native_saved_access`, `settle_native_removal`, `reset_saved_setup` (:607–673,2064–2145) to `native.rs`; setup keeps mixed-route removal dispatch. | ≤420 (170/80) |
 | R2p4 / U1c, save flow | Move `inspect_or_file`, `native_setup`, `settle_native_save` (:491–503,1887–2063) to `native.rs`; preserve lookup → choice → catalog → journal → save/settle. | ≤480 (200/80) |
 | R2p5 / U1c, catalog/default flow | Move `native_catalog_default`, `load_catalog` (:2840–2852,3225–3241) and `setup_account_requires_explicit_effort_for_unreviewed_model` (:3430–3471) to `native.rs`. | ≤250 (85/80) |
 | R2a1 / U1d | Move `ChatGptSetupAccount` and impl (:199–248), `chatgpt_setup`, action enum/action (:1732–1850), `choose_saved_chatgpt` (:2146–2216) to `chatgpt.rs`; preserve menu → selected action → result/default settlement. | ≤600 (260/80) |
@@ -172,7 +171,6 @@ Image S2 and `OwnedTerminal`/Panels prerequisites are present. Reserve `terminal
 
 - **R6a status reconciliation is implemented; last R2c5/R6b in one PR.** Between them R1, R2, R3, R4 and R5 can progress independently only with exclusive production and evidence ownership. R1/R5 serialize `provider.rs` and shared Provider-spec edits. All shared spec/overview edits acquire a short integration reservation too.
 - **OpenAI multi-call integration:** S4 is implemented under the [Provider contract](../../docs/specs/provider.md#structured-outcomes-and-tool-encoding). R1a–R1c and R5 must re-inventory the current wire, diagnostic, Provider registration and credential owners before overlapping edits, preserving the multi-call contract and snapshots. Do not reintroduce old single-call snapshots. No dead P4-complete claim satisfies R1c.
-- **[Chat Completions family](../openai-chat-completions-family/README.md#gates):** S1 and S2's form/recipe exist. Under O7, the remaining S2 inspection label/journey proceeds now in `cli/attached/setup.rs`; it has no R2p2/R2b dependency. Reserve the current file and setup/custom evidence against overlapping moves, then carry the feature through R2b. The label implementation stays in its own feature PR.
 - **[Image hover](../image-hover-preview/README.md):** S1/S2 implementation clears the old B5′b gate; R4 serializes with S3 as above. Pending S3 dependency approval is not imported into this plan or decided here.
 - **[Spec limits](../spec-limits-generation/README.md):** its S1/S2 output exists. Its blocking S3 prose scan follows the remaining same-PR spec edits in R1–R5; coordinate S4's native Tools link moves without expanding this plan into Tools splitting or CI work.
 - **[Context budgets](../context-budgets/README.md):** retain its live S3a–S3d and reporting sequence. It can proceed independently; reserve `tools.rs`/Run presentation or `terminal.rs` only if an actual changed file overlaps R3/R4. Its special compilation/check policy stays with that plan, not this track.
