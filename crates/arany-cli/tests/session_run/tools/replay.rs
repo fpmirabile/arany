@@ -346,7 +346,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         })
         .collect();
     for observation in &observations {
-        batch.push(Event::ToolStarted {
+        batch.push(Event::ToolProposed {
             run_id: run,
             agent_run_id: primary,
             intent: observation.intent.clone().into(),
@@ -354,6 +354,13 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         });
     }
     let mut premature = batch[..TOOL_STARTED + 2].to_vec();
+    premature.push(Event::ToolStarted {
+        run_id: run,
+        agent_run_id: primary,
+        intent: observations[0].intent.clone().into(),
+        active_ceiling_ms: 0,
+        verdict: None,
+    });
     premature.push(Event::ToolFinished {
         checkpoint: None,
         run_id: run,
@@ -375,6 +382,15 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     );
     for order in [[0, 1, 2, 3], [2, 0, 3, 1]] {
         let mut completed = batch.clone();
+        for observation in &observations {
+            completed.push(Event::ToolStarted {
+                run_id: run,
+                agent_run_id: primary,
+                intent: observation.intent.clone().into(),
+                active_ceiling_ms: 0,
+                verdict: None,
+            });
+        }
         for index in order {
             completed.push(Event::ToolFinished {
                 checkpoint: None,
@@ -444,7 +460,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             (&command.intent, COMMAND_ACTIVE_CEILING_MS),
             (&read, QUEUED_READ_ACTIVE_CEILING_MS),
         ] {
-            accounting.push(Event::ToolStarted {
+            accounting.push(Event::ToolProposed {
                 run_id: run,
                 agent_run_id: primary,
                 intent: intent.clone().into(),
@@ -475,6 +491,13 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             replay(duplicate).is_err(),
             "one active-time refresh per intent"
         );
+        accounting.push(Event::ToolStarted {
+            run_id: run,
+            agent_run_id: primary,
+            intent: command.intent.clone().into(),
+            active_ceiling_ms: COMMAND_ACTIVE_CEILING_MS,
+            verdict: None,
+        });
         if after_first {
             accounting.push(Event::ToolFinished {
                 checkpoint: None,

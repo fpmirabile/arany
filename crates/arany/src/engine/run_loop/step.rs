@@ -285,9 +285,10 @@ impl RunLoop<'_> {
             Ok(intents) => intents,
             Err(cause) => return Ok(StepEnd::Stopped(cause)),
         };
-        for intent in &intents {
-            self.commit_intent(&grant, runtime, intent, &intent.call)
-                .await?;
+        if intents.len() > 1 {
+            for intent in &intents {
+                self.propose_tool(intent).await?;
+            }
         }
         let mut end = StepEnd::Continue;
         for intent in intents {
@@ -449,33 +450,33 @@ impl RunLoop<'_> {
     ) -> Result<ToolObservation, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
         let mode = effective_permission_mode(runtime.permissions(), grant);
-        if mode.is_some()
+        let records_permission = mode.is_some()
             || intent.call.is_unguarded()
             || intent.call.is_host()
-            || intent.call.is_git() && intent.call.facts().mutates
-        {
-            self.append(Event::ToolPermissionDecided {
-                run_id: self.run_id,
-                agent_run_id: intent.agent_run_id,
-                verdict: PermissionVerdict {
-                    host: None,
-                    intent_digest: intent.digest(),
-                    mode,
-                    decision: permission.decision,
-                    basis: permission.basis,
-                    source: if permission.decision == Decision::Ask {
-                        PermissionSource::UnavailableApproval
-                    } else {
-                        permission.basis
-                    },
-                    approved: false,
-                    hook_restriction: None,
-                    hooks: 0,
-                    narrowed: false,
+            || intent.call.is_git() && intent.call.facts().mutates;
+        self.append(Event::ToolStarted {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, &intent)?,
+            verdict: records_permission.then(|| PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                mode,
+                decision: permission.decision,
+                basis: permission.basis,
+                source: if permission.decision == Decision::Ask {
+                    PermissionSource::UnavailableApproval
+                } else {
+                    permission.basis
                 },
-            })
-            .await?;
-        }
+                approved: false,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+        })
+        .await?;
         let timeout = self.ledger().command_timeout_limit(&intent.call)?;
         let observation = if let Some((requested, maximum)) = timeout {
             not_dispatched(intent, &NotDispatched::TimeoutLimit { requested, maximum })

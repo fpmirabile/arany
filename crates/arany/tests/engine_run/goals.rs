@@ -9550,6 +9550,12 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
         if case == "four reads" {
             assert_eq!(starts.len(), 4);
             assert_eq!(finishes.len(), 4);
+            let proposals: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event.event, Event::ToolProposed { .. }))
+                .map(|event| event.sequence)
+                .collect();
+            assert_eq!(proposals.len(), 4);
             let reservations: Vec<_> = events
                 .iter()
                 .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
@@ -9559,19 +9565,22 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
                 arany::test_support::admissions::recorded(outcome.session_id)
                     .iter()
                     .all(|(count, _, _)| {
-                        *count < starts[0] as usize || *count >= starts[3] as usize
+                        *count < proposals[0] as usize || *count >= proposals[3] as usize
                     }),
                 "initial intents commit without a second admission boundary"
             );
             for (index, reservation) in reservations.iter().enumerate() {
-                assert!(starts[3] < reservation.sequence && reservation.sequence < finishes[index]);
+                assert!(
+                    proposals[3] < reservation.sequence && reservation.sequence < starts[index]
+                );
+                assert!(starts[index] < finishes[index]);
                 if index > 0 {
                     assert!(finishes[index - 1] < reservation.sequence);
                 }
             }
 
             assert!(
-                starts[3] < finishes[0],
+                proposals[3] < starts[0],
                 "every intent commits before dispatch"
             );
             assert_eq!(outcome.run.status, RunStatus::Finished);
@@ -9798,7 +9807,23 @@ fn assert_researcher_deadline_batch(
         .collect();
     assert_eq!(starts.len(), count);
     assert_eq!(finishes.len(), count);
-    assert!(starts.last().unwrap().0 < finishes[0].0);
+    let declarations: Vec<_> = if count > 1 {
+        events
+            .iter()
+            .filter_map(|event| match &event.event {
+                Event::ToolProposed {
+                    agent_run_id,
+                    intent,
+                    ..
+                } if *agent_run_id == child.id => Some((event.sequence, intent.id)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        starts.clone()
+    };
+    assert_eq!(declarations.len(), count);
+    assert!(declarations.last().unwrap().0 < finishes[0].0);
     for (index, tool) in child.tools.iter().enumerate() {
         assert_eq!(starts[index].1, finishes[index].1);
         let observation = tool.observation.as_ref().unwrap();
