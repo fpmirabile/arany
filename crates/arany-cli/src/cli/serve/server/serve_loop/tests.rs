@@ -113,14 +113,14 @@ async fn complete_turn(
         .unwrap_or_else(|_| panic!("Run admission"));
     let result = server.workers.join_next().await.unwrap().unwrap().unwrap();
     server.active = Some(ActiveTurn {
-        thread_id,
+        thread_id: Some(thread_id),
         events,
         cancel,
         result: finished,
         display: None,
-        approvals: Arc::new(approvals::Approvals::empty_for_test()),
-        approval_mode,
-        steering,
+        approvals: Arc::new(approvals::Approvals::closed()),
+        approval_mode: Some(approval_mode),
+        steering: Some(steering),
         pending_start: Some(RequestId::Integer(2)),
         result_done: false,
         pending_close: None,

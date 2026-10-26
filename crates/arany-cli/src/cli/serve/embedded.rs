@@ -76,13 +76,13 @@ pub(in crate::cli) enum Control {
 
 impl Control {
     pub(super) fn apply(self, state: &RunControls) {
-        let steering = state.steering.as_ref().expect("embedded steering");
+        let steering = || state.steering.as_ref().expect("embedded steering");
         match self {
             Self::Cancel(reply) => {
                 let _ = reply.send(state.cancellation.cancel());
             }
             Self::Pause(reply) => {
-                let _ = reply.send(steering.pause());
+                let _ = reply.send(steering().pause());
             }
             Self::Mode(mode, reply) => {
                 state
@@ -94,18 +94,18 @@ impl Control {
             }
             Self::Offer(target, text, reply) => {
                 let _ = reply.send(match target {
-                    Some(target) => steering.offer_child_note(target, text),
-                    None => steering.offer_note(text),
+                    Some(target) => steering().offer_child_note(target, text),
+                    None => steering().offer_note(text),
                 });
             }
             Self::Withdraw(target, reply) => {
                 let _ = reply.send(match target {
-                    Some(target) => steering.withdraw_child_note(target),
-                    None => steering.withdraw_note(),
+                    Some(target) => steering().withdraw_child_note(target),
+                    None => steering().withdraw_note(),
                 });
             }
             Self::Delivered(reply) => {
-                let _ = reply.send(steering.delivered_notes());
+                let _ = reply.send(steering().delivered_notes());
             }
             Self::View(_, _) => unreachable!("view requests use strict replay"),
         }
@@ -312,15 +312,29 @@ impl Connection {
     }
 
     pub async fn close(mut self) -> Result<(), String> {
-        tokio::time::timeout(crate::cli::run_outcome::SHUTDOWN_GRACE, async {
+        let result = tokio::time::timeout(crate::cli::run_outcome::SHUTDOWN_GRACE, async {
             let _ = self.controls.inbound.send(ClientMessage::Eof).await;
             drain_task(&mut self.server, &mut self.events).await?;
             drain_task(&mut self.writer, &mut self.events).await
         })
         .await
-        .map_err(|_| {
-            "shutdown timed out; Run may be interrupted; check Session history".to_owned()
-        })?
+        .map_err(|_| "shutdown timed out; Run may be interrupted; check Session history".to_owned())
+        .and_then(|result| result);
+        self.stop_tasks().await;
+        result
+    }
+
+    pub async fn abort(mut self) {
+        self.stop_tasks().await;
+    }
+
+    async fn stop_tasks(&mut self) {
+        for task in [&mut self.server, &mut self.writer] {
+            if !task.is_finished() {
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 }
 
