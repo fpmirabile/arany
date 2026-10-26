@@ -217,3 +217,6 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
