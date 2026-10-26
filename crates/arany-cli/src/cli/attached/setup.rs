@@ -510,7 +510,8 @@ pub(super) async fn resolve(
     current: &SessionDefaults,
 ) -> Result<Option<SetupSelection>, SetupError> {
     if super::models::preferences_need_reset(workspace)?
-        && !reset_saved_setup(terminal, workspace, credentials::SetupData::Models, journal).await?
+        && !native::reset_saved_setup(terminal, workspace, credentials::SetupData::Models, journal)
+            .await?
     {
         return Ok(None);
     }
@@ -598,78 +599,11 @@ async fn remove_saved_access(
         return Ok(());
     };
     match kind {
-        b'1' => remove_native_saved_access(terminal, workspace, journal).await?,
+        b'1' => native::remove_native_saved_access(terminal, workspace, journal).await?,
         b'2' => remove_chatgpt_saved_access(terminal, workspace, journal).await?,
         _ => return Err("invalid account removal choice".into()),
     }
     Ok(())
-}
-
-async fn remove_native_saved_access(
-    terminal: &mut AttachedTerminal,
-    workspace: &Path,
-    journal: &mut SetupJournal,
-) -> Result<(), SetupError> {
-    let removal =
-        credentials::NativeRemoval::prepare(workspace).map_err(SetupError::recoverable)?;
-    let Some(removal) = removal else {
-        await_setup_ack(terminal, "Native API account", "No saved account").await?;
-        return Ok(());
-    };
-    if review_warning(
-        terminal,
-        "Remove native API account?",
-        "Delete Arany's saved API credential and model preferences. This does not revoke the Provider's credential remotely.",
-        "Remove local API access?",
-    )
-    .await?
-    {
-        let operation = journal
-            .start(
-                ProviderSetupTargetKind::NativeAccount,
-                "native".into(),
-                None,
-            )
-            .await?;
-        settle_native_removal(journal, operation, removal.apply(workspace)).await?;
-        await_setup_ack(
-            terminal,
-            "Native API account",
-            "Removed locally; the Provider credential remains active",
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-async fn settle_native_removal(
-    journal: &SetupJournal,
-    operation: uuid::Uuid,
-    result: Result<(), CredentialError>,
-) -> Result<(), SetupError> {
-    match result {
-        Ok(()) => {
-            journal
-                .finish(
-                    operation,
-                    Some(Sha256::digest([]).into()),
-                    ProviderSetupDisposition::Applied,
-                )
-                .await
-        }
-        Err(error) => {
-            let disposition = if matches!(
-                error,
-                CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown
-            ) {
-                ProviderSetupDisposition::Uncertain
-            } else {
-                ProviderSetupDisposition::Failed
-            };
-            journal.finish(operation, None, disposition).await?;
-            Err(SetupError::native_removal(error))
-        }
-    }
 }
 
 async fn remove_chatgpt_saved_access(
@@ -1706,7 +1640,7 @@ async fn chatgpt_setup(
     match chatgpt::registration::validate_saved_setup(workspace) {
         Ok(()) => {}
         Err(chatgpt::AuthorizationError::InvalidSavedState) => {
-            if !reset_saved_setup(
+            if !native::reset_saved_setup(
                 terminal,
                 workspace,
                 credentials::SetupData::ChatGpt,
@@ -1861,8 +1795,13 @@ async fn native_setup(
     let inspected = match inspect_or_file().await {
         Ok(inspected) => inspected,
         Err(CredentialError::InvalidAccount) => {
-            if !reset_saved_setup(terminal, workspace, credentials::SetupData::Native, journal)
-                .await?
+            if !native::reset_saved_setup(
+                terminal,
+                workspace,
+                credentials::SetupData::Native,
+                journal,
+            )
+            .await?
             {
                 return Ok(None);
             }
@@ -2023,88 +1962,6 @@ async fn settle_native_save(
         }
     }
     Ok(())
-}
-
-async fn reset_saved_setup(
-    terminal: &mut AttachedTerminal,
-    workspace: &Path,
-    data: credentials::SetupData,
-    journal: &mut SetupJournal,
-) -> Result<bool, SetupError> {
-    let reset =
-        credentials::SetupReset::prepare(workspace, data).map_err(SetupError::recoverable)?;
-    let (title, instruction) = match data {
-        credentials::SetupData::Native => (
-            "Reset API setup?",
-            "Outdated or damaged setup. Reset API setup and models; keep history and ChatGPT. Old password-store entries may remain; no remote sign-out.",
-        ),
-        credentials::SetupData::ChatGpt => (
-            "Reset ChatGPT setup?",
-            "Outdated or damaged setup. Reset ChatGPT accounts, sign-in and models; keep history and API accounts. Password-store entries may remain; no remote sign-out.",
-        ),
-        credentials::SetupData::Models => (
-            "Reset saved model choices?",
-            "Clear outdated or damaged model choices; keep accounts, history and folder trust.",
-        ),
-    };
-    if choose(
-        terminal,
-        2,
-        title,
-        instruction,
-        &[(b'0', "Back"), (b'1', "Reset local setup")],
-    )
-    .await?
-        != Some(b'1')
-    {
-        return Ok(false);
-    }
-    let (kind, identity) = match data {
-        credentials::SetupData::Native => {
-            (ProviderSetupTargetKind::NativeAccount, "native".to_owned())
-        }
-        credentials::SetupData::ChatGpt => (
-            ProviderSetupTargetKind::ChatGptAccount,
-            "chatgpt-setup".to_owned(),
-        ),
-        credentials::SetupData::Models => (
-            ProviderSetupTargetKind::ModelPreferences,
-            "models".to_owned(),
-        ),
-    };
-    let operation = journal.start(kind, identity, None).await?;
-    match reset.apply(workspace) {
-        Ok(()) => {
-            journal
-                .finish(
-                    operation,
-                    Some(Sha256::digest([]).into()),
-                    ProviderSetupDisposition::Applied,
-                )
-                .await?;
-        }
-        Err(error) => {
-            let uncertain = matches!(
-                &error,
-                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
-            );
-            let disposition = if uncertain {
-                ProviderSetupDisposition::Uncertain
-            } else {
-                ProviderSetupDisposition::Failed
-            };
-            journal.finish(operation, None, disposition).await?;
-            if uncertain {
-                return Err(SetupError::Presentation(
-                    "Saved setup reset is uncertain; restart and inspect saved access before continuing".into(),
-                ));
-            }
-            return Err(SetupError::from(format!(
-                "{error}; reset may be incomplete; reopen /setup to check it"
-            )));
-        }
-    }
-    Ok(true)
 }
 
 async fn choose_saved_chatgpt(
@@ -3215,7 +3072,7 @@ pub(super) mod tests {
                     settle_native_save(&journal, operation, uuid::Uuid::now_v7(), Err(error)).await
                 }
                 SetupPublication::NativeRemoval => {
-                    settle_native_removal(&journal, operation, Err(error)).await
+                    native::settle_native_removal(&journal, operation, Err(error)).await
                 }
                 SetupPublication::ChatGpt => unreachable!("native target"),
             };

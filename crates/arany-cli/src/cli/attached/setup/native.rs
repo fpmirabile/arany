@@ -1,11 +1,12 @@
 use super::{
-    AUTHORIZE_PROMPT, AUTHORIZE_TITLE, SavedDefaults, SetupError, SetupSelection, await_operation,
-    await_setup_ack, choose,
+    AUTHORIZE_PROMPT, AUTHORIZE_TITLE, SavedDefaults, SetupError, SetupJournal, SetupSelection,
+    await_operation, await_setup_ack, choose, review_warning,
 };
-use crate::accounts::credentials::{self, AccountStorage, SavedAccount};
+use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
-use arany::{RecordKind, SessionDefaults};
+use arany::{ProviderSetupDisposition, ProviderSetupTargetKind, RecordKind, SessionDefaults};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub(super) fn saved_account_presence(path: &Path) -> Result<(bool, bool), SetupError> {
@@ -122,6 +123,155 @@ pub(super) fn defaults(account: &SavedAccount) -> SessionDefaults {
         account_id: Some(account.id),
         policy: arany::CollaborationPolicy::default(),
     }
+}
+
+pub(super) async fn remove_native_saved_access(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    journal: &mut SetupJournal,
+) -> Result<(), SetupError> {
+    let removal =
+        credentials::NativeRemoval::prepare(workspace).map_err(SetupError::recoverable)?;
+    let Some(removal) = removal else {
+        await_setup_ack(terminal, "Native API account", "No saved account").await?;
+        return Ok(());
+    };
+    if review_warning(
+        terminal,
+        "Remove native API account?",
+        "Delete Arany's saved API credential and model preferences. This does not revoke the Provider's credential remotely.",
+        "Remove local API access?",
+    )
+    .await?
+    {
+        let operation = journal
+            .start(
+                ProviderSetupTargetKind::NativeAccount,
+                "native".into(),
+                None,
+            )
+            .await?;
+        settle_native_removal(journal, operation, removal.apply(workspace)).await?;
+        await_setup_ack(
+            terminal,
+            "Native API account",
+            "Removed locally; the Provider credential remains active",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn settle_native_removal(
+    journal: &SetupJournal,
+    operation: uuid::Uuid,
+    result: Result<(), CredentialError>,
+) -> Result<(), SetupError> {
+    match result {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest([]).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await
+        }
+        Err(error) => {
+            let disposition = if matches!(
+                error,
+                CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown
+            ) {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            Err(SetupError::native_removal(error))
+        }
+    }
+}
+
+pub(super) async fn reset_saved_setup(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    data: credentials::SetupData,
+    journal: &mut SetupJournal,
+) -> Result<bool, SetupError> {
+    let reset =
+        credentials::SetupReset::prepare(workspace, data).map_err(SetupError::recoverable)?;
+    let (title, instruction) = match data {
+        credentials::SetupData::Native => (
+            "Reset API setup?",
+            "Outdated or damaged setup. Reset API setup and models; keep history and ChatGPT. Old password-store entries may remain; no remote sign-out.",
+        ),
+        credentials::SetupData::ChatGpt => (
+            "Reset ChatGPT setup?",
+            "Outdated or damaged setup. Reset ChatGPT accounts, sign-in and models; keep history and API accounts. Password-store entries may remain; no remote sign-out.",
+        ),
+        credentials::SetupData::Models => (
+            "Reset saved model choices?",
+            "Clear outdated or damaged model choices; keep accounts, history and folder trust.",
+        ),
+    };
+    if choose(
+        terminal,
+        2,
+        title,
+        instruction,
+        &[(b'0', "Back"), (b'1', "Reset local setup")],
+    )
+    .await?
+        != Some(b'1')
+    {
+        return Ok(false);
+    }
+    let (kind, identity) = match data {
+        credentials::SetupData::Native => {
+            (ProviderSetupTargetKind::NativeAccount, "native".to_owned())
+        }
+        credentials::SetupData::ChatGpt => (
+            ProviderSetupTargetKind::ChatGptAccount,
+            "chatgpt-setup".to_owned(),
+        ),
+        credentials::SetupData::Models => (
+            ProviderSetupTargetKind::ModelPreferences,
+            "models".to_owned(),
+        ),
+    };
+    let operation = journal.start(kind, identity, None).await?;
+    match reset.apply(workspace) {
+        Ok(()) => {
+            journal
+                .finish(
+                    operation,
+                    Some(Sha256::digest([]).into()),
+                    ProviderSetupDisposition::Applied,
+                )
+                .await?;
+        }
+        Err(error) => {
+            let uncertain = matches!(
+                &error,
+                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
+            );
+            let disposition = if uncertain {
+                ProviderSetupDisposition::Uncertain
+            } else {
+                ProviderSetupDisposition::Failed
+            };
+            journal.finish(operation, None, disposition).await?;
+            if uncertain {
+                return Err(SetupError::Presentation(
+                    "Saved setup reset is uncertain; restart and inspect saved access before continuing".into(),
+                ));
+            }
+            return Err(SetupError::from(format!(
+                "{error}; reset may be incomplete; reopen /setup to check it"
+            )));
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

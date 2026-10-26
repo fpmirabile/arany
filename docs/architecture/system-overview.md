@@ -230,6 +230,8 @@ The attached composer, slash handlers and quick selector share the compiled loca
 
 Attached setup keeps entry routing and setup-journal coordination in `cli/attached/setup.rs`. Its private `setup/error.rs` owns setup error classifications and conversions, including operation-specific native save/removal, ChatGPT removal/authorization/keyring and custom-write mappings and diagnostic recording. The error type is re-exported through the existing setup module path. Journal disposition and settlement remain with the flows; safe custom-check status vocabulary stays with its display owner. Native account presence lookup, inspection, saved-access resolution and selection live in its private `setup/native.rs` flow; credential storage and key access remain owned by `accounts/credentials/`.
 
+Native removal, its journal settlement and checked saved-setup reset also live in `setup/native.rs`; setup retains mixed-route removal dispatch and the shared uncertainty test bridge. The flow borrows the existing journal and terminal without changing account authority or publication ordering.
+
 Explicit `--tools` reaches the same private Engine/Policy/Guard admission from attached and headless composition. The CLI supplies the shipped executable identity and private configuration root, not an alternative Tool runtime or per-effect approval service.
 
 ## 5. Session, Run, and collaboration lifecycle
