@@ -426,7 +426,7 @@ impl ServerLoop {
         if let Some(turn) = self
             .active
             .as_mut()
-            .filter(|t| t.thread_id == input.thread_id)
+            .filter(|t| t.thread_id == Some(input.thread_id))
         {
             if turn.pending_close.is_some() {
                 return Err(Fault::state(Reason::Busy));
@@ -456,9 +456,10 @@ impl ServerLoop {
         if let Some(turn) = self
             .active
             .as_ref()
-            .filter(|turn| turn.thread_id == input.thread_id)
+            .filter(|turn| turn.thread_id == Some(input.thread_id))
+            && let Some(approvals) = &turn.approval_mode
         {
-            turn.approval_mode.set_mode(loaded.approval_mode);
+            approvals.set_mode(loaded.approval_mode);
         }
         Ok(Some(
             serde_json::to_value(ThreadSettingsUpdateResult {
@@ -478,7 +479,7 @@ impl ServerLoop {
         if self
             .active
             .as_ref()
-            .is_some_and(|turn| turn.thread_id == input.thread_id)
+            .is_some_and(|turn| turn.thread_id == Some(input.thread_id))
         {
             return Err(Fault::state(Reason::Busy));
         }
@@ -505,11 +506,11 @@ impl ServerLoop {
         let id = request.id.clone();
         let (providers, request, controls, inbox, first_sequence) =
             self.prepare_turn(&request.method, request.params).await?;
-        let thread_id = request.session_id.expect("loaded thread");
+        let thread_id = request.session_id;
         let submitted_goal = request.goal.id;
         let display = controls.hints.clone().map(DisplayFollower::new);
-        let approval_mode = controls.approvals.clone().expect("approval channel");
-        let steering = controls.steering.clone().expect("steering channel");
+        let approval_mode = controls.approvals.clone();
+        let steering = controls.steering.clone();
         let approval_end = RunCancellation::new();
         let SubmittedRun {
             result,
@@ -518,7 +519,15 @@ impl ServerLoop {
         } = self
             .submit_run(providers, request, controls, approval_end.clone())
             .await?;
-        let approvals = self.start_approvals(inbox, cancel.clone(), thread_id, approval_end);
+        let approvals = match &approval_mode {
+            Some(_) => self.start_approvals(
+                inbox,
+                cancel.clone(),
+                thread_id.expect("human approval Session"),
+                approval_end,
+            ),
+            None => approvals::Approvals::closed(),
+        };
         self.active = Some(ActiveTurn {
             thread_id,
             result,
@@ -557,12 +566,18 @@ impl ServerLoop {
         if let Some(native) = &mut self.native
             && let Some(submission) = native.pending.take()
         {
-            let id = submission.request.session_id.ok_or_else(Fault::params)?;
-            let first = threads::load_view(&self.state, id)
-                .await?
-                .last_sequence
-                .checked_add(1)
-                .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?;
+            let first = match submission
+                .request
+                .session_id
+                .filter(|_| submission.controls.approvals.is_some())
+            {
+                Some(id) => threads::load_view(&self.state, id)
+                    .await?
+                    .last_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?,
+                None => 1,
+            };
             return Ok((
                 submission.providers,
                 submission.request,
@@ -716,7 +731,7 @@ impl ServerLoop {
             .active
             .as_ref()
             .filter(|turn| {
-                turn.thread_id == input.thread_id
+                turn.thread_id == Some(input.thread_id)
                     && turn.state.run_id == Some(input.turn_id)
                     && !turn.state.pending_completion
                     && !turn.result.is_finished()
@@ -735,7 +750,7 @@ impl ServerLoop {
         let message = Message::Notification(notification(
             "turn/display",
             TurnDisplayNotification {
-                thread_id: turn.thread_id,
+                thread_id: turn.thread_id.expect("display Session"),
                 turn_id,
                 update,
             },
@@ -765,9 +780,17 @@ impl ServerLoop {
                 )
                 .await?;
         }
+        if self.native.is_some()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|turn| turn.approval_mode.is_none())
+        {
+            return Ok(());
+        }
         let mut control = self.active.as_ref().map(OutputControl::from);
         if let (Some(control), Tapped::Committed(event)) = (&mut control, &event)
-            && event.session_id == control.thread_id
+            && Some(event.session_id) == control.thread_id
             && let Event::MessageAccepted { run_id, .. } = event.event
         {
             control.run_id = Some(run_id);
@@ -846,8 +869,9 @@ impl ServerLoop {
                 Self::report_start_failure(turn, result.map(|_| ()), state, outbound).await?;
                 complete(turn, state, outbound, opt_out, &ending).await?;
                 if let Some(id) = turn.pending_close.take() {
-                    history.unsubscribe(turn.thread_id);
-                    threads.map.remove(&turn.thread_id);
+                    let thread_id = turn.thread_id.ok_or("Session identity unavailable")?;
+                    history.unsubscribe(thread_id);
+                    threads.map.remove(&thread_id);
                     send(
                         outbound,
                         response(
@@ -904,7 +928,9 @@ impl ServerLoop {
             let committed_budget = matches!(error, EngineError::GoalBudgetExhausted);
             let mut fault = Fault::engine(error);
             if committed_budget
-                && let Ok(view) = threads::load_view(state, turn.thread_id).await
+                && let Ok(view) =
+                    threads::load_view(state, turn.thread_id.ok_or("Session identity unavailable")?)
+                        .await
                 && let Some(feedback) =
                     crate::presentation::budget_refusal_feedback(&view, turn.state.goal_id)
             {
@@ -998,18 +1024,19 @@ async fn run_shared(
 impl ServerLoop {
     async fn start_embedded(&mut self) -> Result<(), String> {
         if self.native.is_some() {
-            let thread_id = self
+            let submission = self
                 .native
                 .as_ref()
                 .and_then(|native| native.pending.as_ref())
-                .and_then(|pending| pending.request.session_id)
-                .expect("attached Session");
+                .expect("embedded submission");
+            let thread_id = submission.request.session_id;
+            let previews = submission.controls.hints.is_some();
             let request = Request {
                 jsonrpc: Default::default(),
                 id: RequestId::Integer(1),
                 method: "initialize".into(),
                 params: Some(
-                    json!({"clientInfo":{"name":"arany-terminal","version":env!("CARGO_PKG_VERSION")},"capabilities":{"provisionalDisplay":true}}),
+                    json!({"clientInfo":{"name":"arany-terminal","version":env!("CARGO_PKG_VERSION")},"capabilities":{"provisionalDisplay":previews}}),
                 ),
             };
             self.initialize(request).map_err(|fault| fault.message)?;
