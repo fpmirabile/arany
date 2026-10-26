@@ -9,7 +9,7 @@ use error::{chatgpt_edit_is_uncertain, chatgpt_keyring_available};
 use crate::accounts::chatgpt::{
     self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration,
 };
-use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
+use crate::accounts::credentials::{self, AccountStorage};
 use crate::presentation::{escape_terminal, format_duration};
 use crate::terminal::{AttachedTerminal, Composer, TerminalInput};
 #[cfg(all(test, unix, debug_assertions))]
@@ -489,19 +489,6 @@ fn catalog_chatgpt_defaults(
     Ok(defaults)
 }
 
-async fn inspect_or_file() -> Result<credentials::InspectedAccount, CredentialError> {
-    Ok(match credentials::inspect().await {
-        Ok(inspected) => inspected,
-        Err(CredentialError::Unavailable | CredentialError::TimedOut) => {
-            credentials::InspectedAccount {
-                account: None,
-                storage: AccountStorage::PrivateFile,
-            }
-        }
-        Err(error) => return Err(error),
-    })
-}
-
 pub(super) async fn resolve(
     terminal: &mut AttachedTerminal,
     state_dir: &Path,
@@ -571,7 +558,7 @@ async fn accounts_setup(
             return Ok(None);
         };
         match action {
-            b'1' => return native_setup(terminal, workspace, journal).await,
+            b'1' => return native::native_setup(terminal, workspace, journal).await,
             b'2' => return native::select_native_account(terminal).await,
             b'3' => return chatgpt_setup(terminal, workspace, journal).await,
             b'4' => native::inspect_native_account(terminal).await?,
@@ -1788,179 +1775,6 @@ async fn inspect_chatgpt_account(terminal: &mut AttachedTerminal) -> Result<(), 
     Ok(())
 }
 
-async fn native_setup(
-    terminal: &mut AttachedTerminal,
-    workspace: &Path,
-    journal: &mut SetupJournal,
-) -> Result<Option<SetupSelection>, SetupError> {
-    let inspected = match inspect_or_file().await {
-        Ok(inspected) => inspected,
-        Err(CredentialError::InvalidAccount) => {
-            if !native::reset_saved_setup(
-                terminal,
-                workspace,
-                credentials::SetupData::Native,
-                journal,
-            )
-            .await?
-            {
-                return Ok(None);
-            }
-            inspect_or_file().await.map_err(SetupError::recoverable)?
-        }
-        Err(error) => return Err(SetupError::recoverable(error)),
-    };
-    let expected = inspected
-        .account
-        .as_ref()
-        .map(SavedAccount::snapshot_digest)
-        .transpose()
-        .map_err(SetupError::recoverable)?;
-    let storage = inspected.storage;
-    if storage == AccountStorage::PrivateFile
-        && choose(
-            terminal,
-            1,
-            "Use private file?",
-            "NOT encrypted; same-user apps read key",
-            &[(b'2', "Cancel"), (b'1', "Use private file")],
-        )
-        .await?
-            != Some(b'1')
-    {
-        return Ok(None);
-    }
-    let Some(provider) = choose(
-        terminal,
-        2,
-        "Choose Provider",
-        "Only the selected Provider receives requests",
-        &[(b'1', "OpenAI"), (b'2', "Anthropic")],
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    let provider = if provider == b'1' {
-        ProviderKind::OpenAi
-    } else {
-        ProviderKind::Anthropic
-    };
-    let Some(key) = read_api_key(terminal).await? else {
-        return Ok(None);
-    };
-    let workspace_id = if provider == ProviderKind::Anthropic {
-        match choose(
-            terminal,
-            3,
-            "API workspace",
-            "Use the key's scope or choose a Console workspace",
-            &[
-                (b'1', "Key scoped to workspace"),
-                (b'2', "Choose API workspace"),
-            ],
-        )
-        .await?
-        {
-            Some(b'1') => None,
-            Some(b'2') => {
-                let Some(id) = read_workspace_id(terminal, &key).await? else {
-                    return Ok(None);
-                };
-                Some(id)
-            }
-            None => return Ok(None),
-            _ => return Err("invalid API workspace selection".into()),
-        }
-    } else {
-        None
-    };
-    let provider = provider.native_name().expect("native Provider name");
-    let credentials = NativeApiCredentials::new(provider, key, workspace_id)
-        .map_err(|_| "invalid selected native API credentials")?;
-    let Some(items) = load_catalog(terminal, provider, &credentials).await? else {
-        return Ok(None);
-    };
-    let (model, preferred) = native_catalog_default(provider, &items)
-        .ok_or("selected account has no visible models; use /setup to retry")?;
-    let notice = if preferred {
-        format!("{provider} ready: {model} · low. Use /model to change.")
-    } else {
-        format!(
-            "{provider} ready: {model} · low. The catalog does not list prices; use /model to change."
-        )
-    };
-    let workspace_id = credentials.anthropic_workspace_id().map(str::to_owned);
-    let account = SavedAccount::new(
-        provider.into(),
-        model.to_owned(),
-        Some(Effort::Low),
-        credentials.into_api_key(),
-    )
-    .and_then(|account| account.with_anthropic_workspace(workspace_id))
-    .map_err(SetupError::recoverable)?;
-    let defaults = native::defaults(&account);
-    terminal.draw_setup(
-        0,
-        "Saving account",
-        match storage {
-            AccountStorage::Keyring => "Using the OS credential store",
-            AccountStorage::PrivateFile => "Using the private 0600 file",
-        },
-        0,
-        None,
-    )?;
-    let account_id = account.id;
-    let operation = journal
-        .start(
-            ProviderSetupTargetKind::NativeAccount,
-            account_id.to_string(),
-            expected,
-        )
-        .await?;
-    settle_native_save(
-        journal,
-        operation,
-        account_id,
-        credentials::save(workspace, account, storage, expected).await,
-    )
-    .await?;
-    Ok(Some(SetupSelection::Native {
-        defaults,
-        notice,
-        catalog: items,
-    }))
-}
-
-async fn settle_native_save(
-    journal: &SetupJournal,
-    operation: uuid::Uuid,
-    account_id: uuid::Uuid,
-    result: Result<(), CredentialError>,
-) -> Result<(), SetupError> {
-    match result {
-        Ok(()) => {
-            journal
-                .finish(
-                    operation,
-                    Some(Sha256::digest(account_id.as_bytes()).into()),
-                    ProviderSetupDisposition::Applied,
-                )
-                .await?;
-        }
-        Err(error) => {
-            let disposition = if error.outcome_unknown() {
-                ProviderSetupDisposition::Uncertain
-            } else {
-                ProviderSetupDisposition::Failed
-            };
-            journal.finish(operation, None, disposition).await?;
-            return Err(SetupError::native_save(error));
-        }
-    }
-    Ok(())
-}
-
 async fn choose_saved_chatgpt(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
@@ -3028,6 +2842,7 @@ async fn load_catalog(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::accounts::credentials::{CredentialError, SavedAccount};
 
     pub(crate) enum SetupPublication {
         NativeSave,
@@ -3066,7 +2881,13 @@ pub(super) mod tests {
             };
             let result = match publication {
                 SetupPublication::NativeSave => {
-                    settle_native_save(&journal, operation, uuid::Uuid::now_v7(), Err(error)).await
+                    native::settle_native_save(
+                        &journal,
+                        operation,
+                        uuid::Uuid::now_v7(),
+                        Err(error),
+                    )
+                    .await
                 }
                 SetupPublication::NativeRemoval => {
                     native::settle_native_removal(&journal, operation, Err(error)).await
