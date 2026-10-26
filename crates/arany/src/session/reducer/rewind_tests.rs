@@ -688,21 +688,16 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
     assert!(!p.files[0].expected_current.as_ref().unwrap().executable);
 }
 
-#[test]
-fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
-    let (f, mut view) = fixture();
-    let mut events = f.envelopes();
-    let event = started(&view, target(&view));
-    events.push(envelope(&view, event.clone()));
-    apply(&mut view, event);
-    let event = finished(&view, RewindOutcome::Restored);
-    events.push(envelope(&view, event.clone()));
-    apply(&mut view, event);
-    let record = crate::session::CompactionRecord {
+fn compaction_record(
+    view: &SessionView,
+    events: &[EventEnvelope],
+) -> crate::session::CompactionRecord {
+    crate::session::CompactionRecord {
         rate_limits: None,
-        covered_run_id: f.run,
+        covered_run_id: view.runs.last().unwrap().id,
         covered_sequence: view.last_sequence,
-        source_digest: crate::session::prefix_digest(&events, view.last_sequence).unwrap(),
+        source_digest: crate::session::prefix_digest(events, view.last_sequence).unwrap(),
+        recent_files: crate::session::recent_files_across(&view.runs, view.last_sequence),
         provider: "openai".into(),
         model: "test".into(),
         prompt_version: 1,
@@ -721,7 +716,20 @@ fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
         status: crate::session::CompactionStatus::Failed {
             reason: crate::session::CompactionFailure::ProviderUnavailable,
         },
-    };
+    }
+}
+
+#[test]
+fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
+    let (f, mut view) = fixture();
+    let mut events = f.envelopes();
+    let event = started(&view, target(&view));
+    events.push(envelope(&view, event.clone()));
+    apply(&mut view, event);
+    let event = finished(&view, RewindOutcome::Restored);
+    events.push(envelope(&view, event.clone()));
+    apply(&mut view, event);
+    let record = compaction_record(&view, &events);
     let mut stale = record.clone();
     stale.covered_sequence = view.runs[0].finished_sequence.unwrap();
     rejects(
@@ -746,6 +754,60 @@ fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
     };
     record.source_digest = [9; 32];
     assert!(SessionView::replay(f.session, &events).is_err());
+}
+
+#[test]
+fn session_compaction_recent_files_must_match_covered_observations() {
+    let (f, mut view) = fixture();
+    let mut events = f.envelopes();
+    let record = compaction_record(&view, &events);
+    assert_eq!(record.recent_files.len(), 1);
+    let reservation = Event::GoalCompactionCallReserved {
+        goal_id: f.goal,
+        run_id: f.run,
+        active_ceiling_ms: 0,
+    };
+    events.push(envelope(&view, reservation.clone()));
+    apply(&mut view, reservation);
+    for forged_file in [
+        crate::session::RecentFile {
+            path: "src/other.rs".into(),
+            digest: record.recent_files[0].digest.clone(),
+        },
+        crate::session::RecentFile {
+            path: record.recent_files[0].path.clone(),
+            digest: "a".repeat(64),
+        },
+    ] {
+        let mut forged = record.clone();
+        forged.recent_files = vec![forged_file];
+        rejects(
+            &view,
+            Event::ContextCompacted {
+                record: forged,
+                active_ms: Some(0),
+            },
+        );
+    }
+    for files in [Vec::new(), record.recent_files.clone()] {
+        let mut view = view.clone();
+        let mut events = events.clone();
+        let mut record = record.clone();
+        record.recent_files = files.clone();
+        let event = Event::ContextCompacted {
+            record,
+            active_ms: Some(0),
+        };
+        events.push(envelope(&view, event.clone()));
+        apply(&mut view, event);
+        assert_eq!(view.compactions.last().unwrap().record.recent_files, files);
+        assert_eq!(
+            SessionView::replay_open(f.session, &events)
+                .unwrap()
+                .unwrap(),
+            view
+        );
+    }
 }
 
 #[test]

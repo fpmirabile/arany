@@ -1903,6 +1903,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             finished_sequence: None,
         }],
         tool_compaction_summary: None,
+        tool_compaction_recent_files: Vec::new(),
         tool_compaction_covered_count: 0,
         tool_results_cleared_count: 0,
         definitions: Default::default(),

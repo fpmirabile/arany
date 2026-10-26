@@ -8,6 +8,21 @@ use crate::provider::{
 };
 
 const MAX_CHILD_CONTEXT_BYTES: usize = 20 * 1024 + 64;
+const SUMMARY_CONTEXT_OVERHEAD_BYTES: usize = 64;
+
+fn summary_context_cost(content_bytes: usize, existing_summary: bool) -> Option<usize> {
+    content_bytes.checked_add(if existing_summary {
+        super::COMPACTION_SUMMARY_SEPARATOR_BYTES
+    } else {
+        SUMMARY_CONTEXT_OVERHEAD_BYTES
+    })
+}
+
+fn fits_history_budget(used: usize, addition: Option<usize>, budget: usize) -> bool {
+    addition
+        .and_then(|addition| used.checked_add(addition))
+        .is_some_and(|total| total <= budget)
+}
 
 pub(crate) struct ContextTooLarge;
 
@@ -85,29 +100,34 @@ impl CompiledContext {
                         content_digest,
                         ..
                     } = &compaction.record.status
-                    && used + summary.len() + 64 <= history_budget
+                    && fits_history_budget(
+                        used,
+                        summary_context_cost(summary.len(), false),
+                        history_budget,
+                    )
                 {
                     return Some((
                         compaction.event_sequence,
                         compaction.record.covered_sequence,
                         *content_digest,
                         summary.clone(),
+                        super::render_recent_files(&compaction.record.recent_files),
                     ));
                 }
                 None
             });
         let covered_sequence = selected_compaction.as_ref().map_or(0, |value| value.1);
-        let (compaction_event_sequence, compaction_content_digest, mut summary) =
-            if let Some((event_sequence, _, digest, summary)) = selected_compaction {
-                used += summary.len() + 64;
-                (Some(event_sequence), Some(digest), Some(summary))
+        let (compaction_event_sequence, compaction_content_digest, mut summary, compacted_files) =
+            if let Some((event_sequence, _, digest, summary, files)) = selected_compaction {
+                used += summary.len() + SUMMARY_CONTEXT_OVERHEAD_BYTES;
+                (Some(event_sequence), Some(digest), Some(summary), files)
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
         if let Some(facts) =
             session.and_then(|v| super::rewind::history_facts(v, covered_sequence, v.last_sequence))
         {
-            used += facts.len() + 64;
+            used += facts.len() + usize::from(summary.is_some()) + SUMMARY_CONTEXT_OVERHEAD_BYTES;
             if used > budget {
                 return Err(ContextTooLarge);
             }
@@ -178,6 +198,22 @@ impl CompiledContext {
         selected.reverse();
         let excluded_history_runs =
             u32::try_from(runs.len().saturating_sub(selected.len())).unwrap_or(u32::MAX);
+        let run_files = session
+            .into_iter()
+            .flat_map(|view| view.runs.iter().rev())
+            .find(|run| {
+                run.accepted_sequence > covered_sequence
+                    && !run.tool_compaction_recent_files.is_empty()
+            })
+            .and_then(|run| super::render_recent_files(&run.tool_compaction_recent_files));
+        for files in compacted_files.into_iter().chain(run_files) {
+            let cost = summary_context_cost(files.len(), summary.is_some());
+            if !fits_history_budget(used, cost, history_budget) {
+                continue;
+            }
+            used += cost.ok_or(ContextTooLarge)?;
+            summary = Some(super::join_recent_files(summary, files));
+        }
         let mut images = Vec::with_capacity(image_count);
         for (turn_index, (run, _)) in selected.iter().enumerate() {
             images.extend(run.images.iter().cloned().map(|image| ProviderImage {
@@ -225,5 +261,29 @@ impl CompiledContext {
             },
             tool_context_budget_bytes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_admission_counts_the_recent_file_join_exactly() {
+        let summary_bytes = 17;
+        let recent_files_bytes = 31;
+        let cost = summary_context_cost(summary_bytes, false).unwrap()
+            + summary_context_cost(recent_files_bytes, true).unwrap();
+        let joined = super::super::join_recent_files(
+            Some("s".repeat(summary_bytes)),
+            "f".repeat(recent_files_bytes),
+        );
+        assert_eq!(cost, joined.len() + SUMMARY_CONTEXT_OVERHEAD_BYTES);
+        assert!(fits_history_budget(7, Some(cost), 7 + cost));
+        assert!(!fits_history_budget(7, Some(cost), 6 + cost));
+        assert_eq!(
+            summary_context_cost(recent_files_bytes, false),
+            Some(recent_files_bytes + SUMMARY_CONTEXT_OVERHEAD_BYTES)
+        );
     }
 }
