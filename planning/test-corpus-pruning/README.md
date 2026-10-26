@@ -10,7 +10,7 @@
 
 One observable result: each oversized corpus inventoried below moves to focused evidence owners, except the explicitly retained journey roots and migration corpus. The harness responsibility served is reviewable evidence for the [non-negotiable guarantees](../../AGENTS.md#non-negotiable-guarantees). Placement and pruning follow [Corpus placement](../../agents/testing.md#corpus-placement) and [Tests worth keeping](../../agents/testing.md#tests-worth-keeping); the latter owns the moved-block exception and deletion safeguards.
 
-Excluded: new tests, behavior changes, fixture or Provider-double changes. `test_support/worker_teams.rs` is shared scenario support, not a corpus to prune; `guard_runs/worker.rs` is below the split signal. Shared-workspace-editors S2 owns their protocol changes. Process/macOS modules with self-spawned filter paths (`cli/attached/run.rs::tests`, `session_run::active_terminal*`, `tools_macos`) retain those paths; architecture-residue R3 owns the other focused Run tests.
+Excluded: new tests, behavior changes, fixture or Provider-double changes. `test_support/worker_teams.rs` is shared scenario support, not a corpus to prune; `guard_runs/worker.rs` is below the split signal. Shared-workspace-editors owns their protocol changes; the Gates section below pins the surviving-corpus handoff. Process/macOS modules with self-spawned filter paths (`cli/attached/run.rs::tests`, `session_run::active_terminal*`, `tools_macos`) retain those paths; architecture-residue R3 owns the other focused Run tests.
 
 ## Research
 
@@ -20,7 +20,7 @@ Inventory at `dfba8416`, measured with `wc -l` and `grep -cE '#\[(tokio::)?test'
 |---|---|---|---|
 | [session/reducer/tests.rs](../../crates/arany/src/session/reducer/tests.rs) | 11,563 | 110 | T1a–T1c: reducer phases and families |
 | [engine_run/goals.rs](../../crates/arany/tests/engine_run/goals.rs) | 10,042 | 116 | T2a–T2b: Goal scenario families; re-inventory at T2a start |
-| [session/reducer/worker_tests.rs](../../crates/arany/src/session/reducer/worker_tests.rs) | 6,203 | 61 | T3a: surviving editor lease, stop and verification evidence after shared-workspace-editors S2 |
+| [session/reducer/worker_tests.rs](../../crates/arany/src/session/reducer/worker_tests.rs) | 6,203 | 61 | T3a: surviving editor lease, stop and verification evidence after shared-workspace-editors S2b2 |
 | [guard_runs/permissions.rs](../../crates/arany-cli/tests/guard_runs/permissions.rs) | 5,828 | 81 | T4a: modes, rules, hooks and host evidence |
 | [tools/tests.rs](../../crates/arany/src/tools/tests.rs) | 5,723 | 62 | T3b: Tool families and cross-family catalog cases |
 | [session_run/setup.rs](../../crates/arany-cli/tests/session_run/setup.rs) | 4,964 | 25 | T4b: setup flows after architecture-residue R2 |
@@ -62,7 +62,7 @@ None change. Review every deletion against the [security coverage categories](..
 
 ## Vertical slices
 
-Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery). The ceiling counts all non-moved lines, including deletions, imports, module glue and link edits; only moved blocks use the exception in Tests worth keeping. Every destination follows Corpus placement and stays below its split signal; retain parent cross-child cases only. Re-inventory the row's test names, assertions and filters before moving them.
+Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery), including its current exclusions for pure moves and listed deletions. Tests worth keeping still requires the deletion inventory and surviving evidence owners. Every destination follows Corpus placement and stays below its split signal; retain parent cross-child cases only. Re-inventory the row's test names, assertions and filters before moving them.
 
 | ID | Complete move inventory and gate | Non-moved-line ceiling |
 |---|---|---|
@@ -71,8 +71,8 @@ Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery). The ce
 | T1c | Remaining Run, Agent, Session and rewind cases to their reducer family tests; cross-child cases remain in the parent; after T1b. | ≤300 |
 | T2a | Re-inventory `engine_run/goals.rs`; move budget and plan-contract cases to `engine_run/budgets` and `engine_run/plan_contract` test children. | ≤300 |
 | T2b | Move team, steering and recovery cases to `engine_run/{team,steering,recovery}` test children; retain only cross-family Goal cases; after T2a. | ≤300 |
-| T3a | Re-inventory surviving `reducer/worker_tests.rs` after shared-workspace-editors S2; move lease, stop and verification cases beside their reducer children. Shared fixtures and `guard_runs/worker.rs` stay unchanged. | ≤300 |
-| T3b | Move `tools/tests.rs` cases beside `tools/{fs,process,git,mcp,permissions}` and catalog/type owners; only cross-family cases stay in the parent; after shared-workspace-editors S2. | ≤300 |
+| T3a | Re-inventory surviving `reducer/worker_tests.rs` after shared-workspace-editors S2b2; move lease, stop and verification cases beside their reducer children. Shared fixtures and `guard_runs/worker.rs` stay unchanged. Optional shared-editor S0b may deliver this move before cutover under the Gates exception. | ≤300 |
+| T3b | Move `tools/tests.rs` cases beside `tools/{fs,process,git,mcp,permissions}` and catalog/type owners; only cross-family cases stay in the parent; after shared-workspace-editors S2b2. | ≤300 |
 | T4a | Move `guard_runs/permissions.rs` into `permissions/{modes,rules,hooks,host}.rs`, preserving all process/native gates. | ≤300 |
 | T4b | Move `session_run/setup.rs` into `setup/{native,chatgpt,custom}.rs`, leaving cross-flow journeys in the parent; after architecture-residue R2. | ≤300 |
 | T4c | Move `terminal/view/tests.rs` into view-region test children; retain cross-region frame cases in the parent; after architecture-residue R4. | ≤300 |
@@ -81,7 +81,7 @@ Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery). The ce
 | T5c | Move `acp/in_process.rs` transport, lifecycle and Tool projection cases to focused ACP test children; after display-facts D2. | ≤300 |
 | T5d | Move `serve/in_process.rs` transport, lifecycle and provisional-display cases to focused serve test children, retaining existing `goal_controls` and `history_tests`; after display-facts D1. | ≤300 |
 | T5e | Move `session_run/tools.rs` read/replay, MCP, permission and native containment journeys to Tool scenario children; preserve `native_exec` and `inline_approval` filter paths. | ≤300 |
-| T6a | Move `session/events/tests.rs` Goal, defaults/account, subscription-compaction, Provider-call, child-grant and payload-version cases beside their Event family owners; retain only cross-family cases; after shared-workspace-editors S2. | ≤300 |
+| T6a | Move `session/events/tests.rs` Goal, defaults/account, subscription-compaction, Provider-call, child-grant and payload-version cases beside their Event family owners; retain only cross-family cases; after shared-workspace-editors S2b2. | ≤300 |
 
 ## Exit criteria
 
@@ -93,3 +93,9 @@ Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery). The ce
 
 - Every slice's test-count equation, deletion inventory and moved-block review are in its PR; all spec scenario links and CI/native filters resolve.
 - Close under the [planning lifecycle](../README.md#lifecycle) when all listed slices and exit criteria are complete.
+
+## Gates
+
+The remaining worker/Tool/Event moves T3a, T3b and T6a open after [shared-workspace-editors](../shared-workspace-editors/README.md#vertical-slices) **S2b2**, without waiting for its private-target/native retirement. Re-inventory the surviving files and their assertions after the cutover; never recreate tests that S1 replaced at focused live-workspace owners. Other table gates remain unchanged.
+
+Optional early T3a: shared-editor S0b may bring the pure move forward after S0a and before S1 if useful for review. That PR records both IDs and the same pure-move/count evidence; T3a is then delivered and no duplicate later move is scheduled. If S0b is skipped, T3a keeps the default S2b2 gate. S0b changes no fixture or behavior; S1 separately owns all required fixture rewrites and protocol-test dispositions.
