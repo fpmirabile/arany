@@ -176,3 +176,48 @@ mod escape_tests {
         );
     }
 }
+
+mod approval_reply_tests {
+    use super::super::approval::linear_approval_choice;
+    use crate::presentation::ToolApprovalChoice::{
+        AutoEdits, ExactCommand, GitPrefix, HostPrefix, No, Yes,
+    };
+
+    #[test]
+    fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
+        let prefix = GitPrefix(arany::permissions::TypedGitPrefix::Branch);
+        for choices in [
+            vec![Yes, prefix, No],
+            vec![Yes, No],
+            vec![Yes, AutoEdits, No],
+            vec![Yes, ExactCommand, No],
+            vec![Yes, HostPrefix, No],
+        ] {
+            for (index, choice) in choices.iter().enumerate() {
+                assert_eq!(
+                    linear_approval_choice(&(index + 1).to_string(), &choices),
+                    Some(*choice)
+                );
+            }
+            for (answer, expected) in [
+                ("", Some(No)),
+                ("YES", Some(Yes)),
+                ("no", Some(No)),
+                ("allow", None),
+                ("always", None),
+                ("0", None),
+                ("4", None),
+            ] {
+                assert_eq!(linear_approval_choice(answer, &choices), expected);
+            }
+        }
+        assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
+        assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
+        assert_eq!(No.reply(), arany::ApprovalReply::Deny);
+        assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
+        assert_eq!(
+            HostPrefix.reply(),
+            arany::ApprovalReply::AllowPrefixInFolder
+        );
+    }
+}
