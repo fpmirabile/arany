@@ -94,9 +94,12 @@ thread so persistence does not own observer delivery. [Execution](../specs/execu
 their observable contracts.
 Provider-owned diagnostic stage, count, response-shape and Tool argument shape
 types live in `provider/diagnostics.rs`, including argument shape construction
-and Debug formatting. Provider also owns stream/failure entry points and record
-construction; root `diagnostics.rs` retains context formatting and the bounded
-private sink, including activation, locking, sanitization and file admission.
+and Debug formatting. Provider also owns stream/failure/context entry points and
+record construction; the Engine calls its context-exhaustion entry point.
+Root `diagnostics.rs` retains the bounded private sink, including activation,
+locking, sanitization and file admission, without a production Provider dependency
+or re-export. Provider depends on that inert-record sink in one direction only;
+unrelated root Engine/Event/Tool producers remain at root.
 
 ```mermaid
 flowchart LR
@@ -209,7 +212,7 @@ modules.
 | Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
 | Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
 | SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
-| Lossy export, bounded private sink and Provider diagnostic records | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md#acceptance-and-evidence-owners) |
+| Lossy export, bounded private sink and Provider stream/failure/context records | `crates/arany/src/telemetry/`, `diagnostics.rs`, `provider/diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md#acceptance-and-evidence-owners) |
 
 [Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
 shared support. [Library](../../agents/arany.md) and
