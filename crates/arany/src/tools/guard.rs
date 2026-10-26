@@ -624,6 +624,9 @@ fn bind_runtime_grants(
         );
         bytes.extend_from_slice(RUST_GUARD_FLAGS.as_bytes());
     }
+    bytes.extend_from_slice(b";private-output-capture-v1");
+    bytes.extend_from_slice(&(super::spill::MAX_SPILL_RESULT_BYTES as u64).to_le_bytes());
+    bytes.extend_from_slice(&(super::spill::MAX_REPORT_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(&profile);
     bytes.extend_from_slice(
         &serde_json::to_vec(runtime_grants).map_err(|_| ToolError::Configuration)?,
@@ -880,6 +883,7 @@ fn discovery_result(
         _ => return dispatch_result(intent, dispatched, result),
     };
     Ok(ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: if cause.is_some() {
             ToolDisposition::Limit
@@ -1079,7 +1083,7 @@ async fn read_report<R: tokio::io::AsyncBufRead + Unpin>(
             error => (error, None),
         }
     };
-    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES)
+    let bytes = read_line_capped(reader, super::spill::report_cap(intent))
         .await
         .map_err(tagged(GuardCheck::WorkerClosed))?;
     let observation = parse_observation(&bytes).map_err(tagged(GuardCheck::ReportMalformed))?;
@@ -1222,7 +1226,7 @@ pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 fn parse_observation(bytes: &[u8]) -> Result<ToolObservation, ToolError> {
-    serde_json::from_slice(bytes).map_err(|_| {
+    super::spill::decode_report(bytes).map_err(|_| {
         serde_json::from_slice::<BootstrapFailure>(bytes)
             .map_or(ToolError::Operation, ToolError::GuardBootstrap)
     })
@@ -1232,7 +1236,7 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
+    let bytes = read_line_capped(reader, super::spill::report_cap(intent)).await?;
     let observation = parse_observation(&bytes)?;
     if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
         return Err(ToolError::Operation);
@@ -1467,8 +1471,8 @@ pub(super) async fn capture_command(
 > {
     let out = child.stdout.take().ok_or(ToolError::Operation)?;
     let err = child.stderr.take().ok_or(ToolError::Operation)?;
-    let mut stdout = super::output::Window::new(cap);
-    let mut stderr = super::output::Window::new(cap);
+    let mut stdout = super::output::Window::capturing(cap);
+    let mut stderr = super::output::Window::capturing(cap);
     let result = tokio::time::timeout(deadline, async {
         tokio::try_join!(
             async {
@@ -1566,6 +1570,7 @@ fn bootstrap_locations(
 }
 
 pub(super) struct GuardContext<'a> {
+    pub(super) captured: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "linux")]
     pub(super) command_before: Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>,
     pub(super) intent: &'a EffectIntent,
@@ -1582,6 +1587,11 @@ pub(super) struct GuardContext<'a> {
 }
 
 impl GuardContext<'_> {
+    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
+        let result = super::dispatch::run(&self).await;
+        (result, self.captured.into_inner().ok().flatten())
+    }
+
     pub(super) fn remaining_runtime(&self) -> Duration {
         runtime_after(
             self.runtime_started,
@@ -1798,13 +1808,13 @@ fn receive_bulk(
 fn send_result(
     task: Task,
     workspace: &Path,
-    result: Result<String, ToolError>,
+    result: (Result<String, ToolError>, Option<Vec<u8>>),
     stdout: &mut impl Write,
     root: &Path,
     before: Option<&super::worker::Image>,
 ) -> Result<(), ToolError> {
     let (disposition, output, enforcement_cause, limit_cause) =
-        super::dispatch::outcome(&task.intent, result);
+        super::dispatch::outcome(&task.intent, result.0);
     let private_command =
         task.worker.is_some() && matches!(task.intent.call, ToolCall::Command { .. });
     let receipt = GuardReceipt {
@@ -1814,6 +1824,7 @@ fn send_result(
         limits: task.intent.limits.clone(),
     };
     let mut observation = ToolObservation {
+        spill: None,
         enforcement_cause,
         limit_cause,
         intent: task.intent,
@@ -1829,6 +1840,7 @@ fn send_result(
             crate::tools::CacheUpdate::NotApplicable
         },
     };
+    observation.spill = super::spill::OutputSpill::captured(&observation, result.1);
     if private_command
         && serde_json::from_str::<crate::session::worker::WorkerCommandResult>(&observation.output)
             .is_err()
@@ -1859,6 +1871,7 @@ fn send_result(
         .map_err(|_| ToolError::Operation)?;
     }
     if task.worker.is_none() && !observation.valid() {
+        observation.spill = None;
         observation.disposition = ToolDisposition::Limit;
         observation.limit_cause = Some(crate::tools::LimitCause::Resource);
         observation.enforcement_cause = None;
@@ -1911,7 +1924,9 @@ fn send_result(
     } else {
         None
     };
-    serde_json::to_writer(&mut *stdout, &observation).map_err(|_| ToolError::Operation)?;
+    stdout
+        .write_all(&super::spill::encode_report(&observation)?)
+        .map_err(|_| ToolError::Operation)?;
     stdout
         .write_all(b"\n")
         .and_then(|()| stdout.flush())
@@ -2041,6 +2056,7 @@ pub(super) fn helper_main() -> ExitCode {
             .build()
             .map_err(|_| ToolError::Operation)?;
         let site = GuardContext {
+            captured: Default::default(),
             #[cfg(target_os = "linux")]
             command_before,
             intent: &task.intent,
@@ -2060,7 +2076,7 @@ pub(super) fn helper_main() -> ExitCode {
         };
         // Capture handshakes acquire stdout from a blocking worker during dispatch.
         drop(stdout);
-        let result = runtime.block_on(super::dispatch::run(&site));
+        let result = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
         send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
@@ -2384,6 +2400,7 @@ mod tests {
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "{\"entries\":[],\"truncated\":false}".into(),
@@ -2984,6 +3001,7 @@ mod tests {
             }
         };
         let observation = |attested: bool| ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: Some(crate::tools::LimitCause::Resource),
             intent: intent.clone(),
@@ -3475,6 +3493,7 @@ mod tests {
             limits: intent.limits.clone(),
         };
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             intent,

@@ -752,7 +752,7 @@ impl RunLoop<'_> {
                     }
                 });
         }
-        let answer = match verdict {
+        let mut answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
                 narrowed = Some(call);
@@ -824,6 +824,7 @@ impl RunLoop<'_> {
                 }
             },
         };
+        answer.observation.spill = None;
         self.finish_answer(&answer).await?;
         if let Some((candidate, data)) = candidate {
             self.worker

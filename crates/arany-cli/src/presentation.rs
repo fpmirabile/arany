@@ -1574,6 +1574,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
     arany::ToolView {
         checkpoint: None,
         observation: Some(arany::ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: arany::ToolDisposition::Succeeded,
             output: output.into(),

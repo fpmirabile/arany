@@ -1123,6 +1123,7 @@ mod enforcement_tests {
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(arany::ToolObservation {
+                spill: None,
                 intent,
                 disposition: arany::ToolDisposition::Denied,
                 output: String::new(),
@@ -1303,6 +1304,7 @@ mod unguarded_tests {
         ToolView {
             checkpoint: None,
             observation: Some(ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: (disposition == arany::ToolDisposition::Limit)
                     .then_some(arany::LimitCause::Resource),

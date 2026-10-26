@@ -611,6 +611,7 @@ mod tests {
         };
         run.tools[0].intent = intent.clone();
         run.tools[0].observation = Some(arany::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             intent,

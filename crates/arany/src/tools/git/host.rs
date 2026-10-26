@@ -1304,6 +1304,7 @@ fn observation(
         output
     };
     ToolObservation {
+        spill: None,
         intent,
         disposition,
         output: output.into(),
