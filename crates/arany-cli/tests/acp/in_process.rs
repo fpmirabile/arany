@@ -2219,7 +2219,7 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             .unwrap()
             .record(arany::RecordKind::UiPreferences)
             .replace(
-                &serde_json::to_vec(&json!({"version":6,"preferences":{
+                &serde_json::to_vec(&json!({"version":7,"preferences":{
                     "completion":"tabs","view":"classic","goal_budget":budget,
                     "resources":arany::ToolResourceSettings::default(),
                     "copy_on_select":true,"newline":"shift_enter"

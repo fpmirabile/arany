@@ -839,6 +839,9 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
         .remember_profiles(true, ApprovalMode::Request, &tokens)
         .unwrap();
     let state = root.join("cargo-state");
+    let jobs = u32::try_from(std::thread::available_parallelism().unwrap().get())
+        .unwrap()
+        .min(2);
     for (case, script, success) in [
         (
             "unmarked",
@@ -849,7 +852,7 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
             "guarded",
             r#"set -eu
 test "$CARGO_NET_OFFLINE" = true
-test "$CARGO_BUILD_JOBS" = 1
+test "$CARGO_BUILD_JOBS" = EXPECTED_BUILD_JOBS
 if (printf changed > "$(command -v cargo)") 2>/dev/null; then exit 94; fi
 test ! -e "$CARGO_HOME/credentials.toml"
 test "$0" = "offline build 'entry"
@@ -926,7 +929,7 @@ printf cache-changed
             program: "sh".into(),
             args: vec![
                 "-c".into(),
-                script.into(),
+                script.replace("EXPECTED_BUILD_JOBS", &jobs.to_string()),
                 "offline build 'entry".into(),
                 "argument with ' quote".into(),
             ],
@@ -964,6 +967,7 @@ printf cache-changed
         let mut request = request(workspace, "Run the offline Cargo fixture");
         request.include_paths.clear();
         request.goal.phase = Some(crate::GoalPhase::Implementation);
+        request.goal.resource_settings.build_jobs = Some(jobs);
         let run = super::engine::run_with(
             &engine,
             &provider,
@@ -982,6 +986,7 @@ printf cache-changed
                 approval.intent.limits.resource_class,
                 ToolResourceClass::Build
             );
+            assert_eq!(approval.intent.limits.build_jobs, jobs);
             let report_gate = (case == "cancelled-report")
                 .then(|| crate::fault::FaultPlan::gate_guard_cache_report(approval.intent.id));
             if case == "cancelled" {
@@ -1032,6 +1037,8 @@ printf cache-changed
             .as_ref()
             .expect("Cargo observation");
         assert_eq!(run.tools.len(), 1);
+        assert_eq!(replay.goals[0].resource_settings.build_jobs, Some(jobs));
+        assert_eq!(observation.intent.limits.build_jobs, jobs);
         assert!(
             !observation
                 .output
