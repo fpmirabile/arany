@@ -32,6 +32,8 @@ mod goal_recovery_tests {
         };
         let tool = ToolView {
             checkpoint: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1517,6 +1519,8 @@ mod goal_replay_tests {
             ),
             observation: None,
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1905,6 +1909,8 @@ mod goal_replay_tests {
         };
         review.runs[0].tools.push(ToolView {
             checkpoint: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -2952,6 +2958,8 @@ mod goal_replay_tests {
                     cache_update,
                 }),
                 review_call_index: None,
+                active_time_reserved: false,
+                narrowing_source: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
                 hook_sequence: None,
@@ -2984,6 +2992,8 @@ mod goal_replay_tests {
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -3012,6 +3022,8 @@ mod goal_replay_tests {
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -5127,6 +5139,8 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 tools: vec![ToolView {
                     checkpoint: None,
+                    active_time_reserved: false,
+                    narrowing_source: None,
                     permission_verdict: None,
                     hooks: Vec::new(),
                     hook_sequence: None,
@@ -5280,6 +5294,8 @@ mod goal_replay_tests {
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
                         checkpoint: None,
+                        active_time_reserved: false,
+                        narrowing_source: None,
                         permission_verdict: None,
                         hooks: Vec::new(),
                         hook_sequence: None,
@@ -5932,6 +5948,10 @@ mod goal_replay_tests {
             assert!(rejected(&view, started(intent.digest(), &foreign)));
             apply(&mut view, started(intent.digest(), &hook_intent)).unwrap();
             assert!(!view.runs[0].hooks_settled());
+            assert!(
+                rejected(&view, reserve_child_call(goal, run, agent)),
+                "an open PreToolUse hook blocks the actor's review reservation"
+            );
             let mut wrong_actor = started(intent.digest(), &hook_intent);
             if let Event::HookStarted { agent_run_id, .. } = &mut wrong_actor {
                 *agent_run_id = AgentRunId::new();
@@ -6231,10 +6251,12 @@ mod goal_replay_tests {
                     Some(0),
                 ),
             };
-            let mut open = view.clone();
-            apply(&mut open, reserve_child_call(goal, run, agent)).unwrap();
             assert!(
-                rejected(&open, continuation.clone()),
+                rejected(&view, reserve_child_call(goal, run, agent)),
+                "no Provider call is reserved while the actor's PostToolUse hook is open"
+            );
+            assert!(
+                rejected(&view, continuation.clone()),
                 "no continuation is recorded while a PostToolUse hook is open"
             );
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
@@ -6292,11 +6314,30 @@ mod goal_replay_tests {
         }
     }
 
+    fn post_tool_hook(intent: &EffectIntent) -> crate::tools::permissions::HookInvocation {
+        crate::tools::permissions::HookInvocation {
+            active_ceiling_ms: None,
+            event: crate::tools::permissions::HookEvent::PostToolUse,
+            group: 0,
+            handler: 0,
+            subject_digest: intent.digest(),
+            intent: child_intent(
+                intent.run_id,
+                intent.agent_run_id,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 0".into()],
+                    cwd: String::new(),
+                },
+            ),
+            input_digest: [9; 32],
+        }
+    }
+
     #[test]
     fn no_tool_starts_while_a_post_tool_use_hook_is_open() {
         use crate::tools::permissions::{
-            Decision, HookEvent, HookInvocation, PermissionMode, PermissionSource,
-            PermissionVerdict,
+            Decision, PermissionMode, PermissionSource, PermissionVerdict,
         };
         let (mut view, goal, run, agent) = primary_tool_session(true);
         view.runs[0]
@@ -6308,7 +6349,7 @@ mod goal_replay_tests {
             .unwrap()
             .permissions_digest = Some([3; 32]);
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         let (first, second) = (
             read_intent(run, agent, "src/lib.rs"),
             read_intent(run, agent, "src/lib.rs"),
@@ -6336,33 +6377,130 @@ mod goal_replay_tests {
         .unwrap();
         apply(&mut view, tool_finished(run, agent, &first, b"x")).unwrap();
         let mut settled = view.clone();
+        apply(&mut settled, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut settled, requesting_step(run, agent, 1)).unwrap();
         apply(&mut settled, tool_started(run, agent, &second)).unwrap();
         apply(
             &mut view,
             Event::HookStarted {
                 run_id: run,
                 agent_run_id: agent,
-                hook: HookInvocation {
-                    active_ceiling_ms: None,
-                    event: HookEvent::PostToolUse,
-                    group: 0,
-                    handler: 0,
-                    subject_digest: first.digest(),
-                    intent: child_intent(
-                        run,
-                        agent,
-                        ToolCall::Command {
-                            program: "sh".into(),
-                            args: vec!["-c".into(), "exit 0".into()],
-                            cwd: String::new(),
-                        },
-                    ),
-                    input_digest: [9; 32],
-                },
+                hook: post_tool_hook(&first),
             },
         )
         .unwrap();
+        assert!(rejected(&view, reserve_child_call(goal, run, agent)));
         assert!(rejected(&view, tool_started(run, agent, &second)));
+    }
+
+    #[test]
+    fn batch_reservations_wait_for_post_tool_hook_settlement() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        const FIRST_CEILING_MS: u64 = 1000;
+        const SECOND_CEILING_MS: u64 = 500;
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        let first = read_intent(run, agent, "src/lib.rs");
+        let second = read_intent(run, agent, "src/lib.rs");
+        for intent in [&first, &second] {
+            apply(&mut view, tool_started(run, agent, intent)).unwrap();
+        }
+        let reservation =
+            |intent: &EffectIntent, active_ceiling_ms| Event::ToolActiveTimeReserved {
+                run_id: run,
+                agent_run_id: agent,
+                intent_digest: intent.digest(),
+                active_ceiling_ms,
+            };
+        apply(&mut view, reservation(&first, FIRST_CEILING_MS)).unwrap();
+        apply(
+            &mut view,
+            verdict_event(
+                &first,
+                Some(PermissionMode::Default),
+                Decision::Allow,
+                PermissionSource::Mode,
+                PermissionSource::Mode,
+                true,
+            ),
+        )
+        .unwrap();
+        apply(&mut view, tool_finished(run, agent, &first, b"Fact")).unwrap();
+        let hook = post_tool_hook(&first);
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: agent,
+                hook: hook.clone(),
+            },
+        )
+        .unwrap();
+        let before = view.clone();
+        assert!(apply(&mut view, reservation(&second, SECOND_CEILING_MS)).is_err());
+        assert_eq!(view, before, "an open hook's ceiling remains intact");
+        assert_post_hook_reservation_after_finish(
+            &view,
+            &hook,
+            reservation(&second, SECOND_CEILING_MS),
+            SECOND_CEILING_MS,
+        );
+    }
+
+    fn assert_post_hook_reservation_after_finish(
+        view: &SessionView,
+        hook: &crate::tools::permissions::HookInvocation,
+        reservation: Event,
+        expected: u64,
+    ) {
+        use crate::tools::permissions::{HookOutcome, HookResult};
+        let run = hook.intent.run_id;
+        let agent = hook.intent.agent_run_id;
+        for completed in [false, true] {
+            let mut settled = view.clone();
+            let mut observation = observation_for(hook.intent.clone(), b"");
+            if !completed {
+                observation.disposition = ToolDisposition::Uncertain;
+                observation.attestation = None;
+                observation.cache_update = CacheUpdate::NotAttempted;
+            }
+            let result = HookResult::for_event(hook.event, &observation);
+            apply(
+                &mut settled,
+                Event::HookFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    outcome: HookOutcome {
+                        boundary_active_ms: None,
+                        observation,
+                        result,
+                    },
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                apply(&mut settled, reservation.clone()).is_ok(),
+                completed,
+                "hook completed: {completed}"
+            );
+            assert_eq!(
+                settled.goals[0].active_ceiling_ms,
+                if completed {
+                    expected
+                } else {
+                    view.goals[0].active_ceiling_ms
+                }
+            );
+        }
     }
 
     struct Unguarded {
@@ -6401,11 +6539,7 @@ mod goal_replay_tests {
         policy.unguarded_rules_digest = rules_pinned.then_some([5; 32]);
         policy.host_epoch = Some(uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501));
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-        apply(
-            &mut view,
-            requesting_step(run, agent, 1 + u8::from(prior.is_some())),
-        )
-        .unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         if let Some((script, disposition, cause)) = prior {
             let guarded = child_intent(
                 run,
@@ -6478,6 +6612,10 @@ mod goal_replay_tests {
                 agent,
                 started: false,
             };
+        }
+        if prior.is_some() {
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         }
         apply(&mut view, start).expect("the start is always admitted");
         Unguarded {
@@ -8295,12 +8433,16 @@ mod goal_replay_tests {
         for size in [2, 1, 1, 1, 1] {
             apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
             apply(&mut view, requesting_step(run, agent, size)).unwrap();
-            for _ in 0..size {
-                let intent = read_intent(run, agent, "src/lib.rs");
-                apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let intents: Vec<_> = (0..size)
+                .map(|_| read_intent(run, agent, "src/lib.rs"))
+                .collect();
+            for intent in &intents {
+                apply(&mut view, tool_started(run, agent, intent)).unwrap();
+            }
+            for intent in &intents {
                 apply(
                     &mut view,
-                    tool_finished(run, agent, &intent, &vec![b'x'; 2048]),
+                    tool_finished(run, agent, intent, &vec![b'x'; 2048]),
                 )
                 .unwrap();
             }
@@ -8356,6 +8498,8 @@ mod goal_replay_tests {
 
     #[test]
     fn tool_started_requires_pending_request() {
+        const FIRST_ACTIVE_CEILING_MS: u64 = 1000;
+        const SECOND_ACTIVE_CEILING_MS: u64 = 500;
         let (mut view, goal, run, agent) = primary_tool_session(false);
         let (first, second, third) = (
             read_intent(run, agent, "src/lib.rs"),
@@ -8374,13 +8518,44 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 intent: first.clone().into(),
-                active_ceiling_ms: 1000,
+                active_ceiling_ms: FIRST_ACTIVE_CEILING_MS,
             },
         )
         .expect("first request starts");
         assert_exhausted_crash_receipt(&view);
-        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        assert!(
+            rejected(&view, tool_finished(run, agent, &first, b"one")),
+            "all declared intents must start before any observation"
+        );
+        for stage in ["active", "reviewed"] {
+            let mut busy = view.clone();
+            let tool = busy.runs[0].tools.last_mut().unwrap();
+            if stage == "active" {
+                tool.active_time_reserved = true;
+            } else {
+                tool.review_call_index = Some(0);
+            }
+            assert!(
+                rejected(&busy, tool_started(run, agent, &second)),
+                "no new intent during {stage} Tool work"
+            );
+        }
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        let reservation =
+            |intent: &EffectIntent, active_ceiling_ms| Event::ToolActiveTimeReserved {
+                run_id: run,
+                agent_run_id: agent,
+                intent_digest: intent.digest(),
+                active_ceiling_ms,
+            };
+        apply(&mut view, reservation(&first, FIRST_ACTIVE_CEILING_MS)).expect("first reserved");
+        assert!(
+            rejected(&view, reservation(&second, SECOND_ACTIVE_CEILING_MS)),
+            "an open action's ceiling cannot be replaced by another intent"
+        );
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, reservation(&second, SECOND_ACTIVE_CEILING_MS))
+            .expect("second reserved after the first observation");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         assert!(
             rejected(&view, tool_started(run, agent, &third)),
@@ -8603,8 +8778,10 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
-        apply(&mut view, reserve_child_call(goal, run, agent)).expect("continuation call");
+        apply(&mut view, reserve_child_call(goal, run, agent))
+            .expect("a pending Tool can reserve its review call");
         let continuation = Event::ProviderCallRecorded {
             run_id: run,
             agent_run_id: agent,
@@ -8618,7 +8795,6 @@ mod goal_replay_tests {
             rejected(&view, continuation.clone()),
             "the second declared request is unobserved"
         );
-        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         apply(&mut view, continuation).expect("all declared requests observed");
     }
@@ -8688,8 +8864,8 @@ mod goal_replay_tests {
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
         apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
-        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         apply(
             &mut view,
@@ -9063,27 +9239,29 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn child_tool_request_count_is_one() {
+    fn researcher_tool_request_count_is_bounded() {
         let (mut view, goal, run, child) = research_session();
         apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
-        let widened = Event::ProviderCallRecorded {
-            run_id: run,
-            agent_run_id: child,
-            record: ProviderCallRecord {
-                requested_tools: 2,
-                ..record(
-                    AgentPhase::ChildWork,
-                    ProviderCallDisposition::ToolRequested,
-                    Some(0),
-                )
-            },
-        };
-        assert!(rejected(&view, widened), "a child step declares one Tool");
-        apply(
-            &mut view,
-            child_record(run, child, ProviderCallDisposition::ToolRequested),
-        )
-        .expect("single child request");
+        for requested_tools in 0..=crate::session::MAX_STEP_TOOL_CALLS + 1 {
+            let event = Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: child,
+                record: ProviderCallRecord {
+                    requested_tools,
+                    ..record(
+                        AgentPhase::ChildWork,
+                        ProviderCallDisposition::ToolRequested,
+                        Some(0),
+                    )
+                },
+            };
+            let mut candidate = view.clone();
+            assert_eq!(
+                apply(&mut candidate, event).is_ok(),
+                (1..=crate::session::MAX_STEP_TOOL_CALLS).contains(&requested_tools),
+                "researcher request count {requested_tools}"
+            );
+        }
     }
 
     #[test]
