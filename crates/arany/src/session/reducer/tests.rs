@@ -9278,7 +9278,80 @@ mod goal_replay_tests {
                 observation: read_attested,
             }
         ));
-        apply(&mut view, tool_finished(run, agent, &write, b"after")).expect("Guard receipt");
+        let finished = tool_finished(run, agent, &write, b"after");
+        let bytes = finished.payload().unwrap();
+        let decoded = Event::decode(
+            finished.kind(),
+            finished.version(),
+            &bytes,
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        apply(&mut view, decoded).expect("historical Guard receipt");
+        assert_eq!(finished.payload().unwrap(), bytes);
+    }
+
+    #[test]
+    fn file_versions_require_intent_bound_in_process_receipts() {
+        use crate::tools::{Attestation, EnforcementCause, FileReceipt, GuardReceipt};
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let call = ToolCall::Write {
+            path: "src/lib.rs".into(),
+            expected_digest: None,
+            content: "after".into(),
+        };
+        let mut intent = child_intent(run, agent, call);
+        intent.enforcement_digest = FileReceipt::enforcement_digest();
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let finish = |observation: ToolObservation| Event::ToolFinished {
+            checkpoint: observation
+                .attestation
+                .is_some()
+                .then(crate::Checkpoint::not_needed),
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        let observed = observation_for(intent.clone(), b"after");
+        let mut guarded = observed.clone();
+        guarded.attestation = Some(Attestation::Guard(GuardReceipt {
+            contract_version: 1,
+            intent_digest: intent.digest(),
+            enforcement_digest: intent.enforcement_digest,
+            limits: intent.limits.clone(),
+        }));
+        assert!(rejected(&view, finish(guarded)));
+        let mut bootstrap = observed.clone();
+        bootstrap.disposition = ToolDisposition::Failed;
+        bootstrap.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
+        bootstrap.attestation = None;
+        assert!(rejected(&view, finish(bootstrap)));
+        let receipt = FileReceipt {
+            intent_digest: intent.digest(),
+            before: None,
+            after: Some(crate::validate::digest(b"after")),
+            executable: false,
+        };
+        let mut forged = receipt.clone();
+        forged.intent_digest = [9; 32];
+        for candidate in [None, Some(forged), Some(receipt.clone())] {
+            let correct = candidate.as_ref() == Some(&receipt);
+            let mut observation = observed.clone();
+            observation.attestation = Some(Attestation::InProcess {
+                receipt: candidate,
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            });
+            if correct {
+                apply(&mut view, finish(observation)).expect("in-process File receipt");
+            } else {
+                assert!(rejected(&view, finish(observation)));
+            }
+        }
     }
 
     #[test]

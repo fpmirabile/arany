@@ -1,7 +1,7 @@
 # Linux Tool latency corpus
 
-The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports single-Read
-and four-Read-step rows offline. Guarded Edit and command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
+The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports single-Read,
+four-Read-step and in-process Edit rows offline. Command rows remain open in [NEXT_STEPS](../../../../NEXT_STEPS.md#daily-use-first).
 This is measurement evidence for [Tools](../../../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners)
 and [Execution](../../../../docs/specs/execution.md#committed-event-stream), not a
 new runtime deadline, CLI reporting feature or native support claim.
@@ -12,8 +12,8 @@ new runtime deadline, CLI reporting feature or native support claim.
 receives a complete typed primary Provider response, before response validation,
 `ProviderCallRecorded`, intent admission and `ToolStarted`. It ends immediately
 after the Store acknowledges the final matching `ToolFinished` durable append for
-the step. This includes permission journaling, admitted Read execution and result fitting. Read
-uses its real in-process path; it does not launch a Guard. No timestamps come from
+the step. This includes permission journaling, admitted Read or Edit execution and result fitting. Both
+use their real in-process paths; neither launches a Guard. No timestamps come from
 the lossy Journal subscription or telemetry.
 
 Provider inference, transport and wire decoding, Engine/fixture startup, final
@@ -47,7 +47,8 @@ reconstructed from journal bytes: preserve `report.json` with the closed journal
 
 Integer microsecond samples stay in attempt order. Sorting their measured-success
 durations reproduces nearest-rank p50/p95/max (`ceil(p*n)-1`, p95 index 94 for 100).
-Only a complete, audited invocation gets a target comparison. Invalid proposals,
+Only a complete, audited single-call row gets a target comparison. The four-Read
+row reports step percentiles without a provisional target. Invalid proposals,
 denial, failure, cancellation, uncertainty and missing acknowledgements cannot
 become successful samples. Failure stops the invocation without retry, preserves
 partial counts/captures and emits no valid percentile or target verdict. A missed
@@ -59,18 +60,19 @@ owns the rationale and peer comparison.
 
 The recorder allows one pending step measurement and at most 330 retained attempts;
 overlapping steps, unmatched completion and overflow invalidate capture. Each row attempts
-at most 110 steps of one or four Reads, two scripted calls per successful Run (a finite four-call Goal
+at most 110 steps of one or four Reads or one Edit, two scripted calls per successful Run (a finite four-call Goal
 ceiling), one 53,248-byte Workspace file, the ordinary 64 KiB Tool result bound,
 32,768 Goal tokens, 120 seconds active time and one Run. The report records the
-effective Tool limits and default resource settings. There is no checkpoint or
-publication for Read.
+effective Tool limits and default resource settings. Read has no checkpoint or publication. Edit replaces a unique final function,
+checks its FileReceipt and checkpoint, and audits closed replay and fresh show.
+The three rows retain independent reports and the same per-row bounds.
 
 The parent serially supervises each helper for at most 120 seconds and the whole
 invocation for 30 minutes. Existing bounded process owners kill and reap helpers
 on timeout/capture failure; `show` has its separate 10-second bound. Each helper
-capture channel is limited to 64 KiB; `show` allows 64 KiB per requested Read.
+capture channel is limited to 64 KiB; `show` allows 64 KiB per requested Tool.
 Sample evidence above 8 MiB fails; the parent reserves 8 MiB before each attempt
-within a 256 MiB aggregate retention ceiling divided equally between the two rows.
+within a 256 MiB aggregate retention ceiling divided equally among the three rows.
 Timing and metadata reports are capped at 1 MiB. Warm-up fixtures are removed only after
 closed replay and inspection succeed; measured and failed fixtures remain private.
 No cleanup of failed evidence is implied by a missing timing endpoint.

@@ -1359,6 +1359,18 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
 }
 
 impl ToolObservation {
+    pub fn enforcement_diagnostic(&self) -> Option<&'static str> {
+        self.enforcement_cause.map(|cause| {
+            if cause == EnforcementCause::FilesystemDenied
+                && super::fs::in_process_mutation(&self.intent)
+            {
+                "File enforcement: protected path or set-ID entry refused"
+            } else {
+                cause.diagnostic()
+            }
+        })
+    }
+
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
@@ -1925,8 +1937,8 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
     if let Some(cause) = observation.limit_cause {
         value["limit_cause"] = json!(cause);
     }
-    if let Some(cause) = observation.enforcement_cause {
-        value["enforcement_cause"] = json!(cause.diagnostic());
+    if let Some(diagnostic) = observation.enforcement_diagnostic() {
+        value["enforcement_cause"] = json!(diagnostic);
     }
     value
 }
