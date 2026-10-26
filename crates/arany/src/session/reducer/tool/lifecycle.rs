@@ -307,7 +307,13 @@ pub(super) fn proposed(
     } else {
         start_primary_tool(current, run_id, agent_run_id, intent)?;
     }
-    super::record_run_ceiling(current, run_id, active_ceiling_ms)
+    super::record_tool_ceiling(
+        current,
+        run_id,
+        agent_run_id,
+        &intent.digest(),
+        active_ceiling_ms,
+    )
 }
 
 fn start_primary_tool(
@@ -510,6 +516,12 @@ pub(super) fn started(
         &EffectIntent::from(intent.clone()).digest(),
     )?
     .started_sequence = Some(prior);
-    super::record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
+    super::record_tool_ceiling(
+        current,
+        *run_id,
+        *agent_run_id,
+        &EffectIntent::from(intent.clone()).digest(),
+        *active_ceiling_ms,
+    )?;
     Ok(())
 }

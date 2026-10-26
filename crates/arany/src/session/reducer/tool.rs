@@ -37,8 +37,6 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             let pending_read = read(&tool.intent.call);
-            let overlapping_read =
-                pending_read && run.tools.iter().any(ToolView::dispatch_in_progress);
             if run
                 .primary()
                 .is_none_or(|primary| primary.id != *agent_run_id)
@@ -52,15 +50,13 @@ pub(super) fn apply(
             }
             let tool = tool_by_digest(run, *agent_run_id, intent_digest)?;
             tool.active_time_reserved = true;
-            let ceiling = if overlapping_read {
-                active_run_goal(current, *run_id)
-                    .ok_or(ReplayError::InvalidTransition)?
-                    .active_ceiling_ms
-                    .max(*active_ceiling_ms)
-            } else {
-                *active_ceiling_ms
-            };
-            record_run_ceiling(current, *run_id, ceiling)?;
+            record_tool_ceiling(
+                current,
+                *run_id,
+                *agent_run_id,
+                intent_digest,
+                *active_ceiling_ms,
+            )?;
         }
         Event::HookStarted {
             run_id,
@@ -332,6 +328,37 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
                 && observed_command_changeset(observation)
                     .is_some_and(|source| source == *changeset)
         })
+}
+
+fn record_tool_ceiling(
+    current: &mut SessionView,
+    run_id: crate::session::RunId,
+    actor: crate::session::AgentRunId,
+    digest: &[u8; 32],
+    ceiling_ms: u64,
+) -> Result<(), ReplayError> {
+    let run = active_run(current, run_id)?;
+    let read = |tool: &ToolView| {
+        tool.intent.call.site() == crate::tools::catalog::Site::InProcess
+            && !tool.intent.call.mutates()
+    };
+    let overlaps = run.primary().is_some_and(|primary| primary.id == actor)
+        && run
+            .tools
+            .iter()
+            .any(|tool| tool.intent.digest() == *digest && read(tool))
+        && run.tools.iter().any(|tool| {
+            tool.intent.digest() != *digest && tool.dispatch_in_progress() && read(tool)
+        });
+    let ceiling_ms = if overlaps {
+        active_run_goal(current, run_id)
+            .ok_or(ReplayError::InvalidTransition)?
+            .active_ceiling_ms
+            .max(ceiling_ms)
+    } else {
+        ceiling_ms
+    };
+    record_run_ceiling(current, run_id, ceiling_ms)
 }
 
 fn record_run_ceiling(

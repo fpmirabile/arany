@@ -4464,9 +4464,9 @@ fn assert_narrowed_read_batch_order(events: &[arany::EventEnvelope], run: &arany
         .collect();
     assert_eq!(starts.len(), 5);
     assert_eq!(starts[0].1, original.intent.id);
-    assert_eq!(starts[4].1, replacement.intent.id);
+    assert_eq!(starts[1].1, replacement.intent.id);
     assert_eq!(
-        starts[1..4].iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        starts[2..].iter().map(|(_, id)| *id).collect::<Vec<_>>(),
         run.tools[2..]
             .iter()
             .map(|tool| tool.intent.id)
@@ -4483,14 +4483,20 @@ fn assert_narrowed_read_batch_order(events: &[arany::EventEnvelope], run: &arany
             _ => None,
         })
         .unwrap();
-    assert!(starts[3].0 < first_finish && first_finish < starts[4].0);
+    let proposals: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolProposed { .. }))
+        .collect();
+    assert!(proposals.len() >= 4);
+    assert!(proposals[3].sequence < starts[0].0);
+    assert!(starts[0].0 < first_finish && first_finish < starts[1].0);
     let reservations: Vec<_> = events
         .iter()
         .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
         .collect();
     assert_eq!(reservations.len(), 4);
     assert!(
-        reservations[1].sequence > starts[4].0,
+        reservations[1].sequence > starts[1].0,
         "the replacement restores request accounting before sibling reservation"
     );
 }
