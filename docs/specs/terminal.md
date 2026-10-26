@@ -210,9 +210,7 @@ conventions and the fixed account root. It runs without a Provider/account and
 writes its bounded text report to stdout; stderr carries fixed failures. A
 complete report succeeds, including explicitly absent roots. A partial/refused
 report exits unsuccessfully with any known subtotal clearly labelled; cancellation
-emits no complete report. Existing spill subtrees appear as separate `Output spill`
-rows with aggregate sizes and counts; individual Run and output names stay hidden.
-Coverage, byte semantics, exclusions, bounds and cleanup
+emits no complete report. Coverage, byte semantics, exclusions, bounds and cleanup
 non-effects belong to [Tools](./tools.md#local-storage-inventory).
 
 Idle `/storage` has no arguments and displays the same local report without
