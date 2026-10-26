@@ -537,7 +537,9 @@ pub(super) fn decode_run_failure_stage(
     bytes: &[u8],
     scope: &RunScope,
 ) -> crate::provider::diagnostics::SubscriptionFailureStage {
-    decode_run_staged(bytes, scope).1
+    let (result, stage, _) = decode_run_staged(bytes, scope);
+    assert!(result.is_err(), "failure-stage fixture must reject");
+    stage
 }
 
 #[cfg(test)]

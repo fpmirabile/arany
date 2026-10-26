@@ -1669,7 +1669,7 @@ fn decoded_messages_report_closed_failure_stages() {
                 "tool_use",
                 json!([
                     tool_use("toolu_one", "arany_read", json!({"path":"src/main.rs"})),
-                    tool_use("toolu_two", "arany_read", json!({"path":"src/lib.rs"}))
+                    tool_use("toolu_one", "arany_read", json!({"path":"src/lib.rs"}))
                 ]),
             )),
             Stage::OutcomeToolArguments,
