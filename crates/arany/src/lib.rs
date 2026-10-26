@@ -95,14 +95,15 @@ pub use session::{
     ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
     RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
     SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
-    ToolIntentRecord, ToolView, UsageGroup, UsageView, WorkspaceIdentity, escape_status_text,
+    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView, UsageGroup,
+    UsageView, WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
 pub use store::{
-    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, ProviderRecordEdit,
-    ProviderRecordTarget, RECORD_FORMATS, Record, RecordFormat, RecordKind, RecordStep, StateRoot,
-    Store, StoreError,
+    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, InspectedEvent,
+    InspectionCause, InspectionFailure, ProviderRecordEdit, ProviderRecordTarget, RECORD_FORMATS,
+    Record, RecordFormat, RecordKind, RecordStep, SessionInspection, StateRoot, Store, StoreError,
 };
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{

@@ -55,6 +55,7 @@ Load before running a git command or proposing a git step in a plan.
 - Use the [PR template](../.github/pull_request_template.md) for every PR, including CLI or API PRs; the publishing tool does not apply it. `Notes` is required when a [security-pass trigger](./security.md#security-pass-triggers) fires; passing tests are not a safety claim.
 - For issues created through the CLI or API, use the [bug report](../.github/ISSUE_TEMPLATE/bug_report.md) or [improvement/task](../.github/ISSUE_TEMPLATE/improvement.md) template.
 - Report skipped or blocked checks; do not claim checks that were not run.
+- From a plan, fill the template's `Slices` line under [slice delivery](../planning/PLANNING.md#slice-delivery).
 - After pushing, watch the PR's CI without waiting indefinitely.
 - Stacked PRs are fine: base the branch on its parent, open the PR against that parent, and when GitHub retargets it after the parent merges, push or re-run the workflow so CI covers the retargeted merge.
 

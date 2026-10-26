@@ -3454,14 +3454,15 @@ int main(int argc, char **argv) {
             let (root, mut attestation, listener) =
                 launch_helper(&mut unit, phase, source.path()).await;
             if matches!(phase, "storage" | "storage-drop" | "command-profile") {
-                crate::tools::fs::native(
-                    source.path(),
+                crate::tools::fs::mutate(
+                    &crate::tools::fs::open_directory(source.path()).unwrap(),
                     &ToolCall::Write {
                         path: "selected".into(),
                         expected_digest: Some(crate::validate::hex_digest(b"before edit")),
                         content: "after typed edit".into(),
                     },
                     &snapshot_runtime(source.path()).config,
+                    &crate::tools::fs::MutationControl::default(),
                 )
                 .unwrap();
             }

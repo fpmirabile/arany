@@ -9,7 +9,7 @@ use crate::session::{
     SessionDefaults, SessionId, SessionView,
 };
 use crate::tools::{
-    Attestation, EffectIntent, FileChange, FileVersion, ToolCall, ToolDisposition, ToolRuntime,
+    Attestation, FileChange, FileVersion, ToolCall, ToolDisposition, ToolObservation, ToolRuntime,
 };
 use crate::worker::{ChangesetSource, WorkerChangeset};
 use std::path::PathBuf;
@@ -476,8 +476,7 @@ impl Engine {
                 finished.outcome,
                 RewindOutcome::Restored | RewindOutcome::Uncertain
             ) {
-                finished.attestation =
-                    rewind_attestation(&started, &intent, observation.attestation.as_ref());
+                finished.attestation = rewind_attestation(&started, &observation);
                 if finished.attestation.is_some() {
                     finished.checkpoint = Some(checkpoint);
                 } else {
@@ -791,21 +790,39 @@ fn workspace_error(error: crate::store::StoreError) -> EngineError {
 }
 fn rewind_attestation(
     started: &RewindStarted,
-    intent: &EffectIntent,
-    attestation: Option<&Attestation>,
+    observation: &ToolObservation,
 ) -> Option<RewindAttestation> {
-    let Some(Attestation::Guard(receipt)) = attestation else {
-        return None;
-    };
-    if !receipt.valid_for(intent) {
+    let intent = &observation.intent;
+    if !observation.valid()
+        || intent.id != started.rewind_id
+        || intent.policy_digest != started.policy_digest
+        || intent.enforcement_digest != started.enforcement_digest
+        || (intent.workspace_device, intent.workspace_inode)
+            != (started.workspace_device, started.workspace_inode)
+        || !matches!(&intent.call, ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind { plan_digest, .. }
+        } if *plan_digest == started.plan_digest)
+    {
         return None;
     }
+    let attestation = observation.attestation.as_ref()?;
+    let receipt = match attestation {
+        Attestation::Guard(receipt) => serde_json::to_vec(receipt),
+        Attestation::InProcess { .. } => serde_json::to_vec(&(intent.digest(), attestation)),
+        Attestation::WorkerCommand { .. }
+        | Attestation::WorkerRead { .. }
+        | Attestation::WorkerMutation { .. }
+        | Attestation::WorkerData { .. }
+        | Attestation::Host(_)
+        | Attestation::Unguarded(_) => return None,
+    }
+    .ok()?;
     Some(RewindAttestation {
         plan_digest: started.plan_digest,
         workspace_device: started.workspace_device,
         workspace_inode: started.workspace_inode,
         enforcement_digest: started.enforcement_digest,
-        receipt_digest: crate::validate::digest(&serde_json::to_vec(receipt).ok()?),
+        receipt_digest: crate::validate::digest(&receipt),
     })
 }
 

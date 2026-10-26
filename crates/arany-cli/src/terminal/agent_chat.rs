@@ -320,8 +320,8 @@ impl AttachedTerminal {
             let admitted = composer.is_empty()
                 && !composer.has_open_menu()
                 && self.clipboard.is_none()
-                && !self.transcript_open
-                && !self.scrollback_dump;
+                && !self.transcript.transcript_open
+                && !self.transcript.scrollback_dump;
             return self.navigate(view, input, admitted).await;
         }
         if let Some(draft) = self.selected_child_draft_mut() {
@@ -1085,6 +1085,7 @@ impl AttachedTerminal {
             self.write_native_agent_chat()?;
             if let Some(text) = history_notice
                 && self
+                    .transcript
                     .native
                     .last_notice
                     .as_ref()
@@ -1094,11 +1095,13 @@ impl AttachedTerminal {
             {
                 let (kind, body) = notice_kind(text);
                 self.insert_native(kind, body, None)?;
-                self.native.last_notice = Some((view.last_sequence, text.to_owned()));
+                self.transcript.native.last_notice = Some((view.last_sequence, text.to_owned()));
             }
         } else if let Some(text) = history_notice {
             // The primary keeps the notice for when it is shown again.
-            self.history.record_notice(TerminalNotice::History(text));
+            self.transcript
+                .history
+                .record_notice(TerminalNotice::History(text));
         }
         let palette = self.palette();
         let armed = self.panels.dialog_armed;

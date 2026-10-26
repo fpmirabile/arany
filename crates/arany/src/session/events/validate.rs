@@ -52,7 +52,8 @@ impl Event {
             | Self::AgentSteeringNoteRecorded { .. }
             | Self::GoalFinished { .. }
             | Self::GoalProviderCallReserved { .. } => Event::validate_goal(self),
-            Self::ToolStarted { .. }
+            Self::ToolPreflightRefused { .. }
+            | Self::ToolStarted { .. }
             | Self::ToolActiveTimeReserved { .. }
             | Self::ToolFinished { .. }
             | Self::HookStarted { .. }

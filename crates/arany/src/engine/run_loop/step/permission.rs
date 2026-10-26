@@ -365,64 +365,11 @@ impl RunLoop<'_> {
         &self,
         call: &ToolCall,
     ) -> Result<Result<(), super::super::ProposalRefusalCause>, EngineError> {
-        let allowed = self.ledger().view(|v| {
-            v.runs.last().is_some_and(|r| {
-                let leases = r
-                    .agents
-                    .iter()
-                    .filter_map(|a| a.assignment.as_ref())
-                    .filter(|w| w.released.is_none())
-                    .flat_map(|w| &w.pins.request.lease)
-                    .collect::<Vec<_>>();
-                match call {
-                    ToolCall::ApplyChangeset {
-                        source: crate::worker::ChangesetSource::WorkerHandover { .. },
-                    } => true,
-                    ToolCall::Write { path, .. }
-                    | ToolCall::Edit { path, .. }
-                    | ToolCall::Delete { path, .. }
-                    | ToolCall::MultiEdit {
-                        file_path: path, ..
-                    }
-                    | ToolCall::Mkdir { path } => {
-                        !leases.iter().any(|l| crate::worker::overlaps(l, path))
-                    }
-                    ToolCall::Move {
-                        source,
-                        destination,
-                        ..
-                    } => ![source, destination]
-                        .iter()
-                        .any(|p| leases.iter().any(|l| crate::worker::overlaps(l, p))),
-                    ToolCall::ParseAgentDefinition { .. }
-                    | ToolCall::List { .. }
-                    | ToolCall::Read { .. }
-                    | ToolCall::Search { .. }
-                    | ToolCall::Command { .. }
-                    | ToolCall::CommandUnguarded { .. }
-                    | ToolCall::ApplyChangeset { .. }
-                    | ToolCall::PrepareWorker { .. }
-                    | ToolCall::McpList { .. }
-                    | ToolCall::McpCall { .. }
-                    | ToolCall::GitStatus { .. }
-                    | ToolCall::GitDiff { .. }
-                    | ToolCall::GitLog { .. }
-                    | ToolCall::GitCommit { .. }
-                    | ToolCall::GitBranch { .. }
-                    | ToolCall::GitSwitch { .. }
-                    | ToolCall::GitPush { .. }
-                    | ToolCall::GhPrCreate { .. }
-                    | ToolCall::GhPrList { .. }
-                    | ToolCall::GhPrView { .. }
-                    | ToolCall::Glob { .. }
-                    | ToolCall::Skill { .. } => !call.is_process() || leases.is_empty(),
-                }
-            })
-        })?;
-        Ok(if allowed {
-            Ok(())
-        } else {
-            Err(super::super::ProposalRefusalCause::LeaseOverlap)
+        self.ledger().view(|view| {
+            view.runs
+                .last()
+                .ok_or(super::super::ProposalRefusalCause::Phase)
+                .and_then(|run| crate::session::validate_primary_tool_lease(run, call))
         })
     }
 
@@ -903,6 +850,103 @@ mod host_prefix_tests {
 #[cfg(test)]
 mod reuse_tests {
     use super::*;
+
+    #[test]
+    fn agent_definition_modes_never_resolve_parent_asks_and_dont_ask_denies_them() {
+        use crate::tools::permissions::PermissionMode;
+        let read = ToolCall::Read {
+            path: "file".into(),
+            offset: None,
+            limit: Some(1),
+        };
+        let mut definition = crate::tools::definitions::AgentDefinition {
+            version: 1,
+            name: "reader".into(),
+            description: "Read".into(),
+            tools: None,
+            disallowed_tools: Vec::new(),
+            model: None,
+            permission_mode: None,
+            max_turns: crate::session::MAX_CHILD_TURNS,
+            isolation: None,
+            background: false,
+            body: String::new(),
+        };
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
+        ] {
+            definition.permission_mode = Some(mode);
+            for decision in [Decision::Allow, Decision::Ask, Decision::Deny] {
+                let permission = Permission {
+                    decision,
+                    basis: PermissionSource::Rule,
+                    approval: (decision == Decision::Ask).then_some(ApprovalMode::Request),
+                }
+                .narrow_definition(&definition, &read);
+                let expected = if mode == PermissionMode::DontAsk && decision == Decision::Ask {
+                    Decision::Deny
+                } else {
+                    decision
+                };
+                assert_eq!(permission.decision, expected);
+                assert_eq!(
+                    permission.approval,
+                    (expected == Decision::Ask).then_some(ApprovalMode::Request)
+                );
+            }
+        }
+        definition.permission_mode = Some(PermissionMode::Auto);
+        let catalog = ToolCall::McpList {
+            server: "server".into(),
+        };
+        let restriction = allow(PermissionSource::Rule).narrow_definition(&definition, &catalog);
+        assert_eq!(restriction.decision, Decision::Ask);
+        assert_eq!(restriction.basis, PermissionSource::Mode);
+        assert_eq!(restriction.approval, Some(ApprovalMode::Auto));
+    }
+
+    #[test]
+    fn typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review() {
+        let commit = ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec!["src/lib.rs".into()],
+            staged: false,
+        };
+        let typed = allow(PermissionSource::TypedPrefixRule);
+        for (mode, asks) in [
+            (ApprovalMode::Request, false),
+            (ApprovalMode::AutoEdits, false),
+            (ApprovalMode::Auto, true),
+        ] {
+            let narrowed = typed.narrow_terminal(Some(mode), &commit);
+            assert_eq!(narrowed.decision == Decision::Ask, asks, "{mode:?}");
+            if asks {
+                assert_eq!(narrowed.approval, Some(ApprovalMode::Auto));
+                assert_eq!(narrowed.basis, PermissionSource::Mode);
+            } else {
+                assert_eq!(narrowed.basis, PermissionSource::TypedPrefixRule);
+            }
+        }
+        let ordinary =
+            allow(PermissionSource::Rule).narrow_terminal(Some(ApprovalMode::Request), &commit);
+        assert_eq!(ordinary.decision, Decision::Ask);
+        let ask = Permission {
+            basis: PermissionSource::TypedPrefixRule,
+            ..asks(ApprovalMode::Request)
+        }
+        .narrow_terminal(Some(ApprovalMode::AutoEdits), &commit);
+        assert_eq!(
+            (ask.decision, ask.approval),
+            (Decision::Ask, Some(ApprovalMode::Request))
+        );
+        let deny = deny(PermissionSource::TypedPrefixRule)
+            .narrow_terminal(Some(ApprovalMode::Request), &commit);
+        assert_eq!(deny.decision, Decision::Deny);
+    }
 
     #[test]
     fn host_reuse_and_session_offers_share_eligibility() {

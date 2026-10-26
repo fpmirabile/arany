@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::{AgentRunId, CompactionRecord, PAYLOAD_VERSIONS, RunId};
 use crate::store::journal::{append, fork_session, open_connection};
-use crate::store::replay::resolve_open_view;
+use crate::store::replay::{MAX_SESSION_EVENTS, resolve_open_view};
 use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -650,8 +650,8 @@ fn fork_history(root: StateRoot, mut connection: Connection, source: SessionId) 
     }
 }
 
-fn rewind_history(path: &Path) -> History {
-    let (root, mut connection, source) = history_source(path, false, 0);
+fn rewind_history(path: &Path, renames: usize) -> History {
+    let (root, mut connection, source) = history_source(path, false, renames);
     let followup = crate::session::worker_compacted_fixture(false);
     let mut hot = None;
     for event in followup.events.iter().skip(1) {
@@ -1124,7 +1124,7 @@ fn migrate_run_started(version: i64) {
 fn rewind_v1_file_migrates_and_cold_replays_all_bound_prefixes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
-    let History { root, sessions } = rewind_history(&path);
+    let History { root, sessions } = rewind_history(&path, 0);
     let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
     let current_fork_digests = fork_digests(&connection);
     downgrade_rewind_started(&connection);
@@ -1183,7 +1183,7 @@ fn rewind_v1_file_migrates_and_cold_replays_all_bound_prefixes() {
 fn rewind_v1_forged_prefix_archives_history_intact() {
     let temp = tempfile::tempdir().unwrap();
     let forged_path = temp.path().join("forged");
-    let History { root: forged, .. } = rewind_history(&forged_path);
+    let History { root: forged, .. } = rewind_history(&forged_path, 0);
     let connection = Connection::open(forged_path.join(DATABASE_FILE)).unwrap();
     downgrade_rewind_started(&connection);
     forge_rewind_v1_digest(&connection);
@@ -1564,11 +1564,20 @@ fn unsupported_refused_or_forged_history_is_archived_intact() {
 fn replay_validation_bounds_aggregate_work_but_not_each_lineage() {
     let floor = started_floor();
     let registry = synthetic(&floor, &STARTED_STEP);
-    // Forks reload their ancestors: about 10,400 events in aggregate, under 10,000 per lineage.
-    for (limit, migrated) in [(MAX_VALIDATION_EVENTS, true), (5_000, false)] {
+    for (limit, migrated) in [(MAX_VALIDATION_EVENTS, true), (MAX_SESSION_EVENTS, false)] {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
-        let History { root, sessions } = history(&path, false, 3_400);
+        let History { root, sessions } = rewind_history(&path, 3_400);
+        let connection = open_connection(&root, false).unwrap();
+        let mut aggregate = 0;
+        for session in sessions {
+            let mut lineage = 0;
+            resolve_view(&connection, session, 0, &mut lineage).unwrap();
+            assert!(lineage <= MAX_SESSION_EVENTS);
+            aggregate += lineage;
+        }
+        assert!(aggregate > MAX_SESSION_EVENTS);
+        drop(connection);
         downgrade_started(&Connection::open(path.join(DATABASE_FILE)).unwrap(), true);
         let original = std::fs::read(path.join(DATABASE_FILE)).unwrap();
         VALIDATION_LIMIT.with(|bound| bound.set(limit));

@@ -2187,6 +2187,20 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         crate::test_support::recorded_tool_failure(unstarted.id).as_deref(),
         Some("Guard stage=connection deadline")
     );
+    let mut file = intent(ToolCall::Mkdir {
+        path: "src/new".into(),
+    });
+    file.enforcement_digest = FileReceipt::enforcement_digest();
+    let failed = super::unstarted_observation(file.clone(), super::ToolError::ChangedInput);
+    assert!(failed.valid() && failed.stops_run() && failed.attestation.is_none());
+    assert_eq!(
+        failed.output,
+        "File pinned input unavailable before dispatch; no operation was dispatched."
+    );
+    assert_eq!(
+        crate::test_support::recorded_tool_failure(file.id).as_deref(),
+        Some("File stage=pinned input")
+    );
     assert_eq!(
         crate::test_support::recorded_tool_failure(uuid::Uuid::now_v7()),
         None
@@ -5660,4 +5674,54 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
     assert_eq!(observed.disposition, ToolDisposition::Uncertain);
     assert!(observed.valid() && observed.stops_run());
     assert!(temp.path().join("cancelled").is_dir());
+    let mut denied = observed;
+    denied.disposition = ToolDisposition::Denied;
+    denied.enforcement_cause = Some(EnforcementCause::FilesystemDenied);
+    assert_eq!(
+        denied.enforcement_diagnostic(),
+        Some("File enforcement: protected path or set-ID entry refused")
+    );
+    assert_eq!(
+        super::types::model_observation(&denied)["enforcement_cause"],
+        denied.enforcement_diagnostic().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn workspace_file_versions_publish_in_process_with_intent_bound_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    let runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let path = "src/file";
+    let source_digest = [1; 32];
+    for call in [
+        json!({"operation":"write","path":path,"expected_digest":null,"content":"before"}),
+        json!({"operation":"edit","path":path,"expected_digest":hex_digest(b"before"),"old":"before","new":"middle"}),
+        json!({"operation":"multiedit","file_path":path,"expected_digest":hex_digest(b"middle"),"edits":[{"old_string":"middle","new_string":"after","replace_all":false}]}),
+        json!({"operation":"mkdir","path":"src/nested"}),
+        json!({"operation":"move","source":path,"destination":"src/nested/moved","expected_digest":hex_digest(b"after")}),
+        json!({"operation":"delete","path":"src/nested/moved","expected_digest":hex_digest(b"after")}),
+        json!({"operation":"apply_changeset","source":{"kind":"command_receipt","source_intent_digest":source_digest,"changeset":{"files":[{"path":path,"before":null,"after":FileVersion::from_bytes(b"published",false)}]}}}),
+    ] {
+        let call: ToolCall = serde_json::from_value(call).unwrap();
+        assert_eq!(call.facts().site, Site::InProcess);
+        assert_eq!(
+            runtime.reservation_overhead(&call),
+            std::time::Duration::ZERO
+        );
+        let observed = run_in_process(&runtime, call).await;
+        assert_eq!(
+            observed.disposition,
+            ToolDisposition::Succeeded,
+            "{observed:?}"
+        );
+        assert!(observed.valid());
+        assert!(
+            matches!(&observed.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.intent_digest == observed.intent.digest())
+        );
+    }
+    assert_eq!(std::fs::read(temp.path().join(path)).unwrap(), b"published");
 }

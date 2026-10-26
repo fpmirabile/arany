@@ -544,7 +544,7 @@ impl ToolRuntime {
             workspace_device: self.workspace_identity.device,
             workspace_inode: self.workspace_identity.inode,
             policy_digest: self.config.digest(),
-            enforcement_digest: self.enforcement_digest,
+            enforcement_digest: FileReceipt::enforcement_digest(),
         }
     }
 
@@ -1529,21 +1529,32 @@ impl ToolRuntime {
         bytes: std::sync::Arc<[u8]>,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        if let Err(error) = worker::decode_handover(&intent, &bytes, &self.config) {
-            return unstarted_observation(intent, error);
-        }
         let mut runtime = self.clone();
         runtime.handover = Some(bytes);
-        match guard::execute(&runtime, &intent, cancellation).await {
-            Ok(observation) => observation,
-            Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
-        }
+        runtime.run_file(intent, cancellation).await
+    }
+
+    pub(crate) async fn execute_concurrent_read(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::InProcess)).await
     }
 
     pub(crate) async fn execute(
         &self,
         intent: EffectIntent,
         cancellation: Cancellation,
+    ) -> ToolObservation {
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::Automatic)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+        reads: ReadDispatch,
     ) -> ToolObservation {
         if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
             && !self.guard_available
@@ -1598,7 +1609,10 @@ impl ToolRuntime {
             Site::InProcess if intent.call.facts().mutates => {
                 self.run_file(intent, cancellation).await
             }
-            Site::InProcess => self.run_read(intent, cancellation).await,
+            Site::InProcess => match reads {
+                ReadDispatch::Automatic => self.run_read(intent, cancellation).await,
+                ReadDispatch::InProcess => self.run_in_process(intent, cancellation).await,
+            },
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
@@ -1626,6 +1640,9 @@ impl ToolRuntime {
     }
 
     async fn run_file(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
+        if !self.guard_available {
+            return unstarted_observation(intent, ToolError::ProtectionUnavailable);
+        }
         if !fs::in_process_mutation(&intent) {
             return unstarted_observation(intent, ToolError::Configuration);
         }
@@ -1663,7 +1680,12 @@ impl ToolRuntime {
             let _permit = permit;
             let control = blocking_control;
             let root = runtime.pinned_root(&file_intent)?;
-            let result = fs::mutate(&root, &file_intent.call, &runtime.config, &control);
+            let result = if let Some(bytes) = &runtime.handover {
+                let changeset = worker::decode_handover(&file_intent, bytes, &runtime.config)?;
+                fs::apply_worker_changeset(&root, &changeset, &control)
+            } else {
+                fs::mutate(&root, &file_intent.call, &runtime.config, &control)
+            };
             Ok::<_, ToolError>(result)
         });
         let result = match tokio::time::timeout_at(deadline, writing).await {
@@ -1850,6 +1872,15 @@ impl ToolRuntime {
                 "In-process read capacity is full; nothing was read",
             );
         };
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return cancelled_read(intent),
+            ready = tokio::time::timeout_at(deadline, crate::fault::in_process_read(&intent)) => {
+                if ready.is_err() {
+                    return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+                }
+            },
+        }
         let (runtime, read_intent) = (self.clone(), intent.clone());
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1879,7 +1910,7 @@ impl ToolRuntime {
                 offset,
                 limit,
             } = &read_intent.call
-                && let Some(reference) = path.strip_prefix("spill:")
+                && let Some(reference) = spill::read_reference(path)
             {
                 let file = runtime
                     .spill_access
@@ -1965,6 +1996,11 @@ impl ToolRuntime {
         }
         observation
     }
+}
+
+enum ReadDispatch {
+    Automatic,
+    InProcess,
 }
 
 #[derive(Clone)]

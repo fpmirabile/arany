@@ -1079,7 +1079,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
                     if profile == "openai" {
                         assert_eq!(body["tool_choice"]["mode"], "auto");
-                        assert_eq!(body["parallel_tool_calls"], false);
+                        assert_eq!(body["parallel_tool_calls"], true);
                         json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[
                             {"type":"reasoning","id":format!("rs_native_{step}"),"summary":[],"encrypted_content":"CIPHERTEXT=="},
                             {"type":"function_call","id":format!("fc_native_{step}"),"call_id":format!("call_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"arguments":arguments.to_string(),"status":"completed"}
@@ -1303,7 +1303,7 @@ async fn offline_cargo_helper() {
         .iter()
         .find(|choice| choice.group == "Rust")
         .expect("one explicit private Rust toolchain");
-    assert!(!rust.selected);
+    assert!(rust.selected);
     permissions
         .remember_profiles(
             true,
@@ -1424,7 +1424,7 @@ const SPILL_SETTLE_WAIT: Duration = Duration::from_secs(10);
     ignore = "native Linux output capture and private spill paging"
 )]
 fn command_spill_pages_private_output_and_survives_reopen() {
-    if !super::super::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let _gate = crate::process::NATIVE_GATE
@@ -1562,13 +1562,28 @@ async fn assert_spill_session_scope(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum StallEnd {
+    Cancel,
+    Deadline,
+}
+
+impl StallEnd {
+    fn expected_outcome(self) -> (RunStatus, usize) {
+        match self {
+            Self::Cancel => (RunStatus::Cancelled, 2),
+            Self::Deadline => (RunStatus::Finished, 4),
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(
     not(arany_ci),
     ignore = "native Linux spill persistence cancellation and deadline"
 )]
 fn spill_persistence_stall_preserves_completed_effects_and_reopens() {
-    if !super::super::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let _gate = crate::process::NATIVE_GATE
@@ -1579,12 +1594,12 @@ fn spill_persistence_stall_preserves_completed_effects_and_reopens() {
         .enable_all()
         .build()
         .unwrap();
-    for cancelled in [true, false] {
-        reactor.block_on(spill_persistence_stall(cancelled));
+    for end in [StallEnd::Cancel, StallEnd::Deadline] {
+        reactor.block_on(spill_persistence_stall(end));
     }
 }
 
-async fn spill_persistence_stall(cancelled: bool) {
+async fn spill_persistence_stall(end: StallEnd) {
     let SpillFixture {
         _temp,
         workspace,
@@ -1595,6 +1610,11 @@ async fn spill_persistence_stall(cancelled: bool) {
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         arany::test_support::scenario::plan_outcome(proposal_plan_contract(&command).unwrap()),
         crate::tool_outcome(command),
+        crate::tool_outcome(ToolCall::Read {
+            path: "src/current.txt".into(),
+            offset: None,
+            limit: None,
+        }),
         ProviderOutcome::Answer(Answer {
             text: "Completed without spill".into(),
         }),
@@ -1617,35 +1637,33 @@ async fn spill_persistence_stall(cancelled: bool) {
             entered = tokio::time::timeout(SPILL_JOURNEY_WAIT, &mut entered) => entered.unwrap().unwrap(),
             outcome = &mut run => panic!("Run settled before spill persistence gate: {:?}", outcome.map(|result| result.run.status)),
         }
-        if cancelled {
-            cancellation.cancel();
-        } else {
-            let timeout = arany::limits::LIMITS
-                .rows
-                .iter()
-                .find(|limit| limit.name == "SPILL_PERSIST_TIMEOUT_MS")
-                .unwrap()
-                .value;
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_millis(timeout)).await;
-            tokio::time::resume();
+        match end {
+            StallEnd::Cancel => {
+                cancellation.cancel();
+            }
+            StallEnd::Deadline => {
+                let timeout = arany::limits::LIMITS
+                    .rows
+                    .iter()
+                    .find(|limit| limit.name == "SPILL_PERSIST_TIMEOUT_MS")
+                    .unwrap()
+                    .value;
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_millis(timeout)).await;
+                tokio::time::resume();
+            }
         }
         tokio::time::timeout(SPILL_SETTLE_WAIT, &mut run)
             .await
             .expect("spill persistence cannot hold the Run")
             .unwrap()
     };
-    assert_eq!(
-        outcome.run.status,
-        if cancelled {
-            RunStatus::Cancelled
-        } else {
-            RunStatus::Finished
-        }
-    );
+    let (expected_status, expected_requests) = end.expected_outcome();
+    assert_eq!(outcome.run.status, expected_status, "{end:?}");
     assert_eq!(
         provider.requests.lock().unwrap().len(),
-        if cancelled { 2 } else { 3 }
+        expected_requests,
+        "{end:?}"
     );
     assert_excerpt_only_success(&outcome.run);
     engine.close().await.unwrap();
@@ -1658,17 +1676,22 @@ async fn assert_spill_recovery(
     release: std::sync::mpsc::SyncSender<()>,
     finished: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let digest = Sha256::digest(serde_json::to_vec(&outcome.run.tools[0].intent).unwrap());
+    let reference = hash(&digest);
+    let path = state
+        .join("spill")
+        .join(outcome.run.id.to_string())
+        .join(format!("{reference}.txt"));
+    assert!(
+        path.exists(),
+        "stalled spill must exist before reopening the Store"
+    );
     let store = Store::open(StateRoot::open_existing(state).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
     let replay = SessionView::replay(outcome.session_id, &events)
         .unwrap()
         .unwrap();
     assert_eq!(replay.runs[0], outcome.run);
-    let reference = hash(&serde_json::to_vec(&outcome.run.tools[0].intent).unwrap());
-    let path = state
-        .join("spill")
-        .join(outcome.run.id.to_string())
-        .join(format!("{reference}.txt"));
     assert!(
         path.exists(),
         "open must skip a writer that still owns its lock"

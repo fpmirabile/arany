@@ -3843,19 +3843,12 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
     }
     for step in &view.runs[0].tools {
         let observation = step.observation.as_ref().unwrap();
-        if matches!(observation.intent.call, arany::ToolCall::Mkdir { .. }) {
-            assert!(matches!(
-                &observation.attestation,
-                Some(arany::Attestation::InProcess { receipt, .. })
-                    if receipt.is_some()
-                        == (observation.disposition == arany::ToolDisposition::Succeeded)
-            ));
-        } else {
-            assert!(matches!(
-                observation.attestation,
-                Some(arany::Attestation::Guard(_))
-            ));
-        }
+        assert!(matches!(
+            &observation.attestation,
+            Some(arany::Attestation::InProcess { receipt, .. })
+                if receipt.is_some()
+                    == (observation.disposition == arany::ToolDisposition::Succeeded)
+        ));
     }
     store.close().await.unwrap();
 }

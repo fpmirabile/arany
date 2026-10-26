@@ -16,6 +16,10 @@ use std::path::Path;
 mod approval;
 mod input;
 
+#[cfg(test)]
+#[path = "run/tests.rs"]
+mod focused_tests;
+
 use approval::{ApprovalPage, ApprovalUi};
 use input::{InputFailure, InputRoute, STEERING_SENT, settle_recorded_note};
 
@@ -223,6 +227,13 @@ pub(super) struct RunUi<'a> {
     pub(super) composer: &'a mut Composer,
 }
 
+#[derive(Default)]
+struct Drafts {
+    offered: Option<String>,
+    linear_offers: Vec<ComposerDraft>,
+    held: Option<HeldDraft>,
+}
+
 pub(super) struct RunProgress<'a> {
     admission: &'a Admission,
     starting_sequence: u64,
@@ -232,9 +243,7 @@ pub(super) struct RunProgress<'a> {
     approval_ui: ApprovalUi,
     stop: ActiveStop,
     user_recorded: bool,
-    offered: Option<String>,
-    linear_offers: Vec<ComposerDraft>,
-    held: Option<HeldDraft>,
+    drafts: Drafts,
     seen_delivered: u64,
     shown_retries: (Option<arany::RunId>, usize),
     exit_after_run: bool,
@@ -272,9 +281,7 @@ impl<'a> RunProgress<'a> {
                 approval_ui: ApprovalUi::default(),
                 stop: ActiveStop::Running,
                 user_recorded: false,
-                offered: None,
-                linear_offers: Vec::new(),
-                held: None,
+                drafts: Drafts::default(),
                 seen_delivered: 0,
                 shown_retries: (None, 0),
                 exit_after_run: false,
@@ -373,14 +380,14 @@ impl<'a> RunProgress<'a> {
         child_follow: bool,
     ) -> Result<(), String> {
         // An undelivered note ends the Run as an ordinary retained draft.
-        let had_offer = self.offered.is_some();
+        let had_offer = self.drafts.offered.is_some();
         let sent = settle_recorded_note(
             self.controls.delivered_notes().await?,
             &mut self.seen_delivered,
-            &mut self.offered,
+            &mut self.drafts.offered,
             ui.composer,
         );
-        let had_held = self.held.is_some();
+        let had_held = self.drafts.held.is_some();
         // The undelivered note predates the held draft, so restore it ahead of that draft.
         let note = self
             .controls
@@ -389,13 +396,15 @@ impl<'a> RunProgress<'a> {
             .filter(|_| ui.terminal.is_linear());
         let withdrawn = note.is_some();
         let mut restored = self
+            .drafts
             .held
             .take()
             .is_none_or(|draft| release_held_draft(ui.composer, draft));
         if let Some(note) = note {
-            restored &= ui
-                .composer
-                .restore_draft(ComposerDraft::from_steering_note(note, &self.linear_offers));
+            restored &= ui.composer.restore_draft(ComposerDraft::from_steering_note(
+                note,
+                &self.drafts.linear_offers,
+            ));
         }
         if (failed || had_offer || sent || had_held)
             && ui
@@ -473,7 +482,7 @@ impl<'a> RunProgress<'a> {
         let sent = settle_recorded_note(
             self.controls.delivered_notes().await?,
             &mut self.seen_delivered,
-            &mut self.offered,
+            &mut self.drafts.offered,
             ui.composer,
         );
         if sent
@@ -566,7 +575,7 @@ impl<'a> RunProgress<'a> {
                 .map_err(|_| InputFailure::Shutdown("terminal rendering failed".to_owned()))?;
         }
         if input == TerminalInput::EndOfInput {
-            if !ui.composer.is_empty() || self.held.is_some() {
+            if !ui.composer.is_empty() || self.drafts.held.is_some() {
                 return Ok(Some(Feedback::Transient(
                     draft_retained_notice(self.autonomous).into(),
                 )));
@@ -853,132 +862,6 @@ impl RunUi<'_> {
             }
         } else {
             self.terminal.draw_notice(self.view, self.composer, notice)
-        }
-    }
-}
-
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-    use arany::AdmittedProviders;
-    use arany::StateRoot;
-    use arany::test_support::{
-        engine::open,
-        goals::{assert_long_turn, facts_workspace, long_turn_provider, replayed},
-        scenario::request,
-    };
-    use std::{os::unix::fs::PermissionsExt, sync::Arc};
-
-    #[tokio::test]
-    async fn attached_defaults_complete_past_64_calls_and_30_active_minutes() {
-        for finite in [false, true] {
-            let temp = tempfile::tempdir().expect("private root");
-            let workspace = facts_workspace(temp.path(), "Fact");
-            let state = temp.path().join("state");
-            let engine = open(
-                StateRoot::admit(&state).expect("State"),
-                arany::EngineConfig {
-                    guard_executable: Some(std::env::current_exe().expect("test executable")),
-                    ..arany::EngineConfig::default()
-                },
-            )
-            .expect("Engine");
-            let config = state.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
-            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-                .expect("private config");
-            if finite {
-                let preferences = serde_json::json!({"version":6,"preferences":{
-                    "completion":"tabs","view":"fullscreen",
-                    "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-                    "resources":arany::ToolResourceSettings::default(),"copy_on_select":true,"newline":"shift_enter"
-                }});
-                StateRoot::open_existing(&state)
-                    .expect("State")
-                    .record(arany::RecordKind::UiPreferences)
-                    .replace(&serde_json::to_vec(&preferences).expect("settings"))
-                    .expect("finite settings");
-            }
-            let engine = Arc::new(engine);
-            let id = engine
-                .create_session(workspace.clone(), None)
-                .await
-                .expect("Session");
-            let (_, view) = replayed(&state, id).await;
-            let settings = super::super::controls::restore_settings_at(&state)
-                .await
-                .expect("missing settings");
-            let mut input = request(&workspace, "Inspect the folder");
-            input.session_id = Some(id);
-            input.title = None;
-            input.goal = super::super::active::goal_request(
-                &view,
-                super::super::active::GoalStart::Plain,
-                settings,
-            )
-            .expect("attached request");
-            let provider = Arc::new(long_turn_provider());
-
-            let result = embedded::run_with_providers(
-                &engine,
-                AdmittedProviders::single(provider.clone()),
-                input,
-                &state,
-                true,
-                None,
-                arany::ApprovalMode::AutoEdits,
-            )
-            .await
-            .expect("attached admission");
-            let outcome = finish_attempt(Ok(result), false).expect("attached completion");
-            assert_eq!(
-                outcome.run.assistant_message.as_deref(),
-                if finite {
-                    None
-                } else {
-                    Some("Long turn completed")
-                }
-            );
-            assert_eq!(
-                outcome.run.status,
-                if finite {
-                    arany::RunStatus::Failed
-                } else {
-                    arany::RunStatus::Finished
-                }
-            );
-            Arc::try_unwrap(engine)
-                .ok()
-                .expect("Engine released")
-                .close()
-                .await
-                .expect("shutdown");
-            let (events, view) = replayed(&state, id).await;
-            if finite {
-                assert_eq!(
-                    crate::presentation::run_feedback(&outcome.run).as_deref(),
-                    Some(
-                        "Error: Run failed. The Goal budget refused the next action. No answer was committed. Use /agents to inspect this Run."
-                    )
-                );
-                assert_eq!(view.goals[0].budget.max_provider_calls, Some(1));
-                assert_eq!(view.goals[0].provider_calls, 1);
-                assert!(matches!(
-                    events.last().expect("receipt").event,
-                    arany::Event::GoalFinished {
-                        exhausted: true,
-                        ..
-                    }
-                ));
-                assert!(view.runs[0].tools.is_empty());
-            } else {
-                assert_long_turn(&events, &view);
-                assert!(provider.responses.lock().expect("script").is_empty());
-            }
-            assert_eq!(
-                provider.requests.lock().expect("requests").len(),
-                if finite { 1 } else { 65 }
-            );
         }
     }
 }
@@ -2425,224 +2308,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod escape_tests {
-    use super::*;
-
-    #[test]
-    fn run_end_notice_never_claims_a_dropped_note_was_kept() {
-        assert_eq!(
-            run_end_notice(false, true, false),
-            Some(
-                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
-            )
-        );
-        assert_eq!(
-            run_end_notice(false, false, false),
-            Some(
-                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
-            )
-        );
-        assert_eq!(
-            run_end_notice(false, true, true),
-            Some("Steering note withdrawn; draft retained")
-        );
-        assert_eq!(run_end_notice(true, false, true), Some(STEERING_SENT));
-        assert_eq!(run_end_notice(false, false, true), None);
-    }
-
-    #[test]
-    fn escape_cancels_only_when_nothing_else_claims_it() {
-        let idle = |input, menu, clipboard, stop| active_escape(input, menu, clipboard, stop);
-        assert_eq!(
-            idle(TerminalInput::Escape, false, false, ActiveStop::Running),
-            TerminalInput::Interrupt
-        );
-        assert_eq!(
-            idle(TerminalInput::Escape, true, false, ActiveStop::Running),
-            TerminalInput::Escape,
-            "an open menu closes first"
-        );
-        assert_eq!(
-            idle(TerminalInput::Escape, false, true, ActiveStop::Running),
-            TerminalInput::Escape,
-            "a pending clipboard read is cancelled, not the Run"
-        );
-        assert_eq!(
-            idle(TerminalInput::Escape, false, false, ActiveStop::Cancelling),
-            TerminalInput::Escape,
-            "a second Escape never forces shutdown"
-        );
-        assert_eq!(
-            idle(TerminalInput::Interrupt, false, false, ActiveStop::Running),
-            TerminalInput::Interrupt
-        );
-    }
-}
-
-#[cfg(test)]
-mod approval_reply_tests {
-    use super::approval::linear_approval_choice;
-    use crate::presentation::ToolApprovalChoice::{
-        AutoEdits, ExactCommand, GitPrefix, HostPrefix, No, Yes,
-    };
-
-    #[test]
-    fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
-        let prefix = GitPrefix(arany::permissions::TypedGitPrefix::Branch);
-        for choices in [
-            vec![Yes, prefix, No],
-            vec![Yes, No],
-            vec![Yes, AutoEdits, No],
-            vec![Yes, ExactCommand, No],
-            vec![Yes, HostPrefix, No],
-        ] {
-            for (index, choice) in choices.iter().enumerate() {
-                assert_eq!(
-                    linear_approval_choice(&(index + 1).to_string(), &choices),
-                    Some(*choice)
-                );
-            }
-            for (answer, expected) in [
-                ("", Some(No)),
-                ("YES", Some(Yes)),
-                ("no", Some(No)),
-                ("allow", None),
-                ("always", None),
-                ("0", None),
-                ("4", None),
-            ] {
-                assert_eq!(linear_approval_choice(answer, &choices), expected);
-            }
-        }
-        assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
-        assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
-        assert_eq!(No.reply(), arany::ApprovalReply::Deny);
-        assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
-        assert_eq!(
-            HostPrefix.reply(),
-            arany::ApprovalReply::AllowPrefixInFolder
-        );
-    }
-}
-
-#[cfg(test)]
 mod driver_tests {
-    use super::super::active::session_with_goal;
     use super::*;
     use crate::terminal::ComposerEdit;
     use arany::SteeringRefused;
-
-    #[test]
-    fn end_of_input_waits_for_only_the_current_run_to_settle() {
-        let mut view = session_with_goal(false);
-        let starting_sequence = view.last_sequence;
-        assert!(!run_settled(&view, starting_sequence), "no current Run");
-        let mut run = arany::RunView {
-            skill: None,
-            supervisor: Default::default(),
-            workers: Default::default(),
-            id: arany::RunId::new(),
-            objective: "Fix".into(),
-            images: Vec::new(),
-            config: None,
-            provider_fallbacks: Vec::new(),
-            provider_retries: Vec::new(),
-            agents: Vec::new(),
-            assistant_message: None,
-            status: arany::RunStatus::Finished,
-            accepted_sequence: starting_sequence,
-            finished_sequence: Some(starting_sequence),
-            failure: None,
-            tools: Vec::new(),
-            tool_compaction_summary: None,
-            tool_compaction_recent_files: Vec::new(),
-            tool_compaction_covered_count: 0,
-            tool_results_cleared_count: 0,
-            definitions: Default::default(),
-            display: Vec::new(),
-            steering_notes: Vec::new(),
-            lifecycle_hooks: Vec::new(),
-            lifecycle_hook_sequence: None,
-            provider_sequences: Default::default(),
-        };
-        view.runs.push(run.clone());
-        assert!(
-            !run_settled(&view, starting_sequence),
-            "an earlier Run cannot defer exit"
-        );
-        run.accepted_sequence = starting_sequence + 1;
-        for (status, settled) in [
-            (arany::RunStatus::Pending, false),
-            (arany::RunStatus::Active, false),
-            (arany::RunStatus::Finished, true),
-            (arany::RunStatus::Failed, true),
-            (arany::RunStatus::Cancelled, true),
-        ] {
-            run.status = status;
-            *view.runs.last_mut().unwrap() = run.clone();
-            assert_eq!(run_settled(&view, starting_sequence), settled, "{status:?}");
-        }
-    }
-
-    #[test]
-    fn exit_waits_for_only_the_current_run_to_settle() {
-        let mut view = session_with_goal(false);
-        let starting_sequence = view.last_sequence;
-        let typed = |text: &str| {
-            let mut composer = Composer::default();
-            for character in text.chars() {
-                composer.apply(TerminalInput::Character(character));
-            }
-            composer
-        };
-        let exit = typed("/exit");
-        assert!(
-            !exits_after_settled_run(&exit, &view, starting_sequence),
-            "no current Run"
-        );
-        let mut run = arany::RunView {
-            skill: None,
-            supervisor: Default::default(),
-            workers: Default::default(),
-            id: arany::RunId::new(),
-            objective: "Fix".into(),
-            images: Vec::new(),
-            config: None,
-            provider_fallbacks: Vec::new(),
-            provider_retries: Vec::new(),
-            agents: Vec::new(),
-            assistant_message: None,
-            status: arany::RunStatus::Active,
-            accepted_sequence: starting_sequence + 1,
-            finished_sequence: None,
-            failure: None,
-            tools: Vec::new(),
-            tool_compaction_summary: None,
-            tool_compaction_recent_files: Vec::new(),
-            tool_compaction_covered_count: 0,
-            tool_results_cleared_count: 0,
-            definitions: Default::default(),
-            display: Vec::new(),
-            steering_notes: Vec::new(),
-            lifecycle_hooks: Vec::new(),
-            lifecycle_hook_sequence: None,
-            provider_sequences: Default::default(),
-        };
-        view.runs.push(run.clone());
-        assert!(
-            !exits_after_settled_run(&exit, &view, starting_sequence),
-            "an active Run keeps /exit refused"
-        );
-        run.status = arany::RunStatus::Finished;
-        *view.runs.last_mut().unwrap() = run;
-        assert!(exits_after_settled_run(&exit, &view, starting_sequence));
-        for other in ["/exit now", "/status", "exit"] {
-            assert!(
-                !exits_after_settled_run(&typed(other), &view, starting_sequence),
-                "{other}"
-            );
-        }
-    }
 
     #[test]
     fn steering_refusals_name_the_retained_draft_without_echoing_text() {

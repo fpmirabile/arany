@@ -21,8 +21,15 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 - Optimize for evidence per test, not count or coverage. Add a test only for a user-visible contract, durable or security invariant, protocol boundary, concurrency or failure mode, or demonstrated regression that no existing test catches with equally useful diagnostics.
 - State the owned claim and the defect the test catches. If it cannot be shown to fail for that defect, strengthen an existing test, type, or parser instead.
 - Prefer a row in an existing scenario, table, corpus, or failpoint harness over a new test function or file. Keep one authoritative owner per claim; duplicate it only for materially different process, platform, durability, or security evidence.
-- Refactors with unchanged behavior rely on existing tests. Do not test private helpers, getters, type-enforced facts, third-party behavior, or test-only abstractions; delete or merge tests a stronger owner subsumes.
+- Refactors with unchanged behavior rely on existing tests. Do not test private helpers, getters, type-enforced facts, third-party behavior, or test-only abstractions; [tests worth keeping](#tests-worth-keeping) governs pruning existing evidence.
 - Record completed checks in the handoff, PR, and CI. Keep only unresolved defects and missing verification in `NEXT_STEPS.md`, removing closed items.
+
+## Tests worth keeping
+
+A test earns its place by the claims [Evidence budget](#evidence-budget) admits: a spec scenario, a [non-negotiable guarantee](../AGENTS.md#non-negotiable-guarantees), a declared bound or its overflow, a protocol boundary, a concurrency, failure or recovery path, the [security coverage](#evidence-lanes) categories, a migration fixture, or a named regression. A test is junk only if it is a same-lane duplicate of a stronger owner (not materially different process, platform, durability or security evidence), or tests private helpers, getters or type-enforced facts. Reviewed goldens and wire or schema snapshots are contract evidence, not noise.
+
+- Junk is deleted only in a corpus-split PR. Each deleted test is listed with the junk category it meets and the surviving owner that asserts the same outcome in the same lane. A test in a keep category is never deleted without such an owner.
+- A test file past 3,000 lines takes no new test: add it to a focused owner beside the child it proves. Splitting the file is its own pure-move PR under the [test corpus pruning](../planning/test-corpus-pruning/README.md) plan. Such a PR may exceed the [slice ceiling](../planning/PLANNING.md#slice-delivery) only for moved blocks, reviewed with `git diff --color-moved=dimmed-zebra`. Its non-moved lines (deletions, imports, module glue, link edits) stay within the ceiling, and deletions sit in a separate commit listed per the rule above. Old and new nonzero `cargo test` counts, plus deleted count, are its evidence.
 
 ## User-visible proof
 
@@ -54,7 +61,7 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 
 ## Corpus placement
 
-Keep scenarios that launch `arany` or drive a terminal in `crates/arany-cli/tests/`: Session journeys stay in `crates/arany-cli/tests/session_run.rs`, and Guard-launching Engine cases belong to `crates/arany-cli/tests/guard_runs.rs`. In-process Engine, Session, Store, Provider and Tool scenarios stay in `crates/arany/tests/` or their owning module. Focused module tests use compact transition, boundary, hostile-input or parser tables only where the central journey cannot prove the claim.
+Keep scenarios that launch `arany` or drive a terminal in `crates/arany-cli/tests/`: Session journeys stay in `crates/arany-cli/tests/session_run.rs`, and Guard-launching Engine cases belong to `crates/arany-cli/tests/guard_runs.rs`. In-process Engine, Session, Store, Provider and Tool scenarios stay in `crates/arany/tests/` or their owning module. Focused module tests use compact transition, boundary, hostile-input or parser tables only where the central journey cannot prove the claim, and live beside the child module they prove (`x/phase.rs` or `x/phase/tests.rs`); a parent `x/tests.rs` holds only cross-child cases. [Tests worth keeping](#tests-worth-keeping) owns the split and pruning rule.
 
 Reuse shared process/Git fixtures and semantic Provider support through the library's `test-support` feature; do not copy fixture or Provider-rendering knowledge between corpora.
 
