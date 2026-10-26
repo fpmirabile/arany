@@ -83,4 +83,4 @@ Triggered: rendering user-controlled content, a new terminal query path and, in 
 
 - S1 and S2 merged with green CI; the four spec edits in place; the deferred emulator checks (kitty, Ghostty, Konsole, WezTerm, iTerm2, foot if S3 lands) listed once in NEXT_STEPS as user-owned dogfooding with the `.lavish/` show-file procedure.
 - Observed in tests: probe reply classification, `?1003` present only with a protocol and absent in every excluded mode, enter/leave frame counts, balloon geometry across 40/80/120 columns and a 12-row screen, byte-exact protocol output including chunking, cleanup bytes on every transition, and a motion burst that loses no key.
-- Closeout: delete this plan, remove NEXT_STEPS item 11 and the planning index row, keep the terminal spec as the only home ([planning lifecycle](../README.md#lifecycle)).
+- Closeout: delete this plan, remove the NEXT_STEPS "Image chip hover preview" item and the planning index row, keep the terminal spec as the only home ([planning lifecycle](../README.md#lifecycle)).
