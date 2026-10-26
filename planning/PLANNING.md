@@ -12,10 +12,20 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
   - **Implement:** land slices in order. If implementation contradicts the research, stop and update the plan before continuing.
 - Slice vertically. Each slice is a thin end-to-end increment, crossing every layer the feature touches (input or protocol, Engine, journal, Tools, presentation, spec and tests), that ships a behavior observable on its own and leaves the feature usable. Do not slice by layer (types first, all specs, then wiring) or by artifact. A refactor slices by flow: each slice moves one complete path and keeps observations byte-identical.
 - Resolve checkable facts before finalizing; turn remaining material uncertainty into a concrete open question. Sweep for `assume`, `probably`, `maybe`, `TBD`, `later` and `follow up`.
-- Each slice is one branch or PR, describable in one sentence, and leaves the repository coherent. Split a slice further only by risk, never by layer.
+- Each slice is one branch or PR under [slice delivery](#slice-delivery), describable in one sentence, and leaves the repository coherent. Split a slice further only by risk, never by layer.
 - Set status to `In progress` when implementation starts; for multi-PR plans keep only remaining work and the next action, and close completed plans under the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
 - Cite adjacent rules, specs and research instead of restating them. Match detail to the work: empty headings and repeated repository rules do not make a plan implementation-ready.
 - For behavior work, link the owning spec and its evidence owner and describe the successful path plus meaningful rejection, failure and recovery scenarios before implementation; the [spec workflow](../docs/specs/README.md) owns contract updates.
+
+## Slice delivery
+
+The unit of delivery, review and bookkeeping is the slice ID. A slice is at most 600 changed lines unless its plan records an owner exception.
+
+- A family of IDs is that many slices; narrowing a PR leaves the remaining IDs open. Only the branch under review delivers a slice.
+- A PR names the exact IDs it completes in its `Slices` line and nothing more. An ID delivered in part keeps its ID and stays listed as remaining in the plan.
+- The same PR updates the plan: remaining work, next action and the index row in `README.md`. A plan whose index row still lists an ID that merged, or omits one that did not, is a defect of that PR.
+- Reviewers check the claimed IDs against the diff and against the plan's slice text (files, inventory, ceiling, same-PR docs) before approving; an exit criterion wider than its inventory (a grep, a dependency-scan result) is checked by running it, not by reading the inventory.
+- The PR that closes a plan (normally its last slice) carries a checklist: one line per slice ID naming its merged PR, and one line per exit criterion naming the command or evidence and its result. An unmet criterion moves to `NEXT_STEPS.md` or a direct PR before the plan is deleted; it is never deleted with the plan. The [lifecycle](./README.md#lifecycle) owns what happens to the plan file.
 
 ## Harness-specific questions
 
