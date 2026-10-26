@@ -200,6 +200,26 @@ fn checked_child(parent: &Dir, child: &Dir) -> Result<(), StoreError> {
 
 pub(crate) const SWEEP_TIME_MS: u64 = 30_000;
 
+struct SweepBudget {
+    deadline: std::time::Instant,
+    remaining: usize,
+}
+
+impl SweepBudget {
+    fn spend(&mut self) -> bool {
+        if self.remaining == 0 || std::time::Instant::now() >= self.deadline {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+enum SweepProgress {
+    Continue,
+    BudgetExhausted,
+}
+
 pub(in crate::store) fn sweep(
     root: &StateRoot,
     connection: &rusqlite::Connection,
@@ -210,13 +230,15 @@ pub(in crate::store) fn sweep(
         Err(error) => return Err(error.into()),
     };
     checked_child(&root.dir, &spill)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(SWEEP_TIME_MS);
-    let mut remaining = crate::store::MAX_LIST_SCAN_EVENTS;
+    let mut budget = SweepBudget {
+        deadline: std::time::Instant::now() + std::time::Duration::from_millis(SWEEP_TIME_MS),
+        remaining: crate::store::MAX_LIST_SCAN_EVENTS,
+    };
     let mut owner = connection
         .prepare("SELECT session_id FROM events WHERE run_id=?1 AND kind='RunStarted' LIMIT 1")?;
     let mut references = connection.prepare("SELECT json_extract(payload, '$.spill.ref') FROM events WHERE run_id=?1 AND kind='ToolFinished'")?;
     for entry in spill.entries()?.take(crate::store::MAX_LIST_SCAN_EVENTS) {
-        if std::time::Instant::now() >= deadline {
+        if std::time::Instant::now() >= budget.deadline {
             return Ok(());
         }
         let entry = entry?;
@@ -254,50 +276,81 @@ pub(in crate::store) fn sweep(
             Err(StoreError::StateNotPrivate | StoreError::InvalidStateDirectory) => continue,
             Err(error) => return Err(error),
         }
-        let Ok(_writer) = writer_lock(&directory) else {
-            continue;
-        };
-        let mut kept = BTreeSet::new();
-        for reference in
-            references.query_map([run.to_string()], |row| row.get::<_, Option<String>>(0))?
-        {
-            if remaining == 0 || std::time::Instant::now() >= deadline {
-                return Ok(());
-            }
-            remaining -= 1;
-            if let Some(reference) = reference?
-                && crate::validate::valid_digest(&reference)
-            {
-                kept.insert(reference);
-            }
-        }
-        for entry in directory.entries()? {
-            if remaining == 0 || std::time::Instant::now() >= deadline {
-                return Ok(());
-            }
-            remaining -= 1;
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(reference) = name.to_str().and_then(|name| name.strip_suffix(".txt")) else {
-                continue;
-            };
-            if crate::validate::valid_digest(reference) && !kept.contains(reference) {
-                match directory.remove_file(&name) {
-                    Ok(()) => {}
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::NotFound
-                            || directory
-                                .symlink_metadata(&name)
-                                .is_ok_and(|metadata| !metadata.is_file()) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
+        match sweep_run(&directory, &mut references, run, &mut budget)? {
+            SweepProgress::Continue => {}
+            SweepProgress::BudgetExhausted => return Ok(()),
         }
     }
     Ok(())
+}
+
+fn sweep_run(
+    directory: &Dir,
+    references: &mut rusqlite::Statement<'_>,
+    run: RunId,
+    budget: &mut SweepBudget,
+) -> Result<SweepProgress, StoreError> {
+    let Ok(_writer) = writer_lock(directory) else {
+        return Ok(SweepProgress::Continue);
+    };
+    let mut kept = BTreeSet::new();
+    match committed_references(references, run, &mut kept, budget)? {
+        SweepProgress::Continue => remove_orphans(directory, &kept, budget),
+        SweepProgress::BudgetExhausted => Ok(SweepProgress::BudgetExhausted),
+    }
+}
+
+fn committed_references(
+    references: &mut rusqlite::Statement<'_>,
+    run: RunId,
+    kept: &mut BTreeSet<String>,
+    budget: &mut SweepBudget,
+) -> Result<SweepProgress, StoreError> {
+    for reference in
+        references.query_map([run.to_string()], |row| row.get::<_, Option<String>>(0))?
+    {
+        if !budget.spend() {
+            return Ok(SweepProgress::BudgetExhausted);
+        }
+        if let Some(reference) = reference?
+            && crate::validate::valid_digest(&reference)
+        {
+            kept.insert(reference);
+        }
+    }
+    Ok(SweepProgress::Continue)
+}
+
+fn remove_orphans(
+    directory: &Dir,
+    kept: &BTreeSet<String>,
+    budget: &mut SweepBudget,
+) -> Result<SweepProgress, StoreError> {
+    for entry in directory.entries()? {
+        if !budget.spend() {
+            return Ok(SweepProgress::BudgetExhausted);
+        }
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(reference) = name.to_str().and_then(|name| name.strip_suffix(".txt")) else {
+            continue;
+        };
+        if crate::validate::valid_digest(reference) && !kept.contains(reference) {
+            match directory.remove_file(&name) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || directory
+                            .symlink_metadata(&name)
+                            .is_ok_and(|metadata| !metadata.is_file()) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(SweepProgress::Continue)
 }
 
 #[cfg(test)]
@@ -318,7 +371,66 @@ fn fixture_write(access: &SpillAccess, reference: &str, bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::types::{CommandResult, OutputTotal};
+    use crate::tools::{
+        Attestation, CacheUpdate, EffectIntent, OutputSpill, ToolCall, ToolDisposition, ToolLimits,
+        ToolObservation,
+    };
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn spill_observation(run: RunId, content: &[u8]) -> ToolObservation {
+        let intent = EffectIntent {
+            host: None,
+            host_command: None,
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: run,
+            agent_run_id: crate::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Command {
+                program: "echo".into(),
+                args: Vec::new(),
+                cwd: String::new(),
+            },
+            limits: ToolLimits::default(),
+            use_count: 1,
+        };
+        let total = OutputTotal {
+            bytes: content.len() as u64,
+            lines: 1,
+        };
+        ToolObservation {
+            spill: Some(OutputSpill {
+                r#ref: crate::validate::hex_digest(&intent.digest()),
+                bytes: total.bytes,
+                truncated: false,
+                captured: None,
+            }),
+            attestation: Some(Attestation::for_site(&intent)),
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            enforcement_cause: None,
+            limit_cause: None,
+            output: serde_json::to_string(&CommandResult {
+                exit_code: Some(0),
+                stdout: format!(
+                    "\n…[{} bytes, 1 lines omitted; {} bytes, 1 lines total]…\n",
+                    total.bytes, total.bytes
+                ),
+                stderr: String::new(),
+                stdout_total: total,
+                stderr_total: OutputTotal::default(),
+                changeset: Default::default(),
+                selection: None,
+            })
+            .unwrap(),
+            approval_cause: None,
+            cache_update: CacheUpdate::Discarded,
+        }
+    }
 
     #[test]
     fn per_run_spill_cap_and_private_file_admission_remain_bounded() {
@@ -412,7 +524,8 @@ mod tests {
         lease.keep();
         let run = RunId::new();
         let access = root.admit_spills(run, &[]).unwrap();
-        let kept = "a".repeat(64);
+        let observation = spill_observation(run, b"committed output");
+        let kept = observation.spill.as_ref().unwrap().r#ref.clone();
         let orphan = "b".repeat(64);
         assert!(fixture_write(&access, &kept, b"committed output").unwrap());
         assert!(fixture_write(&access, &orphan, b"uncommitted output").unwrap());
@@ -458,7 +571,14 @@ mod tests {
                 [
                     session.to_string(),
                     run.to_string(),
-                    serde_json::json!({"spill":{"ref":kept}}).to_string(),
+                    Event::ToolFinished {
+                        checkpoint: None,
+                        run_id: run,
+                        agent_run_id: observation.intent.agent_run_id,
+                        observation,
+                    }
+                    .payload()
+                    .unwrap(),
                 ],
             )
             .unwrap();
