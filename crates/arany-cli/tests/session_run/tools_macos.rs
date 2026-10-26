@@ -966,7 +966,13 @@ async fn native_file_journey_helper() {
     assert_eq!(replay.runs[1], fresh_outcome.run);
     store.close().await.unwrap();
     trace_case(root, "refusal");
-    guard_refuses_before_go(root, &workspace, &outcome.run.tools[0].intent);
+    let discovery = outcome
+        .run
+        .tools
+        .iter()
+        .find(|tool| matches!(tool.intent.call, ToolCall::List { .. }))
+        .expect("recorded Guard discovery intent");
+    guard_refuses_before_go(root, &workspace, &discovery.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
 }
 
@@ -2617,6 +2623,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
+        ("workspace_write", "admission"),
         ("missing_preparation", "admission"),
         ("invalid_go", "admission"),
         ("early_go", "admission"),
@@ -2631,10 +2638,14 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         let mut intent = admitted.clone();
         intent.id = uuid::Uuid::now_v7();
         intent.policy_digest = Sha256::digest(config_bytes).into();
-        intent.call = ToolCall::Write {
-            path: "src/never-dispatched.txt".into(),
-            expected_digest: None,
-            content: "must not be created".into(),
+        intent.call = if case == "workspace_write" {
+            ToolCall::Write {
+                path: "src/never-dispatched.txt".into(),
+                expected_digest: None,
+                content: "must not be created".into(),
+            }
+        } else {
+            ToolCall::List { path: "src".into() }
         };
         if case == "stale_workspace" {
             intent.workspace_inode += 1;
