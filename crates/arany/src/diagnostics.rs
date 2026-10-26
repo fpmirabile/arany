@@ -1,4 +1,3 @@
-use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage};
 use crate::store::StateRoot;
 use std::fmt::{self, Write};
 use std::sync::{Mutex, OnceLock};
@@ -35,6 +34,7 @@ pub enum DevelopmentFailure {
     AttachedExit,
     ExecExit,
     Output,
+    OutputSpill,
 }
 
 /// Records a closed local failure after diagnostics have been enabled.
@@ -42,202 +42,6 @@ pub fn record_development_failure(stage: DevelopmentFailure) {
     let mut record = BoundedRecord(String::new());
     let _ = writeln!(record, "runtime stage={stage:?}");
     record_local(record);
-}
-
-pub(crate) fn stream_limit(bytes: usize, events: usize) {
-    record_local(stream_limit_record(bytes, events));
-}
-
-fn stream_limit_record(bytes: usize, events: usize) -> BoundedRecord {
-    let mut record = BoundedRecord(String::new());
-    let _ = writeln!(
-        record,
-        "stream reason=StreamProtocol stage=StreamLimit bytes={bytes} events={events}"
-    );
-    record
-}
-
-pub(crate) fn subscription_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(root) = ROOT.get() else { return };
-    let Ok(root) = root.try_lock() else { return };
-    write_failure(&root, stage, counts);
-}
-
-pub(crate) fn messages_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(root) = ROOT.get() else { return };
-    let Ok(root) = root.try_lock() else { return };
-    write_record(&root, BoundedRecord(messages_failure_record(stage, counts)));
-}
-
-pub(crate) fn messages_failure_record(
-    stage: SubscriptionFailureStage,
-    counts: StreamCounts,
-) -> String {
-    failure_record("messages", stage, counts).0
-}
-
-fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: StreamCounts) {
-    write_record(root, failure_record("subscription", stage, counts));
-}
-
-fn failure_record(
-    site: &str,
-    stage: SubscriptionFailureStage,
-    counts: StreamCounts,
-) -> BoundedRecord {
-    let mut record = BoundedRecord(String::new());
-    let _ = writeln!(
-        record,
-        "{site} stage={stage:?} bytes={} events={} http_status={:?}",
-        counts.bytes, counts.events, counts.http_status
-    );
-    if let Some(shape) = counts.response_shape {
-        let _ = writeln!(
-            record,
-            "response_shape messages={} commentary={} finals={} unphased={} done_messages={} done_finals={}",
-            shape.messages,
-            shape.commentary,
-            shape.finals,
-            shape.unphased,
-            shape.done_messages,
-            shape.done_finals,
-        );
-    }
-    if let Some(shape) = counts.tool_arguments {
-        let _ = writeln!(record, "tool_arguments {shape:?}");
-    }
-    record
-}
-
-pub(crate) fn tool_context_full(
-    request: &crate::provider::ProviderRequest,
-    window_tokens: Option<u32>,
-    tool_allowance_bytes: usize,
-    pending_turn_bytes: usize,
-) {
-    if enabled() {
-        record_local(context_record(
-            request,
-            window_tokens,
-            tool_allowance_bytes,
-            pending_turn_bytes,
-        ));
-    }
-}
-
-fn context_record(
-    request: &crate::provider::ProviderRequest,
-    window_tokens: Option<u32>,
-    tool_allowance_bytes: usize,
-    pending_turn_bytes: usize,
-) -> BoundedRecord {
-    let input = &request.input;
-    let mut components = vec![
-        ("objective", input.objective.len()),
-        (
-            "instructions",
-            input
-                .workspace_guidance
-                .iter()
-                .map(|value| crate::provider::instructions_text(&value.path, &value.text).len())
-                .sum(),
-        ),
-        ("includes", input.includes.iter().map(String::len).sum()),
-        (
-            "history",
-            input
-                .history
-                .iter()
-                .map(|turn| turn.user.len() + turn.assistant.len() + 64)
-                .sum(),
-        ),
-        (
-            "summary",
-            input.context_summary.as_ref().map_or(0, String::len),
-        ),
-        (
-            "tools",
-            input
-                .tools
-                .as_ref()
-                .map_or(0, crate::tools::ToolContext::rendered_len),
-        ),
-        ("pending_turn", pending_turn_bytes),
-        (
-            "images",
-            input
-                .images
-                .iter()
-                .map(|value| value.image.context_bytes())
-                .sum(),
-        ),
-        (
-            "steering",
-            input.steering_notes.iter().map(String::len).sum(),
-        ),
-        (
-            "goal",
-            serde_json::to_string(&(
-                &input.goal_budget,
-                &input.goal_plan_contract,
-                &input.goal_context_facts,
-            ))
-            .map_or(0, |value| value.len()),
-        ),
-    ];
-    let estimated_bytes = components.iter().map(|(_, bytes)| bytes).sum::<usize>();
-    components.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
-    let mut record = BoundedRecord(String::new());
-    // Only a bounded model identifier is permitted; all conversation and Tool values stay private.
-    let model = if request.model.len() <= 128
-        && request
-            .model
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
-    {
-        request.model.as_str()
-    } else {
-        "unreported"
-    };
-    let _ = writeln!(
-        record,
-        "context cause=ToolContextFull model={model} window_tokens={window_tokens:?} ceiling_bytes={} tool_allowance_bytes={tool_allowance_bytes} estimated_content_bytes={estimated_bytes} estimated_content_tokens={} max_output_tokens={}",
-        crate::session::content_ceiling(window_tokens),
-        estimated_bytes.div_ceil(3),
-        request.max_output_tokens,
-    );
-    for (label, bytes) in components {
-        let _ = writeln!(record, "component={label} bytes={bytes}");
-    }
-    if let Some(context) = &input.tools {
-        let largest_turn = context
-            .steps
-            .iter()
-            .map(|step| step.turn.len())
-            .max()
-            .unwrap_or(0);
-        let largest_result = context
-            .steps
-            .iter()
-            .flat_map(|step| {
-                (0..step.observations.len())
-                    .map(move |index| context.model_result(step, index).to_string().len())
-            })
-            .max()
-            .unwrap_or(0);
-        let _ = writeln!(
-            record,
-            "catalog_bytes={} largest_turn_bytes={largest_turn} largest_result_bytes={largest_result}",
-            context.catalog().len()
-        );
-    }
-    record
 }
 
 pub(crate) fn event_failure(event: &crate::session::Event) {
@@ -389,7 +193,7 @@ pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) 
     record_local(record);
 }
 
-fn record_local(record: BoundedRecord) {
+pub(crate) fn record_local(record: BoundedRecord) {
     if !cfg!(debug_assertions) {
         return;
     }
@@ -428,7 +232,14 @@ fn write_record(root: &StateRoot, details: BoundedRecord) {
     let _ = root.append_development_diagnostic(record.0.as_bytes());
 }
 
-struct BoundedRecord(String);
+#[derive(Default)]
+pub(crate) struct BoundedRecord(String);
+
+impl fmt::Display for BoundedRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 impl Write for BoundedRecord {
     fn write_str(&mut self, text: &str) -> fmt::Result {
@@ -449,76 +260,13 @@ impl Write for BoundedRecord {
 
 #[cfg(all(test, unix))]
 mod tests {
-    #[test]
-    fn stream_limit_record_names_the_reason_stage_and_counts() {
-        assert_eq!(
-            stream_limit_record(1024, 12).0,
-            "stream reason=StreamProtocol stage=StreamLimit bytes=1024 events=12\n"
-        );
-    }
-
-    #[test]
-    fn failure_record_names_site_stage_and_observed_status() {
-        assert_eq!(
-            failure_record(
-                "messages",
-                SubscriptionFailureStage::OutcomeToolArguments,
-                StreamCounts {
-                    bytes: 2048,
-                    events: 9,
-                    http_status: Some(200),
-                    ..Default::default()
-                },
-            )
-            .0,
-            "messages stage=OutcomeToolArguments bytes=2048 events=9 http_status=Some(200)\n"
-        );
-    }
-
-    use crate::provider::diagnostics::ToolArgumentShape;
+    use crate::provider::diagnostics::{
+        StreamCounts, SubscriptionFailureStage, ToolArgumentShape, failure_record,
+    };
 
     use super::test_process::BoundedOutput;
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-
-    #[test]
-    fn context_diagnostic_reports_sizes_without_conversation_values() {
-        let mut input = crate::provider::RunInput::new(
-            crate::provider::PromptRole::Primary,
-            "private-objective-canary".into(),
-        );
-        input.includes.push("private-include-canary".repeat(100));
-        input.tools = Some(crate::tools::ToolContext::new(serde_json::json!({
-            "private-catalog-canary": "private-value-canary"
-        })));
-        input.history.push(crate::provider::HistoryTurn {
-            user: "private-history-canary".into(),
-            assistant: "private-answer-canary".into(),
-        });
-        let request = crate::provider::ProviderRequest {
-            session_id: Default::default(),
-            run_id: Default::default(),
-            agent_run_id: Default::default(),
-            phase: crate::provider::AgentPhase::RootPlan,
-            collaboration: crate::session::CollaborationPolicy::Single,
-            model: "gpt-6-luna".into(),
-            max_output_tokens: 16_384,
-            input,
-        };
-        for window in [None, Some(272_000)] {
-            let record = context_record(&request, window, 16_896, 1234).0;
-            assert!(record.contains("model=gpt-6-luna"));
-            assert!(record.contains(&format!("window_tokens={window:?}")));
-            assert!(record.contains("tool_allowance_bytes=16896"));
-            assert!(record.contains("component=pending_turn bytes=1234"));
-            assert!(record.contains("estimated_content_tokens="));
-            assert!(
-                record.find("component=includes").unwrap()
-                    < record.find("component=history").unwrap()
-            );
-            assert!(!record.contains("canary") && !record.contains("private-"));
-        }
-    }
 
     #[test]
     fn diagnostic_file_is_bounded_private_and_rejects_aliases() {
@@ -578,13 +326,16 @@ mod tests {
             old: CANARY.into(),
             new: CANARY.into(),
         };
-        write_failure(
+        write_record(
             &root,
-            SubscriptionFailureStage::OutcomeToolDigest,
-            StreamCounts {
-                tool_arguments: Some(ToolArgumentShape::from_call(&call)),
-                ..StreamCounts::default()
-            },
+            failure_record(
+                "subscription",
+                SubscriptionFailureStage::OutcomeToolDigest,
+                StreamCounts {
+                    tool_arguments: Some(ToolArgumentShape::from_call(&call)),
+                    ..StreamCounts::default()
+                },
+            ),
         );
         let shape_log = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -602,13 +353,16 @@ mod tests {
             body: CANARY.into(),
             draft: false,
         };
-        write_failure(
+        write_record(
             &root,
-            SubscriptionFailureStage::OutcomeToolDigest,
-            StreamCounts {
-                tool_arguments: Some(ToolArgumentShape::from_call(&host)),
-                ..StreamCounts::default()
-            },
+            failure_record(
+                "subscription",
+                SubscriptionFailureStage::OutcomeToolDigest,
+                StreamCounts {
+                    tool_arguments: Some(ToolArgumentShape::from_call(&host)),
+                    ..StreamCounts::default()
+                },
+            ),
         );
         tool_failure("host", &crate::tools::ToolError::Operation);
         record_development_failure(DevelopmentFailure::ProviderAdmission);
