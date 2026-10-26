@@ -1,6 +1,7 @@
+use super::custom::{CustomRouteContext, add_custom_route, edit_custom_route, remove_custom_route};
 use super::{
-    SetupError, SetupJournal, SetupSelection, add_custom_route, check_custom_route, choose,
-    custom_profile_choices, edit_custom_route, inspect_custom_route, remove_custom_route,
+    SetupError, SetupJournal, SetupSelection, check_custom_route, choose, custom_profile_choices,
+    inspect_custom_route,
 };
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
@@ -48,14 +49,6 @@ enum CustomRouteResult {
     Continue,
     Leave,
     Select(SetupSelection),
-}
-
-pub(super) struct CustomRouteContext<'a> {
-    pub(super) state_dir: &'a Path,
-    pub(super) state: &'a StateRoot,
-    pub(super) expected: Option<&'a [u8]>,
-    pub(super) profiles: &'a [CustomProfile],
-    pub(super) journal: &'a mut SetupJournal,
 }
 
 async fn custom_route_selection(
