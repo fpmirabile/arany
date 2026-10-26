@@ -1383,6 +1383,20 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
 }
 
 impl ToolObservation {
+    pub(super) fn cache_publication_eligible(&self) -> bool {
+        self.intent.target == EffectTarget::Workspace
+            && self.intent.call.is_process()
+            && self.attestation.is_some()
+            && (self.disposition == ToolDisposition::Succeeded
+                || self.disposition == ToolDisposition::Limit
+                    && self.limit_cause == Some(LimitCause::Timeout)
+                    && matches!(self.attestation, Some(Attestation::Guard(_)))
+                    && matches!(self.intent.call, ToolCall::Command { .. })
+                    && self.intent.limits.resource_class == ToolResourceClass::Build
+                    && serde_json::from_str::<CommandResult>(&self.output)
+                        .is_ok_and(|result| result.valid() && result.changeset.files.is_empty()))
+    }
+
     pub fn enforcement_diagnostic(&self) -> Option<&'static str> {
         self.enforcement_cause.map(|cause| {
             if cause == EnforcementCause::FilesystemDenied
@@ -1432,6 +1446,9 @@ impl ToolObservation {
                     && self.attestation.is_none()
                     && self.cache_update == CacheUpdate::NotApplicable)
             && (self.limit_cause.is_some() == (self.disposition == ToolDisposition::Limit))
+            && (self.disposition != ToolDisposition::Limit
+                || self.attestation.is_some()
+                || self.cache_update == CacheUpdate::NotApplicable)
             && (private_command
                 || !matches!(
                     self.intent.call,
@@ -1547,10 +1564,7 @@ impl ToolObservation {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
                 CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
-                    !private_command
-                        && self.intent.call.is_process()
-                        && self.attestation.is_some()
-                        && self.disposition == ToolDisposition::Succeeded
+                    self.cache_publication_eligible()
                 }
             }
     }
