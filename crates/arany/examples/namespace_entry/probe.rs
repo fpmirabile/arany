@@ -134,10 +134,9 @@ fn executable_identity(path: &str) -> Result<()> {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     println!(
-        "executable={path:?} dev={} ino={} uid={} sha256={digest}",
+        "executable={path:?} dev={} ino={} sha256={digest}",
         metadata.dev(),
-        metadata.ino(),
-        metadata.uid()
+        metadata.ino()
     );
     Ok(())
 }
