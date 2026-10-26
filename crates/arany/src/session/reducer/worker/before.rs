@@ -561,7 +561,41 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::ProviderRetryScheduled { .. }
         | Event::WorkerHandoverRecorded { .. }
         | Event::WorkerVerificationRecorded { .. } => return Err(ReplayError::InvalidTransition),
-        _ => {}
+        Event::WorkspaceRewindStarted { .. }
+        | Event::WorkspaceRewindFinished { .. }
+        | Event::SessionStarted { .. }
+        | Event::SessionDefaultChanged { .. }
+        | Event::SessionForked { .. }
+        | Event::ContextCompacted { .. }
+        | Event::SessionRenamed { .. }
+        | Event::ProviderSetupEditStarted { .. }
+        | Event::ProviderSetupEditFinished { .. }
+        | Event::GoalStarted { .. }
+        | Event::GoalRunLinked { .. }
+        | Event::GoalResumed { .. }
+        | Event::GoalPlanContractRecorded { .. }
+        | Event::GoalFinished { .. }
+        | Event::MessageAccepted { .. }
+        | Event::RunStarted { .. }
+        | Event::ProviderCallRecorded { .. }
+        | Event::GoalCompactionCallReserved { .. }
+        | Event::ToolResultsCleared { .. }
+        | Event::GoalContextCompacted { .. }
+        | Event::GoalSteeringNoteRecorded { .. }
+        | Event::AgentSteeringNoteRecorded { .. }
+        | Event::AssistantDisplayRecorded { .. }
+        | Event::SupervisorVerdictRecorded { .. }
+        | Event::HookStarted { .. }
+        | Event::HookFinished { .. }
+        | Event::AgentFinished { .. }
+        | Event::WorkerDataChunk { .. }
+        | Event::WorkerDataSealed { .. }
+        | Event::WorkerIntegrationRecorded { .. }
+        | Event::WorkerHandoverDiscarded { .. }
+        | Event::WorkerLeaseReleased { .. }
+        | Event::WorkerStopObserved { .. }
+        | Event::MessageCommitted { .. }
+        | Event::RunFinished { .. } => {}
     }
     Ok(())
 }
