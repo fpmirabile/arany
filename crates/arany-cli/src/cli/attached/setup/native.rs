@@ -178,10 +178,7 @@ pub(super) async fn settle_native_removal(
                 .await
         }
         Err(error) => {
-            let disposition = if matches!(
-                error,
-                CredentialError::DeleteOutcomeUnknown | CredentialError::WriteOutcomeUnknown
-            ) {
+            let disposition = if error.outcome_unknown() {
                 ProviderSetupDisposition::Uncertain
             } else {
                 ProviderSetupDisposition::Failed
@@ -251,10 +248,7 @@ pub(super) async fn reset_saved_setup(
                 .await?;
         }
         Err(error) => {
-            let uncertain = matches!(
-                &error,
-                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
-            );
+            let uncertain = error.outcome_unknown();
             let disposition = if uncertain {
                 ProviderSetupDisposition::Uncertain
             } else {

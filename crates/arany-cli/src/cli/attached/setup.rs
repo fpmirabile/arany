@@ -1948,11 +1948,7 @@ async fn settle_native_save(
                 .await?;
         }
         Err(error) => {
-            let uncertain = matches!(
-                &error,
-                CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
-            );
-            let disposition = if uncertain {
+            let disposition = if error.outcome_unknown() {
                 ProviderSetupDisposition::Uncertain
             } else {
                 ProviderSetupDisposition::Failed
