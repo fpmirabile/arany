@@ -187,10 +187,10 @@ impl GoalView {
                         && run
                             .tools
                             .iter()
-                            .all(|t| t.settled_without_stop() || matches!(&t.intent.call, crate::tools::ToolCall::PrepareWorker { preparation } if preparation.purpose == super::worker::WorkerDataPurpose::Base))
+                            .all(|t| (t.started_sequence.is_none() || t.settled_without_stop()) || matches!(&t.intent.call, crate::tools::ToolCall::PrepareWorker { preparation } if preparation.purpose == super::worker::WorkerDataPurpose::Base))
                         && run.agents.iter().all(|agent| {
                             agent.tools.iter().all(|t| {
-                                t.settled_without_stop()
+                                t.started_sequence.is_none() || t.settled_without_stop()
                                     || agent.assignment.as_ref().is_some_and(|w| {
                                         matches!(agent.grant, Some(super::ChildGrant::EditOnly { .. }))
                                             && matches!(t.intent.target, super::worker::EffectTarget::WorkerView { assignment_id, base_digest, .. } if assignment_id == agent.id && base_digest == w.pins.base.sha256)
@@ -459,6 +459,7 @@ pub struct ToolView {
     pub intent: crate::tools::EffectIntent,
     pub observation: Option<crate::tools::ToolObservation>,
     pub review_call_index: Option<u32>,
+    pub started_sequence: Option<u64>,
     pub permission_verdict: Option<crate::tools::permissions::PermissionVerdict>,
     pub active_time_reserved: bool,
     pub narrowing_source: Option<[u8; 32]>,
@@ -475,10 +476,29 @@ pub struct HookView {
     pub(crate) idle: bool,
 }
 
+impl HookView {
+    pub(crate) fn outcome_unknown(&self) -> bool {
+        self.outcome.as_ref().is_none_or(|outcome| {
+            outcome.observation.disposition == crate::tools::ToolDisposition::Uncertain
+                || outcome.observation.cache_update == crate::tools::CacheUpdate::Uncertain
+        })
+    }
+}
+
 impl ToolView {
+    pub(crate) fn outcome_unknown(&self) -> bool {
+        self.started_sequence.is_some()
+            && self.observation.as_ref().is_none_or(|observation| {
+                observation.disposition == crate::tools::ToolDisposition::Uncertain
+                    || observation.cache_update == crate::tools::CacheUpdate::Uncertain
+            })
+            || self.hooks.iter().any(HookView::outcome_unknown)
+    }
+
     fn dispatch_in_progress(&self) -> bool {
         self.observation.is_none()
-            && (self.active_time_reserved
+            && (self.started_sequence.is_some()
+                || self.active_time_reserved
                 || self.permission_verdict.is_some()
                 || !self.hooks.is_empty()
                 || self.review_call_index.is_some())
@@ -1252,7 +1272,7 @@ impl SessionView {
             .is_some_and(|run| run.status == RunStatus::Active && run.hook_stop_reason().is_some())
             && matches!(
                 envelope.event,
-                Event::ToolStarted { .. }
+                Event::ToolProposed { .. }
                     | Event::ToolActiveTimeReserved { .. }
                     | Event::HookStarted { .. }
                     | Event::GoalProviderCallReserved { .. }
@@ -1358,7 +1378,7 @@ impl SessionView {
             Event::ToolStarted { .. }
             | Event::ToolActiveTimeReserved { .. }
             | Event::ToolFinished { .. }
-            | Event::ToolPermissionDecided { .. }
+            | Event::ToolProposed { .. }
             | Event::HookStarted { .. }
             | Event::HookFinished { .. } => tool::apply(current, &envelope.event, prior)?,
         }
@@ -1439,15 +1459,20 @@ impl SessionView {
             .rev()
             .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
             .is_some_and(|run| {
-                run.tools
-                    .iter()
-                    .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
-                    .all(|tool| {
-                        tool.observation.as_ref().is_some_and(|observation| {
-                            observation.disposition != crate::tools::ToolDisposition::Uncertain
-                                && observation.cache_update != crate::tools::CacheUpdate::Uncertain
+                run.hooks_settled()
+                    && run
+                        .tools
+                        .iter()
+                        .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                        .all(|tool| {
+                            tool.started_sequence.is_none()
+                                || tool.observation.as_ref().is_some_and(|observation| {
+                                    observation.disposition
+                                        != crate::tools::ToolDisposition::Uncertain
+                                        && observation.cache_update
+                                            != crate::tools::CacheUpdate::Uncertain
+                                })
                         })
-                    })
             })
             .then_some(latest)
     }

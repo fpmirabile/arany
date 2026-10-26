@@ -86,7 +86,8 @@ impl RunView {
                     .tools
                     .iter()
                     .find_map(|t| {
-                        if !matches!(&t.intent.call, ToolCall::ApplyChangeset {
+                        if t.started_sequence.is_none()
+                            || !matches!(&t.intent.call, ToolCall::ApplyChangeset {
                     source: ChangesetSource::WorkerHandover { assignment_id, .. }
                 } if *assignment_id == a.id)
                         {
@@ -130,11 +131,10 @@ impl RunView {
                     publication,
                     integration: w.integration.as_ref().map(|(_, i)| i.outcome),
                     discarded: w.discarded.as_ref().map(|(_, d)| d.reason),
-                    private_outcome_unknown: a.tools.iter().any(|t| {
-                        t.observation
-                            .as_ref()
-                            .is_none_or(|o| o.disposition == ToolDisposition::Uncertain)
-                    }),
+                    private_outcome_unknown: a.tools.iter().any(ToolView::outcome_unknown)
+                        || self.lifecycle_hooks.iter().any(|hook| {
+                            hook.invocation.intent.agent_run_id == a.id && hook.outcome_unknown()
+                        }),
                     cleanup_confirmed: outcome.is_some_and(|o| o.cleanup.is_some()),
                     lease_released: w.released.is_some(),
                     verified: w.verification.as_ref().is_some_and(|(_, v)| v.passed),
@@ -828,7 +828,8 @@ fn unrecorded_integration(run: &RunView) -> bool {
 fn starts_team_work(event: &Event) -> bool {
     matches!(
         event,
-        Event::ToolStarted { .. }
+        Event::ToolProposed { .. }
+            | Event::ToolStarted { .. }
             | Event::GoalProviderCallReserved { .. }
             | Event::AgentSpawned { .. }
             | Event::WorkerHandoverRecorded { .. }
@@ -874,6 +875,20 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
     if scope != Some(run.id) {
         return Ok(());
     }
+    if let Event::ToolStarted {
+        intent, verdict, ..
+    } = event
+        && run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .any(|tool| tool.intent == intent.clone().into() && tool.started_sequence.is_none())
+    {
+        if verdict.as_ref().is_none_or(|verdict| verdict.approved) {
+            before::check(run, event, actor)?;
+        }
+        return Ok(());
+    }
     before::check(run, event, actor)?;
     match event {
         Event::ProviderCallRecorded {
@@ -883,7 +898,12 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
         } if worker(run, *agent_run_id).is_ok() => {
             before::provider_call(run, agent_run_id, record)?
         }
-        Event::ToolStarted {
+        Event::ToolProposed {
+            agent_run_id,
+            intent,
+            ..
+        }
+        | Event::ToolStarted {
             agent_run_id,
             intent,
             ..

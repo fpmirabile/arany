@@ -865,7 +865,7 @@ async fn refuse_without_human_or_settings(repo: &Repo) {
     assert!(tool.observation.as_ref().unwrap().attestation.is_none());
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        arany::Event::ToolPermissionDecided { verdict, .. }
+        arany::Event::ToolStarted { verdict: Some(verdict), .. }
             if verdict.source == PermissionSource::UnavailableApproval && !verdict.approved
     )));
 }

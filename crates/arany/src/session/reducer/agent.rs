@@ -138,6 +138,7 @@ impl SessionView {
             active_time_reserved: false,
             narrowing_source: None,
             permission_verdict: None,
+            started_sequence: None,
             hooks: Vec::new(),
             hook_sequence: None,
             finished_sequence: None,

@@ -68,11 +68,26 @@ impl Fixture {
         }
     }
     fn started(&mut self, intent: &EffectIntent) {
-        self.push(Event::ToolStarted {
-            run_id: self.run,
-            agent_run_id: intent.agent_run_id,
-            intent: intent.clone().into(),
-            active_ceiling_ms: 0,
+        let configured = self.events.iter().any(|event| matches!(event,
+            Event::RunStarted { config, .. } if config.tool_policy.as_ref().is_some_and(|policy| policy.permissions_digest.is_some())))
+            || intent.call.is_host() || intent.call.is_unguarded()
+            || SessionView::replay_open(self.session, &self.envelopes()).ok().flatten()
+                .is_some_and(|view| super::definition_mode(&view.runs[0], intent.agent_run_id).ok().flatten().is_some());
+        self.push(if configured {
+            Event::ToolProposed {
+                run_id: self.run,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            }
+        } else {
+            Event::ToolStarted {
+                run_id: self.run,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+                verdict: None,
+            }
         });
     }
     fn observed(
@@ -530,10 +545,12 @@ fn allow_permission(f: &mut Fixture, intent: &EffectIntent) {
         Decision, PermissionMode, PermissionSource, PermissionVerdict,
     };
 
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: intent.agent_run_id,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),
             decision: Decision::Allow,
@@ -544,7 +561,7 @@ fn allow_permission(f: &mut Fixture, intent: &EffectIntent) {
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
 }
 
@@ -553,10 +570,12 @@ fn deny_permission(f: &mut Fixture, intent: &EffectIntent) {
         Decision, PermissionMode, PermissionSource, PermissionVerdict,
     };
 
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: intent.agent_run_id,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),
             decision: Decision::Deny,
@@ -567,7 +586,7 @@ fn deny_permission(f: &mut Fixture, intent: &EffectIntent) {
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
 }
 
@@ -1083,6 +1102,110 @@ fn worker_protocol_legal_lifecycle_and_every_cold_prefix() {
     }
 }
 
+fn assert_private_history(run: &RunView, actor: AgentRunId, unknown: bool) {
+    let history = run.worker_history();
+    let index = history
+        .iter()
+        .position(|worker| worker.assignment_id == actor)
+        .unwrap();
+    assert_eq!(history[index].private_outcome_unknown, unknown);
+    assert!(
+        history[index]
+            .description()
+            .contains(&format!("private_outcome_unknown={unknown};"))
+    );
+    let rendered: serde_json::Value =
+        serde_json::from_str(&crate::provider::history_tool_block(run)).unwrap();
+    assert_eq!(
+        rendered["workers_untrusted"][index]["private_outcome_unknown"],
+        unknown
+    );
+}
+
+#[test]
+fn worker_cold_replay_distinguishes_proposals_from_unknown_private_effects() {
+    for state in ["proposed", "started", "uncertain", "observed"] {
+        let mut f = fixture();
+        f.mutation();
+        let start = f.events.iter().rposition(|event| {
+            matches!(event, Event::ToolStarted { agent_run_id, .. } if *agent_run_id == f.child)
+        }).unwrap();
+        let Event::ToolStarted {
+            intent,
+            active_ceiling_ms,
+            ..
+        } = f.events[start].clone()
+        else {
+            unreachable!()
+        };
+        if state != "observed" {
+            f.events.truncate(start + 1);
+        }
+        if state == "proposed" {
+            f.events[start] = Event::ToolProposed {
+                run_id: f.run,
+                agent_run_id: f.child,
+                intent,
+                active_ceiling_ms,
+            };
+        } else if state == "uncertain" {
+            f.observed(
+                &intent.into(),
+                ToolDisposition::Uncertain,
+                None,
+                "Unknown private outcome",
+            );
+        }
+        let view = SessionView::replay(f.session, &f.envelopes())
+            .unwrap()
+            .unwrap();
+        assert_private_history(
+            &view.runs[0],
+            f.child,
+            matches!(state, "started" | "uncertain"),
+        );
+    }
+}
+
+#[test]
+fn worker_publication_proposals_remain_unpublished_on_cold_replay() {
+    for started in [false, true] {
+        let mut f = completed_fixture();
+        let start = f.events.iter().rposition(|event| {
+            matches!(event, Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))
+        }).unwrap();
+        f.events.truncate(start + 1);
+        if !started {
+            let Event::ToolStarted {
+                intent,
+                active_ceiling_ms,
+                ..
+            } = f.events[start].clone()
+            else {
+                unreachable!()
+            };
+            f.events[start] = Event::ToolProposed {
+                run_id: f.run,
+                agent_run_id: f.primary,
+                intent,
+                active_ceiling_ms,
+            };
+        }
+        let view = SessionView::replay(f.session, &f.envelopes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            view.runs[0].worker_history()[0].publication,
+            if started {
+                WorkerPublication::Unknown
+            } else {
+                WorkerPublication::Unpublished
+            }
+        );
+        assert_private_history(&view.runs[0], f.child, false);
+    }
+}
+
 fn refused(f: &Fixture, event: Event, name: &str) {
     let mut view = f.view();
     let envelope = f.envelope(event.clone(), f.events.len() as u64 + 1);
@@ -1243,6 +1366,7 @@ fn worker_protocol_refuses_widened_stale_and_unsettled_transitions() {
         refused(
             &f,
             Event::ToolStarted {
+                verdict: None,
                 run_id: f.run,
                 agent_run_id: f.child,
                 intent: f.intent(f.child, call, target).into(),
@@ -1354,6 +1478,269 @@ fn worker_protocol_receipts_handover_order_and_verification_are_causal() {
     );
 }
 
+fn researcher_tool_request(f: &mut Fixture) -> EffectIntent {
+    let researcher = AgentRunId::new();
+    let objective = "Inspect the current files";
+    let Event::ProviderCallRecorded { record, .. } = f.events.iter_mut().rev()
+        .find(|event| matches!(event, Event::ProviderCallRecorded { record, .. } if record.delegation.is_some())).unwrap() else {
+        unreachable!()
+    };
+    record
+        .delegation
+        .as_mut()
+        .unwrap()
+        .push(ChildAssignment::Researcher {
+            objective: objective.into(),
+            definition: None,
+            profile: None,
+        });
+    f.push(Event::AgentSpawned {
+        run_id: f.run,
+        agent_run_id: researcher,
+        role: AgentRole::Child,
+        ordinal: 2,
+        objective: Some(objective.into()),
+        grant: Some(ChildGrant::ReadOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
+        definition: None,
+        profile: None,
+        assignment: None,
+    });
+    f.call(
+        researcher,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    f.intent(
+        researcher,
+        ToolCall::Read {
+            path: "src/a".into(),
+            offset: None,
+            limit: Some(32),
+        },
+        EffectTarget::Workspace,
+    )
+}
+
+fn stop_editor_hook(f: &mut Fixture) {
+    use crate::tools::permissions::{
+        HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
+    };
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: String::new(),
+        },
+        EffectTarget::Workspace,
+    );
+    f.push(Event::HookStarted {
+        run_id: f.run,
+        agent_run_id: f.child,
+        hook: HookInvocation {
+            event: HookEvent::SubagentStop,
+            group: 0,
+            handler: 0,
+            subject_digest: stop_subject(f.child, 0),
+            intent: intent.clone(),
+            input_digest: [9; 32],
+            active_ceiling_ms: Some(1),
+        },
+    });
+    let stdout = r#"{"continue":false}"#;
+    f.push(Event::HookFinished {
+        run_id: f.run, agent_run_id: f.child,
+        outcome: HookOutcome {
+            boundary_active_ms: None, result: HookResult::Stopped { reason: None },
+            observation: ToolObservation {
+                attestation: Some(Attestation::Guard(receipt(&intent))), intent,
+                disposition: ToolDisposition::Succeeded, enforcement_cause: None,
+                limit_cause: None, approval_cause: None, cache_update: CacheUpdate::NotApplicable,
+                output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":stdout,"stderr":"","stdout_total":{"bytes":stdout.len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+            },
+        },
+    });
+    assert_eq!(f.view().runs[0].hook_stop_reason(), Some(None));
+}
+
+#[test]
+fn stopped_hooks_reject_new_or_approved_tools_but_settle_proposed_denials() {
+    use crate::tools::permissions::Decision;
+    for pending in [false, true] {
+        let mut f = configured_fixture();
+        let intent = researcher_tool_request(&mut f);
+        if pending {
+            f.push(Event::ToolProposed {
+                run_id: f.run,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            });
+        }
+        allow_permission(&mut f, &intent);
+        let mut start = f.events.pop().unwrap();
+        let mut before = f.view();
+        before
+            .apply_committed(&f.envelope(start.clone(), before.last_sequence + 1))
+            .unwrap();
+        stop_editor_hook(&mut f);
+        refused(
+            &f,
+            start.clone(),
+            "approved dispatch after another actor's hook stop",
+        );
+        let Event::ToolStarted {
+            verdict: Some(verdict),
+            ..
+        } = &mut start
+        else {
+            unreachable!()
+        };
+        verdict.decision = Decision::Deny;
+        verdict.approved = false;
+        if pending {
+            f.push(start);
+            f.observed(
+                &intent,
+                ToolDisposition::Denied,
+                None,
+                "Permission deny rule blocked this Tool",
+            );
+            assert!(
+                SessionView::replay(f.session, &f.envelopes())
+                    .unwrap()
+                    .is_some()
+            );
+        } else {
+            refused(
+                &f,
+                start,
+                "unproposed settlement after another actor's hook stop",
+            );
+        }
+    }
+}
+
+fn proposal_before_worker_stop(
+    reason: WorkerStopReason,
+    configured: bool,
+) -> (Fixture, EffectIntent, Event) {
+    let mut f = if configured {
+        configured_fixture()
+    } else {
+        fixture()
+    };
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Write {
+            path: "src/a".into(),
+            expected_digest: None,
+            content: "new".into(),
+        },
+        f.target(0),
+    );
+    f.push(Event::ToolProposed {
+        run_id: f.run,
+        agent_run_id: f.child,
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
+    });
+    let start = if configured {
+        allow_permission(&mut f, &intent);
+        f.events.pop().unwrap()
+    } else {
+        Event::ToolStarted {
+            run_id: f.run,
+            agent_run_id: f.child,
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
+            verdict: None,
+        }
+    };
+    let mut view = f.view();
+    view.apply_committed(&f.envelope(start.clone(), view.last_sequence + 1))
+        .expect("the proposed Tool may start before the stop");
+    f.push(Event::WorkerStopObserved {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        record: WorkerStopRecord { reason },
+    });
+    (f, intent, start)
+}
+
+#[test]
+fn worker_stop_rejects_approved_folded_starts_and_allows_non_dispatch_settlement() {
+    use crate::tools::permissions::Decision;
+    for reason in [
+        WorkerStopReason::Cancelled,
+        WorkerStopReason::Paused,
+        WorkerStopReason::Budget,
+    ] {
+        for configured in [false, true] {
+            let (f, _, start) = proposal_before_worker_stop(reason, configured);
+            refused(&f, start, "folded dispatch after a worker stop");
+        }
+        for disposition in [ToolDisposition::Denied, ToolDisposition::Limit] {
+            let (mut f, intent, mut start) = proposal_before_worker_stop(reason, true);
+            let Event::ToolStarted {
+                verdict: Some(verdict),
+                ..
+            } = &mut start
+            else {
+                unreachable!()
+            };
+            verdict.approved = false;
+            verdict.decision = if disposition == ToolDisposition::Denied {
+                Decision::Deny
+            } else {
+                Decision::Allow
+            };
+            f.push(start);
+            f.observed(&intent, disposition, None, "Worker stopped before dispatch");
+            let view = f.view();
+            let tool = view.runs[0]
+                .agents
+                .iter()
+                .find(|agent| agent.id == f.child)
+                .unwrap()
+                .tools
+                .last()
+                .unwrap();
+            assert!(!tool.permission_verdict.as_ref().unwrap().approved);
+            assert_eq!(tool.observation.as_ref().unwrap().disposition, disposition);
+            assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+            let closed = SessionView::replay(f.session, &f.envelopes())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                closed.runs[0]
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == f.child)
+                    .unwrap()
+                    .tools
+                    .last(),
+                Some(tool)
+            );
+        }
+    }
+}
+
 #[test]
 fn worker_protocol_stop_and_workspace_uncertainty_block_dispatch() {
     for reason in [
@@ -1412,6 +1799,103 @@ fn worker_protocol_stop_and_workspace_uncertainty_block_dispatch() {
         },
         "Workspace uncertainty continuation",
     );
+}
+
+fn worker_capture_prefix(case: &str) -> (Fixture, EffectIntent) {
+    let mut f = if matches!(case, "proposal" | "pinned grant") {
+        fixture()
+    } else {
+        configured_fixture()
+    };
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Write {
+            path: "src/a".into(),
+            expected_digest: None,
+            content: "new".into(),
+        },
+        f.target(0),
+    );
+    f.push(Event::ToolProposed {
+        run_id: f.run,
+        agent_run_id: f.child,
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
+    });
+    match case {
+        "approved" | "not dispatched" => {
+            allow_permission(&mut f, &intent);
+            if case == "not dispatched" {
+                let Event::ToolStarted {
+                    verdict: Some(verdict),
+                    ..
+                } = f.events.last_mut().unwrap()
+                else {
+                    unreachable!()
+                };
+                verdict.approved = false;
+            }
+        }
+        "denied" => deny_permission(&mut f, &intent),
+        "pinned grant" => {
+            f.push(Event::ToolStarted {
+                run_id: f.run,
+                agent_run_id: f.child,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+                verdict: None,
+            });
+        }
+        "proposal" | "awaiting approval" => {}
+        _ => unreachable!(),
+    }
+    f.view();
+    (f, intent)
+}
+
+#[test]
+fn worker_capture_requires_a_started_and_approved_producer() {
+    for case in [
+        "proposal",
+        "awaiting approval",
+        "denied",
+        "not dispatched",
+        "approved",
+        "pinned grant",
+    ] {
+        let (mut f, intent) = worker_capture_prefix(case);
+        let end = f.events.len();
+        f.data(
+            &intent,
+            WorkerDataPurpose::Mutation,
+            &serde_json::to_vec(&f.changes).unwrap(),
+        );
+        let capture = f.events.split_off(end);
+        if matches!(case, "approved" | "pinned grant") {
+            f.events.extend(capture);
+            let view = SessionView::replay(f.session, &f.envelopes())
+                .unwrap()
+                .unwrap();
+            assert_eq!(view.runs[0].workers.data.len(), 2, "{case}");
+            assert_eq!(
+                view.runs[0].agents[1].assignment.as_ref().unwrap().revision,
+                0
+            );
+        } else {
+            refused(&f, capture[0].clone(), case);
+            f.events.extend(capture);
+            assert!(
+                SessionView::replay(f.session, &f.envelopes()).is_err(),
+                "{case}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1918,10 +2402,12 @@ pub(crate) fn host_protocol_fixture() -> Fixture {
     });
     intent.limits.network = crate::NetworkGrant::Host;
     f.started(&intent);
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: f.primary,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),
             decision: Decision::Ask,
@@ -1932,7 +2418,7 @@ pub(crate) fn host_protocol_fixture() -> Fixture {
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
     f
 }
@@ -1969,10 +2455,12 @@ pub(crate) fn session_host_protocol_fixture() -> Fixture {
     for source in [PermissionSource::Human, PermissionSource::SessionApproval] {
         let human = source == PermissionSource::Human;
         f.started(&intent);
-        f.push(Event::ToolPermissionDecided {
+        f.push(Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
             run_id: f.run,
             agent_run_id: f.primary,
-            verdict: PermissionVerdict {
+            verdict: Some(PermissionVerdict {
                 host: Some(HostApproval {
                     rule: None,
                     epoch,
@@ -1996,7 +2484,7 @@ pub(crate) fn session_host_protocol_fixture() -> Fixture {
                 hook_restriction: None,
                 hooks: 0,
                 narrowed: false,
-            },
+            }),
         });
         if human {
             f.observed(
@@ -2028,10 +2516,17 @@ fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
         Some(ToolDisposition::Denied),
     ] {
         let mut f = host_protocol_fixture();
-        let intent: EffectIntent = match &f.events[f.events.len() - 2] {
-            Event::ToolStarted { intent, .. } => intent.clone().into(),
-            _ => unreachable!(),
-        };
+        let intent: EffectIntent = f
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                Event::ToolStarted { intent, .. } if intent.call.is_host() => {
+                    Some(intent.clone().into())
+                }
+                _ => None,
+            })
+            .expect("folded host start");
         if let Some(disposition) = outcome {
             let receipt =
                 (disposition != ToolDisposition::Denied).then(|| Attestation::for_site(&intent));
@@ -2272,6 +2767,7 @@ fn worker_protocol_nonoverlap_and_completion_order() {
     refused(
         &f,
         Event::ToolStarted {
+            verdict: None,
             run_id: f.run,
             agent_run_id: f.primary,
             intent: out_of_order.into(),
@@ -2647,10 +3143,12 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
         f.target(0),
     );
     f.started(&intent);
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: f.child,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),
             decision: Decision::Allow,
@@ -2661,7 +3159,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
     let data = f.data(
         &intent,
@@ -3809,6 +4307,25 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                 .unwrap();
             f.events.truncate(start + 1);
         }
+        if event == HookEvent::PreToolUse {
+            let start = f.events.last_mut().expect("pending Tool start");
+            let Event::ToolStarted {
+                run_id,
+                agent_run_id,
+                intent,
+                active_ceiling_ms,
+                ..
+            } = start
+            else {
+                unreachable!()
+            };
+            *start = Event::ToolProposed {
+                run_id: *run_id,
+                agent_run_id: *agent_run_id,
+                intent: intent.clone(),
+                active_ceiling_ms: *active_ceiling_ms,
+            };
+        }
         let mut view = f.view();
         view.runs[0]
             .config
@@ -3823,6 +4340,11 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
         } else {
             view.runs[0].agents[1].tools.last().unwrap()
         };
+        assert_eq!(
+            tool.started_sequence.is_none(),
+            event == HookEvent::PreToolUse,
+            "{site}"
+        );
         let pending = tool.intent.clone();
         let subject = if matches!(site, "stop" | "stopped") {
             stop_subject(actor, view.runs[0].agents[1].provider_calls.len() - 1)
@@ -3866,6 +4388,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
         assert!(append(&mut view.clone(), foreign).is_err(), "{site}");
         append(&mut view, started).unwrap();
         assert!(!view.runs[0].hooks_settled(), "{site}");
+        assert_private_history(&view.runs[0], f.child, actor == f.child);
         let result = if site == "stopped" {
             HookResult::Stopped {
                 reason: Some("halt".into()),
@@ -3916,11 +4439,14 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
         )
         .unwrap();
         assert!(view.runs[0].hooks_settled(), "{site}");
+        assert_private_history(&view.runs[0], f.child, false);
         if event == HookEvent::PreToolUse {
-            let verdict = |narrowed| Event::ToolPermissionDecided {
+            let verdict = |narrowed| Event::ToolStarted {
+                intent: pending.clone().into(),
+                active_ceiling_ms: 0,
                 run_id: f.run,
                 agent_run_id: actor,
-                verdict: PermissionVerdict {
+                verdict: Some(PermissionVerdict {
                     host: None,
                     intent_digest: pending.digest(),
                     mode: Some(PermissionMode::Default),
@@ -3931,7 +4457,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                     hook_restriction: Some(Decision::Deny),
                     hooks: 1,
                     narrowed,
-                },
+                }),
             };
             if actor != f.primary {
                 assert!(append(&mut view.clone(), verdict(true)).is_err(), "{site}");
@@ -4205,6 +4731,7 @@ fn supervisor_handover_verdict_preserves_the_original_integration_subject() {
     refused(
         &f,
         Event::ToolStarted {
+            verdict: None,
             run_id: f.run,
             agent_run_id: f.primary,
             intent: wrong.into(),
@@ -4267,6 +4794,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
         let sequence = view.last_sequence + 1;
         view.apply_committed(&f.envelope(started, sequence))
             .unwrap();
+        assert_private_history(&view.runs[0], f.child, true);
         let (disposition, stdout, stderr, exit, hook_result) = match result {
             "passed" => (ToolDisposition::Succeeded, "", "", 0, HookResult::Passed),
             "blocked" => (
@@ -4318,6 +4846,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             .unwrap();
         let unknown = matches!(result, "unknown" | "stopped_unknown");
         assert_eq!(view.runs[0].hooks_settled(), !unknown);
+        assert_private_history(&view.runs[0], f.child, unknown);
         assert_eq!(view.runs[0].stop_blocked(f.child), result == "blocked");
         assert_eq!(
             view.runs[0].actor_stopped_by_hook(f.child),
@@ -4833,10 +5362,12 @@ fn worker_protocol_denied_tool_with_a_permission_verdict_reaches_child_continuat
         f.target(0),
     );
     f.started(&denied);
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: denied.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: f.child,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: denied.digest(),
             decision: Decision::Deny,
@@ -4847,7 +5378,7 @@ fn worker_protocol_denied_tool_with_a_permission_verdict_reaches_child_continuat
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
     f.observed(
         &denied,
@@ -4996,10 +5527,12 @@ fn worker_protocol_configured_command_denial_reaches_child_continuation() {
         f.target(0),
     );
     f.started(&denied);
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: denied.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: f.child,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: denied.digest(),
             decision: Decision::Deny,
@@ -5010,7 +5543,7 @@ fn worker_protocol_configured_command_denial_reaches_child_continuation() {
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
     f.observed(
         &denied,
@@ -5181,10 +5714,12 @@ fn worker_protocol_approved_execution_denial_settles_without_child_continuation(
         f.target(0),
     );
     f.started(&intent);
-    f.push(Event::ToolPermissionDecided {
+    f.push(Event::ToolStarted {
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
         run_id: f.run,
         agent_run_id: f.child,
-        verdict: PermissionVerdict {
+        verdict: Some(PermissionVerdict {
             host: None,
             intent_digest: intent.digest(),
             decision: Decision::Allow,
@@ -5195,7 +5730,7 @@ fn worker_protocol_approved_execution_denial_settles_without_child_continuation(
             hook_restriction: None,
             hooks: 0,
             narrowed: false,
-        },
+        }),
     });
     f.observed(
         &intent,

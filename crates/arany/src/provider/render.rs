@@ -473,6 +473,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
                 &tool.hook_feedback(),
                 tool.model_denial_output().unwrap_or(&observation.output),
             ),
+            None if tool.started_sequence.is_none() => json!({"call": model_call(&tool.intent.call), "execution": "not dispatched; proposal only"}),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
         .collect();

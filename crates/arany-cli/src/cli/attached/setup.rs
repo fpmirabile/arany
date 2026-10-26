@@ -3363,7 +3363,8 @@ pub(super) mod tests {
                 [(
                     1,
                     2,
-                    arany::test_support::admissions::AdmissionKind::Operation
+                    arany::test_support::admissions::AdmissionKind::Operation,
+                    0
                 )]
             ));
             let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();

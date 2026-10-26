@@ -356,9 +356,9 @@ impl Sample {
                     .is_some_and(|next| next.sequence <= finished.sequence)
                 || !events.iter().filter(scoped).any(|event| {
                     matches!(&event.event,
-                    Event::ToolPermissionDecided { verdict, .. }
+                    Event::ToolStarted { verdict: Some(verdict), .. }
                     if verdict.intent_digest == observation.intent.digest()
-                        && event.sequence > started.sequence && event.sequence < finished.sequence)
+                        && event.sequence == started.sequence && event.sequence < finished.sequence)
                 })
             {
                 return Err(LatencyError::MismatchedFinishOrPermission);

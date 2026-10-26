@@ -42,7 +42,7 @@ pub fn protocol_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$ref": message.as_value()["$ref"],
         "title": "arany-protocol",
-        "version": "1",
+        "version": "2",
         "$defs": generator.take_definitions(true),
         "methods": methods,
         "notifications": notifications,
