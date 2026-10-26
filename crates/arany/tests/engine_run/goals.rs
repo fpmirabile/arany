@@ -9894,7 +9894,7 @@ async fn concurrent_reads_commit_in_completion_order_and_settle_before_effects()
             );
             if case == "cancel reads" {
                 cancellation.cancel();
-                return;
+                return releases;
             }
             if case == "limit reads" {
                 let mut started = 0;
@@ -9909,7 +9909,7 @@ async fn concurrent_reads_commit_in_completion_order_and_settle_before_effects()
                 tokio::time::pause();
                 tokio::time::advance(Duration::from_millis(u64::from(runtime_ms) + 1)).await;
                 tokio::time::resume();
-                return;
+                return releases;
             }
             let order = if count == 4 {
                 vec![2, 0, 3, 1]
@@ -9929,8 +9929,9 @@ async fn concurrent_reads_commit_in_completion_order_and_settle_before_effects()
                     }
                 }
             }
+            releases
         };
-        let (outcome, ()) = tokio::join!(
+        let (outcome, _held_releases) = tokio::join!(
             run_with(
                 &engine,
                 &provider,

@@ -10,6 +10,7 @@ const MEASURED: usize = 100;
 const REPORT_CAP: u64 = 1024 * 1024;
 const SAMPLE_CAP: u64 = 8 * 1024 * 1024;
 const EVIDENCE_CAP: u64 = 256 * 1024 * 1024;
+const SHOW_BYTES_PER_READ: usize = 64 * 1024;
 
 fn private_file(path: &Path, bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt;
@@ -194,11 +195,9 @@ fn audit_show(root: &Path, sample: &Sample, remaining: Duration) {
         .arg(root.join("state"))
         .args([&sample.session_id.to_string(), "--output", "jsonl"]);
     use process::BoundedOutput;
+    let show_limit = SHOW_BYTES_PER_READ * sample.requested_tools.max(1);
     let output = command
-        .bounded_output_for(
-            remaining.min(Duration::from_secs(10)),
-            64 * 1024 * sample.requested_tools.max(1),
-        )
+        .bounded_output_for(remaining.min(Duration::from_secs(10)), show_limit)
         .unwrap();
     private_file(&root.join("show-stdout.jsonl"), &output.stdout);
     private_file(&root.join("show-stderr.txt"), &output.stderr);
@@ -211,7 +210,7 @@ fn audit_show(root: &Path, sample: &Sample, remaining: Duration) {
         .map(|line| serde_json::from_slice(line).unwrap())
         .collect();
     let expected_path = root.join("expected-show.jsonl");
-    assert!(expected_path.metadata().unwrap().len() <= 64 * 1024);
+    assert!(expected_path.metadata().unwrap().len() <= u64::try_from(show_limit).unwrap());
     let expected_bytes = std::fs::read(expected_path).unwrap();
     let expected: Vec<serde_json::Value> = expected_bytes
         .split(|byte| *byte == b'\n')
