@@ -108,11 +108,10 @@ fn controls() -> RunControls {
     }
 }
 
-fn assert_read(view: &SessionView) {
+fn assert_single_primary_run(view: &SessionView) -> &arany::RunView {
     assert_eq!(view.runs.len(), 1);
     let run = &view.runs[0];
     assert_eq!(run.status, RunStatus::Finished);
-    assert_eq!(run.assistant_message.as_deref(), Some("Read completed"));
     assert_eq!(run.tools.len(), 1);
     assert!(
         run.agents
@@ -122,6 +121,12 @@ fn assert_read(view: &SessionView) {
     assert!(view.compactions.is_empty());
     assert!(run.provider_fallbacks.is_empty());
     assert!(run.provider_retries.is_empty());
+    run
+}
+
+fn assert_read(view: &SessionView) {
+    let run = assert_single_primary_run(view);
+    assert_eq!(run.assistant_message.as_deref(), Some("Read completed"));
     let observation = run.tools[0].observation.as_ref().unwrap();
     assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
     assert!(matches!(
@@ -171,12 +176,13 @@ async fn measure(root: &Path, ordinal: usize, operation: Operation) {
     if operation == Operation::Read {
         assert_read(&view);
     } else {
-        let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+        let run = assert_single_primary_run(&view);
+        let observation = run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
         assert!(
             matches!(&observation.attestation, Some(arany::Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.before.is_some() && receipt.after.is_some())
         );
-        assert!(view.runs[0].tools[0].checkpoint.is_some());
+        assert!(run.tools[0].checkpoint.is_some());
     }
     private_file(
         &root.join("expected-show.jsonl"),
