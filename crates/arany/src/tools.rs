@@ -1468,8 +1468,7 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        self.execute_inner(intent, cancellation, ReadDispatch::InProcess)
-            .await
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::InProcess)).await
     }
 
     pub(crate) async fn execute(
@@ -1477,8 +1476,7 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        self.execute_inner(intent, cancellation, ReadDispatch::Automatic)
-            .await
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::Automatic)).await
     }
 
     async fn execute_inner(

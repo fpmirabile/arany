@@ -605,7 +605,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
     use arany::test_support::scenario::tool_outcome;
     use sha2::{Digest, Sha256};
     let _gate = crate::test_process::NATIVE_GATE.lock().unwrap();
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(Box::pin(async {
     arany::test_support::isolate_account_root();
     for case in [
         "success",
@@ -936,7 +936,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
             }
         }
     }
-    });
+    }));
 }
 
 async fn closed_view(
