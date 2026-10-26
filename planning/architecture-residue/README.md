@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: harness maintainers
 - Last updated: 2026-10-26
-- Next action: R6a reconciles existing plan status; then release the independent tracks under the gates below.
+- Next action: release independent R1–R5 tracks under the gates below; hold R2c5/R6b for final closeout.
 
 ## Outcome and scope
 
@@ -169,7 +169,7 @@ Image S2 and `OwnedTerminal`/Panels prerequisites are present. Reserve `terminal
 
 ## Gates and order against active plans
 
-- **First R6a; last R2c5/R6b in one PR.** Between them R1, R2, R3, R4 and R5 can progress independently only with exclusive production and evidence ownership. R1/R5 serialize `provider.rs` and shared Provider-spec edits. All shared spec/overview edits acquire a short integration reservation too.
+- **R6a status reconciliation is implemented; last R2c5/R6b in one PR.** Between them R1, R2, R3, R4 and R5 can progress independently only with exclusive production and evidence ownership. R1/R5 serialize `provider.rs` and shared Provider-spec edits. All shared spec/overview edits acquire a short integration reservation too.
 - **[Multi-call steps](../multi-call-steps/README.md):** current S1–S3 implementation is present (`Tools` list, Anthropic decoding and [concurrent-read dispatch:1455](../../crates/arany/src/tools.rs)); S4 remains. R1a–R1c release the wire/diagnostic owners **before S4**; R5 also releases Provider registration/credential files before any overlapping S4 edit. If S4 lands first, re-inventory at its merge and preserve the new wire contract; do not reintroduce old single-call snapshots. No dead P4-complete claim satisfies R1c.
 - **[Chat Completions family](../openai-chat-completions-family/README.md#gates):** S1 and S2's form/recipe exist. The remaining S2 inspection label/journey waits for **R2p2 → R2b1 → R2b2 → R2b3 → R2b4**, replacing U2c/U1h–U1k. Reserve setup/custom/removal evidence until release. The label implementation stays in its own feature PR; this plan only fixes its gate.
 - **[Image hover](../image-hover-preview/README.md):** S1/S2 implementation clears the old B5′b gate; R4 serializes with S3 as above. Pending S3 dependency approval is not imported into this plan or decided here.
