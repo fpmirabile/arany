@@ -29,7 +29,7 @@ Done when a normal engineering day in this repository needs no fallback to anoth
 
 ### Pursue, in order
 
-1. **Context budgets.** Remaining: output spill S3a–S3d for explicit paged Read, then the separate storage-report slice; compaction summary bounds and recent-file hints are implemented ([plan](./planning/context-budgets/README.md)).
+1. **Context budgets.** Remaining output-spill storage-report rows ([plan](./planning/context-budgets/README.md)).
 2. **Spec limits generation.** Tool, Session, execution, Goal and Provider exports are implemented. Remaining: S3 blocking spec-budget/restatement check after architecture-residue spec edits, then S4 native Tools split ([plan](./planning/spec-limits-generation/README.md)).
 3. **Workspace Tools on custom routes (deferred).** Custom routes remain read-only; adding Workspace Tools across custom protocol families is a separate feature ([Provider contract](./docs/specs/provider.md#custom-destinations-and-routing)).
 4. **Supervisor.** Private worker views and the assignment-time cache are superseded by [editors on the shared Workspace](./planning/shared-workspace-editors/README.md). Supervisor signals stay shadow-only until calibrated thresholds are accepted ([Supervisor adapter](./docs/specs/tools.md#supervisor-adapter)).

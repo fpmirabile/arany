@@ -6,6 +6,8 @@ use std::borrow::Cow;
 mod approval;
 mod summary;
 
+const SUMMARY_TEXT_WIDTH: usize = 160;
+
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = summary::operation(&tool.intent.call);
@@ -29,10 +31,10 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 | ToolCall::GitBranch { name: Some(_), .. }
                 | ToolCall::GitSwitch { .. } => git_write_summary(observation),
                 ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
-                    safe_truncate(&observation.output, 160)
+                    safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
                 }
                 ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
-                    safe_truncate(&observation.output, 160)
+                    safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
                 }
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
@@ -52,7 +54,10 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                     match tool.model_denial_label() {
                         Some(label) => format!("{state}: {label}"),
                         None if observation.output.is_empty() => state.into(),
-                        None => format!("{state}: {}", safe_truncate(&observation.output, 160)),
+                        None => format!(
+                            "{state}: {}",
+                            safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
+                        ),
                     }
                 } else if observation.output.is_empty() {
                     state.into()
@@ -63,8 +68,10 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                             ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. },
                         ) => format!(
                             "{state}: {}",
-                            command_result_summary(observation)
-                                .unwrap_or_else(|| safe_truncate(&observation.output, 160))
+                            command_result_summary(observation).unwrap_or_else(|| safe_truncate(
+                                &observation.output,
+                                SUMMARY_TEXT_WIDTH
+                            ))
                         ),
                         // An uncertain Git write may lead with locks the owner must remove by hand.
                         (
@@ -73,13 +80,19 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                             | ToolCall::GitBranch { .. }
                             | ToolCall::GitSwitch { .. },
                         ) => format!("{state}: {}", wrapped_rows(&observation.output)),
-                        _ => format!("{state}: {}", safe_truncate(&observation.output, 160)),
+                        _ => format!(
+                            "{state}: {}",
+                            safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
+                        ),
                     }
                 }
             }
         },
     };
-    let mut summary = format!("⏺ {}\n  ⎿ {result}", safe_truncate(&operation, 160));
+    let mut summary = format!(
+        "⏺ {}\n  ⎿ {result}",
+        safe_truncate(&operation, SUMMARY_TEXT_WIDTH)
+    );
     if let Some(label) = tool
         .observation
         .as_ref()
@@ -148,6 +161,18 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     } else if failed {
         summary.push_str(" · hook failed (non-blocking)");
     }
+    if let Some(spill) = tool
+        .observation
+        .as_ref()
+        .and_then(|observation| observation.spill.as_ref())
+    {
+        summary.push_str(&format!(
+            "\n  Output spill: spill:{}; {}; truncated: {}",
+            safe_truncate(&spill.r#ref, SUMMARY_TEXT_WIDTH),
+            format_bytes(spill.bytes),
+            spill.truncated
+        ));
+    }
     summary
 }
 
@@ -182,7 +207,7 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
 // The committed receipt, not a later read, is the evidence of what was published.
 fn git_write_summary(observation: &arany::ToolObservation) -> String {
     let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap_or_default();
-    let text = |key: &str| safe_truncate(result[key].as_str().unwrap_or("?"), 160);
+    let text = |key: &str| safe_truncate(result[key].as_str().unwrap_or("?"), SUMMARY_TEXT_WIDTH);
     let short = |key: &str| text(key).chars().take(12).collect::<String>();
     match &observation.intent.call {
         arany::ToolCall::GitCommit { .. } => {

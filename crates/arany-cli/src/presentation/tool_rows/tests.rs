@@ -1350,6 +1350,22 @@ mod unguarded_tests {
             tool_summary(&host_tool(ToolDisposition::Denied, false)),
             "⏺ Unguarded command(sh -c exit 0)\n  ⎿ denied"
         );
+        let mut tool = host_tool(ToolDisposition::Succeeded, true);
+        let reference = "f".repeat(64);
+        let observation = tool.observation.as_mut().unwrap();
+        observation.cache_update = CacheUpdate::Rejected;
+        observation.spill = Some(
+            serde_json::from_value(
+                serde_json::json!({"ref":reference,"bytes":64,"truncated":false}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            format!(
+                "⏺ Unguarded command(sh -c exit 0)\n  ⎿ 0 B · cache not saved (limit) · UNGUARDED\n  Output spill: spill:{reference}; 64 B; truncated: false"
+            )
+        );
     }
 
     #[test]
@@ -1407,5 +1423,39 @@ mod unguarded_tests {
             render_answer(&run, "Arany · Answer:"),
             "Arany · Answer (host effects: 1):\n  Done\n"
         );
+    }
+}
+
+#[test]
+fn spill_summary_neutralizes_untrusted_reference_text() {
+    let mut tool = crate::presentation::tool_fixture(
+        arany::ToolCall::Read {
+            path: "file.txt".into(),
+            offset: None,
+            limit: None,
+        },
+        "",
+    );
+    for (bytes, truncated, expected) in [
+        (
+            64,
+            false,
+            r"  Output spill: spill:reference\u{001b}[31m; 64 B; truncated: false",
+        ),
+        (
+            1024,
+            true,
+            r"  Output spill: spill:reference\u{001b}[31m; 1.0 KB; truncated: true",
+        ),
+    ] {
+        tool.observation.as_mut().unwrap().spill = Some(
+            serde_json::from_value(
+                serde_json::json!({"ref":"reference\u{001b}[31m","bytes":bytes,"truncated":truncated}),
+            )
+            .unwrap(),
+        );
+        let summary = tool_summary(&tool);
+        assert_eq!(summary.lines().last().unwrap(), expected);
+        assert!(!summary.contains('\u{001b}'));
     }
 }
