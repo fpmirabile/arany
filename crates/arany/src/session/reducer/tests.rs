@@ -455,65 +455,6 @@ mod goal_replay_tests {
         ]
     }
 
-    #[test]
-    fn invalid_compaction_reference_is_attributed_to_selecting_run_start() {
-        let (session, goal, run, actor) = (
-            SessionId::new(),
-            GoalId::new(),
-            RunId::new(),
-            AgentRunId::new(),
-        );
-        let mut run_config = config(CollaborationPolicy::Single, false);
-        run_config.compaction_event_sequence = Some(99);
-        run_config.compaction_content_digest = Some([2; 32]);
-        let mut events = vec![goal_started(goal, GoalBudget::default())];
-        events.extend(start_run(goal, run, actor, run_config));
-        let envelopes = session_with(session, events);
-        let selecting_sequence = envelopes
-            .iter()
-            .find(|event| matches!(event.event, Event::RunStarted { .. }))
-            .unwrap()
-            .sequence;
-        let mut view = SessionView::replay_open(session, &envelopes)
-            .unwrap()
-            .unwrap();
-        view.compactions.push(crate::session::CompactionView {
-            event_sequence: 99,
-            record: crate::session::events::CompactionRecord {
-                rate_limits: None,
-                covered_run_id: run,
-                covered_sequence: 1,
-                source_digest: [0; 32],
-                recent_files: Vec::new(),
-                provider: "openai".into(),
-                model: "gpt-5.4".into(),
-                prompt_version: 1,
-                schema_version: 1,
-                compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
-                source_bytes: 1,
-                source_tokens_estimate: 1,
-                input_tokens: None,
-                output_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
-                response_id: None,
-                wire_provenance: None,
-                chatgpt_provenance: None,
-                output_token_bound: OutputTokenBound::ProviderEnforced,
-                status: crate::session::events::CompactionStatus::Succeeded {
-                    summary: "inherited summary".into(),
-                    content_digest: [1; 32],
-                    summary_bytes: 17,
-                    summary_tokens_estimate: 4,
-                },
-            },
-        });
-        assert_eq!(
-            crate::session::validate_compaction_references_with_sequence(&view, &envelopes),
-            Err((selecting_sequence, ReplayError::InvalidSnapshot))
-        );
-    }
-
     fn complete_run_and_goal(
         goal_id: GoalId,
         run_id: RunId,

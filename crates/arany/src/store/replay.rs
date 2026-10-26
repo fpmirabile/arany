@@ -129,7 +129,7 @@ fn scan_inspected_events(
     session_id: SessionId,
 ) -> Result<(Vec<InspectedEvent>, Option<InspectionFailure>), StoreError> {
     let mut statement = connection.prepare(&format!(
-        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CAST(CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND 32 THEN kind ELSE '[invalid kind]' END AS BLOB), event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
+        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND 32 THEN kind ELSE '[invalid kind]' END, event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
         MAX_LIST_SCAN_EVENTS + 1
     ))?;
     let mut rows = statement.query([session_id.to_string()])?;
@@ -1207,16 +1207,8 @@ pub(super) struct RawRow {
 
 pub(super) fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
     let text = |index: usize| -> Result<String, StoreError> {
-        let value = row.get_ref(index)?;
-        match value {
-            rusqlite::types::ValueRef::Blob(bytes) if index == 7 => {
-                String::from_utf8(bytes.to_vec()).map_err(|_| StoreError::InvalidHistory)
-            }
-            rusqlite::types::ValueRef::Text(bytes) => {
-                String::from_utf8(bytes.to_vec()).map_err(|_| StoreError::InvalidHistory)
-            }
-            _ => Err(StoreError::InvalidHistory),
-        }
+        row.get::<_, String>(index)
+            .map_err(|_| StoreError::InvalidHistory)
     };
     let optional = |index: usize| -> Result<Option<String>, StoreError> {
         row.get::<_, Option<String>>(index)
@@ -1336,6 +1328,36 @@ pub(super) fn supervisor_corpus(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_event_decode_requires_text_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = Connection::open(temp.path().join("events.sqlite3")).unwrap();
+        let session = SessionId::new();
+        let event = Event::SessionRenamed {
+            title: "Title".into(),
+        };
+        for (kind, accepted) in [
+            (rusqlite::types::Value::Text(event.kind().into()), true),
+            (
+                rusqlite::types::Value::Blob(event.kind().as_bytes().to_vec()),
+                false,
+            ),
+        ] {
+            let result = connection
+                .query_row(
+                    "SELECT 1, 36, length(CAST(?1 AS BLOB)), length(CAST(?2 AS BLOB)), ?3, NULL, NULL, ?1, ?4, ?2, 0",
+                    rusqlite::params![kind, event.payload().unwrap(), session.to_string(), event.version()],
+                    |row| Ok(decode_event(row)),
+                )
+                .unwrap();
+            if accepted {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(StoreError::InvalidHistory)));
+            }
+        }
+    }
 
     #[test]
     fn strict_event_decode_rejects_noncanonical_envelope_id_lengths() {

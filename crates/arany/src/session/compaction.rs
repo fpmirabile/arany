@@ -57,10 +57,6 @@ pub(crate) fn recent_files_across(runs: &[RunView], covered_sequence: u64) -> Ve
     recent
 }
 
-pub(crate) fn validate_compaction_references(view: &SessionView) -> Result<(), ReplayError> {
-    validate_compaction_references_with_sequence(view, &[]).map_err(|(_, cause)| cause)
-}
-
 type RecentChange = (String, Option<String>);
 
 fn observation_changes(
@@ -428,39 +424,25 @@ pub(crate) fn validate_goal_context_compactions_with_sequence(
     Ok(())
 }
 
-pub(crate) fn validate_compaction_references_with_sequence(
-    view: &SessionView,
-    events: &[EventEnvelope],
-) -> Result<(), (u64, ReplayError)> {
-    let run_starts: HashMap<_, _> = events
-        .iter()
-        .filter_map(|envelope| match &envelope.event {
-            Event::RunStarted { run_id, .. } => Some((*run_id, envelope.sequence)),
-            _ => None,
-        })
-        .collect();
+pub(crate) fn validate_compaction_references(view: &SessionView) -> Result<(), ReplayError> {
     for run in &view.runs {
         let Some(config) = &run.config else { continue };
         let Some(event_sequence) = config.compaction_event_sequence else {
             continue;
         };
-        let selecting_sequence = run_starts
-            .get(&run.id)
-            .copied()
-            .unwrap_or(run.accepted_sequence);
         let selected = view
             .compactions
             .iter()
             .find(|compaction| compaction.event_sequence == event_sequence)
-            .ok_or((selecting_sequence, ReplayError::InvalidSnapshot))?;
+            .ok_or(ReplayError::InvalidSnapshot)?;
         let CompactionStatus::Succeeded { content_digest, .. } = &selected.record.status else {
-            return Err((selecting_sequence, ReplayError::InvalidSnapshot));
+            return Err(ReplayError::InvalidSnapshot);
         };
         if config.compaction_content_digest != Some(*content_digest)
             || selected.record.covered_sequence >= run.accepted_sequence
             || event_sequence >= run.accepted_sequence
         {
-            return Err((selecting_sequence, ReplayError::InvalidSnapshot));
+            return Err(ReplayError::InvalidSnapshot);
         }
     }
     Ok(())

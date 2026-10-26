@@ -33,8 +33,6 @@ pub(crate) const MAX_STEERING_LABEL_BYTES: usize = 8;
 pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
-#[cfg(test)]
-pub(crate) use compaction::validate_compaction_references_with_sequence;
 pub(crate) use compaction::{
     AUTO_COMPACTION_HISTORY_BYTES, COMPACTION_COMPILER_VERSION, COMPACTION_SUMMARY_SEPARATOR_BYTES,
     CompactionInputError, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_OUTPUT_TOKENS,
