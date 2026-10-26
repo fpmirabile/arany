@@ -66,7 +66,6 @@ pub(crate) struct View {
     remaining_data: usize,
     retained_limit: usize,
     enforcement_digest: [u8; 32],
-    process_enforcement_digest: [u8; 32],
     last_intent_digest: Option<[u8; 32]>,
     last_enforcement_digest: Option<[u8; 32]>,
     sealed: Option<WorkerDataRef>,
@@ -136,7 +135,6 @@ impl View {
             pending: None,
             contained: true,
             enforcement_digest: runtime.enforcement_digest,
-            process_enforcement_digest: runtime.process_enforcement_digest,
             last_intent_digest: None,
             last_enforcement_digest: None,
             sealed: None,
@@ -255,7 +253,7 @@ impl View {
         if !super::discovery::possible(&intent.call) || exact {
             return self.read(intent, runtime.permissions());
         }
-        if self.check(&intent).is_err() {
+        if self.check(&intent, self.enforcement_digest).is_err() {
             return denied(intent);
         }
         let bytes = match self.current.encode() {
@@ -314,7 +312,7 @@ impl View {
         intent: EffectIntent,
         permissions: Option<&super::permissions::PermissionConfig>,
     ) -> ToolObservation {
-        if self.check(&intent).is_err() {
+        if self.check(&intent, self.enforcement_digest).is_err() {
             return denied(intent);
         }
         let hidden = permissions
@@ -351,17 +349,12 @@ impl View {
         }
     }
 
-    fn check(&self, intent: &EffectIntent) -> Result<(), ToolError> {
+    fn check(&self, intent: &EffectIntent, enforcement_digest: [u8; 32]) -> Result<(), ToolError> {
         if self.stopped
             || self.pending.is_some()
             || intent.run_id != self.run_id
             || intent.policy_digest != self.policy_digest
-            || intent.enforcement_digest
-                != if intent.call.is_process() {
-                    self.process_enforcement_digest
-                } else {
-                    self.enforcement_digest
-                }
+            || intent.enforcement_digest != enforcement_digest
             || intent.workspace_device != self.workspace_identity.device
             || intent.workspace_inode != self.workspace_identity.inode
             || !intent.valid()
@@ -392,7 +385,14 @@ impl View {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> Result<Candidate, Box<ToolObservation>> {
-        if self.check(&intent).is_err()
+        let enforcement_digest = if intent.call.is_process() {
+            runtime.build_jobs_digest(&intent)
+        } else {
+            Ok(self.enforcement_digest)
+        };
+        if enforcement_digest
+            .and_then(|digest| self.check(&intent, digest))
+            .is_err()
             || matches!(intent.call, ToolCall::Command { .. })
                 && intent.limits.cache_bytes > 0
                 && self.cache_lease.is_none()
@@ -1476,6 +1476,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_build_jobs_bind_selected_rust_before_guard_dispatch() {
+        let (dir, mut runtime, mut view) = fixture();
+        runtime.config.commands = serde_json::from_value(json!([{"name":"sh","executable":"/unavailable","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}])).unwrap();
+        let version = "1.98.1-x86_64-unknown-linux-gnu";
+        runtime.config.runtime_grants = serde_json::from_value(json!([{"kind":"rust","manager":"rustup","version":version,"path":dir.path().join(".rustup/toolchains").join(version),"device":1,"inode":1}])).unwrap();
+        runtime.process_enforcement_digest =
+            crate::tools::guard::enforcement_digest(&runtime.config.runtime_grants).unwrap();
+        view.policy_digest = runtime.config.digest();
+        view.grant.commands = vec!["sh".into()];
+        view.grant.tools.push(WorkerTool::Command);
+        let mut intent = intent(
+            &runtime,
+            &view,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        );
+        intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
+        intent.limits.build_jobs = 2;
+        intent.limits.cache_bytes = 0;
+        intent.limits.cache_candidate_bytes = 0;
+        runtime.bind_build_jobs(&mut intent).unwrap();
+        assert!(intent.enforcement_digest != runtime.process_enforcement_digest);
+        let mut forged = intent.clone();
+        forged.enforcement_digest = runtime.process_enforcement_digest;
+        let refused = view
+            .command(&runtime, forged, Cancellation::new())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.disposition, ToolDisposition::Denied);
+        assert!(view.last_intent_digest.is_none());
+        let cancellation = Cancellation::new();
+        // Stop at Guard admission so this corpus needs no native service.
+        cancellation.cancel();
+        let _ = view.command(&runtime, intent, cancellation).await;
+        assert!(view.last_intent_digest.is_some());
+    }
+
+    #[tokio::test]
     async fn private_target_refuses_scope_identity_revision_and_model_admission_before_dispatch() {
         let (dir, runtime, mut view) = fixture();
         for path in [
@@ -1856,15 +1898,14 @@ mod tests {
     #[test]
     fn cleanup_binds_the_enforcement_of_the_last_intent_class() {
         let (_dir, runtime, mut view) = fixture();
-        view.process_enforcement_digest = [9; 32];
         let command = ToolCall::Command {
             program: "sh".into(),
             args: Vec::new(),
             cwd: ".".into(),
         };
         let mut intent = intent(&runtime, &view, command);
-        intent.enforcement_digest = view.process_enforcement_digest;
-        assert_ne!(view.enforcement_digest, view.process_enforcement_digest);
+        intent.enforcement_digest = [9; 32];
+        assert_ne!(view.enforcement_digest, intent.enforcement_digest);
         view.note_intent(&intent);
         let cleanup = view.dispose().unwrap();
         assert_eq!(cleanup.enforcement_digest, intent.enforcement_digest);

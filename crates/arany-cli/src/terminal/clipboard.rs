@@ -1634,7 +1634,7 @@ mod copy_tests {
                 .0,
             "tab\there\n\\u{001b}]52;c;aGk=\\u{0007}\\u{000d}\\u{202e}x"
         );
-        for answer in ["", "\t", "\n\t\t\n", "\tfirst\t\n\tlast\t"] {
+        for answer in ["", "# source", "\t", "\n\t\t\n", "\tfirst\t\n\tlast\t"] {
             assert_eq!(CopyRequest::answer(answer).unwrap().0, answer);
         }
         assert_eq!(
