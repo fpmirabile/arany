@@ -386,8 +386,8 @@ fn reducer_accepts_maximum_summary_from_recorded_compiler_floor() {
     }];
     record.status = crate::session::events::CompactionStatus::Succeeded {
         content_digest: crate::validate::digest(summary.as_bytes()),
-        summary_bytes: summary.len() as u32,
-        summary_tokens_estimate: summary.len().div_ceil(4) as u32,
+        summary_bytes: u32::try_from(summary.len()).unwrap(),
+        summary_tokens_estimate: u32::try_from(summary.len().div_ceil(4)).unwrap(),
         summary: summary.clone(),
     };
     let mut invalid_record = record.clone();
