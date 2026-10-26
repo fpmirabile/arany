@@ -297,6 +297,7 @@ impl RunLoop<'_> {
                     end = Box::pin(self.execute_step_call(&grant, runtime, &mut step, intent))
                         .await?;
                 }
+                StepEnd::Stopped(StopCause::ToolRefused(_)) => {}
                 StepEnd::Stopped(_) => {
                     let observation = self.finish_undispatched(&grant, runtime, intent).await?;
                     step.observations.push(observation);
@@ -329,7 +330,12 @@ impl RunLoop<'_> {
                 .await?
                 .map_err(StopCause::from);
             match sized {
-                Ok(intent) => intents.push(intent),
+                Ok(intent) => {
+                    if let Err(cause) = self.validate_step_intent(runtime, &intent).await? {
+                        return Ok(Err(cause));
+                    }
+                    intents.push(intent);
+                }
                 Err(StopCause::DelegationDeadline) => {
                     let calls: Vec<_> = step
                         .requests
@@ -682,7 +688,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         permission: Permission,
         narrowable: bool,
-    ) -> Result<Admission<Verdict>, EngineError> {
+    ) -> Result<Result<Admission<Verdict>, StopCause>, EngineError> {
         let phase = self
             .hook_gate(grant, runtime, intent, permission, narrowable)
             .await?;
@@ -704,11 +710,20 @@ impl RunLoop<'_> {
             ),
         };
         let decided = self.dispatch_decision(grant, &facts, approval);
-        let resolution = self.dispatch_verdict(&phase, decided, save)?;
-        self.record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
-            .await?;
+        let mut resolution = self.dispatch_verdict(&phase, decided, save)?;
+        if let Err(cause) = self
+            .record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
+            .await?
+        {
+            if let Verdict::Dispatch { queue_pause, .. } = &mut resolution.verdict
+                && let Some(pause) = queue_pause.take()
+            {
+                self.settle_active_pause(pause, None)?;
+            }
+            return Ok(Err(StopCause::ToolRefused(cause)));
+        }
         self.save_remembered_rule(runtime, phase.site, resolution.verdict, resolution.save)
-            .map(Admission::Reserved)
+            .map(|verdict| Ok(Admission::Reserved(verdict)))
     }
 
     async fn hook_gate(
@@ -942,7 +957,7 @@ impl RunLoop<'_> {
         phase: &BeforeDispatch,
         facts: &DispatchFacts<'_>,
         resolution: &DispatchResolution,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Result<(), crate::session::ToolRefusal>, EngineError> {
         let unguarded = phase.intent.call.is_unguarded();
         let git_write = phase.intent.call.is_git() && phase.intent.call.facts().mutates;
         let primary_host_read =
@@ -959,27 +974,38 @@ impl RunLoop<'_> {
         } else {
             resolution.source
         };
-        self.append(Event::ToolStarted {
+        let verdict = records_permission.then(|| PermissionVerdict {
+            host: phase
+                .host_permission
+                .verdict(approved, unguarded, resolution.save),
+            intent_digest: phase.intent.digest(),
+            decision: resolution.decision,
+            mode,
+            basis: facts.permission.basis,
+            source,
+            approved,
+            hook_restriction: phase.hooks.restriction,
+            hooks: phase.hooks.count,
+            narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
+        });
+        let mut event = Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: phase.intent.agent_run_id,
             intent: phase.intent.clone().into(),
             active_ceiling_ms: self.tool_ceiling(runtime, &phase.intent)?,
-            verdict: records_permission.then(|| PermissionVerdict {
-                host: phase
-                    .host_permission
-                    .verdict(approved, unguarded, resolution.save),
-                intent_digest: phase.intent.digest(),
-                decision: resolution.decision,
-                mode,
-                basis: facts.permission.basis,
-                source,
-                approved,
-                hook_restriction: phase.hooks.restriction,
-                hooks: phase.hooks.count,
-                narrowed: matches!(resolution.verdict, Verdict::Narrow(..)),
-            }),
-        })
-        .await
+            verdict: verdict.clone(),
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        if let Err(cause) = self
+            .ledger()
+            .view(|view| crate::session::validate_tool_started(view, &event))?
+        {
+            self.record_tool_refusal(&phase.intent, cause, verdict)
+                .await?;
+            return Ok(Err(cause));
+        }
+        self.append(event).await?;
+        Ok(Ok(()))
     }
 
     async fn dispatch_primary(

@@ -966,3 +966,196 @@ async fn multi_call_cancellation_settles_the_undispatched_suffix() {
         4
     );
 }
+
+#[tokio::test]
+async fn reducer_only_preflight_refusals_commit_reasons_and_terminal_recovery() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+    let _deadline = engine_support::deadline("Tool preflight refusal", TEST_TIMEOUT);
+    for kind in ["ToolProposed", "ToolStarted"] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+        let state = temp.path().join("state");
+        let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        private_file(
+            &state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Read"]}}"#,
+        );
+        let calls = if kind == "ToolStarted" { 2 } else { 1 };
+        let provider = preflight_provider(calls);
+        let initial = run_with(
+            &engine,
+            &provider,
+            request(&workspace, "Prepare"),
+            RunControls::default(),
+        )
+        .await
+        .unwrap();
+        let mut injected = arany::FaultPlan::corrupt_tool_preflight(initial.session_id, kind);
+        let mut input = request(&workspace, "Read the facts");
+        input.session_id = Some(initial.session_id);
+        input.title = None;
+        input.include_paths.clear();
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let approve = async {
+            if kind == "ToolStarted" {
+                inbox.next().await.expect("precommitted Read").decide(true);
+            }
+        };
+        let (outcome, ()) = tokio::join!(
+            run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    approvals: (kind == "ToolStarted").then_some(approvals),
+                    ..Default::default()
+                }
+            ),
+            approve
+        );
+        let outcome = outcome.unwrap();
+        injected
+            .try_recv()
+            .expect("candidate pin corruption reached the real reducer validator");
+        assert_eq!(provider.requests.lock().unwrap().len(), 2, "{kind}");
+        engine.close().await.unwrap();
+        let (events, view) = arany::test_support::goals::replayed(&state, initial.session_id).await;
+        assert_eq!(view.runs.last().unwrap(), &outcome.run, "{kind}");
+        assert_eq!(outcome.run.status, RunStatus::Failed, "{kind}");
+        assert_eq!(
+            outcome.run.failure,
+            Some(arany::RunFailure::ProposalRefused),
+            "{kind}"
+        );
+        assert_eq!(
+            outcome.run.tools.len(),
+            if kind == "ToolStarted" { calls } else { 0 }
+        );
+        assert!(
+            outcome
+                .run
+                .tools
+                .iter()
+                .all(|tool| tool.started_sequence.is_none() && tool.observation.is_none())
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("notes/facts.txt")).unwrap(),
+            "Fact"
+        );
+        assert_preflight_refusal_receipt(&events, &outcome.run);
+        assert_preflight_followup(&state, &workspace, &provider, initial.session_id).await;
+    }
+}
+
+fn preflight_provider(calls: usize) -> Arc<ScriptedProvider> {
+    let requests = (0..calls)
+        .map(|index| arany::ToolRequest {
+            id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+            call: arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: None,
+            },
+        })
+        .collect();
+    Arc::new(ScriptedProvider::new(vec![
+        arany::test_support::goals::finish_with("ready"),
+        ProviderOutcome::Tools(requests),
+        arany::test_support::goals::finish_with("recovered"),
+    ]))
+}
+
+async fn assert_preflight_followup(
+    state: &Path,
+    workspace: &Path,
+    provider: &Arc<ScriptedProvider>,
+    session: SessionId,
+) {
+    let engine = engine_support::open(
+        StateRoot::open_existing(state).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let mut input = request(workspace, "Explain the refused action");
+    input.session_id = Some(session);
+    input.title = None;
+    input.include_paths.clear();
+    let outcome = run_with(&engine, provider, input, RunControls::default())
+        .await
+        .unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let calls = provider.requests.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    let feedback = calls[2].input.previous_run_failure.unwrap();
+    assert_eq!(
+        feedback.refusal_cause,
+        Some(arany::ProposalRefusalCause::Phase)
+    );
+    assert_eq!(
+        feedback.stop,
+        arany::RunStop::Failed(arany::RunFailure::ProposalRefused)
+    );
+    assert_eq!(
+        feedback.provider_disposition,
+        Some(ProviderCallDisposition::ToolRequested)
+    );
+    assert_eq!(feedback.provider_failure, None);
+}
+
+fn assert_preflight_refusal_receipt(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    let (index, event) = events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| {
+            event.run_id == Some(run.id)
+                && matches!(event.event, Event::ToolPreflightRefused { .. })
+        })
+        .unwrap();
+    let Event::ToolPreflightRefused { record, .. } = &event.event else {
+        unreachable!()
+    };
+    assert_eq!(record.refusal.cause, arany::ProposalRefusalCause::Phase);
+    assert_eq!(
+        record.refusal.to_string(),
+        "Phase: Tool start violates the committed Session transition."
+    );
+    assert_eq!(
+        event.event.payload().unwrap(),
+        format!(
+            r#"{{"intent_digest":{},"refusal":{{"cause":"phase","reason":"Tool start violates the committed Session transition."}}{}}}"#,
+            serde_json::to_string(&record.intent_digest).unwrap(),
+            record
+                .verdict
+                .as_ref()
+                .map(|verdict| format!(",\"verdict\":{}", serde_json::to_string(verdict).unwrap()))
+                .unwrap_or_default(),
+        )
+    );
+    assert_eq!(record.verdict.is_some(), !run.tools.is_empty());
+    if let Some(verdict) = &record.verdict {
+        assert_eq!(verdict.source, arany::permissions::PermissionSource::Human);
+        assert!(verdict.approved);
+        assert_eq!(verdict.intent_digest, record.intent_digest);
+    }
+    assert_eq!(
+        run.agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Primary)
+            .unwrap()
+            .tool_refusal
+            .as_ref(),
+        Some(record)
+    );
+    assert_eq!(events[index + 1].event.kind(), "AgentFinished");
+    assert_eq!(events[index + 2].event.kind(), "RunFinished");
+    assert!(!events.iter().any(|event| event.run_id == Some(run.id)
+        && matches!(
+            event.event,
+            Event::ToolStarted { .. } | Event::ToolFinished { .. }
+        )));
+    let mut duplicate = events.to_vec();
+    duplicate[index + 1].event = event.event.clone();
+    assert!(SessionView::replay(event.session_id, &duplicate).is_err());
+}

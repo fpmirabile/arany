@@ -9,11 +9,186 @@ use super::{
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, ProviderCallDisposition, ReplayError};
+use crate::session::{ToolPreflightRefusal, ToolRefusal, ToolRefusalReason};
 use crate::tools::permissions::{
     Decision, HookEvent, HookResult, HostApproval, MAX_HOOKS_PER_OCCURRENCE, PermissionMode,
     PermissionSource, PermissionVerdict,
 };
 use crate::tools::{EffectIntent, ToolPolicyReceipt};
+
+pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result<(), ToolRefusal> {
+    use crate::session::ProposalRefusalCause::InvalidArguments;
+    let payload = ToolRefusal {
+        cause: InvalidArguments,
+        reason: ToolRefusalReason::Payload,
+    };
+    let transition = ToolRefusal::INVALID_TRANSITION;
+    let (Event::ToolProposed {
+        intent,
+        run_id,
+        agent_run_id,
+        ..
+    }
+    | Event::ToolStarted {
+        intent,
+        run_id,
+        agent_run_id,
+        ..
+    }) = event
+    else {
+        return Err(payload);
+    };
+    event.validate().map_err(|_| payload)?;
+    let run = view
+        .runs
+        .last()
+        .filter(|run| run.id == *run_id)
+        .ok_or(transition)?;
+    let pending = run.tools.iter().any(|tool| tool.intent.id == intent.id);
+    if !pending
+        && run
+            .primary()
+            .is_some_and(|primary| primary.id == *agent_run_id)
+    {
+        validate_primary_tool_scope(view, *run_id, &intent.call).map_err(|cause| ToolRefusal {
+            cause,
+            reason: ToolRefusalReason::Scope,
+        })?;
+        validate_primary_tool_lease(run, &intent.call).map_err(|cause| ToolRefusal {
+            cause,
+            reason: ToolRefusalReason::Lease,
+        })?;
+    }
+    let (run_id, agent_run_id) = event.scope();
+    let mut candidate = view.clone();
+    candidate
+        .apply_committed(&crate::session::EventEnvelope {
+            sequence: view.last_sequence.saturating_add(1),
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event: event.clone(),
+            created_at_ms: 0,
+        })
+        .map_err(|error| match error {
+            ReplayError::InvalidPayload | ReplayError::UnknownEvent => payload,
+            ReplayError::InvalidTransition | ReplayError::InvalidSnapshot => transition,
+        })
+}
+
+pub(crate) fn validate_primary_tool_scope(
+    view: &SessionView,
+    run_id: crate::session::RunId,
+    call: &crate::tools::ToolCall,
+) -> Result<(), crate::session::ProposalRefusalCause> {
+    use crate::session::ProposalRefusalCause::{Phase, PlanScopeExcludesCall};
+    use crate::tools::ToolCall;
+    let goal = active_run_goal(view, run_id).ok_or(Phase)?;
+    if goal.phase != crate::session::GoalPhase::Implementation && !call.is_goal_plan_prelude() {
+        return Err(Phase);
+    }
+    if !matches!(call, ToolCall::ParseAgentDefinition { .. })
+        && let Some(contract) = &goal.plan_contract
+        && (goal.awaiting_plan_contract
+            || !(matches!(
+                call,
+                ToolCall::PrepareWorker { .. } | ToolCall::ApplyChangeset { .. }
+            ) || contract.allows_call(call)))
+    {
+        return Err(PlanScopeExcludesCall);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_primary_tool_lease(
+    run: &RunView,
+    call: &crate::tools::ToolCall,
+) -> Result<(), crate::session::ProposalRefusalCause> {
+    use crate::session::ProposalRefusalCause::LeaseOverlap;
+    use crate::tools::ToolCall;
+    if matches!(
+        call,
+        ToolCall::ApplyChangeset {
+            source: crate::worker::ChangesetSource::WorkerHandover { .. }
+        }
+    ) || !(call.mutates() || call.is_process())
+    {
+        return Ok(());
+    }
+    let leases: Vec<_> = run
+        .agents
+        .iter()
+        .filter_map(|agent| agent.assignment.as_ref())
+        .filter(|worker| worker.released.is_none())
+        .flat_map(|worker| &worker.pins.request.lease)
+        .collect();
+    let paths: Vec<_> = match call {
+        ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::Delete { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        }
+        | ToolCall::Mkdir { path } => vec![path],
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => vec![source, destination],
+        ToolCall::ApplyChangeset {
+            source: crate::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => changeset.files.iter().map(|file| &file.path).collect(),
+        _ if !leases.is_empty() => return Err(LeaseOverlap),
+        _ => Vec::new(),
+    };
+    if paths.iter().any(|path| {
+        leases
+            .iter()
+            .any(|lease| crate::worker::overlaps(lease, path))
+    }) {
+        return Err(LeaseOverlap);
+    }
+    Ok(())
+}
+
+fn preflight_refused(
+    view: &mut SessionView,
+    run_id: crate::session::RunId,
+    actor: crate::session::AgentRunId,
+    record: &ToolPreflightRefusal,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    let run = active_run(view, run_id)?;
+    let agent = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == actor)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if agent.status != AgentStatus::Active
+        || agent.tool_refusal.is_some()
+        || run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .filter(|tool| tool.intent.agent_run_id == actor)
+            .any(ToolView::outcome_unknown)
+        || run
+            .lifecycle_hooks
+            .iter()
+            .filter(|hook| hook.invocation.intent.agent_run_id == actor)
+            .any(HookView::outcome_unknown)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let agent = run
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == actor)
+        .ok_or(ReplayError::InvalidTransition)?;
+    agent.tool_refusal = Some(record.clone());
+    agent.tool_refusal_sequence = Some(sequence);
+    Ok(())
+}
 
 pub(super) fn apply(
     current: &mut SessionView,
@@ -22,6 +197,13 @@ pub(super) fn apply(
 ) -> Result<(), ReplayError> {
     lifecycle::validate_finished(current, event)?;
     match event {
+        Event::ToolPreflightRefused {
+            run_id,
+            agent_run_id,
+            record,
+        } => {
+            preflight_refused(current, *run_id, *agent_run_id, record, prior)?;
+        }
         Event::ToolActiveTimeReserved {
             run_id,
             agent_run_id,
@@ -410,6 +592,29 @@ pub(super) fn before_lifecycle_event(
     let Some(run) = current.runs.last() else {
         return Ok(());
     };
+    if event.scope().0 == Some(run.id)
+        && let Some(actor) = event.scope().1
+        && run
+            .agents
+            .iter()
+            .any(|agent| agent.id == actor && agent.tool_refusal.is_some())
+        && !matches!(
+            event,
+            Event::AgentFinished {
+                disposition: crate::session::AgentDisposition::Failed
+                    | crate::session::AgentDisposition::Cancelled
+                    | crate::session::AgentDisposition::StoppedByHook,
+                ..
+            } | Event::WorkerDataChunk { .. }
+                | Event::WorkerDataSealed { .. }
+                | Event::WorkerHandoverRecorded { .. }
+                | Event::WorkerHandoverDiscarded { .. }
+                | Event::WorkerLeaseReleased { .. }
+                | Event::WorkerStopObserved { .. }
+        )
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     if run
         .lifecycle_hooks
         .last()

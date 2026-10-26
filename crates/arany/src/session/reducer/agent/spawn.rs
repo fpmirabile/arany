@@ -65,6 +65,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
     }
     validate_definition(run, *role, definition, assignment.is_some())?;
     run.agents.push(AgentView {
+        tool_refusal: None,
+        tool_refusal_sequence: None,
         profile: profile.clone(),
         assignment: assignment.clone().map(worker::WorkerView::new),
         definition: definition.clone(),

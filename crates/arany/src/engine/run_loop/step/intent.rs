@@ -274,7 +274,10 @@ impl RunLoop<'_> {
             .sized_intent(grant, runtime, step, call.clone(), post_call)
             .await?;
         match sized {
-            Ok(intent) => Ok(Ok(intent)),
+            Ok(intent) => Ok(self
+                .validate_step_intent(runtime, &intent)
+                .await?
+                .map(|()| intent)),
             Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(
                 match self
                     .record_delegation_deadline(grant, runtime, &[call])
@@ -292,6 +295,47 @@ impl RunLoop<'_> {
             Err(refusal @ SizingRefusal::Cancelled) => Ok(Err(refusal.into())),
             Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
         }
+    }
+
+    pub(super) async fn validate_step_intent(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) -> Result<Result<(), StopCause>, EngineError> {
+        let mut event = Event::ToolProposed {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
+        };
+        crate::fault::tool_preflight(self.session_id, &mut event);
+        if let Err(refusal) = self
+            .ledger()
+            .view(|view| crate::session::validate_tool_started(view, &event))?
+        {
+            self.record_tool_refusal(intent, refusal, None).await?;
+            return Ok(Err(StopCause::ToolRefused(refusal)));
+        }
+        Ok(Ok(()))
+    }
+
+    pub(super) async fn record_tool_refusal(
+        &self,
+        intent: &EffectIntent,
+        refusal: crate::session::ToolRefusal,
+        verdict: Option<PermissionVerdict>,
+    ) -> Result<(), EngineError> {
+        self.append(Event::ToolPreflightRefused {
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
+            record: crate::session::ToolPreflightRefusal {
+                intent_digest: intent.digest(),
+                refusal,
+                verdict,
+            },
+        })
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn sized_intent(
@@ -626,11 +670,13 @@ impl RunLoop<'_> {
         let permission = self.permission(grant, runtime, &intent.call);
         let mut narrowed = None;
         let mut candidate = None;
-        let Admission::Reserved(verdict) = self
+        let verdict = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable)
             .await?
-        else {
-            return Ok(Err(StopCause::ActiveTime));
+        {
+            Ok(Admission::Reserved(verdict)) => verdict,
+            Ok(Admission::Exhausted) => return Ok(Err(StopCause::ActiveTime)),
+            Err(cause) => return Ok(Err(cause)),
         };
         if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
             self.worker

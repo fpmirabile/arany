@@ -169,9 +169,9 @@ grant than their parent.
 Exact Read, exact-file Search and Skill text use the admitted directory capability
 in process.
 Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
-execution site. Mkdir uses the same admitted handle in process with a journaled File receipt.
-Other Workspace mutations and changeset publication retain Guard execution until S1b. Typed Git reads,
-Discovery, Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-reads) owns
+execution site. Typed Workspace mutations and changeset publication use the same admitted handle
+in process, with digest preconditions and journaled File receipts. Typed Git reads,
+Discovery, Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-file-operations) owns
 path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforcement-and-compatibility)
 and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
 native launch, supervision and recovery. Short-lived same-binary Guard and
@@ -276,7 +276,7 @@ Context is isolated per AgentRun. Children receive explicit assignment capsules 
 
 The [Tool contract](../specs/tools.md) owns supported behavior and acceptance scenarios. [Guard research](../research/deterministic-harness-protection.md#linux-launch-and-syscall-rationale) and [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) retain alternatives and rationale; [dependency review](../security/local-tool-dependency-review.md) owns scoped security evidence. `tools.json` is private host configuration, not repository configuration. Its pinned scope/resource digests produce immutable primary-only one-use intents. The Engine commits each Provider request fact and intent before dispatch, then a correlated observation before inferring again. Uncertain, cancelled or unacknowledged effects stop without retry; public typed replay validates payloads as well as legal transitions. Replay accepts only the current Goal-linked format and never grants authority from an older or incomplete journal.
 
-The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. Native operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the native mutation Guard, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
+The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. In-process file operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the in-process file publisher, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
 
 Past effect records enter context/compaction only as bounded untrusted facts, including interrupted attempts and observed failures, never renewed permission or execution. The tool-enabled compiler reserves current observations from the remaining finite context budget. An active Goal may summarize only an acknowledged Tool prefix at a Run boundary; it retains every observation in canonical Events and sends the latest untrusted summary plus a bounded recent tail. Researcher children receive a read-only catalog and only their own observations; the primary receives their bounded reports.
 
@@ -437,7 +437,8 @@ CLI boundaries supply typed failure stages; optimized builds leave it disabled.
 ## 11. Security boundary
 
 Policy admits authority before project input; the separate native Guard enforces
-effects and returns evidence for validated publication. The Engine journals the
+program effects and returns evidence for validated publication. Typed file effects
+use admitted directory capabilities in process and return intent-bound receipts. The Engine journals the
 transition and never treats replay as permission to dispatch. Account setup and
 the credential helper own browser/callback and OS-store access respectively.
 

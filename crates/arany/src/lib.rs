@@ -95,7 +95,8 @@ pub use session::{
     ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
     RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
     SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
-    ToolIntentRecord, ToolView, UsageGroup, UsageView, WorkspaceIdentity, escape_status_text,
+    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView, UsageGroup,
+    UsageView, WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};

@@ -1581,7 +1581,6 @@ pub(super) struct GuardContext<'a> {
     pub(super) hidden: &'a HiddenPaths,
     pub(super) worker_paths: Option<&'a [String]>,
     pub(super) definition: Option<Vec<u8>>,
-    pub(super) handover: Option<crate::session::worker::WorkerChangeset>,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
@@ -2071,7 +2070,6 @@ pub(super) fn helper_main() -> ExitCode {
                 .as_ref()
                 .map(|worker| worker.grant.read_paths.as_slice()),
             definition,
-            handover,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,

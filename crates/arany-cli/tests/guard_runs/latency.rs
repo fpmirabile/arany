@@ -1,11 +1,14 @@
 use super::*;
-use arany::test_support::latency::{JournalIntervals, LatencyError, Sample, percentiles};
+use arany::test_support::latency::{
+    JournalIntervals, LatencyError, Operation, Sample, percentiles,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const FIXTURE: &str = "fn main() {}\n";
 const WARMUPS: usize = 10;
 const MEASURED: usize = 100;
+const CORPUS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REPORT_CAP: u64 = 1024 * 1024;
 const SAMPLE_CAP: u64 = 8 * 1024 * 1024;
 const EVIDENCE_CAP: u64 = 256 * 1024 * 1024;
@@ -17,15 +20,23 @@ fn private_file(path: &Path, bytes: &[u8]) {
 }
 
 fn fixture(root: &Path, path: &str) -> (Engine, Arc<ScriptedProvider>, arany::RunRequest) {
+    fixture_for(root, path, Operation::Read)
+}
+
+fn fixture_for(
+    root: &Path,
+    path: &str,
+    operation: Operation,
+) -> (Engine, Arc<ScriptedProvider>, arany::RunRequest) {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     private_file(
         &workspace.join("src/main.rs"),
-        FIXTURE.repeat(4096).as_bytes(),
+        fixture_content(operation).as_bytes(),
     );
     assert_eq!(
         std::fs::read(workspace.join("src/main.rs")).unwrap().len(),
-        53_248
+        FIXTURE.len() * 4096
     );
     let state = root.join("state");
     let engine = engine_support::open(
@@ -40,20 +51,33 @@ fn fixture(root: &Path, path: &str) -> (Engine, Arc<ScriptedProvider>, arany::Ru
         &state.join("permissions.json"),
         br#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
     );
-    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":[],"skills":[],"mcp":[]})).unwrap());
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            tool_outcome(arany::ToolCall::Read {
-                path: path.into(),
-                offset: None,
-                limit: None,
+            tool_outcome(match operation {
+                Operation::Read => arany::ToolCall::Read {
+                    path: path.into(),
+                    offset: None,
+                    limit: None,
+                },
+                Operation::Edit => arany::ToolCall::Edit {
+                    path: path.into(),
+                    expected_digest: digest_hex(fixture_content(operation).as_bytes()),
+                    old: "fn pick".into(),
+                    new: "fn done".into(),
+                },
+                _ => panic!("unsupported latency operation"),
             }),
             arany::test_support::goals::finish_with("Read completed"),
         ])
         .with_known_input_tokens(),
     );
     let mut input = request(&workspace, "Read the first page of src/main.rs");
-    input.include_paths.clear();
+    input.include_paths = if operation == Operation::Edit {
+        vec!["src/main.rs".into()]
+    } else {
+        Vec::new()
+    };
     input.goal.budget = Some(arany::GoalBudget {
         max_provider_calls: Some(4),
         max_tokens: Some(32_768),
@@ -63,6 +87,21 @@ fn fixture(root: &Path, path: &str) -> (Engine, Arc<ScriptedProvider>, arany::Ru
     (engine, provider, input)
 }
 
+fn fixture_content(operation: Operation) -> String {
+    if operation == Operation::Edit {
+        format!("{}fn pick() {{}}\n", FIXTURE.repeat(4095))
+    } else {
+        FIXTURE.repeat(4096)
+    }
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn controls() -> RunControls {
     RunControls {
         tools: ToolGrant::Configured,
@@ -70,11 +109,10 @@ fn controls() -> RunControls {
     }
 }
 
-fn assert_read(view: &SessionView) {
+fn assert_single_primary_run(view: &SessionView) -> &arany::RunView {
     assert_eq!(view.runs.len(), 1);
     let run = &view.runs[0];
     assert_eq!(run.status, RunStatus::Finished);
-    assert_eq!(run.assistant_message.as_deref(), Some("Read completed"));
     assert_eq!(run.tools.len(), 1);
     assert!(
         run.agents
@@ -84,6 +122,12 @@ fn assert_read(view: &SessionView) {
     assert!(view.compactions.is_empty());
     assert!(run.provider_fallbacks.is_empty());
     assert!(run.provider_retries.is_empty());
+    run
+}
+
+fn assert_read(view: &SessionView) {
+    let run = assert_single_primary_run(view);
+    assert_eq!(run.assistant_message.as_deref(), Some("Read completed"));
     let observation = run.tools[0].observation.as_ref().unwrap();
     assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
     assert!(matches!(
@@ -114,8 +158,8 @@ struct AuditedSample {
     effective_bounds: serde_json::Value,
 }
 
-async fn measure(root: &Path, ordinal: usize) {
-    let (engine, provider, input) = fixture(root, "src/main.rs");
+async fn measure(root: &Path, ordinal: usize, operation: Operation) {
+    let (engine, provider, input) = fixture_for(root, "src/main.rs", operation);
     let recorder = engine_support::record_tool_latency(&engine);
     let result = run_with(&engine, &provider, input, controls()).await;
     private_file(
@@ -130,7 +174,17 @@ async fn measure(root: &Path, ordinal: usize) {
     let (events, view) =
         arany::test_support::goals::replayed(&root.join("state"), outcome.session_id).await;
     assert_eq!(view.runs[0], outcome.run);
-    assert_read(&view);
+    if operation == Operation::Read {
+        assert_read(&view);
+    } else {
+        let run = assert_single_primary_run(&view);
+        let observation = run.tools[0].observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+        assert!(
+            matches!(&observation.attestation, Some(arany::Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.before.is_some() && receipt.after.is_some())
+        );
+        assert!(run.tools[0].checkpoint.is_some());
+    }
     private_file(
         &root.join("expected-show.jsonl"),
         arany_cli::presentation::render_session(
@@ -157,11 +211,13 @@ async fn measure(root: &Path, ordinal: usize) {
         warmup: ordinal < WARMUPS,
         journal_interval_ms: audit.unwrap(),
         sample: samples[0].clone(),
-        effective_bounds: serde_json::json!({"goal_budget":view.goals[0].budget,"resource_settings":view.goals[0].resource_settings,"tool_limits":view.runs[0].tools[0].intent.limits,"grant":{"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]},"permission_mode":"acceptEdits","checkpoint":"Read has no publication"}),
+        effective_bounds: serde_json::json!({"goal_budget":view.goals[0].budget,"resource_settings":view.goals[0].resource_settings,"tool_limits":view.runs[0].tools[0].intent.limits,"grant":{"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":[],"skills":[],"mcp":[]},"permission_mode":"acceptEdits","checkpoint":view.runs[0].tools[0].checkpoint}),
     };
     assert_eq!(
         std::fs::read(root.join("workspace/src/main.rs")).unwrap(),
-        FIXTURE.repeat(4096).as_bytes()
+        fixture_content(operation)
+            .replace("fn pick", "fn done")
+            .as_bytes()
     );
     private_file(
         &root.join("sample.json"),
@@ -311,10 +367,25 @@ fn linux_tool_latency_sample() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(measure(&root, ordinal));
+        .block_on(measure(
+            &root,
+            ordinal,
+            match std::env::var("ARANY_LATENCY_OPERATION").unwrap().as_str() {
+                "Read" => Operation::Read,
+                "Edit" => Operation::Edit,
+                _ => panic!("unsupported latency operation"),
+            },
+        ));
 }
 
 pub(super) fn corpus() {
+    let deadline = std::time::Instant::now() + CORPUS_TIMEOUT;
+    for operation in [Operation::Read, Operation::Edit] {
+        corpus_row(operation, deadline);
+    }
+}
+
+fn corpus_row(operation: Operation, deadline: std::time::Instant) {
     require_release_linux();
     let _gate = process::NATIVE_GATE
         .lock()
@@ -379,7 +450,6 @@ pub(super) fn corpus() {
             "local disk required; tmpfs is not this workload"
         );
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
     let mut samples = Vec::with_capacity(WARMUPS + MEASURED);
     let mut failure = None;
     let mut attempted = 0;
@@ -403,7 +473,8 @@ pub(super) fn corpus() {
                 "--test-threads=1",
             ])
             .env("ARANY_LATENCY_SAMPLE", &sample_root)
-            .env("ARANY_LATENCY_ORDINAL", ordinal.to_string());
+            .env("ARANY_LATENCY_ORDINAL", ordinal.to_string())
+            .env("ARANY_LATENCY_OPERATION", format!("{operation:?}"));
         use process::BoundedOutput;
         let sample_deadline = deadline.min(std::time::Instant::now() + Duration::from_secs(120));
         let remaining = sample_deadline.saturating_duration_since(std::time::Instant::now());
@@ -475,12 +546,12 @@ pub(super) fn corpus() {
         None
     };
     let report = serde_json::json!({
-        "corpus_version":1, "operation":"read", "profile":"release with test-support", "host":host,
+        "corpus_version":1, "operation":operation, "profile":"release with test-support", "host":host,
         "binary_sha256":binary_sha256,"test_binary_sha256":test_binary_sha256,"package_version":env!("CARGO_PKG_VERSION"),
         "failed_capture":failed_capture,
-        "evidence_root":root, "workload":"warm 53248-byte file, default 2000-line page, fresh State/Workspace per sample",
+        "evidence_root":root, "workload":"warm file: Read first 2000 lines or Edit unique final function, fresh State/Workspace per sample",
         "endpoint":"complete typed Provider receipt to ToolFinished durable append acknowledgement",
-        "excluded":"Provider transport/inference/decoding, startup, final answer, rendering, show; no Guard spawn for Read",
+        "excluded":"Provider transport/inference/decoding, startup, final answer, rendering, show; no Guard spawn for Read or Edit",
         "attempted":attempted, "warmups":samples.iter().filter(|sample| sample.warmup).count(), "measured":measured.len(),
         "failed_or_incomplete":attempted - samples.len(), "valid":valid, "failure":failure, "samples":samples,
         "p50_p95_max_us":summary, "provisional_p95_objective_us":100_000,

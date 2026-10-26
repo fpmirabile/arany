@@ -7,12 +7,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let call = &site.intent.call;
     let facts = call.facts();
     match facts.family {
-        Family::File if site.handover.is_some() => fs::apply_worker_changeset(
-            site.workspace,
-            site.handover.as_ref().ok_or(ToolError::Configuration)?,
-        ),
         Family::File if super::discovery::possible(call) => discover(site),
-        Family::File => fs::native(site.workspace, call, site.config),
+        Family::File if site.worker_paths.is_some() => {
+            fs::native(site.workspace, call, site.config)
+        }
+        Family::File => Err(ToolError::Configuration),
         Family::Process => process::run(site).await,
         Family::Skill => Err(ToolError::Configuration),
         Family::Mcp => {
