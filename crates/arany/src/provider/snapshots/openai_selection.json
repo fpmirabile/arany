@@ -1,0 +1,123 @@
+{
+  "editor": {
+    "parallel_tool_calls": false,
+    "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
+    "tool_choice": {
+      "mode": "auto",
+      "tools": [
+        {
+          "name": "arany_list",
+          "type": "function"
+        },
+        {
+          "name": "arany_read",
+          "type": "function"
+        },
+        {
+          "name": "arany_search",
+          "type": "function"
+        },
+        {
+          "name": "arany_glob",
+          "type": "function"
+        }
+      ],
+      "type": "allowed_tools"
+    }
+  },
+  "planning": {
+    "parallel_tool_calls": true,
+    "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
+    "tool_choice": {
+      "mode": "auto",
+      "tools": [
+        {
+          "name": "arany_list",
+          "type": "function"
+        },
+        {
+          "name": "arany_read",
+          "type": "function"
+        },
+        {
+          "name": "arany_search",
+          "type": "function"
+        },
+        {
+          "name": "arany_glob",
+          "type": "function"
+        },
+        {
+          "name": "arany_plan",
+          "type": "function"
+        },
+        {
+          "name": "arany_delegate",
+          "type": "function"
+        }
+      ],
+      "type": "allowed_tools"
+    }
+  },
+  "researcher": {
+    "parallel_tool_calls": true,
+    "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
+    "tool_choice": {
+      "mode": "auto",
+      "tools": [
+        {
+          "name": "arany_list",
+          "type": "function"
+        },
+        {
+          "name": "arany_read",
+          "type": "function"
+        },
+        {
+          "name": "arany_search",
+          "type": "function"
+        },
+        {
+          "name": "arany_glob",
+          "type": "function"
+        }
+      ],
+      "type": "allowed_tools"
+    }
+  },
+  "spent": {
+    "parallel_tool_calls": true,
+    "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
+    "tool_choice": "none"
+  },
+  "synthesis": {
+    "parallel_tool_calls": true,
+    "prompt_cache_key": "01900000-0000-7000-8000-000000000001",
+    "tool_choice": {
+      "mode": "auto",
+      "tools": [
+        {
+          "name": "arany_list",
+          "type": "function"
+        },
+        {
+          "name": "arany_read",
+          "type": "function"
+        },
+        {
+          "name": "arany_search",
+          "type": "function"
+        },
+        {
+          "name": "arany_glob",
+          "type": "function"
+        },
+        {
+          "name": "arany_plan",
+          "type": "function"
+        }
+      ],
+      "type": "allowed_tools"
+    }
+  }
+}

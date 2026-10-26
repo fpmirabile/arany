@@ -35,7 +35,7 @@ pub(crate) struct RunScope<'a> {
     pub(crate) output_cap: u32,
     pub(crate) secret: &'a str,
     functions: Vec<String>,
-    review: bool,
+    role: crate::provider::PromptRole,
 }
 
 impl<'a> RunScope<'a> {
@@ -53,7 +53,7 @@ impl<'a> RunScope<'a> {
                 conversation.tools.as_deref().unwrap_or_default(),
                 &conversation.outcome,
             ),
-            review: request.input.role == crate::provider::PromptRole::ToolReview,
+            role: request.input.role,
         }
     }
 }
@@ -122,14 +122,17 @@ fn decode(
         .iter()
         .any(|item| item.kind == "function_call")
     {
-        if scope.review {
+        if scope.role == crate::provider::PromptRole::ToolReview {
             return Err(ResponseError::Outcome);
         }
-        let (id, usage, call) = response.completed_function(scope.model)?;
-        (id, usage, call.outcome(&scope.functions)?)
+        let (id, usage, calls) = response.completed_functions(scope.model)?;
+        if scope.role == crate::provider::PromptRole::Editor && calls.len() != 1 {
+            return Err(ResponseError::Outcome);
+        }
+        (id, usage, function_outcomes(&calls, &scope.functions)?)
     } else {
         let (id, usage, text) = response.completed_text(scope.model)?;
-        let outcome = if scope.review {
+        let outcome = if scope.role == crate::provider::PromptRole::ToolReview {
             review_outcome(&text).map_err(|_| ResponseError::Outcome)?
         } else {
             ProviderOutcome::Answer(crate::provider::Answer { text })
@@ -162,7 +165,6 @@ pub(crate) fn outcome_failure_diagnostic(
     crate::provider::diagnostics::SubscriptionFailureStage,
     Option<crate::diagnostics::ToolArgumentShape>,
 ) {
-    use crate::diagnostics::ToolArgumentShape;
     use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
     let Ok(response) = decode_completed_event(bytes) else {
         return (Stage::OutcomeContract, None);
@@ -187,43 +189,17 @@ pub(crate) fn outcome_failure_diagnostic(
         .iter()
         .any(|item| item.kind == "function_call")
     {
-        let Ok((_, _, call)) = response.completed_function(model) else {
+        let Ok((_, _, calls)) = response.completed_functions(model) else {
             return (Stage::OutcomeContract, None);
         };
-        let Some(operation) = call.name.strip_prefix(NAME_PREFIX) else {
-            return (Stage::OutcomeContract, None);
-        };
-        let Ok(mut fields) = call.fields() else {
-            return (Stage::OutcomeContract, None);
-        };
-        if operation == "plan" {
-            return (Stage::OutcomeFields, None);
+        if let [call] = calls.as_slice() {
+            return function_failure_diagnostic(call);
         }
-        if matches!(operation, "delegate") {
-            return match function_outcome(operation, fields) {
-                Err(_) => (Stage::OutcomeFields, None),
-                Ok(_) => (Stage::OutcomeContract, None),
-            };
-        }
-        fields.insert("operation".into(), json!(operation));
-        return match serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)) {
-            Err(_) => (Stage::OutcomeFields, None),
-            Ok(call) => {
-                let stage = match &call {
-                    crate::tools::ToolCall::Read { offset, limit, .. }
-                        if offset.is_some_and(|n| n == 0)
-                            || limit.is_some_and(|n| {
-                                !(1..=crate::tools::types::MAX_READ_PAGE_LINES).contains(&n)
-                            }) =>
-                    {
-                        Stage::OutcomeReadBounds
-                    }
-                    _ if !call.valid() => tool_failure_stage(&call),
-                    _ => Stage::OutcomeContract,
-                };
-                (stage, Some(ToolArgumentShape::from_call(&call)))
-            }
-        };
+        return calls
+            .iter()
+            .map(function_failure_diagnostic)
+            .find(|(stage, _)| *stage != Stage::OutcomeContract)
+            .unwrap_or((Stage::OutcomeContract, None));
     }
     let Ok((_, _, text)) = response.completed_text(model) else {
         return (Stage::OutcomeContract, None);
@@ -232,6 +208,50 @@ pub(crate) fn outcome_failure_diagnostic(
         Err(_) => (Stage::OutcomeEncoding, None),
         Ok(_) if review_outcome(&text).is_err() => (Stage::OutcomeFields, None),
         Ok(_) => (Stage::OutcomeContract, None),
+    }
+}
+
+fn function_failure_diagnostic(
+    call: &FunctionCall,
+) -> (
+    crate::provider::diagnostics::SubscriptionFailureStage,
+    Option<crate::diagnostics::ToolArgumentShape>,
+) {
+    use crate::diagnostics::ToolArgumentShape;
+    use crate::provider::diagnostics::SubscriptionFailureStage as Stage;
+    let Some(operation) = call.name.strip_prefix(NAME_PREFIX) else {
+        return (Stage::OutcomeContract, None);
+    };
+    let Ok(mut fields) = call.fields() else {
+        return (Stage::OutcomeContract, None);
+    };
+    if operation == "plan" {
+        return (Stage::OutcomeFields, None);
+    }
+    if matches!(operation, "delegate") {
+        return match function_outcome(operation, fields) {
+            Err(_) => (Stage::OutcomeFields, None),
+            Ok(_) => (Stage::OutcomeContract, None),
+        };
+    }
+    fields.insert("operation".into(), json!(operation));
+    match serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)) {
+        Err(_) => (Stage::OutcomeFields, None),
+        Ok(call) => {
+            let stage = match &call {
+                crate::tools::ToolCall::Read { offset, limit, .. }
+                    if offset.is_some_and(|n| n == 0)
+                        || limit.is_some_and(|n| {
+                            !(1..=crate::tools::types::MAX_READ_PAGE_LINES).contains(&n)
+                        }) =>
+                {
+                    Stage::OutcomeReadBounds
+                }
+                _ if !call.valid() => tool_failure_stage(&call),
+                _ => Stage::OutcomeContract,
+            };
+            (stage, Some(ToolArgumentShape::from_call(&call)))
+        }
     }
 }
 
@@ -395,7 +415,8 @@ fn run_body_inner(
                     "tools": allowed.into_iter().map(|name| json!({"type":"function", "name":name})).collect::<Vec<_>>()
                 })
             };
-            body["parallel_tool_calls"] = json!(false);
+            body["parallel_tool_calls"] =
+                json!(request.input.role != crate::provider::PromptRole::Editor);
         }
         body["include"] = json!(["reasoning.encrypted_content"]);
     } else {
@@ -679,23 +700,46 @@ impl FunctionCall {
     }
 }
 
+fn function_outcomes(
+    calls: &[FunctionCall],
+    offered: &[String],
+) -> Result<ProviderOutcome, ResponseError> {
+    if let [call] = calls {
+        return call.outcome(offered);
+    }
+    let mut requests = Vec::with_capacity(calls.len());
+    for call in calls {
+        if !offered.contains(&call.name) || matches!(call.operation()?, "plan" | "delegate") {
+            return Err(ResponseError::Outcome);
+        }
+        requests.push(
+            crate::provider::decode::tool_request(
+                ToolUseId::new(call.call_id.clone()).map_err(|_| ResponseError::Outcome)?,
+                call.operation()?,
+                Value::Object(call.fields()?),
+            )
+            .map_err(|_| ResponseError::Outcome)?,
+        );
+    }
+    crate::provider::decode::tools_outcome(requests).map_err(|_| ResponseError::Outcome)
+}
+
 impl WireResponse {
-    fn completed_function(
+    fn completed_functions(
         self,
         model: &str,
-    ) -> Result<(String, Option<WireUsage>, FunctionCall), ResponseError> {
+    ) -> Result<(String, Option<WireUsage>, Vec<FunctionCall>), ResponseError> {
         self.validate_envelope(model)?;
-        let mut call = None;
+        let mut calls = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
         for item in &self.output {
             match item.kind.as_str() {
                 "reasoning" => {}
-                "function_call"
-                    if call.is_none() && item.status.as_deref() == Some("completed") =>
-                {
+                "function_call" if item.status.as_deref() == Some("completed") => {
                     if item.content.is_some()
                         || item.phase.is_some()
                         || item.role.is_some()
-                        || item.completed_id().is_none()
+                        || !item.completed_id().is_some_and(|id| ids.insert(id))
                         || item.call_id.as_deref().is_none_or(|id| {
                             id.is_empty()
                                 || id.len() > 128
@@ -704,13 +748,13 @@ impl WireResponse {
                     {
                         return Err(ResponseError::Message);
                     }
-                    call = Some(FunctionCall {
+                    calls.push(FunctionCall {
                         name: item.name.clone().ok_or(ResponseError::Outcome)?,
                         arguments: item.arguments.clone().ok_or(ResponseError::Outcome)?,
                         call_id: item.call_id.clone().unwrap_or_default(),
                     });
                 }
-                "message" if call.is_none() => {
+                "message" if calls.is_empty() => {
                     if item.role.as_deref() != Some("assistant")
                         || item
                             .status
@@ -730,9 +774,10 @@ impl WireResponse {
                 _ => return Err(ResponseError::Message),
             }
         }
-        let call = call.ok_or(ResponseError::MissingFinalMessage)?;
-        call.operation()?;
-        Ok((self.id, self.usage, call))
+        if calls.is_empty() {
+            return Err(ResponseError::MissingFinalMessage);
+        }
+        Ok((self.id, self.usage, calls))
     }
 
     fn validate_envelope(&self, model: &str) -> Result<(), ResponseError> {

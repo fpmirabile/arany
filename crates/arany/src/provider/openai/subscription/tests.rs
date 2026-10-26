@@ -286,8 +286,8 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
     ));
     let coding: Value =
         serde_json::from_slice(&body_for(&coding, Effort::Medium).unwrap()).unwrap();
-    assert_eq!(coding["tool_choice"], "auto");
-    assert_eq!(coding["parallel_tool_calls"], false);
+    assert_eq!(coding["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(coding["parallel_tool_calls"], true);
     assert!(coding.get("text").is_none());
     assert!(
         coding["tools"]
@@ -877,8 +877,8 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     assert_eq!(decoded.usage.cache_read_input_tokens, Some(7));
     let wire_request = server.await.unwrap();
     let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    assert_eq!(body["tool_choice"], "auto");
-    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["tool_choice"]["type"], "allowed_tools");
+    assert_eq!(body["parallel_tool_calls"], true);
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     let stream = String::from_utf8(completed(Some(12)))
         .unwrap()
@@ -1819,7 +1819,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
 }
 
 #[test]
-fn chatgpt_uses_auto_with_phase_specific_functions() {
+fn chatgpt_keeps_constant_functions_with_phase_specific_auto_selection() {
     let mut researcher = crate::provider::test_support::researcher_request("model-a");
     let active: Value =
         serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
@@ -1834,7 +1834,7 @@ fn chatgpt_uses_auto_with_phase_specific_functions() {
     assert_eq!(value["prompt_cache_key"], researcher.session_id.to_string());
     assert_eq!(value["tools"], active["tools"]);
     assert_eq!(value["tool_choice"], "none");
-    assert_eq!(value["parallel_tool_calls"], false);
+    assert_eq!(value["parallel_tool_calls"], true);
     let names = |body: &Value| {
         body["tools"]
             .as_array()
@@ -1860,16 +1860,24 @@ fn chatgpt_uses_auto_with_phase_specific_functions() {
         primary.phase = AgentPhase::RootSynthesis;
         let synthesis: Value =
             serde_json::from_slice(&body_for(&primary, Effort::Low).unwrap()).unwrap();
-        for field in ["instructions", "prompt_cache_key"] {
+        for field in ["tools", "instructions", "prompt_cache_key"] {
             assert_eq!(planning[field], synthesis[field], "{field}");
         }
         for body in [&planning, &synthesis] {
-            assert_eq!(body["tool_choice"], "auto");
+            assert_eq!(body["tool_choice"]["type"], "allowed_tools");
             assert_eq!(body["prompt_cache_key"], primary.session_id.to_string());
         }
         assert!(names(&planning).contains(&"arany_delegate".into()));
-        assert!(!names(&synthesis).contains(&"arany_delegate".into()));
-        assert_ne!(planning["tools"], synthesis["tools"]);
+        assert!(names(&synthesis).contains(&"arany_delegate".into()));
+        let allowed = |body: &Value| {
+            body["tool_choice"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "arany_delegate")
+        };
+        assert!(allowed(&planning));
+        assert!(!allowed(&synthesis));
     }
     let mut next_run = primary.clone();
     next_run.run_id = RunId::new();
@@ -2511,13 +2519,51 @@ async fn probe_stops_leave_intent_and_result_acknowledgments_confirmed() {
 #[test]
 fn multi_call_replay_keeps_all_paired_outputs_and_drops_server_ids() {
     let mut request = crate::provider::test_support::primary_request("model-a");
+    let step = crate::provider::test_support::four_read_step("openai");
+    let items = step.turn.items("openai").unwrap();
+    let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let created = json!({"type":"response.created","response":{"id":"resp_batch"}});
+    assert!(
+        decoder
+            .feed(format!("data: {created}\n\n").as_bytes())
+            .unwrap()
+            .is_none()
+    );
+    for (index, item) in items.iter().enumerate() {
+        let done = json!({"type":"response.output_item.done","output_index":index,"item":item});
+        assert!(
+            decoder
+                .feed(format!("data: {done}\n\n").as_bytes())
+                .unwrap()
+                .is_none()
+        );
+    }
+    let completed = json!({"type":"response.completed","response":{"id":"resp_batch","status":"completed","model":"model-a","output":[],"usage":{"input_tokens":12,"output_tokens":8}}});
+    let accepted = decoder
+        .feed(format!("data: {completed}\n\n").as_bytes())
+        .unwrap()
+        .unwrap();
+    let conversation = render::conversation(&request).unwrap();
+    let decoded = wire::decode_streamed_run(
+        &accepted,
+        &wire::RunScope::new(&request, &conversation, TOKEN),
+    )
+    .unwrap();
+    let ProviderOutcome::Tools(calls) = &decoded.outcome else {
+        panic!("four Tool calls")
+    };
+    assert_eq!(calls.len(), 4);
+    assert_eq!(decoded.usage.output_tokens, Some(8));
     request
         .input
         .tools
         .as_mut()
         .unwrap()
         .steps
-        .push(crate::provider::test_support::four_read_step("openai"));
+        .push(crate::provider::test_support::observed_step(
+            decoded,
+            "bounded facts",
+        ));
     let body: Value = serde_json::from_slice(&body_for(&request, Effort::Low).unwrap()).unwrap();
     let results = crate::provider::render::semantic::tool_results(&body);
     assert_eq!(results.len(), 4);
@@ -2538,5 +2584,61 @@ fn multi_call_replay_keeps_all_paired_outputs_and_drops_server_ids() {
         .collect();
     assert_eq!(calls.len(), 4);
     assert!(calls.iter().all(|item| item.get("id").is_none()));
-    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["parallel_tool_calls"], true);
+}
+
+#[test]
+fn openai_routes_pin_cached_function_selection_bytes() {
+    let mut primary = crate::provider::test_support::primary_request("model-a");
+    primary.session_id = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+    primary.collaboration = crate::session::CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let catalog = json!({"write":false,"commands":[],"skills":[],"mcp_servers":[]});
+    primary.input.tools = Some(crate::provider::test_support::tool_context(catalog.clone()));
+    let mut synthesis = primary.clone();
+    synthesis.phase = AgentPhase::RootSynthesis;
+    let mut researcher = crate::provider::test_support::researcher_request("model-a");
+    researcher.session_id = primary.session_id;
+    researcher.input.tools = Some(crate::provider::test_support::tool_context(catalog.clone()));
+    let mut spent = researcher.clone();
+    let mut exhausted = catalog;
+    exhausted["tool_calls_remaining"] = json!(0);
+    spent.input.tools = Some(crate::provider::test_support::tool_context(exhausted));
+    let mut editor = researcher.clone();
+    editor.input.role = PromptRole::Editor;
+    let mut snapshots = serde_json::Map::new();
+    for (label, request) in [
+        ("planning", primary),
+        ("synthesis", synthesis),
+        ("researcher", researcher),
+        ("spent", spent),
+        ("editor", editor),
+    ] {
+        let conversation = render::conversation(&request).unwrap();
+        let api = wire::run_body_with_effort(&request, &conversation, Effort::Low).unwrap();
+        let chatgpt: Value =
+            serde_json::from_slice(&body_for(&request, Effort::Low).unwrap()).unwrap();
+        for field in [
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+        ] {
+            assert_eq!(api[field], chatgpt[field], "{label}: {field}");
+        }
+        snapshots.insert(
+            label.into(),
+            json!({
+                "tool_choice":chatgpt["tool_choice"],
+                "parallel_tool_calls":chatgpt["parallel_tool_calls"],
+                "prompt_cache_key":chatgpt["prompt_cache_key"],
+            }),
+        );
+    }
+    let rendered = serde_json::to_string_pretty(&snapshots).unwrap() + "\n";
+    assert_eq!(
+        rendered,
+        include_str!("../../snapshots/openai_selection.json")
+    );
 }

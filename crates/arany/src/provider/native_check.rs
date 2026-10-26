@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v42";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v43";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -562,6 +562,7 @@ mod tests {
             "native-goal-contract-outcome-conformance-v33",
             "native-goal-contract-outcome-conformance-journal-v38",
             "native-goal-contract-outcome-conformance-journal-v41",
+            "native-goal-contract-outcome-conformance-journal-v42",
         ] {
             let mut legacy = Vec::new();
             for field in [

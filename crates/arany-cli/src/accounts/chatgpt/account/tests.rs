@@ -1505,7 +1505,7 @@ fn assert_superseded_account_versions(
         selected,
         "model-one",
         Effort::High,
-        "chatgpt-consented-account-admission-v36",
+        "chatgpt-consented-account-admission-v37",
         "no-preflight-inference;strict-stream-outcomes;local-output-bound",
     )
     .unwrap();
@@ -1519,7 +1519,7 @@ fn assert_superseded_account_versions(
         selected,
         "model-one",
         Effort::High,
-        "chatgpt-goal-contract-strict-stream-conformance-v35",
+        "chatgpt-goal-contract-strict-stream-conformance-journal-v38",
         "three-probes-1024-local-output-tokens",
     )
     .unwrap();

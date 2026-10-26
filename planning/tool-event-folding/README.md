@@ -51,4 +51,4 @@ No trust input changes. The verdict's authority is unchanged (same `PermissionVe
 
 ## Gates
 
-Slice 3: no code gate; `main.rs`/`record_formats.rs` are not in any follow-up. Coordinate with [multi-call-steps](../multi-call-steps/README.md) slice 1: whichever lands second rebases on the other's `ToolStarted` shape.
+Slice 3: no code gate; `main.rs`/`record_formats.rs` are not in any follow-up.
