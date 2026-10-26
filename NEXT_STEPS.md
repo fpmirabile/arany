@@ -29,12 +29,11 @@ Done when a normal engineering day in this repository needs no fallback to anoth
 
 ### Pursue, in order
 
-1. **Context budgets.** Remaining output-spill storage-report rows ([plan](./planning/context-budgets/README.md)).
-2. **Workspace Tools on custom routes (deferred).** Custom routes remain read-only; adding Workspace Tools across custom protocol families is a separate feature ([Provider contract](./docs/specs/provider.md#custom-destinations-and-routing)).
-3. **Supervisor.** Private worker views and the assignment-time cache are superseded by [editors on the shared Workspace](./planning/shared-workspace-editors/README.md). Supervisor signals stay shadow-only until calibrated thresholds are accepted ([Supervisor adapter](./docs/specs/tools.md#supervisor-adapter)).
-4. **Provider roster: deferred D work.** Judge-only adapters need a researched typed-judge contract (vendor, verdict semantics, deadlines, usage, privacy). A durable per-agent pause, retry and switch lifecycle after exhausted routes needs accepted Events and user commands. Current fail-and-drain recovery with explicit new-Run resume stays authoritative ([Provider contract](./docs/specs/provider.md#named-roster-presets)).
-5. **Conditional `arany-journal` crate extraction (deferred).** Revisit for an external SDK only after measured dependency, ownership or release pressure; first resolve `tools::Cancellation` ownership. The [serve contract](./docs/specs/serve.md) owns the existing binary-only schema and Server.
-6. **Guard egress proxy, web Tools and remote MCP (low priority).** Allow-listed egress proxy for guarded commands first, then `web_fetch`/`web_search` and remote MCP with OAuth ([plan](./planning/network-proxy/README.md)); interactive and background jobs stay under deferred network grants.
+1. **Workspace Tools on custom routes (deferred).** Custom routes remain read-only; adding Workspace Tools across custom protocol families is a separate feature ([Provider contract](./docs/specs/provider.md#custom-destinations-and-routing)).
+2. **Supervisor.** Private worker views and the assignment-time cache are superseded by [editors on the shared Workspace](./planning/shared-workspace-editors/README.md). Supervisor signals stay shadow-only until calibrated thresholds are accepted ([Supervisor adapter](./docs/specs/tools.md#supervisor-adapter)).
+3. **Provider roster: deferred D work.** Judge-only adapters need a researched typed-judge contract (vendor, verdict semantics, deadlines, usage, privacy). A durable per-agent pause, retry and switch lifecycle after exhausted routes needs accepted Events and user commands. Current fail-and-drain recovery with explicit new-Run resume stays authoritative ([Provider contract](./docs/specs/provider.md#named-roster-presets)).
+4. **Conditional `arany-journal` crate extraction (deferred).** Revisit for an external SDK only after measured dependency, ownership or release pressure; first resolve `tools::Cancellation` ownership. The [serve contract](./docs/specs/serve.md) owns the existing binary-only schema and Server.
+5. **Guard egress proxy, web Tools and remote MCP (low priority).** Allow-listed egress proxy for guarded commands first, then `web_fetch`/`web_search` and remote MCP with OAuth ([plan](./planning/network-proxy/README.md)); interactive and background jobs stay under deferred network grants.
 
 ### Tool and Engine follow-ups
 
