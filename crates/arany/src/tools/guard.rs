@@ -2508,6 +2508,7 @@ mod tests {
             device: 1,
             inode: 1,
         };
+        let args = ["build".into(), "--jobs=3".into()];
         for selected in [false, true] {
             for class in [ToolResourceClass::Default, ToolResourceClass::Build] {
                 let grants = if selected {
@@ -2517,7 +2518,7 @@ mod tests {
                 };
                 let command = payload(
                     &program,
-                    &[],
+                    &args,
                     "",
                     &root,
                     grants,
@@ -2529,6 +2530,12 @@ mod tests {
                     },
                 )
                 .unwrap();
+                assert!(
+                    command
+                        .as_std()
+                        .get_args()
+                        .eq(args.iter().map(std::ffi::OsStr::new))
+                );
                 let environment = command
                     .as_std()
                     .get_envs()

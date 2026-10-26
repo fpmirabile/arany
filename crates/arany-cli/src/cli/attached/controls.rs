@@ -1954,10 +1954,11 @@ mod tests {
         let cores = std::thread::available_parallelism()
             .ok()
             .and_then(|cores| u32::try_from(cores.get()).ok());
+        let process_limit = preferences.resources.build_processes;
         let build_jobs = match cores {
             Some(cores) => format!(
-                "Build jobs: automatic; {} effective (cores {cores}, process limit 256) (automatic or 1..cores)",
-                cores.min(256)
+                "Build jobs: automatic; {} effective (cores {cores}, process limit {process_limit}) (automatic or 1..cores)",
+                cores.min(process_limit)
             ),
             None => "Build jobs: automatic; Build unavailable (automatic or 1..cores)".into(),
         };
