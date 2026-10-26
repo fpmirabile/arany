@@ -9,7 +9,7 @@ DeepSeek API, Kimi platform/Code and GLM Standard are eligible for exact-profile
 text-compaction conformance; live compatibility remains unverified.
 GLM Coding Plan is excluded by its supported-tool authorization boundary.
 The [Provider contract](../specs/provider.md#provider-support-summary) owns route
-admission; [setup](../setup.md#anthropic-compatible-custom-routes) owns recipes.
+admission; [setup](../setup.md#openai-compatible-and-anthropic-custom-routes) owns recipes.
 
 Scope: official documentation and pinned peer source review. No credentials,
 paid requests, live `provider check`, native-platform checks or conformance
@@ -184,7 +184,7 @@ by itself, a third-party authorization grant for Arany.
 
 The [Provider contract](../specs/provider.md#custom-destinations-and-routing)
 owns exact endpoint/model checks, text compaction, usage, cancellation, bounds,
-key isolation and truthful client identity. The [setup recipes](../setup.md#anthropic-compatible-custom-routes)
+key isolation and truthful client identity. The [setup recipes](../setup.md#openai-compatible-and-anthropic-custom-routes)
 follow explicit Messages base/key selection, matching Kimi's
 [Claude Code](https://www.kimi.com/code/docs/en/third-party-tools/claude-code) and
 [OpenCode](https://www.kimi.com/code/docs/en/third-party-tools/opencode) integration

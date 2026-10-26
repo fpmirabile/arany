@@ -2,15 +2,15 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: harness maintainers
-- Last updated: 2026-10-25
+- Last updated: 2026-10-26
 
 ## Outcome and scope
 
 One capability: a custom profile may declare `protocol: openai-chat-completions`, pass the same `provider check` conformance sequence as the two existing families, and then serve read-only primary, child and compaction calls through `custom:NAME`. This opens every endpoint that speaks only `POST /v1/chat/completions` (vLLM, llama.cpp server, LiteLLM and other gateways, Groq, Mistral, Together, DeepSeek's native API) without a vendor-specific adapter. The harness responsibility served is the Provider boundary ([priority 1](../../AGENTS.md#product-and-implementation-priorities)); the [custom-destination admission contract](../../docs/specs/provider.md#custom-destinations-and-routing) (admission before disclosure, durable provenance, exact conformance) is reused unchanged.
 
-Excluded: Workspace Tools on custom routes (today every custom route is read-only, [setup.md](../../docs/setup.md#anthropic-compatible-custom-routes); extending Tools to custom routes is a separate feature for all three families), streaming previews on this family, OpenRouter's broker profile, and any relaxation of the check gate (the owner's comparison recommended making the probe a diagnostic; that is a separate decision and not part of this plan).
+Excluded: Workspace Tools on custom routes (today every custom route is read-only, [setup.md](../../docs/setup.md#openai-compatible-and-anthropic-custom-routes); extending Tools to custom routes is a separate feature for all three families), streaming previews on this family, OpenRouter's broker profile, and any relaxation of the check gate (the owner's comparison recommended making the probe a diagnostic; that is a separate decision and not part of this plan).
 
 ## Research
 
@@ -48,7 +48,7 @@ Same trust boundary as the two existing families: trusted private configuration,
 ## Vertical slices
 
 1. **Family end to end, headless.** Profile variant, URL derivation, body builder, strict decoder, provenance value, adapter and transport branch, probe reuse; `provider check` and `exec --provider custom:NAME` work against the loopback fixture; snapshot rows; security pass. Specs: `provider.md` (custom destinations entry, support summary row, structured outcomes line), `execution.md` (provenance value and record rule). ≤600 (split the decoder tests into 1b if exceeded).
-2. **Attached setup and recipe.** Protocol choice `3` in the custom-route form with the Chat prompts (base URL, Bearer only), validation messages, `/model` and `/setup` labels; `docs/setup.md` gains a loopback llama.cpp/vLLM recipe beside the Messages recipes. Specs: `terminal.md` setup form rows. ≤400.
+2. **Attached setup and recipe.** Protocol choice `3` in the custom-route form with the Chat prompts (base URL, Bearer only), validation messages, `/model` and `/setup` labels; `docs/setup.md` gains a loopback llama.cpp/vLLM recipe beside the Messages recipes. Specs: `terminal.md` setup form rows. The recipe and form contract are complete; remaining: display the declared protocol when inspecting a route and assert that label in the setup journey after the setup-flow gates below. ≤400.
 
 ## Exit criteria
 
@@ -57,4 +57,4 @@ Same trust boundary as the two existing families: trusted private configuration,
 
 ## Gates
 
-Slice 1 edits `provider/custom.rs`, `custom/{adapter,check,transport}.rs`, `provider.rs` and `provider/openai/`: **after P5 and P4a–P4d** (Provider-name and diagnostic vocabulary moves in those files) and **after K2** (saved/configured Provider formats) from the [architecture follow-ups](../architecture-homogenization/README.md#follow-up-slices-post-refactor-review); reserve `provider.rs` against J1/J2 while open. Slice 2 edits `cli/attached/setup.rs` or its split successors: **after provider-setup-ui S3 and U1h–U1k** (custom route form moves) and U2c; it edits `setup/custom.rs` and `setup/routes.rs` once those exist.
+Slice 1 edits `provider/custom.rs`, `custom/{adapter,check,transport}.rs`, `provider.rs` and `provider/openai/`: **after P5 and P4a–P4d** (Provider-name and diagnostic vocabulary moves in those files) and **after K2** (saved/configured Provider formats) from the [architecture follow-ups](../architecture-homogenization/README.md#follow-up-slices-post-refactor-review); reserve `provider.rs` against J1/J2 while open. Slice 2 edits `cli/attached/setup.rs` or its split successors: **after provider-setup-ui S3 and U1h–U1k** (custom route form moves) and U2c; it edits `setup/custom.rs` and `setup/routes.rs` once those exist. These gates remain pending, so the protocol inspection label and its journey assertion remain open.
