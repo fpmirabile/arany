@@ -208,38 +208,29 @@ fn recent_compaction_files_use_newest_committed_workspace_digest() {
     );
 }
 
-fn background_primary_tool_session() -> (SessionView, GoalId, RunId, AgentRunId, AgentRunId) {
-    let fixture = super::super::worker_tests::background_fixture();
-    let mut view = SessionView::replay_open(fixture.session, &fixture.envelopes())
+fn foreground_primary_tool_session() -> (SessionView, GoalId, RunId, AgentRunId, AgentRunId) {
+    let mut fixture = super::super::worker_tests::completed_fixture();
+    let finished = fixture.events.iter().position(|event| matches!(event,
+        Event::ProviderCallRecorded { agent_run_id, record, .. }
+            if *agent_run_id == fixture.primary && record.disposition == ProviderCallDisposition::Finished
+    )).unwrap();
+    fixture.events.truncate(finished - 1);
+    let view = SessionView::replay_open(fixture.session, &fixture.envelopes())
         .unwrap()
         .unwrap();
-    let (goal, run, primary, child) = (fixture.goal, fixture.run, fixture.primary, fixture.child);
-    let read = read_intent(run, primary, "src/lib.rs");
-    apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
-    apply(
-        &mut view,
-        Event::ProviderCallRecorded {
-            run_id: run,
-            agent_run_id: primary,
-            record: ProviderCallRecord {
-                requested_tools: 1,
-                ..record(
-                    AgentPhase::RootSynthesis,
-                    ProviderCallDisposition::ToolRequested,
-                    Some(0),
-                )
-            },
-        },
+    (
+        view,
+        fixture.goal,
+        fixture.run,
+        fixture.primary,
+        fixture.child,
     )
-    .unwrap();
-    apply(&mut view, tool_started(run, primary, &read)).unwrap();
-    apply(&mut view, tool_finished(run, primary, &read, b"one")).unwrap();
-    (view, goal, run, primary, child)
 }
 
 #[test]
-fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
-    let (mut view, goal, run, primary, child) = background_primary_tool_session();
+fn primary_compaction_charges_itself_without_restarting_a_finished_editor() {
+    let (mut view, goal, run, primary, child) = foreground_primary_tool_session();
+    let calls = view.goals[0].provider_calls;
     apply(
         &mut view,
         Event::GoalCompactionCallReserved {
@@ -249,54 +240,55 @@ fn primary_compaction_keeps_child_calls_independent_and_budgeted() {
         },
     )
     .unwrap();
+    assert_eq!(view.goals[0].provider_calls, calls + 1);
     let primary_call = reserve_child_call(goal, run, primary);
     let child_call = reserve_child_call(goal, run, child);
     assert!(rejected(&view, primary_call.clone()));
-    let calls = view.goals[0].provider_calls;
+    assert!(rejected(&view, child_call.clone()));
+    assert_eq!(view.goals[0].provider_calls, calls + 1);
+    assert_eq!(view.goals[0].compaction_call_reserved, Some(run));
+    assert!(view.goals[0].unobserved_provider_calls.is_empty());
+    let count = u32::try_from(view.runs[0].tools.len()).unwrap();
+    let compacted = covering_compaction(&view, goal, run, count);
+    apply(&mut view, compacted).expect("primary compaction settles independently");
+    assert_eq!(view.goals[0].compaction_call_reserved, None);
+    assert!(view.goals[0].unobserved_provider_calls.is_empty());
     let mut exhausted = view.clone();
     exhausted.goals[0]
         .plan_contract
         .as_mut()
         .unwrap()
         .budget
-        .max_provider_calls = Some(calls);
-    assert_eq!(
-        exhausted.goals[0].effective_budget().max_provider_calls,
-        Some(calls)
-    );
+        .max_provider_calls = Some(calls + 1);
+    assert!(rejected(&exhausted, primary_call.clone()));
     assert!(rejected(&exhausted, child_call.clone()));
-    apply(&mut view, child_call.clone()).expect("child continues during primary compaction");
-    assert_eq!(view.goals[0].provider_calls, calls + 1);
-    assert_eq!(view.goals[0].compaction_call_reserved, Some(run));
-    assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
     assert!(rejected(&view, child_call));
-    let count = u32::try_from(view.runs[0].tools.len()).unwrap();
-    let compacted = covering_compaction(&view, goal, run, count);
-    apply(&mut view, compacted).expect("primary compaction settles independently");
-    assert_eq!(view.goals[0].compaction_call_reserved, None);
-    assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
-    apply(
-        &mut view,
-        child_record(run, child, ProviderCallDisposition::Finished),
-    )
-    .expect("child call settles independently");
-    assert!(view.goals[0].unobserved_provider_calls.is_empty());
     apply(&mut view, primary_call).expect("primary resumes after its compaction");
+    assert_eq!(view.goals[0].provider_calls, calls + 2);
     assert_eq!(view.goals[0].unobserved_provider_calls, [primary]);
 }
 
 #[test]
-fn primary_compaction_accepts_only_continuable_worker_deferrals() {
+fn primary_compaction_rejects_background_deferrals_and_accepts_proposal_refusals() {
     use crate::provider::ProviderFailureReason;
 
-    for reason in [
-        Some(ProviderFailureReason::WorkerAnswerDeferred),
-        Some(ProviderFailureReason::WorkerDelegateRefused),
-        Some(ProviderFailureReason::WorkerToolRefused),
-        None,
+    for (reason, admitted, continuable) in [
+        (
+            Some(ProviderFailureReason::WorkerAnswerDeferred),
+            false,
+            false,
+        ),
+        (
+            Some(ProviderFailureReason::WorkerDelegateRefused),
+            false,
+            false,
+        ),
+        (Some(ProviderFailureReason::WorkerToolRefused), false, false),
+        (Some(ProviderFailureReason::ProposalRefused), true, true),
+        (None, true, false),
     ] {
-        let (mut view, goal, run, primary, child) = background_primary_tool_session();
-        apply(&mut view, reserve_child_call(goal, run, child)).unwrap();
+        let (mut view, goal, run, primary, child) = foreground_primary_tool_session();
+        assert!(rejected(&view, reserve_child_call(goal, run, child)));
         apply(&mut view, reserve_child_call(goal, run, primary)).unwrap();
         let mut deferred = record(
             AgentPhase::RootSynthesis,
@@ -304,31 +296,41 @@ fn primary_compaction_accepts_only_continuable_worker_deferrals() {
             Some(0),
         );
         deferred.failure_reason = reason;
-        apply(
-            &mut view,
-            Event::ProviderCallRecorded {
-                run_id: run,
-                agent_run_id: primary,
-                record: deferred,
-            },
-        )
-        .unwrap();
+        if reason == Some(ProviderFailureReason::ProposalRefused) {
+            deferred.disposition = ProviderCallDisposition::Rejected;
+            deferred.refusal = Some(crate::session::ProposalRefusal {
+                operation: "arany_read".into(),
+                cause: crate::session::ProposalRefusalCause::InvalidArguments,
+            });
+        }
+        let event = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: primary,
+            record: deferred,
+        };
         let reservation = Event::GoalCompactionCallReserved {
             goal_id: goal,
             run_id: run,
             active_ceiling_ms: 0,
         };
+        if !admitted {
+            assert!(rejected(&view, event), "{reason:?}");
+            assert!(rejected(&view, reservation));
+            assert_eq!(view.goals[0].unobserved_provider_calls, [primary]);
+            continue;
+        }
+        apply(&mut view, event).expect("foreground Provider outcome");
         assert_eq!(
             apply(&mut view, reservation).is_ok(),
-            reason.is_some(),
+            continuable,
             "{reason:?}"
         );
-        if reason.is_some() {
+        if continuable {
             let count = u32::try_from(view.runs[0].tools.len()).unwrap();
             let compacted = covering_compaction(&view, goal, run, count);
-            apply(&mut view, compacted).expect("compaction settles after a worker deferral");
+            apply(&mut view, compacted).expect("compaction settles after a proposal refusal");
             assert_eq!(view.goals[0].compaction_call_reserved, None);
-            assert_eq!(view.goals[0].unobserved_provider_calls, [child]);
+            assert!(view.goals[0].unobserved_provider_calls.is_empty());
         }
     }
 }
