@@ -14,7 +14,7 @@ const MOUNT_DIRECTORY: &str = "namespace";
 const PROBE_NAME: &str = "user.arany_probe";
 const PROBE_VALUE: &[u8] = b"arany";
 pub(super) const TMPFS_INODES: u64 = (crate::tools::types::COMMAND_SCAN_ENTRIES
-    + crate::tools::config::MAX_WORKSPACE_PATHS * 2
+    + crate::tools::config::MAX_WORKSPACE_PATHS * overlay::SETUP_INODES
     + 2) as u64;
 
 #[derive(Serialize, Deserialize)]
@@ -90,6 +90,8 @@ pub(super) struct Launch {
     pin: Pin,
     probe: Option<ProjectProbe>,
     helper: PathBuf,
+    #[serde(default)]
+    pub(super) overlay: Option<overlay::Grant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,7 +129,15 @@ impl Launch {
         if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() != 0 {
             return Err(ToolError::ChangedInput);
         }
-        Ok((Self { pin, probe, helper }, executable))
+        Ok((
+            Self {
+                pin,
+                probe,
+                helper,
+                overlay: None,
+            },
+            executable,
+        ))
     }
 
     pub(super) fn append(&self, command: &mut Command, guard: &Path) -> Result<(), ToolError> {
@@ -141,7 +151,11 @@ impl Launch {
     }
 
     pub(super) fn helper_pin(&self) -> Result<String, ToolError> {
-        serde_json::to_string(&self.pin).map_err(|_| ToolError::Configuration)
+        serde_json::to_string(&Helper {
+            pin: &self.pin,
+            overlay: None,
+        })
+        .map_err(|_| ToolError::Configuration)
     }
 
     pub(super) fn helper_path(&self) -> &Path {
@@ -179,14 +193,29 @@ impl ProjectProbe {
     }
 }
 
-pub(in crate::tools::guard) fn verify_helper() -> Result<(), ToolError> {
+#[derive(Serialize)]
+struct Helper<'a> {
+    pin: &'a Pin,
+    overlay: Option<&'a overlay::Attestation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelperInput {
+    pin: Pin,
+    overlay: Option<overlay::Attestation>,
+}
+
+pub(in crate::tools::guard) fn verify_helper() -> Result<Option<overlay::Attestation>, ToolError> {
     let encoded = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
     if encoded.len() > MAX_PATH_BYTES {
         return Err(ToolError::Limit);
     }
-    let pin: Pin = serde_json::from_str(encoded.to_str().ok_or(ToolError::Configuration)?)
-        .map_err(|_| ToolError::Configuration)?;
-    pin.verify(Path::new("/proc/self/exe"))
+    let helper: HelperInput =
+        serde_json::from_str(encoded.to_str().ok_or(ToolError::Configuration)?)
+            .map_err(|_| ToolError::Configuration)?;
+    helper.pin.verify(Path::new("/proc/self/exe"))?;
+    Ok(helper.overlay)
 }
 
 pub(in crate::tools::guard) fn main() -> std::process::ExitCode {
@@ -224,7 +253,7 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
     if arguments.len() < 3 || arguments[1] != "--" {
         return Err(ToolError::Configuration);
     }
-    let launch: Launch =
+    let mut launch: Launch =
         serde_json::from_str(arguments[0].to_str().ok_or(ToolError::Configuration)?)
             .map_err(|_| ToolError::Configuration)?;
     launch.pin.verify(Path::new("/proc/self/exe"))?;
@@ -247,6 +276,7 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
         mount_probe(probe)?;
     }
     *stage = super::super::BootstrapStage::RuntimeMounts;
+    let view = mount_view(&mut launch, &mut arguments)?;
     bind_helper(&launch.helper)?;
     *stage = super::super::BootstrapStage::Capabilities;
     clear_capabilities()?;
@@ -254,7 +284,34 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
         &thread_status(Path::new("/proc/self/status"))?.ok_or(ToolError::ProtectionUnavailable)?,
     )?;
     *stage = super::super::BootstrapStage::LauncherReap;
-    wait_bwrap(&arguments[2..])
+    wait_bwrap(&arguments[2..], view.as_ref())
+}
+
+fn mount_view(
+    launch: &mut Launch,
+    arguments: &mut [std::ffi::OsString],
+) -> Result<Option<overlay::View>, ToolError> {
+    let view = match launch.overlay.take() {
+        Some(grant) => Some(overlay::View::mount(
+            &launch.probe.as_ref().ok_or(ToolError::Configuration)?.root,
+            grant,
+            launch.probe.as_ref().ok_or(ToolError::Configuration)?.bytes,
+        )?),
+        None => None,
+    };
+    if let Some(view) = &view {
+        let helper = arguments.last_mut().ok_or(ToolError::Configuration)?;
+        *helper = serde_json::to_string(&Helper {
+            pin: &launch.pin,
+            overlay: Some(view.attestation()),
+        })
+        .map_err(|_| ToolError::Configuration)?
+        .into();
+        if helper.len() > MAX_PATH_BYTES {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    Ok(view)
 }
 
 fn bind_helper(target: &Path) -> Result<(), ToolError> {
@@ -298,41 +355,8 @@ fn mount_probe(probe: &ProjectProbe) -> Result<(), ToolError> {
         options.as_c_str(),
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let mounts = read_mountinfo()?;
-    verify_mount_entries(&mounts, std::slice::from_ref(&probe.root))?;
-    let entry = mounts
-        .iter()
-        .find(|entry| entry.path == probe.root)
-        .ok_or(ToolError::ProtectionUnavailable)?;
-    if entry.filesystem != b"tmpfs"
-        || entry.source != b"tmpfs"
-        || entry.root != Path::new("/")
-        || !entry
-            .options
-            .split(|byte| *byte == b',')
-            .any(|option| option == b"nosuid")
-        || !entry
-            .options
-            .split(|byte| *byte == b',')
-            .any(|option| option == b"nodev")
-    {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    let inode_option = format!("nr_inodes={TMPFS_INODES}");
-    let size_option = format!("size={}k", probe.bytes.div_ceil(1024));
-    if ![inode_option.as_bytes(), size_option.as_bytes()]
-        .iter()
-        .all(|expected| {
-            entry
-                .super_options
-                .split(|byte| *byte == b',')
-                .filter(|option| option == expected)
-                .count()
-                == 1
-        })
-    {
-        return Err(ToolError::ProtectionUnavailable);
-    }
+    verify_mount_entries(&read_mountinfo()?, std::slice::from_ref(&probe.root))?;
+    verify_tmpfs(&probe.root, probe.bytes)?;
     let path = probe.root.join("probe");
     let file = std::fs::File::create_new(&path).map_err(|_| ToolError::ProtectionUnavailable)?;
     probe_xattr(&file)?;
@@ -403,18 +427,26 @@ fn verify_capabilities(status: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn wait_bwrap(arguments: &[std::ffi::OsString]) -> Result<(), ToolError> {
+fn wait_bwrap(
+    arguments: &[std::ffi::OsString],
+    view: Option<&overlay::View>,
+) -> Result<(), ToolError> {
     use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, pidfd_open, waitid};
-    let mut child = std::process::Command::new("/usr/bin/bwrap")
-        .args(arguments)
-        .env_clear()
-        .current_dir("/")
+    let mut command = std::process::Command::new("/usr/bin/bwrap");
+    command.args(arguments).env_clear().current_dir("/");
+    if view.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+    let mut child = command
         .spawn()
         .map_err(|_| ToolError::ProtectionUnavailable)?;
     let result = (|| {
         let pid = Pid::from_raw(child.id() as i32).ok_or(ToolError::ProtectionUnavailable)?;
         let pidfd =
             pidfd_open(pid, PidfdFlags::empty()).map_err(|_| ToolError::ProtectionUnavailable)?;
+        if let Some(view) = view {
+            view.relay(&mut child.stdin.take().ok_or(ToolError::Operation)?)?;
+        }
         loop {
             match waitid(
                 WaitId::PidFd(pidfd.as_fd()),
@@ -434,6 +466,9 @@ fn wait_bwrap(arguments: &[std::ffi::OsString]) -> Result<(), ToolError> {
     result?;
     if !reaped.success() {
         return Err(ToolError::Operation);
+    }
+    if let Some(view) = view {
+        view.finish()?;
     }
     Ok(())
 }
@@ -463,4 +498,44 @@ fn namespace_remedy(guard: &Path) -> Option<String> {
     Some(format!(
         "Namespace authorization failed; this alone does not identify AppArmor. On restricted Ubuntu, review existing executable attachments with sudo aa-status. Keep an existing bwrap-userns-restrict attachment; otherwise include the arany_bwrap block below. Run the following by hand after reviewing local policy; Arany never changes it:\nsudo tee /etc/apparmor.d/arany-userns >/dev/null <<'PROFILE'\nabi <abi/4.0>,\nprofile arany_bwrap /usr/bin/bwrap flags=(unconfined) {{ userns, }}\nprofile arany_supervisor {path} flags=(unconfined) {{ userns, }}\nPROFILE\nsudo chmod 0644 /etc/apparmor.d/arany-userns\nsudo apparmor_parser -r /etc/apparmor.d/arany-userns\nOmit arany_bwrap when an attachment already exists. Keep kernel.apparmor_restrict_unprivileged_userns=1. Stop and restart the exact profiled Arany executable, then explicitly retry. Missing kernel or tmpfs user-xattr enforcement requires a separate repair."
     ))
+}
+
+pub(super) fn verify_tmpfs(root: &Path, bytes: u64) -> Result<(), ToolError> {
+    let mounts = read_mountinfo()?;
+    let entry = mounts
+        .iter()
+        .find(|entry| entry.path == root)
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    if mounts.iter().filter(|entry| entry.path == root).count() != 1
+        || entry.filesystem != b"tmpfs"
+        || entry.source != b"tmpfs"
+        || entry.root != Path::new("/")
+        || entry.optional_fields != 0
+        || !entry
+            .options
+            .split(|byte| *byte == b',')
+            .any(|option| option == b"nosuid")
+        || !entry
+            .options
+            .split(|byte| *byte == b',')
+            .any(|option| option == b"nodev")
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let inode_option = format!("nr_inodes={TMPFS_INODES}");
+    let size_option = format!("size={}k", bytes.div_ceil(1024));
+    if ![inode_option.as_bytes(), size_option.as_bytes()]
+        .iter()
+        .all(|expected| {
+            entry
+                .super_options
+                .split(|byte| *byte == b',')
+                .filter(|option| option == expected)
+                .count()
+                == 1
+        })
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
 }

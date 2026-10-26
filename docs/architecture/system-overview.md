@@ -186,8 +186,8 @@ path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforce
 and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
 native launch, supervision and recovery. Short-lived same-binary Guard and
 credential helpers are privilege boundaries, not Clients or daemons. On Linux, a
-retained same-binary namespace supervisor owns bootstrap tmpfs and its bwrap
-child's pidfd. It clears every capability set and sets no-new-privileges before
+retained same-binary namespace supervisor owns bootstrap tmpfs, whole-root command
+lower/overlay/mask construction and its bwrap child's pidfd. It clears every capability set and sets no-new-privileges before
 forking bwrap; the inner helper owns payload dispatch/capture, while the controller
 retains READY/GO and unit/cgroup cleanup authority. A short-lived
 same-binary host launcher establishes a fresh OS session before executing an
@@ -292,13 +292,17 @@ Context is isolated per AgentRun. Children receive explicit assignment capsules 
 
 The [Tool contract](../specs/tools.md) owns supported behavior and acceptance scenarios. [Guard research](../research/deterministic-harness-protection.md#linux-launch-and-syscall-rationale) and [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) retain alternatives and rationale; [dependency review](../security/local-tool-dependency-review.md) owns scoped security evidence. `tools.json` is private host configuration, not repository configuration. Its pinned scope/resource digests produce immutable primary-only one-use intents. The Engine commits each Provider request fact and intent before dispatch, then a correlated observation before inferring again. Uncertain, cancelled or unacknowledged effects stop without retry; public typed replay validates payloads as well as legal transitions. Replay accepts only the current Goal-linked format and never grants authority from an older or incomplete journal.
 
-The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. In-process file operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the in-process file publisher, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
+The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. In-process file operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Linux whole-root primary commands instead receive a supervisor-owned Workspace overlay; narrow Linux commands, macOS commands and MCP retain fresh private selected-file snapshots. All retain no network/accounts and bounded memory/PID/CPU/time/scratch. Copy commands return bounded changesets after descendant termination; whole-root overlays currently accept only empty uppers, and MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the in-process file publisher, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
 
 Linux bootstrap verifies its own executable pin and bounded tmpfs/xattr operations
 before privilege removal. Both namespace owners attest their own mount topology;
-the inner helper also checks its executable pin and the primary copy-view tmpfs.
-The supervisor's pidfd wait/reap precedes namespace release. Typed setup refusals
-can explain unavailable enforcement before GO; missing completion after GO remains
+the inner helper also checks its executable pin and its copy tmpfs or merged overlay
+and masks. Whole-root lower clones, bounded inventory, masks and private tmpfs
+upper/work belong only to the retained supervisor. It checks D5 before any lower
+walk, constructs the view before capability clearing, and reattests before relaying
+GO. Raw layers and their descriptors never reach the payload. Its pidfd wait/reap
+precedes empty-upper validation, completion reporting and namespace release.
+Typed setup refusals can explain unavailable enforcement before GO; missing completion after GO remains
 Uncertain. Neither path grants host authority or chooses an alternate launcher.
 
 Past effect records enter context/compaction only as bounded untrusted facts, including interrupted attempts and observed failures, never renewed permission or execution. The tool-enabled compiler reserves current observations from the remaining finite context budget. An active Goal may summarize only an acknowledged Tool prefix at a Run boundary; it retains every observation in canonical Events and sends the latest untrusted summary plus a bounded recent tail. Researcher children receive a read-only catalog and only their own observations; the primary receives their bounded reports.

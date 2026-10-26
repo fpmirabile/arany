@@ -45,11 +45,24 @@ fn supervisor_probes_tmpfs_clears_caps_and_reaps_bwrap() {
 }
 
 #[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux overlay probe and host submount refusal"
+)]
+fn supervisor_overlay_probe_and_submount_refusal_clean_up_before_payload() {
+    entry_case("overlay-probe-denied");
+    entry_case("submount");
+}
+
+#[test]
 #[ignore = "isolated production-supervisor fixture"]
 fn supervisor_entry_helper() {
     let mode = std::env::var("ARANY_TEST_SUPERVISOR_MODE").unwrap();
     let root = PathBuf::from(std::env::var_os("ARANY_TEST_SUPERVISOR_ROOT").unwrap());
     let (executable, file, launch) = entry_launch(&root, &mode);
+    if mode == "submount" {
+        submount_fixture(&root);
+    }
     let namespace = root.join("namespace");
     let helper = root.join("supervisor-executable");
     deny_entry(&mode);
@@ -108,6 +121,16 @@ fn supervisor_entry_helper() {
             json!({"stage":if mode == "namespace-denied" {"namespace_entry"} else {"runtime_mounts"}})
         );
     }
+    if mode == "submount" {
+        rustix::mount::unmount(
+            root.join("workspace/vendor"),
+            rustix::mount::UnmountFlags::empty(),
+        )
+        .unwrap();
+    }
+    if matches!(mode.as_str(), "overlay-probe-denied" | "submount") {
+        std::fs::remove_dir_all(root.join("workspace")).unwrap();
+    }
     std::fs::remove_dir(namespace).unwrap();
     std::fs::remove_file(helper).unwrap();
     if mode == "replacement" {
@@ -140,17 +163,27 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
         hash.update(&buffer[..count]);
     }
     let digest: [u8; 32] = hash.finalize().into();
-    let launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
+    let mut launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
         "probe":{"root":namespace,"bytes":arany::ToolLimits::default().project_bytes},
         "helper":helper});
+    if matches!(mode, "overlay-probe-denied" | "submount") {
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let metadata = std::fs::metadata(&workspace).unwrap();
+        launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32]});
+    }
     (executable, file, launch)
 }
 
 fn deny_entry(mode: &str) {
-    if matches!(mode, "namespace-denied" | "probe-denied") {
+    if matches!(
+        mode,
+        "namespace-denied" | "probe-denied" | "overlay-probe-denied"
+    ) {
         let syscall = match mode {
             "namespace-denied" => nix::libc::SYS_unshare,
             "probe-denied" => nix::libc::SYS_fsetxattr,
+            "overlay-probe-denied" => nix::libc::SYS_umount2,
             _ => panic!("unsupported supervisor fixture mode"),
         };
         let filter: seccompiler::BpfProgram = seccompiler::SeccompFilter::new(
@@ -215,24 +248,131 @@ fn helper_death_after_go_stays_uncertain_without_retry_or_publication() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _deadline =
         arany::test_support::engine::deadline("supervisor helper death", SPILL_JOURNEY_WAIT);
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let fixture = SpillFixture::new();
-        let session = fixture.engine.create_session(fixture.workspace.clone(), None).await.unwrap();
-        let command = ToolCall::Command { program: "bash".into(), args: vec!["-c".into(), "kill -KILL \"$PPID\"".into()], cwd: String::new() };
-        let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![crate::tool_outcome(command)]));
-        let mut request = proposal_request(&fixture.workspace);
-        request.session_id = Some(session);
-        let outcome = run_with(&fixture.engine, &provider, request, RunControls { tools: ToolGrant::Configured, ..Default::default() }).await;
-        assert!(matches!(outcome, Err(arany::EngineError::Tool(arany::ToolError::Uncertain))));
-        assert_eq!(provider.requests.lock().unwrap().len(), 1);
-        fixture.engine.close().await.unwrap();
-        let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
-        let run = &view.runs[0];
-        let observation = run.tools[0].observation.as_ref().unwrap();
-        assert_eq!(observation.disposition, ToolDisposition::Uncertain);
-        assert_eq!(observation.enforcement_cause, None);
-        assert_eq!(view.run_stop(run), Some(arany::RunStop::Uncertain));
-        assert!(!events.iter().any(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))));
-        assert_eq!(std::fs::read(fixture.workspace.join("src/current.txt")).unwrap(), b"current");
-    });
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (root, loss) in [
+                ("src", LostEvidence::Helper),
+                (".", LostEvidence::Helper),
+                (".", LostEvidence::Completion),
+            ] {
+                assert_lost_guard_evidence(root, loss).await;
+            }
+        });
+}
+
+#[derive(Clone, Copy)]
+enum LostEvidence {
+    Helper,
+    Completion,
+}
+
+async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
+    let fixture = SpillFixture::new();
+    fixture.set_workspace_root(root);
+    let session = fixture
+        .engine
+        .create_session(fixture.workspace.clone(), None)
+        .await
+        .unwrap();
+    let script = match loss {
+        LostEvidence::Helper => "printf private > src/current.txt; kill -KILL \"$PPID\"",
+        LostEvidence::Completion => {
+            "printf private > src/current.txt; printf overlay-command-completed"
+        }
+    };
+    let command = ToolCall::Command {
+        program: "bash".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: String::new(),
+    };
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        crate::tool_outcome(command.clone()),
+    ]));
+    let mut request = proposal_request(&fixture.workspace);
+    request.session_id = Some(session);
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let completion_loss = matches!(loss, LostEvidence::Completion);
+    let inject = async {
+        if completion_loss {
+            let action = inbox
+                .next()
+                .await
+                .expect("one exact completion-loss intent");
+            assert_eq!(action.intent.call, command);
+            let entered = arany::FaultPlan::lose_guard_completion(action.intent.id);
+            action.decide(true);
+            entered
+                .await
+                .expect("the overlay completion reader reached the injected loss");
+        }
+    };
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: completion_loss.then_some(approvals),
+        ..Default::default()
+    };
+    let (outcome, ()) = tokio::time::timeout(SPILL_JOURNEY_WAIT, async {
+        tokio::join!(
+            run_with(&fixture.engine, &provider, request, controls),
+            inject
+        )
+    })
+    .await
+    .expect("bounded lost Guard evidence journey");
+    assert!(matches!(
+        outcome,
+        Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+    ));
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_uncertain_guard_replay(fixture, session, &command).await;
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+async fn assert_uncertain_guard_replay(
+    fixture: SpillFixture,
+    session: arany::SessionId,
+    command: &ToolCall,
+) {
+    fixture.engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
+    let run = &view.runs[0];
+    assert_eq!(run.tools.len(), 1);
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(&observation.intent.call, command);
+    assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+    assert_eq!(observation.enforcement_cause, None);
+    assert_eq!(view.run_stop(run), Some(arany::RunStop::Uncertain));
+    assert!(!events.iter().any(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))));
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("src/current.txt")).unwrap(),
+        b"current"
+    );
+}
+
+fn submount_fixture(root: &Path) {
+    use nix::sched::{CloneFlags, unshare};
+    let uid = nix::unistd::getuid().as_raw();
+    let gid = nix::unistd::getgid().as_raw();
+    unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS).unwrap();
+    std::fs::write("/proc/self/setgroups", "deny").unwrap();
+    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n")).unwrap();
+    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n")).unwrap();
+    rustix::mount::mount_change(
+        "/",
+        rustix::mount::MountPropagationFlags::PRIVATE | rustix::mount::MountPropagationFlags::REC,
+    )
+    .unwrap();
+    let target = root.join("workspace/vendor");
+    std::fs::create_dir(&target).unwrap();
+    rustix::mount::mount(
+        "tmpfs",
+        target,
+        "tmpfs",
+        rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
+        c"size=4096,nr_inodes=2",
+    )
+    .unwrap();
 }

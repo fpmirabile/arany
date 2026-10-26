@@ -2918,7 +2918,13 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         std::fs::create_dir(&workspace).unwrap();
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
-        let config = json!({"version":1,"workspace_paths":["."],"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+        let roots = if command {
+            std::fs::create_dir(workspace.join("outputs")).unwrap();
+            json!(["outputs"])
+        } else {
+            json!(["."])
+        };
+        let config = json!({"version":1,"workspace_paths":roots,"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
         private_file(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
@@ -2928,7 +2934,8 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 program: "bash".into(),
                 args: vec![
                     "-c".into(),
-                    "printf published > command-output.txt; printf approval-command-passed".into(),
+                    "printf published > outputs/command-output.txt; printf approval-command-passed"
+                        .into(),
                 ],
                 cwd: "".into(),
             }
@@ -3021,12 +3028,12 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             );
         }
         assert_eq!(
-            workspace.join("command-output.txt").exists(),
+            workspace.join("outputs/command-output.txt").exists(),
             allowed && command
         );
         if allowed && command {
             assert_eq!(
-                std::fs::read(workspace.join("command-output.txt")).unwrap(),
+                std::fs::read(workspace.join("outputs/command-output.txt")).unwrap(),
                 b"published"
             );
         }

@@ -19,6 +19,7 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+pub(super) mod overlay;
 pub(super) mod supervisor;
 
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
@@ -66,7 +67,7 @@ const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-w
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v17:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-private-readonly-helper-bind-pinned-identity-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v18:whole-root-overlay-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-empty-upper;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-private-readonly-helper-bind-pinned-identity-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
@@ -667,8 +668,11 @@ fn unit_command(
     } else {
         "--property=CPUQuota=25%"
     };
-    let (launch, executable) =
+    let (mut launch, executable) =
         supervisor::Launch::new(&runtime.guard_executable, seed_path, intent)?;
+    if !preparation && overlay::selected(intent, &runtime.config) {
+        launch.overlay = Some(overlay::Grant::new(runtime, intent));
+    }
     let executable_path = supervisor::executable_path(&executable);
     let mut command = manager_command("/usr/bin/systemd-run");
     command.args([
@@ -712,18 +716,24 @@ fn unit_command(
         .into_iter()
         .filter(|folder| !preparation && seed_dir.symlink_metadata(folder).is_ok())
         .collect::<Vec<_>>();
-    let workspace_mount = ((native || preparation) && runtime.worker.is_none()).then(|| {
-        (
-            runtime.workspace.as_path(),
-            !preparation && intent.call.mutates(),
-        )
-    });
+    let workspace_mount = if launch.overlay.is_some() {
+        Some((seed_path.join("namespace/merged"), true))
+    } else {
+        ((native || preparation) && runtime.worker.is_none()).then(|| {
+            (
+                runtime.workspace.clone(),
+                !preparation && intent.call.mutates(),
+            )
+        })
+    };
     profile_arguments(
         &mut command,
         runtime_path,
         seed_path,
         &folders,
-        workspace_mount,
+        workspace_mount
+            .as_ref()
+            .map(|(path, write)| (path.as_path(), *write)),
         &intent.limits,
         launch.helper_path(),
     );
@@ -923,7 +933,7 @@ async fn prepare_seed(
         &guard_config(runtime, intent),
         intent.call.is_process() && !primary_command(intent) && runtime.worker.is_none(),
     )?;
-    if primary_command(intent) {
+    if primary_command(intent) && !overlay::selected(intent, &runtime.config) {
         prepare_inputs(
             runtime,
             intent,
@@ -1118,6 +1128,16 @@ pub(super) async fn execute_inner(
                 report_deadline,
             )
             .await?;
+            let (mut observation, mut candidate) = (observation, candidate);
+            if overlay::selected(intent, &runtime.config) {
+                overlay::complete(
+                    &mut stdout,
+                    (intent, &parent_namespaces),
+                    &mut observation,
+                    &mut candidate,
+                )
+                .await?;
+            }
             if candidate == super::CacheCandidate::Uncertain {
                 return Ok((observation, candidate));
             }
@@ -1129,7 +1149,9 @@ pub(super) async fn execute_inner(
             {
                 return Err(ToolError::Operation);
             }
-            if cache.is_some() && !read_capped(&mut stdout, 1).await?.is_empty() {
+            if (cache.is_some() || overlay::selected(intent, &runtime.config))
+                && !read_capped(&mut stdout, 1).await?.is_empty()
+            {
                 return Err(ToolError::Operation);
             }
             Ok((observation, candidate))
@@ -1825,7 +1847,21 @@ async fn receive_result(
         };
         Ok((observation, candidate))
     } else {
-        let read = read_effect_observation(stdout, runtime, intent);
+        let read = async {
+            if overlay::selected(intent, &runtime.config) {
+                let bytes =
+                    read_line_capped(stdout, super::super::spill::report_cap(intent)).await?;
+                let observation = super::parse_observation(&bytes)?;
+                if !observation.attested_for(intent)
+                    || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
+                {
+                    return Err(ToolError::Operation);
+                }
+                Ok(observation)
+            } else {
+                read_effect_observation(stdout, runtime, intent).await
+            }
+        };
         let observation = if let Some(report_deadline) = report_deadline {
             tokio::time::timeout_at(report_deadline, read)
                 .await
