@@ -1462,17 +1462,22 @@ async fn assert_spill_recovery(
     release: std::sync::mpsc::SyncSender<()>,
     finished: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let digest = Sha256::digest(serde_json::to_vec(&outcome.run.tools[0].intent).unwrap());
+    let reference = hash(&digest);
+    let path = state
+        .join("spill")
+        .join(outcome.run.id.to_string())
+        .join(format!("{reference}.txt"));
+    assert!(
+        path.exists(),
+        "stalled spill must exist before reopening the Store"
+    );
     let store = Store::open(StateRoot::open_existing(state).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
     let replay = SessionView::replay(outcome.session_id, &events)
         .unwrap()
         .unwrap();
     assert_eq!(replay.runs[0], outcome.run);
-    let reference = hash(&serde_json::to_vec(&outcome.run.tools[0].intent).unwrap());
-    let path = state
-        .join("spill")
-        .join(outcome.run.id.to_string())
-        .join(format!("{reference}.txt"));
     assert!(
         path.exists(),
         "open must skip a writer that still owns its lock"
