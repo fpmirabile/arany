@@ -1149,19 +1149,52 @@ Byte and entry bounds on synchronous snapshot preparation do not guarantee a fin
 
 ### Ubuntu namespace-entry diagnosis
 
-Successful user-namespace creation does not establish permission to mount inside it. On Ubuntu 24.04, [AppArmor can restrict an unprofiled executable's use of unprivileged user namespaces](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/#apparmor-unprivileged-user-namespace-restrictions), producing `ProtectionUnavailable` even with the required kernel facilities installed. A mount denial alone does not identify AppArmor: compare the failure stage, profile labels and capability sets. Check the installed launcher profile too; an installed `/usr/bin/unshare` does not establish that it is distribution-profiled. Missing namespace authorization and missing kernel/tmpfs-user-xattr enforcement are separate prerequisites; the entry probe below tests the former, not xattrs or overlay support.
+Successful user-namespace creation does not establish permission to map IDs or mount inside it. On Ubuntu 24.04, [AppArmor denies subsequent namespace capabilities to unprofiled executables](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions), which can produce `ProtectionUnavailable` with the required kernel facilities installed. A denial alone does not identify AppArmor: compare the failure stage, profile labels and capability sets. Namespace authorization and kernel/tmpfs-user-xattr enforcement are separate prerequisites.
 
-From the checkout, in a disposable unprivileged account on the same stock Ubuntu 24.04 host, run:
+Stock Ubuntu 24.04 has no enabled executable profile for `/usr/bin/bwrap` or plain `/usr/bin/unshare` ([AppArmor package files](https://packages.ubuntu.com/noble/all/apparmor/filelist)). `bwrap-userns-restrict` is an extra profile there; it became enabled by default in [Ubuntu 25.04](https://documentation.ubuntu.com/release-notes/25.04/#apparmor-profile-for-bwrap). [Codex documents the same Ubuntu failure and hand-install/load remedy](https://developers.openai.com/codex/concepts/sandboxing/#prerequisites) for the bwrap profile. Arany’s current [unshare-first bootstrap](../../crates/arany/src/tools/guard/linux.rs) is also denied under stock policy; this follows from the code and the [S1a0 refusals](../../planning/command-workspace-overlay/README.md#d7-native-gate-result), not a completed Guard observation. [CI](../../.github/workflows/ci.yml) disables the restriction before Linux native lanes, so those lanes do not prove stock-policy compatibility.
+
+The [D7′ supervisor plan](../../planning/command-workspace-overlay/README.md) selects in-process `unshare(2)` in the pinned Arany executable, followed by capability clearing before bwrap; it retires the external `unshare --keep-caps` entry. On a host that denies the required namespace, guarded commands fail closed as `ProtectionUnavailable` before GO with this diagnosis and the exact hand-run remedy below. No copy or host fallback is selected. The profile procedure targets that replacement entry; it does not repair the current unprofiled-unshare bootstrap. The diagnostic must render the actual admitted supervisor path in the profile below, never a model- or repository-supplied path. Native success with the profiles remains [pending](../../NEXT_STEPS.md#daily-use-first).
+
+**Preferred one-time administrator step.** Install an executable-specific `userns` exception for both `/usr/bin/bwrap` and the exact pinned Arany supervisor executable. AppArmor needs a static absolute executable path: the example below uses `/opt/arany/bin/arany`. Before running it, replace that literal with the actual resolved, admitted supervisor path; do not use a symlink, version wildcard, directory grant or a profile for the terminal/shell. The binary must already be installed at that path. Review existing local profiles first; do not overwrite a local policy or load conflicting attachments for the same executable.
+
+The following is the complete profile text and the commands for the administrator to run by hand in their own terminal. Arany never performs these policy changes. Privilege tools are never executed by Arany, even through a host-command approval.
+
+```sh
+sudo tee /etc/apparmor.d/arany-userns >/dev/null <<'PROFILE'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile arany_bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+
+profile arany_supervisor /opt/arany/bin/arany flags=(unconfined) {
+  userns,
+}
+PROFILE
+sudo chmod 0644 /etc/apparmor.d/arany-userns
+sudo apparmor_parser -r /etc/apparmor.d/arany-userns
+```
+
+Loading the file applies it without a reboot; `/etc/apparmor.d` retains the administrator’s policy for later boots. Keep `kernel.apparmor_restrict_unprivileged_userns=1`. Fully stop and restart Arany from the exact profiled executable, then explicitly retry the original guarded command. Verify the loaded profile labels and namespace operations; profile installation alone does not establish mount, xattr, overlay or full Guard support. These `flags=(unconfined)` profiles add namespace authorization for the named executables; they are not general AppArmor confinement. They expose namespace kernel operations to those executables, while Arany must still enforce zero payload capabilities, no-new-privileges, seccomp and the existing grants. They authorize no host command or broader filesystem access through Arany.
+
+AppArmor’s [executable attachments](https://manpages.ubuntu.com/manpages/noble/man5/apparmor.d.5.html) match paths, not executable digests. If `cargo install`, an upgrade or relocation moves the executable, the new resolved path has no exception until the administrator updates the attachment and reloads the profile by hand; namespace entry remains fail closed meanwhile. Replacing the executable at the same path retains the AppArmor exception for the replacement, so the administrator must trust what is installed there. Arany’s separate identity/digest pin must reject a changed binary for an already pinned invocation; restart and readmit the replacement before retrying. Do not broaden the attachment to follow arbitrary future versions.
+
+**Last resort.** If the targeted profiles are unavailable or insufficient, an administrator may explicitly choose this temporary system-wide change by hand:
+
+```sh
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+This removes AppArmor’s unprivileged-user-namespace restriction for all otherwise unconfined applications on the host, expanding their access to the kernel’s namespace attack surface. It is broader than the two executable exceptions, does not supply other missing enforcement and is not the profile-enabled Ubuntu evidence lane. Restore it by hand with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1` after the experiment; the temporary setting normally resets at reboot unless separate administrator policy persists it. Arany never performs these policy changes.
+
+For diagnosis from the checkout, in a disposable unprivileged account on the stock Ubuntu 24.04 host, the hand-run S1a0 reproduction is:
 
 ```sh
 cargo run --locked --offline -p arany --example namespace_entry_probe
 ```
 
-The [native entry probe](../../crates/arany/examples/namespace_entry/probe.rs) compares in-process namespace setup with `/usr/bin/unshare --user --map-current-user --mount --propagation private --keep-caps --` exec into the same pinned executable. It records kernel/package/profile provenance, labels across entry, UID/GID maps, capabilities and positive process teardown. Successful setup additionally proves bounded tmpfs mount/write/read/unmount, capability removal and no-new-privileges across a further exec. A result without the completed probe-entry snapshot is a startup failure, not a mount/capability observation. A timed-out entry fails after its child is killed if still running and positively reaped; the other entry is still compared. Cleanup errors or host mountpoint leftovers stop the comparison. It launches no command payload. Retain both results and verify unchanged distribution policy; version strings and a passing entry alone do not establish stock-host or overlay support.
-
-The [accepted supervisor work](../../planning/command-workspace-overlay/README.md) requires stock-host evidence before admitting either new entry. Prefer in-process entry if it passes; otherwise require the distro-launcher route to pass, clearing all capability sets before bwrap. Neither is a current command-dispatch option. After the evidence-selected entry is implemented and admitted, retry the original command through that entry; do not add `--keep-caps` to the current direct-to-bwrap bootstrap. If both stock entries fail, keep the design gate open with no copy or host fallback.
-
-An administrator may separately choose an executable-specific `/etc/apparmor.d` profile containing `userns,`, or run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` by hand. Arany never performs these policy changes. Neither is a prerequisite or qualifying result for stock Ubuntu support.
+The [probe](../../crates/arany/examples/namespace_entry/probe.rs) still compares the historical in-process and external-launcher entries. It records kernel/package/profile provenance, labels, UID/GID maps, capability sets and positive process teardown; success additionally observes bounded tmpfs mount/write/read/unmount, capability removal and no-new-privileges across exec. A missing probe-entry snapshot is startup failure, not mount/capability evidence. A timed-out child is killed if still running and positively reaped; cleanup errors or host mountpoint leftovers stop comparison. It launches no command payload. Both entries refused in S1a0; the external route is no longer an implementation candidate. The probe executable has its own path and is not authorized by the Arany attachment above. S1a1+ native evidence must exercise the actual profiled supervisor on Ubuntu 24.04 with the restriction enabled, plus an unrestricted distribution, rather than treating a probe or sysctl-disabled run as that evidence.
 
 ## Acceptance scenarios and evidence owners
 
