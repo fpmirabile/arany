@@ -3181,7 +3181,7 @@ fn remaining_borrowed_payloads_match_fixed_bytes() {
         ("GoalContextCompacted", format!(r#"{{"goal_id":"01900000-0000-7000-8000-000000000002","covered_tool_count":1,"record":{RECORD}}}"#), run, None),
         ("MessageCommitted", r#"{"text":"committed"}"#.into(), run, None),
         ("AgentFinished", r#"{"worker":null,"disposition":"finished","summary":"done","result":"answer"}"#.into(), run, agent),
-        ("AgentFinished", r#"{"worker":{"cleanup":null,"disposition":"failed","cause":"tool_failed","data":null},"disposition":"failed","summary":null,"result":null}"#.into(), run, agent),
+        ("AgentFinished", r#"{"worker":{"disposition":"failed","cause":"tool_failed"},"disposition":"failed","summary":null,"result":null}"#.into(), run, agent),
     ];
     for (kind, fixture, run, agent) in cases {
         assert_eq!(

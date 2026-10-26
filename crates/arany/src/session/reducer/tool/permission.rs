@@ -5,6 +5,33 @@ use crate::tools::permissions::{
     Decision, HookResult, PermissionMode, PermissionSource, TypedGitPrefix,
 };
 
+pub(super) fn validate_modes(
+    call: &crate::tools::ToolCall,
+    verdict: &crate::tools::permissions::PermissionVerdict,
+    restrictions: Vec<PermissionMode>,
+) -> Result<(), ReplayError> {
+    for mode in restrictions {
+        let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(mode, call).0;
+        if verdict.approved
+            && !(call.is_unguarded()
+                && mode == PermissionMode::DontAsk
+                && matches!(
+                    verdict.source,
+                    PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
+                ))
+            && (restriction == crate::tools::permissions::Decision::Deny
+                || restriction == crate::tools::permissions::Decision::Ask
+                    && !matches!(
+                        verdict.source,
+                        PermissionSource::Human | PermissionSource::AiReview
+                    ))
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     match event {
         Event::ToolStarted {
@@ -26,6 +53,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .intent
                 .call
                 .clone();
+            validate_modes(
+                &pending_call,
+                verdict,
+                super::super::mode_restrictions(run, *agent_run_id)?,
+            )?;
             let unguarded = pending_call.is_unguarded();
             let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
             let first_use = !permissions_pinned

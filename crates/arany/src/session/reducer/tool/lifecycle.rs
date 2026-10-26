@@ -89,29 +89,7 @@ fn validate_permission_verdict(
         .permission_verdict
         .as_ref()
         .ok_or(ReplayError::InvalidTransition)?;
-    for mode in restrictions {
-        let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(
-            mode,
-            &observation.intent.call,
-        )
-        .0;
-        if verdict.approved
-            && !(unguarded
-                && mode == PermissionMode::DontAsk
-                && matches!(
-                    verdict.source,
-                    PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
-                ))
-            && (restriction == crate::tools::permissions::Decision::Deny
-                || restriction == crate::tools::permissions::Decision::Ask
-                    && !matches!(
-                        verdict.source,
-                        PermissionSource::Human | PermissionSource::AiReview
-                    ))
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
-    }
+    super::permission::validate_modes(&observation.intent.call, verdict, restrictions)?;
     if unguarded
         && !matches!(
             observation.attestation,

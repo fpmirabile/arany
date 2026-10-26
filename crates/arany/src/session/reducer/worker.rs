@@ -119,24 +119,33 @@ fn quiescent(run: &RunView) -> bool {
         .all(|t| t.observation.is_some())
 }
 pub(crate) fn coordination_ready(run: &RunView) -> bool {
-    wave_settled(run)
-}
-pub(crate) fn wave_settled(run: &RunView) -> bool {
     let proposed: usize = run
         .primary()
         .into_iter()
-        .flat_map(|a| &a.provider_calls)
-        .filter_map(|r| r.delegation.as_ref())
+        .flat_map(|agent| &agent.provider_calls)
+        .filter_map(|record| record.delegation.as_ref())
         .map(Vec::len)
         .sum();
     proposed == run.agents.len().saturating_sub(1)
-        && run.agents.iter().skip(1).all(|a| {
-            a.assignment
+        && run.agents.iter().skip(1).all(|agent| {
+            agent
+                .assignment
                 .as_ref()
-                .map_or(a.status == AgentStatus::Finished, |w| {
-                    a.status != AgentStatus::Active && w.settled()
+                .map_or(agent.status == AgentStatus::Finished, |worker| {
+                    agent.status != AgentStatus::Active
+                        && worker.released.is_some()
+                        && worker.outcome.is_some()
+                        && !agent.tools.iter().any(ToolView::outcome_unknown)
                 })
         })
+}
+pub(crate) fn wave_settled(run: &RunView) -> bool {
+    coordination_ready(run)
+        && run
+            .agents
+            .iter()
+            .filter_map(|agent| agent.assignment.as_ref())
+            .all(WorkerView::settled)
 }
 pub(super) fn child_terminal(a: &AgentView) -> bool {
     a.assignment

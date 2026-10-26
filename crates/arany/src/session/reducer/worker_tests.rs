@@ -960,7 +960,23 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
         }),
     });
     let invalid = f.events.pop().unwrap();
-    refused(&f, invalid, "child acceptEdits cannot erase parent Ask");
+    refused(
+        &f,
+        invalid.clone(),
+        "child acceptEdits cannot erase parent Ask",
+    );
+    let mut approved = invalid;
+    let Event::ToolStarted {
+        verdict: Some(verdict),
+        ..
+    } = &mut approved
+    else {
+        unreachable!()
+    };
+    verdict.decision = Decision::Ask;
+    verdict.source = PermissionSource::Human;
+    f.push(approved);
+    f.view();
 }
 
 #[test]

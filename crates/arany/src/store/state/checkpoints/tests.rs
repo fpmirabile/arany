@@ -567,7 +567,13 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
             assert_eq!(
                 capture(
                     &root,
-                    batch(f.session, f.goal, f.run, sequence, &[sequence as u8]),
+                    batch(
+                        f.session,
+                        f.goal,
+                        f.run,
+                        f.events.len() as u64 + sequence,
+                        &[sequence as u8]
+                    ),
                     if startup { 0 } else { now },
                 )
                 .status,
@@ -623,30 +629,44 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
             )
             .await
             .unwrap();
-        let mut tail = f.events[finished + 1..].iter();
-        for event in tail.by_ref() {
-            if matches!(event, Event::GoalProviderCallReserved { agent_run_id, .. } if *agent_run_id == f.primary)
-            {
-                break;
-            }
-            let mut event = event.clone();
-            if let Event::AgentFinished {
-                disposition,
-                summary,
-                result,
-                worker: Some(outcome),
-                ..
-            } = &mut event
-            {
-                *disposition = crate::session::AgentDisposition::Failed;
-                *summary = None;
-                *result = None;
-                outcome.disposition = crate::worker::WorkerDisposition::Failed;
-                outcome.cause = crate::worker::WorkerCause::ToolFailed;
-            }
-            store.append(f.session, event).await.unwrap();
-        }
-        let primary_call = tail.next().unwrap().clone();
+        let mut failed = f.events.iter().find(|event| matches!(event,
+            Event::AgentFinished { agent_run_id, worker: Some(_), .. } if *agent_run_id == f.child
+        )).unwrap().clone();
+        let Event::AgentFinished {
+            disposition,
+            summary,
+            result,
+            worker: Some(outcome),
+            ..
+        } = &mut failed
+        else {
+            unreachable!()
+        };
+        *disposition = crate::session::AgentDisposition::Failed;
+        *summary = None;
+        *result = None;
+        outcome.disposition = crate::worker::WorkerDisposition::Failed;
+        outcome.cause = crate::worker::WorkerCause::ToolFailed;
+        let finished = store.append(f.session, failed).await.unwrap();
+        store
+            .append(
+                f.session,
+                Event::WorkerLeaseReleased {
+                    run_id: f.run,
+                    agent_run_id: f.primary,
+                    record: crate::worker::WorkerLeaseRelease {
+                        assignment_id: f.child,
+                        cause_sequence: finished.sequence,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let primary_call = f.events.iter().find(|event| matches!(event,
+            Event::ProviderCallRecorded { agent_run_id, record, .. }
+                if *agent_run_id == f.primary && record.phase == crate::AgentPhase::RootSynthesis
+                    && record.disposition == crate::ProviderCallDisposition::ToolRequested
+        )).unwrap().clone();
         let primary_reserve = f.events.iter().rev().find(|e| matches!(e, Event::GoalProviderCallReserved { agent_run_id, .. } if *agent_run_id == f.primary)).unwrap().clone();
         for index in 0..2 {
             for event in [&primary_reserve, &primary_call] {

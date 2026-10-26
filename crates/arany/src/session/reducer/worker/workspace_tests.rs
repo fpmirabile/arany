@@ -26,7 +26,10 @@ fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
             SessionView::replay(f.session, &decoded).unwrap().unwrap(),
             cold
         );
-        if let Some(child) = cold.runs[0].agents.iter().find(|a| a.id == f.child) {
+        let Some(run) = cold.runs.first() else {
+            continue;
+        };
+        if let Some(child) = run.agents.iter().find(|a| a.id == f.child) {
             let unknown = child.tools.iter().any(ToolView::outcome_unknown);
             if unknown {
                 assert!(!cold.goal(f.goal).unwrap().can_resume(&cold));
@@ -37,7 +40,7 @@ fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
                     .is_some_and(|o| o.disposition == ToolDisposition::Succeeded)
             }) {
                 assert_ne!(
-                    cold.runs[0].worker_history()[0].publication,
+                    run.worker_history()[0].publication,
                     WorkerPublication::Unpublished
                 );
             }
@@ -608,4 +611,22 @@ fn a_later_foreground_wave_invalidates_old_primary_verification_until_fresh_evid
     for end in 1..=f.events.len() {
         assert!(SessionView::replay(f.session, &f.envelopes()[..end]).is_ok());
     }
+}
+
+#[test]
+fn primary_verification_tools_require_release_but_never_require_a_prior_verification() {
+    let mut f = fixture();
+    f.mutation();
+    let cause = f.finish_worker();
+    let view = f.view();
+    assert!(!coordination_ready(&view.runs[0]));
+    assert!(!wave_settled(&view.runs[0]));
+    f.release(cause);
+    let view = f.view();
+    assert!(coordination_ready(&view.runs[0]));
+    assert!(!wave_settled(&view.runs[0]));
+    f.verify();
+    let view = f.view();
+    assert!(coordination_ready(&view.runs[0]));
+    assert!(wave_settled(&view.runs[0]));
 }
