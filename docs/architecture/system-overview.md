@@ -72,7 +72,8 @@ Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
 it during admission, so the source dependency points from Engine to Tools.
 Engine permission selection, host session reuse and remembering eligibility live
 in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
-shared ask and dispatch flow.
+shared ask and dispatch flow. Focused definition-mode and typed-prefix approval
+tests live with that permission policy.
 The Engine composes per-dispatch queue progress, active-action and checkpoint
 senders through consuming ToolRuntime builders; Guard dispatch makes one owned
 copy from its borrowed runtime before consuming that chain.
