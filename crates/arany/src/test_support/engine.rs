@@ -25,7 +25,9 @@ pub fn deadline(name: &str, duration: std::time::Duration) -> impl Drop {
     // Like the serve watchdog, this also bounds a paused or blocked runtime during native teardown.
     let worker = std::thread::spawn(move || {
         if stopped.recv_timeout(duration) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-            eprintln!(
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "{name} exceeded its {}-second wall-clock deadline",
                 duration.as_secs()
             );

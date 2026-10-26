@@ -3039,8 +3039,10 @@ mod tests {
             },
         ]);
         let conflict = decode_handover(&call(&conflict), &conflict, &runtime.config).unwrap();
+        let root = crate::tools::fs::open_directory(dir.path()).unwrap();
+        let control = crate::tools::fs::MutationControl::default();
         assert!(matches!(
-            fs::apply_worker_changeset(dir.path(), &conflict),
+            fs::apply_worker_changeset(&root, &conflict, &control),
             Err(ToolError::Conflict)
         ));
         assert_eq!(std::fs::read(dir.path().join("owned/a")).unwrap(), old);
@@ -3051,7 +3053,7 @@ mod tests {
             }]);
             let alias = decode_handover(&call(&alias), &alias, &runtime.config).unwrap();
             assert!(
-                fs::apply_worker_changeset(dir.path(), &alias).is_err(),
+                fs::apply_worker_changeset(&root, &alias, &control).is_err(),
                 "{path}"
             );
         }
@@ -3065,7 +3067,7 @@ mod tests {
                 "{path}"
             );
         }
-        fs::apply_worker_changeset(dir.path(), &changes).unwrap();
+        fs::apply_worker_changeset(&root, &changes, &control).unwrap();
         assert_eq!(std::fs::read(dir.path().join("owned/a")).unwrap(), new);
         assert_eq!(
             std::fs::read(dir.path().join("owned/b")).unwrap(),

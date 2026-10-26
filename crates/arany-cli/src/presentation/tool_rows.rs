@@ -105,10 +105,10 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     if let Some(cause) = tool
         .observation
         .as_ref()
-        .and_then(|value| value.enforcement_cause)
+        .and_then(|value| value.enforcement_diagnostic())
     {
         summary.push_str(" · ");
-        summary.push_str(cause.diagnostic());
+        summary.push_str(cause);
     }
     if let Some(verdict) = &tool.permission_verdict
         && verdict.decision == arany::permissions::Decision::Deny

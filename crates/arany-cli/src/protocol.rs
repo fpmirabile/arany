@@ -79,6 +79,7 @@ event_kinds!(
     ToolFinished,
     SupervisorVerdictRecorded,
     ToolProposed,
+    ToolPreflightRefused,
     HookStarted,
     HookFinished,
     AgentFinished,

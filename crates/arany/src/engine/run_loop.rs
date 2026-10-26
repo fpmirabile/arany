@@ -280,6 +280,7 @@ impl<'a> RunLoop<'a> {
     }
 
     async fn append_inner(&self, event: Event) -> Result<(), EngineError> {
+        let writer = self.journal.writer().await;
         let fact = matches!(
             event,
             Event::AgentSpawned { .. } | Event::AgentFinished { .. } | Event::RunFinished { .. }
@@ -287,9 +288,9 @@ impl<'a> RunLoop<'a> {
         .then(|| event.clone());
         let committed = self
             .ledger
-            .append_committed(self.journal, self.session_id, event)
+            .append_committed_in(&writer, self.session_id, event)
             .await?;
-        self.record_supervisor_verdict(&committed).await?;
+        self.record_supervisor_verdict(&writer, &committed).await?;
         if let (Some(steering), Some(fact)) = (&self.controls.steering, fact) {
             match fact {
                 Event::AgentSpawned {
@@ -324,6 +325,7 @@ impl<'a> RunLoop<'a> {
 
     async fn record_supervisor_verdict(
         &self,
+        writer: &crate::journal::JournalWriter<'_>,
         committed: &crate::session::EventEnvelope,
     ) -> Result<(), EngineError> {
         let decision = self.ledger.view(|view| {
@@ -340,8 +342,8 @@ impl<'a> RunLoop<'a> {
                 verdict,
             } => {
                 self.ledger
-                    .append(
-                        self.journal,
+                    .append_committed_in(
+                        writer,
                         self.session_id,
                         Event::SupervisorVerdictRecorded {
                             run_id,
@@ -410,6 +412,8 @@ impl<'a> RunLoop<'a> {
             .active_elapsed()
             .saturating_sub(pause.activity_started);
         let sampled_at = pause.paused_at + active_during;
+        let resume_at =
+            resume_at.or_else(|| self.ledger().activity_in_progress().then(Instant::now));
         self.settle_active_segment_at(pause.segment, sampled_at, resume_at)
     }
 
@@ -824,9 +828,12 @@ impl<'a> RunLoop<'a> {
             return Ok(tool_compaction::ContextCapacity::Fits);
         }
         let contract = self.ledger().plan_contract()?;
-        let mut refusal_index = requests
-            .iter()
-            .position(|item| self.check_tool(&item.call, contract.as_ref()).is_err());
+        let mut refusal_index = self.ledger().view(|view| {
+            requests.iter().position(|item| {
+                self.check_tool(view, &item.call, contract.as_ref())
+                    .is_err()
+            })
+        })?;
         if refusal_index.is_none() {
             for (index, item) in requests.iter().enumerate() {
                 if self.primary_lease_allows(&item.call)?.is_err() {
@@ -1268,9 +1275,11 @@ impl<'a> RunLoop<'a> {
             return Ok(Err(ProposalRefusalCause::InvalidArguments));
         }
         let contract = self.ledger().plan_contract()?;
-        Ok(requests
-            .iter()
-            .try_for_each(|request| self.check_tool(&request.call, contract.as_ref())))
+        self.ledger().view(|view| {
+            requests
+                .iter()
+                .try_for_each(|request| self.check_tool(view, &request.call, contract.as_ref()))
+        })
     }
 
     fn model_may_propose(&self, call: &crate::tools::ToolCall) -> bool {
@@ -1311,6 +1320,7 @@ impl<'a> RunLoop<'a> {
 
     fn check_tool(
         &self,
+        view: &crate::session::SessionView,
         call: &crate::tools::ToolCall,
         contract: Option<&crate::session::GoalPlanContract>,
     ) -> Result<(), ProposalRefusalCause> {
@@ -1340,20 +1350,14 @@ impl<'a> RunLoop<'a> {
         if !call.valid() {
             return Err(InvalidArguments);
         }
-        if self.controls.goal_phase != GoalPhase::Implementation && !call.is_goal_plan_prelude() {
-            return Err(Phase);
-        }
-        if let Some(contract) = contract {
-            if !contract.allows_call(call) {
-                return Err(PlanScopeExcludesCall);
-            }
-            if !self
+        crate::session::validate_primary_tool_scope(view, self.run_id, call)?;
+        if let Some(contract) = contract
+            && !self
                 .controls
                 .tools
                 .is_some_and(|tools| tools.allows_goal_contract(contract))
-            {
-                return Err(PlanOutsideGrant);
-            }
+        {
+            return Err(PlanOutsideGrant);
         }
         Ok(())
     }

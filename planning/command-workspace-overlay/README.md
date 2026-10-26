@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready` (implementation gated on [in-process file mutations](../in-process-file-mutations/README.md) completing)
+- Status: `Ready`
 - Owner: harness maintainers
 - Last updated: 2026-10-25
 
@@ -62,4 +62,4 @@ Disclosure widens by design: the payload reads every unprotected Workspace file 
 
 ## Gates
 
-Opens only after [in-process file mutations](../in-process-file-mutations/README.md) slice 2 has merged (it deletes the Linux file-worker code in `guard/linux.rs` and `guard.rs` that slice 1 here would otherwise conflict with, and publication then runs in process). Slice 1 edits `guard/linux.rs`, `guard.rs`, `tools/fs.rs`, `tools/process.rs`: no open PR touches them at `04b80ac1`; reserve `fs.rs` against the in-process plan. Slice 2 edits `store/state/build_cache.rs`, `store/state.rs`, `guard.rs`, `presentation/storage.rs`: **after #446** (spec-limits S1 edits `store/state.rs` and `store.rs`). Slice 3 edits `tools/config.rs`, `tools/process.rs`, `cli/attached/controls.rs` (`/settings`) and `guard.rs`: after #438 (B13 exec feedback) only if it is still open and touches `controls.rs`; otherwise none.
+Primary publication already runs [in process](../../docs/specs/tools.md#in-process-file-operations). Slice 1 edits `guard/linux.rs`, `guard.rs`, `tools/fs.rs`, `tools/process.rs`: no open PR touches them at `04b80ac1`. Slice 2 edits `store/state/build_cache.rs`, `store/state.rs`, `guard.rs`, `presentation/storage.rs`: **after #446** (spec-limits S1 edits `store/state.rs` and `store.rs`). Slice 3 edits `tools/config.rs`, `tools/process.rs`, `cli/attached/controls.rs` (`/settings`) and `guard.rs`: after #438 (B13 exec feedback) only if it is still open and touches `controls.rs`; otherwise none.

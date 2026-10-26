@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) mod check;
 mod evidence;
 use crate::journal::check::{CheckId, CheckOp, CheckView};
+pub use replay::{InspectedEvent, InspectionCause, InspectionFailure, SessionInspection};
 mod journal;
 mod migrate;
 mod replay;
@@ -23,8 +24,8 @@ use journal::{HotSession, append, open_connection};
 pub use migrate::{RECORD_FORMATS, RecordFormat, RecordStep};
 pub(crate) use replay::{MAX_DISCOVERED_SESSIONS, MAX_LIST_SCAN_EVENTS, MAX_SESSION_EVENTS};
 use replay::{
-    latest_session_id, list_session_page, load_session, resolve_open_view, resolve_view,
-    session_for_run,
+    inspect_session, latest_session_id, list_session_page, load_session, resolve_open_view,
+    resolve_view, session_for_run,
 };
 #[cfg(test)]
 pub(crate) use state::capture_archive;
@@ -279,6 +280,10 @@ enum Request {
         session_id: SessionId,
         reply: oneshot::Sender<Result<Vec<EventEnvelope>, StoreError>>,
     },
+    Inspect {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<replay::SessionInspection, StoreError>>,
+    },
     RunSession {
         run_id: RunId,
         reply: oneshot::Sender<Result<Option<SessionId>, StoreError>>,
@@ -467,6 +472,9 @@ impl Store {
                         }
                         Request::Load { session_id, reply } => {
                             let _ = reply.send(load_session(&connection, session_id));
+                        }
+                        Request::Inspect { session_id, reply } => {
+                            let _ = reply.send(inspect_session(&connection, session_id));
                         }
                         Request::RunSession { run_id, reply } => {
                             let _ = reply.send(session_for_run(&connection, run_id));
@@ -733,6 +741,14 @@ impl Store {
         session_id: SessionId,
     ) -> Result<Vec<EventEnvelope>, StoreError> {
         self.call(|reply| Request::Load { session_id, reply }).await
+    }
+
+    pub async fn inspect_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionInspection, StoreError> {
+        self.call(|reply| Request::Inspect { session_id, reply })
+            .await
     }
 
     pub(crate) async fn admit(

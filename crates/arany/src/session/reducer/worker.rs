@@ -803,7 +803,10 @@ fn integration_in_flight(run: &RunView, assignment_id: AgentRunId) -> bool {
             ToolCall::ApplyChangeset {
                 source: ChangesetSource::WorkerHandover { assignment_id: id, .. }
             } if *id == assignment_id
-        )
+        ) && (t.started_sequence.is_some()
+            || run
+                .primary()
+                .is_none_or(|actor| actor.tool_refusal.is_none()))
     }) && worker(run, assignment_id).is_ok_and(|w| w.integration.is_none())
 }
 
@@ -1118,6 +1121,10 @@ fn valid_discard(run: &RunView, w: &WorkerView, d: &WorkerSettlement) -> bool {
     match d.reason {
         WorkerSettlementReason::Stopped => {
             run.workers.stop.is_some_and(|(s, _)| s == d.cause_sequence)
+                || run.primary().is_some_and(|actor| {
+                    actor.tool_refusal.is_some()
+                        && actor.tool_refusal_sequence == Some(d.cause_sequence)
+                })
         }
         WorkerSettlementReason::Conflict | WorkerSettlementReason::Denied => {
             w.integration.as_ref().is_some_and(|(s, i)| {

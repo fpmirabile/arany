@@ -208,6 +208,8 @@ An active submission or another request during publication returns busy; an unkn
 
 ## Notifications and items
 
+The raw Event catalog includes `ToolPreflightRefused`; its typed cause and fixed reason follow the [execution contract](./execution.md#accepted-outcomes). An unstarted refused proposal creates no Tool item; the failed turn retains its terminal failure feedback.
+
 All live facts come from committed Events on `RunHandle.events` or the single
 process-wide `Engine::subscribe()` tap for raw subscriptions. Provisional
 display is a separate opt-in stream, never a source of committed facts. Completion reloads the strict reduced view

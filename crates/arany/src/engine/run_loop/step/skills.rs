@@ -156,6 +156,7 @@ impl RunLoop<'_> {
                 | StopCause::ContextFull
                 | StopCause::DelegationDeadline
                 | StopCause::Refused(_)
+                | StopCause::ToolRefused(_)
                 | StopCause::ToolStopped
                 | StopCause::InvalidCommandResult,
             ) => return Ok(RunProgress::Ready(DefinitionRead::Stopped)),
@@ -283,6 +284,7 @@ impl RunLoop<'_> {
                 | StopCause::ContextFull
                 | StopCause::DelegationDeadline
                 | StopCause::Refused(_)
+                | StopCause::ToolRefused(_)
                 | StopCause::ToolStopped
                 | StopCause::InvalidCommandResult,
             ) => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),

@@ -243,36 +243,9 @@ pub(super) fn tool_started(
             if !integration_source(run, source) {
                 return Err(ReplayError::InvalidTransition);
             }
-        } else if intent.call.mutates() || intent.call.is_process() {
-            let leases: Vec<_> = run
-                .agents
-                .iter()
-                .filter_map(|a| a.assignment.as_ref())
-                .filter(|w| w.released.is_none())
-                .flat_map(|w| &w.pins.request.lease)
-                .collect();
-            let paths: Vec<_> = match &intent.call {
-                ToolCall::Write { path, .. }
-                | ToolCall::Edit { path, .. }
-                | ToolCall::Delete { path, .. }
-                | ToolCall::MultiEdit {
-                    file_path: path, ..
-                }
-                | ToolCall::Mkdir { path } => vec![path],
-                ToolCall::Move {
-                    source,
-                    destination,
-                    ..
-                } => vec![source, destination],
-                ToolCall::ApplyChangeset {
-                    source: ChangesetSource::CommandReceipt { changeset, .. },
-                } => changeset.files.iter().map(|f| &f.path).collect(),
-                _ if !leases.is_empty() => return Err(ReplayError::InvalidTransition),
-                _ => Vec::new(),
-            };
-            if paths.iter().any(|p| leases.iter().any(|l| overlaps(l, p))) {
-                return Err(ReplayError::InvalidTransition);
-            }
+        } else {
+            super::super::tool::validate_primary_tool_lease(run, &intent.call)
+                .map_err(|_| ReplayError::InvalidTransition)?;
         }
     } else if worker(run, *agent_run_id).is_ok() {
         if !child_tool_admissible(run, *agent_run_id, intent) {
@@ -561,7 +534,8 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::ProviderRetryScheduled { .. }
         | Event::WorkerHandoverRecorded { .. }
         | Event::WorkerVerificationRecorded { .. } => return Err(ReplayError::InvalidTransition),
-        Event::WorkspaceRewindStarted { .. }
+        Event::ToolPreflightRefused { .. }
+        | Event::WorkspaceRewindStarted { .. }
         | Event::WorkspaceRewindFinished { .. }
         | Event::SessionStarted { .. }
         | Event::SessionDefaultChanged { .. }
