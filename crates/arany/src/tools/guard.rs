@@ -1643,6 +1643,8 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         && task.intent.target != crate::session::worker::EffectTarget::Workspace
         || !task.intent.valid()
         || !(task.intent.call.facts().site == Site::Guard
+            || task.worker.is_some()
+                && task.intent.call.facts().family == super::catalog::Family::File
             || super::discovery::possible(&task.intent.call))
         || task.intent.policy_digest != task.config.digest()
         || !(task.config.allows(&task.intent.call)

@@ -349,6 +349,13 @@ impl View {
         Ok(())
     }
 
+    pub(crate) fn shape_intent(&self, intent: &mut EffectIntent) {
+        intent.target = self.target();
+        if !intent.call.is_process() {
+            intent.enforcement_digest = self.enforcement_digest;
+        }
+    }
+
     pub(crate) fn note_intent(&mut self, intent: &EffectIntent) {
         self.last_intent_digest = Some(intent.digest());
         self.last_enforcement_digest = Some(intent.enforcement_digest);
@@ -1654,7 +1661,7 @@ mod tests {
 
     fn intent(runtime: &ToolRuntime, view: &View, call: ToolCall) -> EffectIntent {
         let mut intent = runtime.intent(view.run_id, view.assignment, call);
-        intent.target = view.target();
+        view.shape_intent(&mut intent);
         intent
     }
 

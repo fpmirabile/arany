@@ -416,7 +416,12 @@ impl RunLoop<'_> {
         intent: &mut EffectIntent,
         id: AgentRunId,
     ) -> Result<(), EngineError> {
-        intent.target = self.worker_target(id)?;
+        self.worker
+            .try_lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .get(&id)
+            .ok_or(EngineError::CoordinatorFailed)?
+            .shape_intent(intent);
         intent.limits.project_bytes = crate::tools::types::SCRATCH_BYTES;
         if matches!(intent.call, ToolCall::Command { .. }) {
             let (class, requested, settings) = self.ledger().requested_command_resources()?;
