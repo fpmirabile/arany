@@ -1,59 +1,23 @@
 use super::{Admission, Feedback, emit_outcome, load_confirmed_outcome};
-use crate::cli::provider::routing::RoutingError;
-use crate::cli::provider::select::{Selection, SelectionError, select_provider};
+use crate::cli::provider::select::{Selection, select_provider};
 use crate::cli::run_outcome::{SHUTDOWN_GRACE, stop_after_answer, stop_text};
+use crate::cli::serve::embedded::{self, Controls, classify_run_error};
+pub(in crate::cli) use crate::cli::serve::embedded::{RunAttemptError, RunFailure};
 use crate::terminal::{
     AgentChatFollow, AttachedTerminal, Composer, ComposerDraft, TerminalError, TerminalInput,
     TerminalNotice,
 };
 use arany::{
-    AdmittedProviders, CompactionRecord, Engine, RunCancellation, RunControls, RunHandle, RunHints,
-    RunId, RunOutcome, RunRequest, RunResult, RunSteering, SessionId, SessionView, ToolGrant,
-    native_protection_supported,
+    CompactionRecord, Engine, RunId, RunOutcome, RunRequest, RunResult, SessionId, SessionView,
 };
+use arany_cli::protocol::{methods::*, rpc::*};
 use std::path::Path;
-use std::time::Duration;
 
 mod approval;
 mod input;
 
-use approval::{ApprovalPage, ApprovalUi, withdraw_abandoned_approval};
+use approval::{ApprovalPage, ApprovalUi};
 use input::{InputFailure, InputRoute, STEERING_SENT, settle_recorded_note};
-
-#[derive(Clone, Copy)]
-pub(super) struct ToolAccess<'a> {
-    pub configured: bool,
-    pub permissions: Option<&'a arany::WorkspacePermissions>,
-    pub approvals: &'a arany::ToolApprovals,
-}
-
-#[derive(Debug)]
-pub(super) enum RunAttemptError {
-    InterruptedBeforeRun,
-    Stopped {
-        outcome: Box<arany::RunOutcome>,
-        reason: String,
-    },
-    Failed(RunFailure),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum RunFailure {
-    #[error(transparent)]
-    Selection(SelectionError),
-    #[error("{0}")]
-    Roster(String),
-    #[error(transparent)]
-    Routing(RoutingError),
-    #[error("state directory unavailable or unsafe")]
-    StateUnavailable,
-    #[error("{}", super::permissions::UNAVAILABLE_NOTICE)]
-    ToolsUnavailable,
-    #[error(transparent)]
-    Engine(arany::EngineError),
-    #[error("{0}")]
-    Unsettled(&'static str),
-}
 
 pub(super) async fn preflight_selected(
     state_dir: &Path,
@@ -63,124 +27,6 @@ pub(super) async fn preflight_selected(
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-struct SelectedSubmission<'a> {
-    engine: &'a Engine,
-    state_dir: &'a Path,
-    selection: Selection<'a>,
-    request: RunRequest,
-    cancellation: RunCancellation,
-    hints: RunHints,
-    tools: ToolAccess<'a>,
-    steering: RunSteering,
-    roster: Option<crate::cli::provider::roster::SelectedRoster>,
-}
-
-async fn submit_selected<'a>(
-    submission: SelectedSubmission<'a>,
-) -> Result<RunHandle<'a>, RunAttemptError> {
-    let SelectedSubmission {
-        engine,
-        state_dir,
-        selection,
-        request,
-        cancellation,
-        hints,
-        tools,
-        steering,
-        roster,
-    } = submission;
-    let mut admission_cancellation = cancellation.clone();
-    let admit = async {
-        engine
-            .readmit_state()
-            .map_err(|_| RunFailure::StateUnavailable)?;
-        if let Some(roster) = &roster {
-            roster
-                .matches_selection(selection)
-                .map_err(RunFailure::Roster)?;
-            return roster
-                .admit(state_dir, &request.workspace)
-                .await
-                .map_err(RunFailure::Roster);
-        }
-        let provider = select_provider(state_dir, selection)
-            .await
-            .map_err(RunFailure::Selection)?;
-        // Fail closed before route resolution can recreate a removed State directory.
-        engine
-            .readmit_state()
-            .map_err(|_| RunFailure::StateUnavailable)?;
-        crate::cli::provider::routing::configured_providers(state_dir, &request.workspace, provider)
-            .await
-            .map_err(RunFailure::Routing)
-    };
-    let providers = tokio::select! {
-        biased;
-        () = admission_cancellation.cancelled() => return Err(RunAttemptError::InterruptedBeforeRun),
-        result = admit => result.map_err(RunAttemptError::Failed)?,
-    };
-    submit_with_providers(
-        engine,
-        providers,
-        request,
-        cancellation,
-        hints,
-        tools,
-        steering,
-    )
-}
-
-fn submit_with_providers<'a>(
-    engine: &'a Engine,
-    providers: AdmittedProviders,
-    request: RunRequest,
-    cancellation: RunCancellation,
-    hints: RunHints,
-    tools: ToolAccess<'_>,
-    steering: RunSteering,
-) -> Result<RunHandle<'a>, RunAttemptError> {
-    // Each submission fails closed when the held State became unsafe or its path was swapped.
-    engine
-        .readmit_state()
-        .map_err(|_| RunAttemptError::Failed(RunFailure::StateUnavailable))?;
-    let trusted_tools =
-        super::permissions::supports_tools(Some(&providers.primary[0].identity().profile));
-    let grant = if tools.configured {
-        if !native_protection_supported() {
-            return Err(RunAttemptError::Failed(RunFailure::ToolsUnavailable));
-        }
-        ToolGrant::Configured
-    } else {
-        match tools
-            .permissions
-            .filter(|permissions| trusted_tools && permissions.is_trusted())
-        {
-            Some(permissions) => ToolGrant::Trusted(permissions.clone()),
-            None => ToolGrant::None,
-        }
-    };
-    let grants_tools = !matches!(grant, ToolGrant::None);
-    let handle = engine
-        .submit(
-            providers,
-            request,
-            RunControls {
-                tools: grant,
-                approvals: Some(tools.approvals.clone()),
-                steering: Some(steering),
-                cancellation,
-                hints: Some(hints),
-            },
-        )
-        .map_err(|error| {
-            if grants_tools {
-                arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
-            }
-            RunAttemptError::Failed(RunFailure::Engine(error))
-        })?;
-    Ok(handle)
 }
 
 pub(super) fn finish_attempt(
@@ -209,13 +55,6 @@ pub(super) fn finish_attempt(
             reason,
         }),
         None => Ok(run),
-    }
-}
-
-fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
-    match error {
-        arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
-        error => RunAttemptError::Failed(RunFailure::Engine(error)),
     }
 }
 
@@ -274,11 +113,6 @@ pub(super) enum RunSubmission {
     Shutdown(String),
 }
 
-enum RunStep<'a> {
-    Admitted(arany::RunHandle<'a>),
-    Completed(Result<Box<RunOutcome>, RunAttemptError>),
-}
-
 fn draft_retained_notice(autonomous: bool) -> &'static str {
     if autonomous {
         "Draft retained; press Enter after this Goal to submit"
@@ -320,15 +154,15 @@ fn exits_after_settled_run(
 }
 
 // /exit drops held drafts and notes so the deferred Ctrl+D exits on an empty composer.
-fn abandon_drafts_for_exit(
+async fn abandon_drafts_for_exit(
     composer: &mut Composer,
     held: &mut Option<HeldDraft>,
-    steering: &RunSteering,
+    controls: &Controls,
 ) {
     composer.take();
     composer.take_images();
     *held = None;
-    let _ = steering.withdraw_note();
+    let _ = controls.withdraw_note().await;
 }
 
 fn active_escape(
@@ -373,14 +207,14 @@ fn release_held_draft(composer: &mut Composer, draft: HeldDraft) -> bool {
 }
 
 pub(super) struct PreparedSubmission<'a> {
-    pub(super) engine: &'a arany::Engine,
+    pub(super) engine: &'a std::sync::Arc<arany::Engine>,
     pub(super) profile: String,
     pub(super) model: String,
     pub(super) roster: Option<crate::cli::provider::roster::SelectedRoster>,
     pub(super) manifest: Option<String>,
     pub(super) request: RunRequest,
     pub(super) progress: RunProgress<'a>,
-    pub(super) inbox: arany::ApprovalInbox,
+    pub(super) inbox: embedded::Bootstrap,
 }
 
 pub(super) struct RunUi<'a> {
@@ -394,10 +228,7 @@ pub(super) struct RunProgress<'a> {
     starting_sequence: u64,
     autonomous: bool,
     submitted_goal: Option<arany::GoalId>,
-    cancellation: RunCancellation,
-    hints: RunHints,
-    approvals: arany::ToolApprovals,
-    steering: RunSteering,
+    controls: Controls,
     approval_ui: ApprovalUi,
     stop: ActiveStop,
     user_recorded: bool,
@@ -426,25 +257,18 @@ impl<'a> RunProgress<'a> {
         starting_sequence: u64,
         autonomous: bool,
         submitted_goal: Option<arany::GoalId>,
-    ) -> (Self, arany::ApprovalInbox) {
-        let cancellation = RunCancellation::new();
-        let hints = if ui.terminal.is_linear() {
-            RunHints::new()
-        } else {
-            RunHints::with_previews()
-        };
-        let (approvals, inbox) =
-            arany::ToolApprovals::new(ui.composer.approval_mode().unwrap_or_default());
+    ) -> (Self, embedded::Bootstrap) {
+        let (controls, inbox) = Controls::new(
+            ui.composer.approval_mode().unwrap_or_default(),
+            !ui.terminal.is_linear(),
+        );
         (
             Self {
                 admission,
                 starting_sequence,
                 autonomous,
                 submitted_goal,
-                cancellation,
-                hints,
-                approvals,
-                steering: RunSteering::new(),
+                controls,
                 approval_ui: ApprovalUi::default(),
                 stop: ActiveStop::Running,
                 user_recorded: false,
@@ -478,7 +302,7 @@ impl<'a> RunProgress<'a> {
         }
         let approval_more = match &self.approval_ui.pending {
             Some(approval) => match ui.terminal.draw_tool_approval(
-                approval,
+                &approval.prompt,
                 ui.view,
                 self.approval_ui.page,
                 (!self.approval_ui.unarmed).then_some(self.approval_ui.choice),
@@ -509,9 +333,16 @@ impl<'a> RunProgress<'a> {
         result: Result<Box<RunOutcome>, RunAttemptError>,
     ) -> Completion {
         let caught_up = !ui.terminal.child_notes_pending()
-            || catch_up(&self.admission.state_dir, ui.view).await.is_ok();
+            || match self.controls.view(ui.view.id).await {
+                Ok(view) => {
+                    *ui.view = view;
+                    true
+                }
+                Err(_) => false,
+            };
         ui.terminal
-            .settle_child_notes(ui.view, &self.steering, true);
+            .settle_child_notes(ui.view, self.controls.child_withdrawal(), true)
+            .await;
         let child_follow = if !caught_up {
             false
         } else {
@@ -529,13 +360,13 @@ impl<'a> RunProgress<'a> {
                     .into(),
             )));
         }
-        if let Err(reason) = self.restore_drafts(ui, result.is_err(), child_follow) {
+        if let Err(reason) = self.restore_drafts(ui, result.is_err(), child_follow).await {
             return Completion::Finished(Ok(RunSubmission::Shutdown(reason)));
         }
         Completion::Finished(self.submission_result(ui, result).await)
     }
 
-    fn restore_drafts(
+    async fn restore_drafts(
         &mut self,
         ui: &mut RunUi<'_>,
         failed: bool,
@@ -544,7 +375,7 @@ impl<'a> RunProgress<'a> {
         // An undelivered note ends the Run as an ordinary retained draft.
         let had_offer = self.offered.is_some();
         let sent = settle_recorded_note(
-            self.steering.delivered_notes(),
+            self.controls.delivered_notes().await?,
             &mut self.seen_delivered,
             &mut self.offered,
             ui.composer,
@@ -552,8 +383,9 @@ impl<'a> RunProgress<'a> {
         let had_held = self.held.is_some();
         // The undelivered note predates the held draft, so restore it ahead of that draft.
         let note = self
-            .steering
+            .controls
             .withdraw_note()
+            .await?
             .filter(|_| ui.terminal.is_linear());
         let withdrawn = note.is_some();
         let mut restored = self
@@ -598,7 +430,7 @@ impl<'a> RunProgress<'a> {
             Err(RunAttemptError::Failed(RunFailure::Engine(
                 arany::EngineError::GoalBudgetExhausted,
             ))) => {
-                let reloaded = super::load_view(&self.admission.state_dir, ui.view.id).await?;
+                let reloaded = self.controls.view(ui.view.id).await?;
                 let feedback =
                     crate::presentation::budget_refusal_feedback(&reloaded, self.submitted_goal);
                 Err(feedback
@@ -639,7 +471,7 @@ impl<'a> RunProgress<'a> {
             self.user_recorded = true;
         }
         let sent = settle_recorded_note(
-            self.steering.delivered_notes(),
+            self.controls.delivered_notes().await?,
             &mut self.seen_delivered,
             &mut self.offered,
             ui.composer,
@@ -658,11 +490,14 @@ impl<'a> RunProgress<'a> {
         } else {
             retry.as_deref().map(TerminalNotice::Transient)
         };
-        let child_changed = ui.terminal.settle_child_notes(
-            ui.view,
-            &self.steering,
-            self.stop != ActiveStop::Running,
-        );
+        let child_changed = ui
+            .terminal
+            .settle_child_notes(
+                ui.view,
+                self.controls.child_withdrawal(),
+                self.stop != ActiveStop::Running,
+            )
+            .await;
         if child_changed
             && ui
                 .terminal
@@ -696,7 +531,7 @@ impl<'a> RunProgress<'a> {
         Ok(())
     }
 
-    fn control_input(
+    async fn control_input(
         &mut self,
         ui: &mut RunUi<'_>,
         input: TerminalInput,
@@ -709,8 +544,9 @@ impl<'a> RunProgress<'a> {
             }
             self.stop = ActiveStop::Cancelling;
             ui.terminal
-                .settle_child_notes(ui.view, &self.steering, true);
-            self.cancellation.cancel();
+                .settle_child_notes(ui.view, self.controls.child_withdrawal(), true)
+                .await;
+            self.controls.cancel().await?;
         }
         if input == TerminalInput::Suspend {
             ui.terminal
@@ -745,78 +581,12 @@ impl<'a> RunProgress<'a> {
     }
 }
 
-enum RunEvent<'a> {
-    ApprovalWithdrawn,
-    Approval,
-    Step(RunStep<'a>),
-    Preview(Option<arany::DisplayUpdate>),
-    Events(Result<(), String>),
-    Waiting(Option<uuid::Uuid>),
+enum RunEvent {
+    Server(Result<embedded::Event, String>),
     Input(Result<TerminalInput, TerminalError>),
 }
 
-struct RunDriver<'a, 'f, F> {
-    future: std::pin::Pin<&'f mut F>,
-    handle: Option<arany::RunHandle<'a>>,
-    inbox: arany::ApprovalInbox,
-    previews: arany::RunPreview,
-    waiting_hints: RunHints,
-}
-
-impl<'a, F> RunDriver<'a, '_, F>
-where
-    F: std::future::Future<Output = Result<arany::RunHandle<'a>, RunAttemptError>>,
-{
-    async fn poll(&mut self, progress: &mut RunProgress<'_>, ui: &mut RunUi<'_>) -> RunEvent<'a> {
-        let (result, mut events) = self
-            .handle
-            .as_mut()
-            .map(|handle| (&mut handle.result, &mut handle.events))
-            .unzip();
-        let approval_pending = progress.approval_ui.pending.is_some();
-        let stop = progress.stop;
-        tokio::select! {
-            () = withdraw_abandoned_approval(&mut progress.approval_ui.pending, &mut progress.approval_ui.answer) => RunEvent::ApprovalWithdrawn,
-            approval = self.inbox.next(), if !approval_pending => { progress.approval_ui.pending = approval; RunEvent::Approval },
-            step = async {
-                match result {
-                    Some(result) => RunStep::Completed(finish_attempt(result.await, !matches!(stop, ActiveStop::Running)).map(Box::new)),
-                    None => match self.future.as_mut().await {
-                        Ok(handle) => RunStep::Admitted(handle),
-                        Err(error) => RunStep::Completed(Err(error)),
-                    },
-                }
-            } => RunEvent::Step(step),
-            preview = self.previews.changed() => RunEvent::Preview(preview),
-            event = async {
-                match events.as_deref_mut() {
-                    Some(events) => events.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                let ready = async || match events.as_deref_mut() {
-                    Some(events) => tokio::time::timeout(Duration::ZERO, events.next()).await.ok(),
-                    None => None,
-                };
-                RunEvent::Events(apply_burst(&progress.admission.state_dir, ui.view, event, ready).await)
-            },
-            waiting = self.waiting_hints.waiting_changed() => RunEvent::Waiting(waiting),
-            input = async {
-                if approval_pending { ui.terminal.next_input().await } else { ui.terminal.next_chat_input().await }
-            }, if !progress.exit_after_run => RunEvent::Input(input),
-        }
-    }
-
-    async fn finish(self) -> Result<RunOutcome, RunAttemptError> {
-        let handle = match self.handle {
-            Some(handle) => handle,
-            None => self.future.await?,
-        };
-        finish_attempt(handle.await, true)
-    }
-}
-
-pub(super) async fn drive_run(
+pub(super) async fn run_attached(
     prepared: PreparedSubmission<'_>,
     ui: &mut RunUi<'_>,
 ) -> Result<RunSubmission, String> {
@@ -840,92 +610,80 @@ pub(super) async fn drive_run(
             )
             .map_err(|error| error.to_string())?;
     }
-    let approvals = progress.approvals.clone();
-    let admission = progress.admission;
-    let future = submit_selected(SelectedSubmission {
-        engine,
-        state_dir: &admission.state_dir,
-        selection: Selection {
-            workspace: &admission.workspace,
-            profile: &profile,
-            model: &model,
-            effort: ui.view.defaults.effort,
-            account_id: ui.view.defaults.account_id,
-        },
+    let admission = embedded::Admission {
+        state: progress.admission.state_dir.clone(),
+        profile,
+        model,
+        effort: ui.view.defaults.effort,
+        account_id: ui.view.defaults.account_id,
         request,
-        cancellation: progress.cancellation.clone(),
-        hints: progress.hints.clone(),
-        tools: ToolAccess {
-            configured: admission.tools,
-            permissions: admission.workspace_permissions.as_ref(),
-            approvals: &approvals,
-        },
-        steering: progress.steering.clone(),
+        configured_tools: progress.admission.tools,
+        permissions: progress.admission.workspace_permissions.clone(),
         roster,
-    });
-    tokio::pin!(future);
-    let mut driver = RunDriver {
-        future: future.as_mut(),
-        handle: None,
-        inbox,
-        previews: progress.hints.previews(),
-        waiting_hints: progress.hints.clone(),
     };
-    match drive_loop(&mut progress, ui, &mut driver).await {
-        Completion::Finished(result) => result,
-        Completion::Shutdown(reason) => finish_shutdown(&progress, ui, driver, reason).await,
+    let admitted_engine = engine.clone();
+    let mut connection = embedded::Connection::start(
+        engine.clone(),
+        admission.state.clone(),
+        progress.controls.clone(),
+        inbox,
+        move |controls, inbox| admission.admit(admitted_engine, controls, inbox),
+    );
+    let completion = run_client(&mut progress, ui, &mut connection).await;
+    match completion {
+        Completion::Finished(result) => match connection.close().await {
+            Ok(()) => result,
+            Err(mut reason) => {
+                if matches!(result, Ok(RunSubmission::Completed(..))) {
+                    reason.push_str("; Run committed; check Session history");
+                }
+                if ui.terminal.restore().is_err() {
+                    reason.push_str("; terminal restoration failed");
+                }
+                Ok(RunSubmission::Shutdown(reason))
+            }
+        },
+        Completion::Shutdown(reason) => finish_shutdown(&progress, ui, connection, reason).await,
     }
 }
 
-async fn drive_loop<'a, F>(
+async fn run_client(
     progress: &mut RunProgress<'_>,
     ui: &mut RunUi<'_>,
-    driver: &mut RunDriver<'a, '_, F>,
-) -> Completion
-where
-    F: std::future::Future<Output = Result<arany::RunHandle<'a>, RunAttemptError>>,
-{
+    connection: &mut embedded::Connection,
+) -> Completion {
     loop {
         let page = match progress.prepare_iteration(ui).await {
             Ok(Iteration::Armed(page)) => page,
             Ok(Iteration::Redraw) => continue,
             Err(reason) => return Completion::Shutdown(reason),
         };
-        let result = match driver.poll(progress, ui).await {
-            RunEvent::ApprovalWithdrawn => {
-                if let Err(error) = ui
-                    .terminal
-                    .restore_draft_input(ui.composer.input_capacity())
-                {
-                    return Completion::Finished(Err(error.to_string()));
-                }
-                progress
-                    .draw(ui, None)
-                    .map_err(|_| "terminal rendering failed".to_owned())
-            }
-            RunEvent::Approval => {
-                progress.receive_approval(ui);
-                Ok(())
-            }
-            RunEvent::Step(RunStep::Admitted(handle)) => {
-                driver.handle = Some(handle);
-                continue;
-            }
-            RunEvent::Step(RunStep::Completed(result)) => {
+        let event = tokio::select! {
+            event = connection.next() => RunEvent::Server(event),
+            input = async {
+                if progress.approval_ui.pending.is_some() { ui.terminal.next_input().await }
+                else { ui.terminal.next_chat_input().await }
+            }, if !progress.exit_after_run => RunEvent::Input(input),
+        };
+        let result = match event {
+            RunEvent::Server(Ok(embedded::Event::Finished(result))) => {
+                let result = (*result)
+                    .and_then(|result| {
+                        finish_attempt(Ok(result), progress.stop != ActiveStop::Running)
+                    })
+                    .map(Box::new);
                 return progress.settle(ui, result).await;
             }
-            RunEvent::Preview(preview) => {
-                ui.terminal.set_preview(preview);
-                progress.draw_hint(ui)
+            RunEvent::Server(Ok(embedded::Event::Committed(event))) => {
+                match connection.reduce(ui.view, event).await {
+                    Ok(()) => progress.on_events(ui).await,
+                    Err(error) => Err(error),
+                }
             }
-            RunEvent::Events(result) => match result {
-                Ok(()) => progress.on_events(ui).await,
-                Err(reason) => Err(reason),
-            },
-            RunEvent::Waiting(waiting) => {
-                ui.terminal.set_waiting_tool(waiting);
-                progress.draw_hint(ui)
+            RunEvent::Server(Ok(embedded::Event::Message(message))) => {
+                progress.on_server_message(ui, message).await
             }
+            RunEvent::Server(Err(error)) => Err(error),
             RunEvent::Input(input) => match progress.on_input(ui, input, page).await {
                 Ok(()) => Ok(()),
                 Err(InputFailure::Shutdown(reason)) => Err(reason),
@@ -938,18 +696,73 @@ where
     }
 }
 
-async fn finish_shutdown<'a, F>(
+impl RunProgress<'_> {
+    async fn on_server_message(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        message: Message,
+    ) -> Result<(), String> {
+        match message {
+            Message::Request(request) => {
+                self.approval_ui.pending = Some(embedded::Approval::from_request(request)?);
+                self.receive_approval(ui);
+            }
+            Message::Notification(note) if note.method == "$/cancel_request" => {
+                if self.approval_ui.pending.as_ref().is_some_and(|approval| {
+                    note.params
+                        .as_ref()
+                        .and_then(|params| params.get("requestId"))
+                        == Some(&serde_json::json!(approval.request_id))
+                }) {
+                    self.approval_ui.pending.take();
+                    self.approval_ui.answer.clear();
+                    ui.terminal
+                        .restore_draft_input(ui.composer.input_capacity())
+                        .map_err(|error| error.to_string())?;
+                    self.draw(ui, None)
+                        .map_err(|_| "terminal rendering failed".to_owned())?;
+                }
+            }
+            Message::Notification(note) if note.method == "turn/display" => {
+                let display: TurnDisplayNotification =
+                    serde_json::from_value(note.params.unwrap_or_default())
+                        .map_err(|_| "invalid Server display".to_owned())?;
+                match display.update {
+                    arany_cli::protocol::methods::DisplayUpdate::Waiting { intent_id } => {
+                        ui.terminal.set_waiting_tool(intent_id)
+                    }
+                    arany_cli::protocol::methods::DisplayUpdate::Preview { preview } => ui
+                        .terminal
+                        .set_preview(preview.map(|preview| arany::DisplayUpdate {
+                            run_id: display.turn_id,
+                            agent_run_id: preview.agent_run_id,
+                            call_index: preview.call_index,
+                            text: std::sync::Arc::new(arany::PreviewText {
+                                answer: preview.answer,
+                                commentary: preview.commentary,
+                                commentary_limited: preview.commentary_limited,
+                                tentative: preview.tentative,
+                            }),
+                        })),
+                }
+                self.draw_hint(ui)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+async fn finish_shutdown(
     progress: &RunProgress<'_>,
     ui: &mut RunUi<'_>,
-    driver: RunDriver<'a, '_, F>,
+    mut connection: embedded::Connection,
     shutdown_reason: String,
-) -> Result<RunSubmission, String>
-where
-    F: std::future::Future<Output = Result<arany::RunHandle<'a>, RunAttemptError>>,
-{
+) -> Result<RunSubmission, String> {
     ui.terminal
-        .settle_child_notes(ui.view, &progress.steering, true);
-    progress.cancellation.cancel();
+        .settle_child_notes(ui.view, progress.controls.child_withdrawal(), true)
+        .await;
+    let _ = progress.controls.cancel().await;
     let linear = ui.terminal.is_linear();
     let mode = (!linear).then_some(ui.terminal.mode());
     let preview_printed = if linear {
@@ -962,7 +775,22 @@ where
     };
     let restored = ui.terminal.restore();
     let mut reason = shutdown_reason;
-    match tokio::time::timeout(SHUTDOWN_GRACE, driver.finish()).await {
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+    let finish = async {
+        let result = loop {
+            if let embedded::Event::Finished(result) = connection
+                .next()
+                .await
+                .map_err(|_| embedded::failed("Run event stream closed"))?
+            {
+                break *result;
+            }
+        };
+        result.and_then(|result| finish_attempt(Ok(result), true))
+    };
+    let finished = tokio::time::timeout_at(deadline, finish).await;
+    let cleanup = tokio::time::timeout_at(deadline, connection.close()).await;
+    match finished {
         Ok(Ok(outcome)) if restored.is_ok() => {
             let emitted = match load_confirmed_outcome(&progress.admission.state_dir, &outcome)
                 .await
@@ -976,13 +804,15 @@ where
         }
         Ok(Ok(_)) => reason.push_str("; Run committed; check Session history"),
         Ok(Err(RunAttemptError::InterruptedBeforeRun)) => {
-            reason
-                .push_str("; no Run started for this submission; account work may still complete");
+            reason.push_str("; no Run started for this submission; account work may still complete")
         }
         Ok(Err(RunAttemptError::Stopped { .. } | RunAttemptError::Failed(_))) => {
             reason.push_str("; Run outcome unavailable; check Session history")
         }
         Err(_) => reason.push_str("; Run may be interrupted; check Session history"),
+    }
+    if !matches!(cleanup, Ok(Ok(()))) {
+        reason.push_str("; Server shutdown failed");
     }
     if restored.is_err() {
         reason.push_str("; terminal restoration failed");
@@ -1027,71 +857,10 @@ impl RunUi<'_> {
     }
 }
 
-const EVENT_DRAIN_LIMIT: usize = 64;
-
-// Bounded so input is polled again before the next burst.
-async fn apply_burst(
-    state_dir: &std::path::Path,
-    view: &mut SessionView,
-    first: Option<arany::Tapped>,
-    mut ready: impl AsyncFnMut() -> Option<Option<arany::Tapped>>,
-) -> Result<(), String> {
-    let mut event = first;
-    for drained in 1..=EVENT_DRAIN_LIMIT {
-        let Some(tapped) = event else {
-            return Err("Run event stream closed".to_owned());
-        };
-        if apply_tapped(state_dir, view, tapped).await.is_err() {
-            return Err("Run history unavailable; check Session history".to_owned());
-        }
-        if drained == EVENT_DRAIN_LIMIT {
-            break;
-        }
-        match ready().await {
-            Some(next) => event = next,
-            None => break,
-        }
-    }
-    Ok(())
-}
-
-async fn apply_tapped(
-    state_dir: &std::path::Path,
-    view: &mut SessionView,
-    tapped: arany::Tapped,
-) -> Result<(), String> {
-    match tapped {
-        arany::Tapped::Committed(event) => {
-            if event.session_id != view.id || event.sequence <= view.last_sequence {
-                return Ok(());
-            }
-            if event.sequence != view.last_sequence + 1 {
-                return catch_up(state_dir, view).await;
-            }
-            match arany::reduce_into(view, &event) {
-                Ok(()) => Ok(()),
-                Err(_) => catch_up(state_dir, view).await,
-            }
-        }
-        arany::Tapped::Resync { .. } => catch_up(state_dir, view).await,
-    }
-}
-
-async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result<(), String> {
-    let state = arany::StateRoot::open_existing(state_dir).map_err(|error| error.to_string())?;
-    let store = arany::Store::open_read_only(state).map_err(|error| error.to_string())?;
-    let loaded = store
-        .load_open_view(view.id)
-        .await
-        .map_err(|error| error.to_string());
-    store.close().await.map_err(|error| error.to_string())?;
-    *view = loaded?.ok_or_else(|| "Session history unavailable".to_owned())?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+    use arany::AdmittedProviders;
     use arany::StateRoot;
     use arany::test_support::{
         engine::open,
@@ -1130,6 +899,7 @@ mod budget_tests {
                     .replace(&serde_json::to_vec(&preferences).expect("settings"))
                     .expect("finite settings");
             }
+            let engine = Arc::new(engine);
             let id = engine
                 .create_session(workspace.clone(), None)
                 .await
@@ -1148,23 +918,19 @@ mod budget_tests {
             )
             .expect("attached request");
             let provider = Arc::new(long_turn_provider());
-            let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
-            let result = submit_with_providers(
+
+            let result = embedded::run_with_providers(
                 &engine,
                 AdmittedProviders::single(provider.clone()),
                 input,
-                RunCancellation::new(),
-                RunHints::new(),
-                ToolAccess {
-                    configured: true,
-                    permissions: None,
-                    approvals: &approvals,
-                },
-                RunSteering::new(),
+                &state,
+                true,
+                None,
+                arany::ApprovalMode::AutoEdits,
             )
-            .expect("attached admission")
-            .await;
-            let outcome = finish_attempt(result, false).expect("attached completion");
+            .await
+            .expect("attached admission");
+            let outcome = finish_attempt(Ok(result), false).expect("attached completion");
             assert_eq!(
                 outcome.run.assistant_message.as_deref(),
                 if finite {
@@ -1181,7 +947,12 @@ mod budget_tests {
                     arany::RunStatus::Finished
                 }
             );
-            engine.close().await.expect("shutdown");
+            Arc::try_unwrap(engine)
+                .ok()
+                .expect("Engine released")
+                .close()
+                .await
+                .expect("shutdown");
             let (events, view) = replayed(&state, id).await;
             if finite {
                 assert_eq!(
@@ -1243,9 +1014,9 @@ mod tests {
     use arany::RecordKind;
     #[cfg(target_os = "macos")]
     use arany::{
-        AgentPhase, Answer, ApprovalMode, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
-        OutputTokenBound, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
-        ProviderRequest, ProviderResponse, RunStatus,
+        AdmittedProviders, AgentPhase, Answer, ApprovalMode, ChatGptAdmission, ChatGptProvenance,
+        CollaborationPolicy, OutputTokenBound, Provenance, Provider, ProviderError,
+        ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunStatus,
     };
     use arany::{Effort, SessionView, StateRoot, Store};
     #[cfg(target_os = "macos")]
@@ -2398,7 +2169,7 @@ mod tests {
             Ok(super::super::permissions::PermissionChoice::Selected(access)) => Some(access),
             _ => None,
         };
-        let (approvals, _inbox) = arany::ToolApprovals::new(ApprovalMode::AutoEdits);
+
         for profile in ["chatgpt", "openai", "anthropic"] {
             let state = root.join(profile);
             let account_id = Uuid::now_v7();
@@ -2411,9 +2182,10 @@ mod tests {
                 },
             )
             .unwrap();
+            let engine = Arc::new(engine);
             let mut session = None;
             for _ in 0..2 {
-                let outcome = submit_with_providers(
+                let outcome = embedded::run_with_providers(
                     &engine,
                     AdmittedProviders::single(Arc::new(Greeting::new(
                         profile,
@@ -2432,16 +2204,11 @@ mod tests {
                         policy: CollaborationPolicy::Single,
                         goal: arany::GoalRequest::default(),
                     },
-                    RunCancellation::new(),
-                    RunHints::new(),
-                    ToolAccess {
-                        configured: false,
-                        permissions,
-                        approvals: &approvals,
-                    },
-                    RunSteering::new(),
+                    &state,
+                    false,
+                    permissions,
+                    arany::ApprovalMode::AutoEdits,
                 )
-                .expect("ordinary greeting retains the admitted native file capability")
                 .await
                 .map(|result| result.run)
                 .expect("ordinary greeting Run finishes");
@@ -2489,7 +2256,7 @@ mod tests {
             std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
                 "commands":[{"name":"sh","executable":"/bin/sh","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap()).unwrap();
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
-            let error = match submit_with_providers(
+            let error = embedded::run_with_providers(
                 &engine,
                 AdmittedProviders::single(Arc::new(Greeting::new(
                     profile,
@@ -2508,19 +2275,13 @@ mod tests {
                     policy: CollaborationPolicy::Single,
                     goal: arany::GoalRequest::default(),
                 },
-                RunCancellation::new(),
-                RunHints::new(),
-                ToolAccess {
-                    configured: true,
-                    permissions: None,
-                    approvals: &approvals,
-                },
-                RunSteering::new(),
-            ) {
-                Ok(handle) => finish_attempt(handle.await, false)
-                    .expect_err("explicit Tool admission must reject before inference"),
-                Err(error) => error,
-            };
+                &state,
+                true,
+                None,
+                arany::ApprovalMode::AutoEdits,
+            )
+            .await
+            .expect_err("explicit Tool admission must reject before inference");
             #[cfg(debug_assertions)]
             assert!(
                 matches!(
@@ -2553,7 +2314,12 @@ mod tests {
                 "explicit rejection preserves the committed prefix"
             );
             store.close().await.unwrap();
-            engine.close().await.unwrap();
+            Arc::try_unwrap(engine)
+                .ok()
+                .expect("Engine released")
+                .close()
+                .await
+                .unwrap();
             if profile == "openai" {
                 let mut recovery_view = view.clone();
                 let mut recovery_composer = Composer::default();
@@ -2659,149 +2425,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod burst_tests {
-    use super::*;
-    use arany::test_support::{
-        engine::{open, run_to_end},
-        scenario::{ScriptedProvider, request},
-    };
-    use arany::{
-        Answer, ChildAssignment, CollaborationPolicy, Delegate, EngineConfig, ProviderOutcome,
-        StateRoot, Store, Tapped,
-    };
-    use std::{collections::VecDeque, sync::Arc};
-
-    // A team Run with two children, then single Runs, so the journal outgrows one burst.
-    async fn committed_team() -> (
-        tempfile::TempDir,
-        std::path::PathBuf,
-        Vec<arany::EventEnvelope>,
-    ) {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).unwrap();
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        let state_dir = root.path().join("state");
-        let engine = open(
-            StateRoot::admit(&state_dir).unwrap(),
-            EngineConfig::default(),
-        )
-        .unwrap();
-        let answer = |text: &str| ProviderOutcome::Answer(Answer { text: text.into() });
-        let child = |objective: &str| ChildAssignment {
-            editor: None,
-            objective: objective.into(),
-            profile: None,
-        };
-        let mut responses = vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![child("first task"), child("second task")],
-            }),
-            answer("first result"),
-            answer("second result"),
-            answer("team answer"),
-        ];
-        responses.extend((0..8).map(|_| answer("later answer")));
-        let mut provider = ScriptedProvider::new(responses);
-        // One call at a time, so each child takes its scripted answer in spawn order.
-        provider.identity.limits.concurrency = 1;
-        let provider = Arc::new(provider);
-        let mut team = request(&workspace, "team task");
-        team.policy = CollaborationPolicy::Team {
-            max_active_children: 2,
-        };
-        let session = run_to_end(&engine, &provider, team)
-            .await
-            .unwrap()
-            .session_id;
-        for _ in 0..8 {
-            let mut later = request(&workspace, "later task");
-            later.session_id = Some(session);
-            later.title = None;
-            run_to_end(&engine, &provider, later).await.unwrap();
-        }
-        engine.close().await.unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&state_dir).unwrap()).unwrap();
-        let events = store.load_session(session).await.unwrap();
-        store.close().await.unwrap();
-        (root, state_dir, events)
-    }
-
-    fn tapped(envelope: &arany::EventEnvelope) -> Tapped {
-        Tapped::Committed(Arc::new(envelope.clone()))
-    }
-
-    fn replay(events: &[arany::EventEnvelope]) -> SessionView {
-        SessionView::replay(events[0].session_id, events)
-            .unwrap()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn committed_events_apply_in_bounded_in_order_bursts_and_gaps_reload_the_view() {
-        let (_root, state_dir, events) = committed_team().await;
-        let full = replay(&events);
-
-        // Commit order, one Event at a time, reaches the strictly replayed view.
-        let mut view = replay(&events[..1]);
-        for envelope in &events[1..] {
-            apply_tapped(&state_dir, &mut view, tapped(envelope))
-                .await
-                .unwrap();
-            assert_eq!(view.last_sequence, envelope.sequence);
-        }
-        assert_eq!(view.runs, full.runs);
-
-        // One burst applies at most EVENT_DRAIN_LIMIT ready Events and leaves the rest queued.
-        let mut queue = events[1..].iter().map(tapped).collect::<VecDeque<_>>();
-        assert!(queue.len() > EVENT_DRAIN_LIMIT);
-        let mut view = replay(&events[..1]);
-        let first = queue.pop_front();
-        apply_burst(&state_dir, &mut view, first, async || {
-            queue.pop_front().map(Some)
-        })
-        .await
-        .unwrap();
-        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT].sequence);
-        assert_eq!(queue.len(), events.len() - 1 - EVENT_DRAIN_LIMIT);
-        // Nothing else ready ends the burst after its first Event.
-        let first = queue.pop_front();
-        apply_burst(&state_dir, &mut view, first, async || None)
-            .await
-            .unwrap();
-        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT + 1].sequence);
-
-        // A sequence gap or a resync reloads the whole validated committed view.
-        let gap = tapped(&events[EVENT_DRAIN_LIMIT + 3]);
-        for missed in [Some(gap), Some(Tapped::Resync { missed: 3 })] {
-            let mut view = replay(&events[..=EVENT_DRAIN_LIMIT]);
-            apply_burst(&state_dir, &mut view, missed, async || None)
-                .await
-                .unwrap();
-            assert_eq!(view.last_sequence, full.last_sequence);
-            assert_eq!(view.runs, full.runs);
-        }
-        // A closed stream or unreadable history stops the Run view instead of inventing progress.
-        let mut view = replay(&events[..1]);
-        for (state, event, expected) in [
-            (state_dir.as_path(), None, "Run event stream closed"),
-            (
-                std::path::Path::new("/nonexistent-arany-state"),
-                Some(Tapped::Resync { missed: 1 }),
-                "Run history unavailable; check Session history",
-            ),
-        ] {
-            assert_eq!(
-                apply_burst(state, &mut view, event, async || None).await,
-                Err(expected.to_owned())
-            );
-        }
-        assert_eq!(view.last_sequence, events[0].sequence);
-    }
-}
-
-#[cfg(test)]
 mod escape_tests {
     use super::*;
 
@@ -2858,77 +2481,10 @@ mod escape_tests {
 
 #[cfg(test)]
 mod approval_reply_tests {
-    use super::approval::{linear_approval_choice, withdraw_abandoned_approval};
+    use super::approval::linear_approval_choice;
     use crate::presentation::ToolApprovalChoice::{
         AutoEdits, ExactCommand, GitPrefix, HostPrefix, No, Yes,
     };
-    use crate::terminal::{Composer, TerminalInput};
-    use std::time::Duration;
-
-    #[tokio::test(start_paused = true)]
-    async fn child_timeout_withdraws_the_dialog_and_discards_its_partial_answer() {
-        tokio::time::timeout(Duration::from_secs(60), async {
-            let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-            let intent = arany::EffectIntent {
-                host: None,
-                host_command: None,
-                target: arany::worker::EffectTarget::Workspace,
-                id: uuid::Uuid::now_v7(),
-                run_id: arany::RunId::new(),
-                agent_run_id: arany::AgentRunId::new(),
-                policy_digest: [1; 32],
-                enforcement_digest: [2; 32],
-                workspace_device: 1,
-                workspace_inode: 2,
-                call: arany::ToolCall::Mkdir {
-                    path: "directory".into(),
-                },
-                limits: arany::ToolLimits::default(),
-                use_count: 1,
-            };
-            let child_approvals = approvals.clone();
-            let child_intent = intent.clone();
-            let child = tokio::spawn(async move {
-                tokio::time::timeout(
-                    Duration::from_secs(30),
-                    arany::test_support::approval::ask(&child_approvals, &child_intent),
-                )
-                .await
-            });
-            let mut pending = Some(inbox.next().await.expect("child approval"));
-            let mut answer = Composer::default();
-            answer.apply(TerminalInput::Character('y'));
-            assert!(
-                tokio::time::timeout(
-                    Duration::ZERO,
-                    withdraw_abandoned_approval(&mut pending, &mut answer),
-                )
-                .await
-                .is_err(),
-                "a live approval stays answerable"
-            );
-            assert!(pending.is_some());
-            assert_eq!(answer.text(), "y");
-            tokio::time::advance(Duration::from_secs(31)).await;
-            assert!(child.await.expect("child waiter").is_err());
-            withdraw_abandoned_approval(&mut pending, &mut answer).await;
-            assert!(pending.is_none(), "the dialog releases approval input");
-            assert_eq!(
-                answer.text(),
-                "",
-                "partial answers cannot reach a later approval"
-            );
-            let (approved, ()) = tokio::join!(
-                arany::test_support::approval::ask(&approvals, &intent),
-                async {
-                    inbox.next().await.expect("next approval").decide(true);
-                },
-            );
-            assert!(approved, "the parent can continue with a fresh approval");
-        })
-        .await
-        .expect("approval withdrawal deadline");
-    }
 
     #[test]
     fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
@@ -2972,36 +2528,9 @@ mod approval_reply_tests {
 #[cfg(test)]
 mod driver_tests {
     use super::super::active::session_with_goal;
-    use super::approval::interrupt_approval_input;
     use super::*;
     use crate::terminal::ComposerEdit;
     use arany::SteeringRefused;
-
-    #[test]
-    fn approval_end_of_input_and_escape_cancel_without_a_decline() {
-        for input in [TerminalInput::EndOfInput, TerminalInput::Escape] {
-            let cancellation = arany::RunCancellation::new();
-            let mut stop = ActiveStop::Running;
-            assert!(interrupt_approval_input(&input, &cancellation, &mut stop));
-            assert!(stop == ActiveStop::Cancelling);
-            assert!(
-                !cancellation.cancel(),
-                "interruption already cancelled the Run"
-            );
-        }
-        let cancellation = arany::RunCancellation::new();
-        let mut stop = ActiveStop::Running;
-        assert!(!interrupt_approval_input(
-            &TerminalInput::Submit,
-            &cancellation,
-            &mut stop
-        ));
-        assert!(stop == ActiveStop::Running);
-        assert!(
-            cancellation.cancel(),
-            "ordinary approval input did not cancel"
-        );
-    }
 
     #[test]
     fn end_of_input_waits_for_only_the_current_run_to_settle() {
@@ -3111,28 +2640,6 @@ mod driver_tests {
                 "{other}"
             );
         }
-    }
-
-    #[test]
-    fn exit_abandons_a_held_linear_draft_and_waiting_note() {
-        let mut composer = Composer::default();
-        for character in "refused draft".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        let mut held = hold_draft(&mut composer);
-        assert!(held.is_some(), "a refused linear draft is held");
-        let steering = RunSteering::default();
-        steering
-            .offer_note("waiting note".into())
-            .expect("note waits");
-        for character in "/exit".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        abandon_drafts_for_exit(&mut composer, &mut held, &steering);
-        assert!(composer.is_empty());
-        // Run end hands back nothing, so the deferred Ctrl+D exits instead of retaining a draft.
-        assert!(steering.withdraw_note().is_none());
-        assert!(held.is_none());
     }
 
     #[test]

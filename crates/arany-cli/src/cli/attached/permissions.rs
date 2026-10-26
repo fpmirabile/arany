@@ -15,10 +15,10 @@ pub(super) enum PermissionChoice {
     Exit,
 }
 
-pub(super) const UNAVAILABLE_NOTICE: &str =
+pub(in crate::cli) const UNAVAILABLE_NOTICE: &str =
     "Native Tool protection is unavailable on this OS; chat is read only.";
 
-pub(super) fn supports_tools(profile: Option<&str>) -> bool {
+pub(in crate::cli) fn supports_tools(profile: Option<&str>) -> bool {
     native_protection_supported()
         && profile
             .and_then(ProviderKind::parse)
