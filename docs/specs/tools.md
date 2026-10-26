@@ -241,7 +241,7 @@ An export holds at most 10,000 records and emits at most 8 MiB, including its he
 
 Peer mechanisms: [OpenHands](https://github.com/OpenHands/software-agent-sdk/blob/main/openhands-sdk/openhands/sdk/conversation/stuck_detector.py) supplies ID-free action/observation equality, four identical steps, failure streaks and alternating cycles; [Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/services/loopDetectionService.ts) supplies hashed calls and short cycles; [Goose](https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/agent.rs) places repetition checks in the pre-dispatch inspector seam; [Claude Code hooks](https://code.claude.com/docs/en/hooks) supply the restrict-only adapter shape. Arany diverges by journaling shadow candidates before enforcement, using bounded per-actor windows and excluding LLM judges. Engine ownership follows the recorded Engine-side gate shape of Claude Code hooks and Codex approval policy; replay accepts the recorded decision. Enforcement, durable pause/revoke and human-only overrides require later calibrated owner approval; this adapter applies none of them.
 
-Evidence owners: [pure signal corpus](../../crates/arany/src/supervisor/tests.rs), [reducer corpus](../../crates/arany/src/session/reducer/tests.rs), [Event corpus](../../crates/arany/src/session/events/tests.rs), [Engine Goal corpus](../../crates/arany/tests/engine_run/goals.rs), [corpus show journey](../../crates/arany-cli/tests/session_run/supervisor.rs), [export-bound corpus](../../crates/arany/src/supervisor/corpus.rs) and shared `assert_action_bounds`. They own signal thresholds/cycles/oscillation/saturation, accepted recorded/forged verdicts, malformed/duplicate/misplaced rejection, capped/interrupted prefixes, commit-before-continuation, closed decoding and unchanged model observations and accepted output with an all-off test pin. The [Execution scenarios](./execution.md#acceptance-scenarios-and-evidence-owners) assign those requirements. The evaluator is platform-independent; native journeys establish platform support separately.
+Evidence owners: [pure signal corpus](../../crates/arany/src/supervisor/tests.rs), [reducer corpus](../../crates/arany/src/session/reducer/tests.rs), [Event corpus](../../crates/arany/src/session/events/tests.rs), [Engine Goal corpus](../../crates/arany/tests/engine_run/goals.rs), [Goal recovery corpus](../../crates/arany/tests/engine_run/recovery.rs), [corpus show journey](../../crates/arany-cli/tests/session_run/supervisor.rs), [export-bound corpus](../../crates/arany/src/supervisor/corpus.rs) and shared `assert_action_bounds`. They own signal thresholds/cycles/oscillation/saturation, accepted recorded/forged verdicts, malformed/duplicate/misplaced rejection, capped/interrupted prefixes, commit-before-continuation, closed decoding and unchanged model observations and accepted output with an all-off test pin. The [Execution scenarios](./execution.md#acceptance-scenarios-and-evidence-owners) assign those requirements. The evaluator is platform-independent; native journeys establish platform support separately.
 
 ### Limits and acceptance scenarios
 
@@ -475,8 +475,12 @@ Missing roots remain absent without creation. Report paths only for admitted
 owned locations; suppress individual private-file and directory names. The main
 Workspace is excluded by opened identity, including when inside a storage root;
 a root inside the Workspace is unavailable. Nested roots and regular-file
-identities are counted once. Private build-cache totals are separate from their
-parent's other private records and are not added twice.
+identities are counted once. Private build-cache and Output spill totals are
+separate from their parent's other private records and are not added twice.
+Each admitted `spill` subtree has an `Output spill` row, including its directories,
+output files and writer-lock metadata. Missing spill directories remain absent;
+inspection never creates them. It neither reads payloads nor checks journal
+references, takes writer locks, changes retention or grants Tool Read authority.
 
 Aggregate regular-file and directory counts, logical metadata lengths and
 allocated bytes (`blocks × 512`, checked for overflow). Secret-containing regular
@@ -534,6 +538,7 @@ history, credentials or live/uncertain Guard storage.
 | Scenario | Required observation | Evidence owner |
 |---|---|---|
 | Known, nested or duplicate storage; Workspace overlap | Disjoint category/subtotal accounting and Workspace exclusion; allocation and logical sizes remain separate | [Storage/private-fs corpus](../../crates/arany/src/store/state/inventory.rs) |
+| Output spill, including duplicate roots and active writers | Separate metadata-only rows exclude spill bytes from general records; missing directories stay absent; no payload/name disclosure, lock acquisition or mutation | [Inventory corpus](../../crates/arany/src/store/state/inventory.rs), [fresh-process journey](../../crates/arany-cli/tests/session_run/storage.rs) |
 | Missing state or damaged database | Absence or independently measurable metadata; no creation or repair | [Fresh-process journey](../../crates/arany-cli/tests/session_run/storage.rs) |
 | Private secrets, hostile names, hard links, symlinks and special objects | Metadata aggregation only, no individual names/content, no linked target counted, unsafe objects make report partial | [Storage corpus](../../crates/arany/src/store/state/inventory.rs), [process canaries](../../crates/arany-cli/tests/session_run/storage.rs) |
 | Pending cache and exhausted bounds/cancellation | Retained pending bytes, partial known subtotal or cancellation without complete output; no recovery/mutation | [Inventory owner](../../crates/arany/src/store/state/inventory.rs) |

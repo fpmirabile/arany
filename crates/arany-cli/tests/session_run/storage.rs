@@ -57,6 +57,7 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
     assert!(String::from_utf8_lossy(&absent.stdout).contains("Selected StateRoot: absent"));
     assert!(!state.exists());
     assert!(!temp.path().join("accounts").exists());
+    assert!(!String::from_utf8_lossy(&absent.stdout).contains("Output spill:"));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -73,6 +74,41 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
         &state.join("private-secret-name"),
         b"PRIVATE_STORAGE_CANARY",
     );
+    let without_spill = run();
+    assert!(without_spill.status.success());
+    assert!(!String::from_utf8_lossy(&without_spill.stdout).contains("Output spill:"));
+    assert!(!state.join("spill").exists());
+    let spill = state.join("spill");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&spill)
+        .expect("spill directory");
+    let output_run = spill.join("private-run-name");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&output_run)
+        .expect("spill Run directory");
+    let output_file = output_run.join("private-output-name.txt");
+    private_file(&output_file, b"PRIVATE_SPILL_CANARY");
+    private_file(&output_run.join("writer.lock"), b"");
+    let spill_metadata = [
+        &spill,
+        &output_run,
+        &output_file,
+        &output_run.join("writer.lock"),
+    ]
+    .map(|path| std::fs::metadata(path).expect("spill metadata"));
+    let logical = spill_metadata
+        .iter()
+        .map(std::fs::Metadata::len)
+        .sum::<u64>();
+    let allocated = spill_metadata
+        .iter()
+        .map(|metadata| {
+            use std::os::unix::fs::MetadataExt;
+            metadata.blocks() * 512
+        })
+        .sum::<u64>();
     let known = run();
     assert!(known.status.success());
     assert_eq!(known.stderr, b"");
@@ -81,6 +117,21 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
     assert!(text.contains("Known owned subtotal:"));
     assert!(!text.contains("private-secret-name"));
     assert!(!text.contains("PRIVATE_STORAGE_CANARY"));
+    assert_eq!(text.matches("Output spill: complete\n").count(), 1);
+    assert!(text.contains(&format!("Output spill: complete\n  allocated {allocated} B; logical {logical} B; 2 files; 2 directories\n")));
+    assert!(!text.contains("private-run-name"));
+    assert!(!text.contains("private-output-name.txt"));
+    assert!(!text.contains("PRIVATE_SPILL_CANARY"));
+    assert_eq!(
+        std::fs::read(&output_file).expect("retained spill"),
+        b"PRIVATE_SPILL_CANARY"
+    );
+    assert_eq!(
+        std::fs::read_dir(&output_run)
+            .expect("retained output and lock")
+            .count(),
+        2
+    );
     assert_eq!(
         std::fs::read(state.join("events.sqlite3")).expect("unchanged history"),
         history
@@ -110,9 +161,12 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
         std::fs::read(state.join("events.sqlite3")).expect("no repair"),
         b"damaged history stays inspectable"
     );
-    private_file(&state.join("unsafe"), b"UNSAFE_STORAGE_CANARY");
-    std::fs::set_permissions(state.join("unsafe"), std::fs::Permissions::from_mode(0o644))
-        .expect("unsafe record");
+    private_file(&output_run.join("unsafe"), b"UNSAFE_STORAGE_CANARY");
+    std::fs::set_permissions(
+        output_run.join("unsafe"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("unsafe record");
     let partial = run();
     assert!(!partial.status.success());
     assert_eq!(
@@ -122,8 +176,9 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
     let text = String::from_utf8(partial.stdout).expect("partial report");
     assert!(text.starts_with("Arany storage: partial; known subtotal only\n"));
     assert!(!text.contains("UNSAFE_STORAGE_CANARY"));
+    assert!(text.contains("Output spill: partial\n"));
     assert_eq!(
-        std::fs::read(state.join("unsafe")).expect("unsafe record retained"),
+        std::fs::read(output_run.join("unsafe")).expect("unsafe record retained"),
         b"UNSAFE_STORAGE_CANARY"
     );
     assert!(!state.join("development.log").exists());
