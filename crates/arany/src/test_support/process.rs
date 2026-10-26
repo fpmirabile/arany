@@ -211,7 +211,7 @@ pub fn detach_disk_image(image: &std::path::Path, deadline: Duration) -> Result<
         if budget.is_zero() {
             return None;
         }
-        // A command past its bound panics inside the bounded runner; that attempt then just fails.
+        // An output-bound panic also makes this attempt fail.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Command::new("/usr/bin/hdiutil")
                 .args(args)
@@ -306,21 +306,33 @@ impl BoundedOutput for Command {
         self.stdin(Stdio::null());
         self.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = OwnedChild(self.spawn()?);
-        Ok(capture(&mut child.0, duration, cap))
+        child.capture(duration, cap)
     }
 
     fn bounded_output_with_input(&mut self) -> io::Result<Output> {
         self.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = OwnedChild(self.spawn()?);
-        Ok(capture(
-            &mut child.0,
-            Duration::from_secs(30),
-            32 * 1024 * 1024,
-        ))
+        child.capture(Duration::from_secs(30), 32 * 1024 * 1024)
     }
 }
 
 struct OwnedChild(Child);
+
+impl OwnedChild {
+    fn capture(&mut self, duration: Duration, cap: usize) -> io::Result<Output> {
+        let result = try_capture(&mut self.0, duration, cap);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut)
+        {
+            if self.0.try_wait()?.is_none() {
+                self.0.kill()?;
+            }
+            self.0.wait()?;
+        }
+        result
+    }
+}
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -330,6 +342,10 @@ impl Drop for OwnedChild {
 }
 
 pub fn capture(child: &mut Child, duration: Duration, cap: usize) -> Output {
+    try_capture(child, duration, cap).expect("bounded subprocess capture")
+}
+
+fn try_capture(child: &mut Child, duration: Duration, cap: usize) -> io::Result<Output> {
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
     capture_streams(
@@ -481,6 +497,7 @@ pub fn capture_terminal(
         "terminal",
         observe,
     )
+    .expect("bounded terminal capture")
 }
 
 fn capture_streams(
@@ -491,7 +508,7 @@ fn capture_streams(
     cap: usize,
     stderr_channel: &'static str,
     mut observe: impl FnMut(&[u8]),
-) -> Output {
+) -> io::Result<Output> {
     let deadline = Instant::now() + duration;
     for pipe in stdout_pipe
         .as_ref()
@@ -506,10 +523,12 @@ fn capture_streams(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "subprocess exit/output EOF deadline exceeded"
-        );
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "subprocess exit/output EOF deadline exceeded",
+            ));
+        }
         drain(&mut stdout_pipe, &mut stdout, cap, "stdout");
         drain(&mut stderr_pipe, &mut stderr, cap, stderr_channel);
         observe(&stderr);
@@ -517,11 +536,11 @@ fn capture_streams(
             && stdout_pipe.is_none()
             && stderr_pipe.is_none()
         {
-            return Output {
+            return Ok(Output {
                 status,
                 stdout,
                 stderr,
-            };
+            });
         }
         std::thread::yield_now();
     }
@@ -679,6 +698,71 @@ pub fn decline_workspace_consent(
 mod tests {
     use super::attached_device;
     use std::path::Path;
+
+    #[test]
+    fn bounded_capture_timeout_reaps_child_and_allows_next_command() {
+        use super::{BoundedOutput, OwnedChild};
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        const HELPER: &str = "test_support::process::tests::bounded_capture_child";
+        const OUTPUT_CAP: usize = 4096;
+        const NEXT_DEADLINE: Duration = Duration::from_secs(10);
+        let command = |case| {
+            let mut command = Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args(["--exact", HELPER, "--ignored", "--nocapture"])
+                .env_clear()
+                .env("ARANY_CAPTURE_CASE", case);
+            command
+        };
+        let mut held = OwnedChild(
+            command("held")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("held capture child"),
+        );
+        let pid = rustix::process::Pid::from_child(&held.0);
+        let error = held
+            .capture(Duration::ZERO, OUTPUT_CAP)
+            .expect_err("expired capture must not fabricate an output");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(matches!(
+            rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
+            Err(rustix::io::Errno::CHILD)
+        ));
+        let status = held
+            .0
+            .try_wait()
+            .expect("timeout child status")
+            .expect("timeout child reaped");
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+        let output = command("complete")
+            .bounded_output_for(NEXT_DEADLINE, OUTPUT_CAP)
+            .expect("next command after timeout");
+        assert!(output.status.success());
+        super::assert_single_test_completed(&output.stdout, HELPER);
+    }
+
+    #[test]
+    #[ignore = "invoked by the bounded capture timeout parent"]
+    fn bounded_capture_child() {
+        use std::io::Read;
+
+        match std::env::var("ARANY_CAPTURE_CASE").as_deref() {
+            Ok("held") => {
+                std::io::stdin()
+                    .read_exact(&mut [0])
+                    .expect("parent retains stdin until termination");
+                panic!("held child must be terminated");
+            }
+            Ok("complete") => {}
+            _ => panic!("bounded capture child requires its parent"),
+        }
+    }
 
     #[test]
     fn pty_text_matches_only_cr_runs_immediately_before_newlines() {

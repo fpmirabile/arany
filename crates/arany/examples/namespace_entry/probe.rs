@@ -224,26 +224,12 @@ fn compare_entries() -> Result<()> {
             .current_dir(root.path())
             .env_clear();
         println!("entry argv={command:?}");
-        let output = command.bounded_output_for(DEADLINE, CAPTURE_BYTES)?;
-        println!(
-            "exit={:?}\nstdout={}\nstderr={}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let reached = output
-            .stdout
-            .split(|byte| *byte == b'\n')
-            .any(|line| line == ENTRY_REACHED.as_bytes());
-        if !reached {
-            println!("startup failed before the probe snapshot; no mount/capability observation");
-        }
+        passed[index] = observe_entry(&mut command)?;
         assert!(
             fs::read_dir(&mountpoint)?.next().is_none(),
             "no mount or file reached the host"
         );
         println!("positive teardown: entry reaped; host mountpoint empty");
-        passed[index] = output.status.success() && reached;
     }
     if !stock {
         return Err(
@@ -259,6 +245,31 @@ fn compare_entries() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn observe_entry(command: &mut Command) -> Result<bool> {
+    let output = match command.bounded_output_for(DEADLINE, CAPTURE_BYTES) {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            println!("entry timed out after {DEADLINE:?}; child killed if running and reaped");
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    println!(
+        "exit={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reached = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .any(|line| line == ENTRY_REACHED.as_bytes());
+    if !reached {
+        println!("startup failed before the probe snapshot; no mount/capability observation");
+    }
+    Ok(output.status.success() && reached)
 }
 
 fn entry(route: Route, root: &Path) -> Result<()> {
