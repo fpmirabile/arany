@@ -475,8 +475,12 @@ Missing roots remain absent without creation. Report paths only for admitted
 owned locations; suppress individual private-file and directory names. The main
 Workspace is excluded by opened identity, including when inside a storage root;
 a root inside the Workspace is unavailable. Nested roots and regular-file
-identities are counted once. Private build-cache totals are separate from their
-parent's other private records and are not added twice.
+identities are counted once. Private build-cache and Output spill totals are
+separate from their parent's other private records and are not added twice.
+Each admitted `spill` subtree has an `Output spill` row, including its directories,
+output files and writer-lock metadata. Missing spill directories remain absent;
+inspection never creates them. It neither reads payloads nor checks journal
+references, takes writer locks, changes retention or grants Tool Read authority.
 
 Aggregate regular-file and directory counts, logical metadata lengths and
 allocated bytes (`blocks × 512`, checked for overflow). Secret-containing regular
@@ -534,6 +538,7 @@ history, credentials or live/uncertain Guard storage.
 | Scenario | Required observation | Evidence owner |
 |---|---|---|
 | Known, nested or duplicate storage; Workspace overlap | Disjoint category/subtotal accounting and Workspace exclusion; allocation and logical sizes remain separate | [Storage/private-fs corpus](../../crates/arany/src/store/state/inventory.rs) |
+| Output spill, including duplicate roots and active writers | Separate metadata-only rows exclude spill bytes from general records; missing directories stay absent; no payload/name disclosure, lock acquisition or mutation | [Inventory corpus](../../crates/arany/src/store/state/inventory.rs), [fresh-process journey](../../crates/arany-cli/tests/session_run/storage.rs) |
 | Missing state or damaged database | Absence or independently measurable metadata; no creation or repair | [Fresh-process journey](../../crates/arany-cli/tests/session_run/storage.rs) |
 | Private secrets, hostile names, hard links, symlinks and special objects | Metadata aggregation only, no individual names/content, no linked target counted, unsafe objects make report partial | [Storage corpus](../../crates/arany/src/store/state/inventory.rs), [process canaries](../../crates/arany-cli/tests/session_run/storage.rs) |
 | Pending cache and exhausted bounds/cancellation | Retained pending bytes, partial known subtotal or cancellation without complete output; no recovery/mutation | [Inventory owner](../../crates/arany/src/store/state/inventory.rs) |
