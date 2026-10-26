@@ -1333,19 +1333,22 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
         .find(|agent| agent.assignment.is_some())
         .unwrap()
         .clone();
-    let mut uncertain_tool = run.tools[0].clone();
+    let mut uncertain_tool = template.tools[0].clone();
     uncertain_tool.observation = None;
     for _ in 0..25 {
         let mut agent = template.clone();
         agent.id = AgentRunId::new();
+        uncertain_tool.intent.agent_run_id = agent.id;
         agent.tools = vec![uncertain_tool.clone()];
         run.agents.push(agent);
     }
     let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
     assert_eq!(report.unresolved[25], newest);
-    assert!(report.unresolved[..25].iter().all(|line| {
-        line.starts_with("Worker ") && line.contains("private_outcome_unknown=true")
-    }));
+    assert!(
+        report.unresolved[..25]
+            .iter()
+            .all(|line| { line.starts_with("Worker ") && line.contains("publication=Unknown") })
+    );
     assert_eq!(report.unresolved.last().unwrap(), GOAL_REPORT_OMISSION);
     assert!(report.unresolved.len() < GOAL_REPORT_ITEM_LIMIT);
     assert!(

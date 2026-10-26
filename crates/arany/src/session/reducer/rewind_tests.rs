@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::rewind::*;
 use crate::session::{Checkpoint, CheckpointStatus};
-use crate::tools::{CacheUpdate, ToolCall, ToolDisposition};
+use crate::tools::{Attestation, CacheUpdate, ToolCall, ToolDisposition};
 
 fn compiled_bytes(view: &SessionView, items: &[crate::provider::CompactionItem]) -> Vec<u8> {
     serde_json::to_vec(&crate::provider::compaction_input(
@@ -262,15 +262,11 @@ fn rewind_prefix_sealing_and_uncertainty_block_resume_without_fabricating_a_fini
 #[test]
 fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() {
     let (_, mut view) = fixture();
-    let source = view.runs[0]
-        .tools
-        .iter()
-        .find(|t| matches!(t.intent.call, ToolCall::ApplyChangeset { .. }))
-        .unwrap()
-        .clone();
+    let source = view.runs[0].tools[0].clone();
     let version = |text: &[u8], exec| crate::tools::FileVersion::from_bytes(text, exec);
     let mut run = view.runs[0].clone();
     run.id = RunId::new();
+    run.agents.retain(|agent| agent.role == AgentRole::Primary);
     run.accepted_sequence = view.last_sequence + 1;
     let new_start = view.last_sequence + 2;
     view.rewinds.checkpoints.push(CheckpointTarget::Run {
@@ -286,6 +282,7 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
     .enumerate()
     {
         let mut t = source.clone();
+        t.intent.run_id = run.id;
         let changeset = crate::tools::CommandChangeset {
             files: vec![crate::tools::FileChange {
                 path: "src/a".into(),
@@ -300,6 +297,7 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
             },
         };
         t.observation.as_mut().unwrap().intent = t.intent.clone();
+        t.observation.as_mut().unwrap().attestation = Some(Attestation::for_site(&t.intent));
         t.finished_sequence = Some(new_start + 1 + i as u64);
         t.checkpoint = Some(Checkpoint {
             status: CheckpointStatus::Captured,
@@ -354,7 +352,7 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
         plan(&prefix, &target(&prefix)).unwrap()
     );
     let t = view.runs[1].tools.last_mut().unwrap();
-    t.observation = None;
+    let mut observation = t.observation.take().unwrap();
     assert!(
         !plan(&view, &view.rewinds.checkpoints[1])
             .unwrap()
@@ -362,8 +360,8 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
             .is_empty()
     );
     let t = view.runs[1].tools.last_mut().unwrap();
-    t.observation = source.observation.clone();
-    t.observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
+    observation.disposition = ToolDisposition::Uncertain;
+    t.observation = Some(observation);
     assert!(
         !plan(&view, &view.rewinds.checkpoints[1])
             .unwrap()
@@ -375,18 +373,14 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
 #[test]
 fn rewind_pruned_first_preimages_reject_start_but_can_be_kept() {
     let (_, mut view) = fixture();
-    let source = view.runs[0]
-        .tools
-        .iter()
-        .find(|t| matches!(t.intent.call, ToolCall::ApplyChangeset { .. }))
-        .unwrap()
-        .clone();
+    let source = view.runs[0].tools[0].clone();
     for (before, after) in [
         (b"old".as_slice(), b"middle".as_slice()),
         (b"middle", b"new"),
     ] {
         let mut run = view.runs[0].clone();
         run.id = RunId::new();
+        run.agents.retain(|agent| agent.role == AgentRole::Primary);
         run.accepted_sequence = view.last_sequence + 1;
         let sequence = view.last_sequence + 2;
         view.rewinds.checkpoints.push(CheckpointTarget::Run {
@@ -408,6 +402,7 @@ fn rewind_pruned_first_preimages_reject_start_but_can_be_kept() {
             },
         };
         tool.observation.as_mut().unwrap().intent = tool.intent.clone();
+        tool.observation.as_mut().unwrap().attestation = Some(Attestation::for_site(&tool.intent));
         tool.finished_sequence = Some(sequence + 1);
         tool.checkpoint = Some(Checkpoint {
             status: CheckpointStatus::Captured,

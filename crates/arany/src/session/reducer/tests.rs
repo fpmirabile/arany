@@ -7567,14 +7567,23 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn primary_compaction_accepts_only_continuable_foreground_deferrals() {
+    fn primary_compaction_rejects_background_deferrals_and_accepts_proposal_refusals() {
         use crate::provider::ProviderFailureReason;
 
-        for reason in [
-            Some(ProviderFailureReason::WorkerAnswerDeferred),
-            Some(ProviderFailureReason::WorkerDelegateRefused),
-            Some(ProviderFailureReason::WorkerToolRefused),
-            None,
+        for (reason, admitted, continuable) in [
+            (
+                Some(ProviderFailureReason::WorkerAnswerDeferred),
+                false,
+                false,
+            ),
+            (
+                Some(ProviderFailureReason::WorkerDelegateRefused),
+                false,
+                false,
+            ),
+            (Some(ProviderFailureReason::WorkerToolRefused), false, false),
+            (Some(ProviderFailureReason::ProposalRefused), true, true),
+            (None, true, false),
         ] {
             let (mut view, goal, run, primary, child) = foreground_primary_tool_session();
             assert!(rejected(&view, reserve_child_call(goal, run, child)));
@@ -7585,29 +7594,39 @@ mod goal_replay_tests {
                 Some(0),
             );
             deferred.failure_reason = reason;
-            apply(
-                &mut view,
-                Event::ProviderCallRecorded {
-                    run_id: run,
-                    agent_run_id: primary,
-                    record: deferred,
-                },
-            )
-            .unwrap();
+            if reason == Some(ProviderFailureReason::ProposalRefused) {
+                deferred.disposition = ProviderCallDisposition::Rejected;
+                deferred.refusal = Some(crate::session::ProposalRefusal {
+                    operation: "arany_read".into(),
+                    cause: crate::session::ProposalRefusalCause::InvalidArguments,
+                });
+            }
+            let event = Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: primary,
+                record: deferred,
+            };
             let reservation = Event::GoalCompactionCallReserved {
                 goal_id: goal,
                 run_id: run,
                 active_ceiling_ms: 0,
             };
+            if !admitted {
+                assert!(rejected(&view, event), "{reason:?}");
+                assert!(rejected(&view, reservation));
+                assert_eq!(view.goals[0].unobserved_provider_calls, [primary]);
+                continue;
+            }
+            apply(&mut view, event).expect("foreground Provider outcome");
             assert_eq!(
                 apply(&mut view, reservation).is_ok(),
-                reason.is_some(),
+                continuable,
                 "{reason:?}"
             );
-            if reason.is_some() {
+            if continuable {
                 let count = u32::try_from(view.runs[0].tools.len()).unwrap();
                 let compacted = covering_compaction(&view, goal, run, count);
-                apply(&mut view, compacted).expect("compaction settles after a worker deferral");
+                apply(&mut view, compacted).expect("compaction settles after a proposal refusal");
                 assert_eq!(view.goals[0].compaction_call_reserved, None);
                 assert!(view.goals[0].unobserved_provider_calls.is_empty());
             }
