@@ -33,7 +33,7 @@ pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
-pub(crate) use state::spill::SpillAccess;
+pub(crate) use state::spill::{SWEEP_TIME_MS, SpillAccess};
 pub(crate) use state::{
     AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
     MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
@@ -393,6 +393,9 @@ impl Store {
                     let _ = ready_sender.send(connection.map(|_| ()));
                     return;
                 };
+                if !read_only {
+                    let _ = state::spill::sweep(&root, &connection);
+                }
                 if ready_sender.send(Ok(())).is_err() {
                     return;
                 }

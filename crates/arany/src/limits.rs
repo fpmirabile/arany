@@ -314,6 +314,36 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/types.rs",
         },
         Limit {
+            name: "SWEEP_TIME_MS",
+            value: crate::store::SWEEP_TIME_MS,
+            unit: "milliseconds",
+            owner: "crates/arany/src/store/state/spill.rs",
+        },
+        Limit {
+            name: "SPILL_PERSIST_TIMEOUT_MS",
+            value: crate::tools::spill::SPILL_PERSIST_TIMEOUT_MS,
+            unit: "milliseconds",
+            owner: "crates/arany/src/tools/spill.rs",
+        },
+        Limit {
+            name: "MAX_SPILL_WRITERS",
+            value: crate::tools::spill::MAX_SPILL_WRITERS as u64,
+            unit: "writers",
+            owner: "crates/arany/src/tools/spill.rs",
+        },
+        Limit {
+            name: "MAX_SPILL_RESULT_BYTES",
+            value: crate::tools::spill::MAX_SPILL_RESULT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/spill.rs",
+        },
+        Limit {
+            name: "MAX_SPILL_RUN_BYTES",
+            value: crate::tools::spill::MAX_SPILL_RUN_BYTES,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/spill.rs",
+        },
+        Limit {
             name: "MAX_READ_PAGE_LINES",
             value: MAX_READ_PAGE_LINES as u64,
             unit: "lines",
