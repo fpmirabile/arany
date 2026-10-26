@@ -9105,6 +9105,15 @@ mod goal_replay_tests {
         };
         let mut invalid_record = record.clone();
         invalid_record.recent_files[0].digest = "x".repeat(64);
+        assert!(rejected(
+            &view,
+            Event::GoalContextCompacted {
+                goal_id: goal,
+                run_id: run,
+                covered_tool_count: 2,
+                record: invalid_record,
+            }
+        ));
 
         apply(
             &mut view,
@@ -9128,7 +9137,6 @@ mod goal_replay_tests {
             }]
         );
         assert_eq!(view.runs[0].tools.len(), 2);
-        assert!(invalid_record.validate().is_err());
     }
 
     #[test]

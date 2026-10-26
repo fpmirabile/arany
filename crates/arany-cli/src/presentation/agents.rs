@@ -274,12 +274,12 @@ fn agent_lines(
                 .map(|compaction| compaction.record.recent_files.as_slice())
         });
     if let Some(recent_files) = recent_files {
-        let files = recent_files
-            .iter()
-            .map(|file| format!("{} ({})", file.path, file.digest))
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(format!("Files changed before compaction: {files}"));
+        lines.push("Files changed before compaction:".into());
+        lines.extend(
+            recent_files
+                .iter()
+                .map(|file| format!("  {} ({})", file.path, file.digest)),
+        );
     }
     if let Some(worker) = run
         .worker_history()
@@ -838,21 +838,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn agent_inspector_renders_the_recorded_recent_file_digest() {
+    fn agent_inspector_renders_each_recorded_recent_file_on_its_own_row() {
         let mut view = view();
         let mut run = run(0);
-        run.tool_compaction_recent_files = vec![arany::RecentFile {
-            path: "src/recent.txt".into(),
-            digest: "a".repeat(64),
-        }];
+        run.tool_compaction_recent_files = ["src/recent.txt", "src/previous.txt"]
+            .into_iter()
+            .map(|path| arany::RecentFile {
+                path: path.into(),
+                digest: "a".repeat(64),
+            })
+            .collect();
         view.runs.push(run);
         let inspector = AgentInspectorModel::from_session(&view, &focused(&view, 0, 1), 120, false);
-        assert!(inspector.lines.iter().any(|line| {
-            line == &format!(
-                "Files changed before compaction: src/recent.txt ({})",
-                "a".repeat(64)
-            )
-        }));
+        let heading = inspector
+            .lines
+            .iter()
+            .position(|line| line == "Files changed before compaction:")
+            .expect("recent-file heading");
+        assert_eq!(
+            &inspector.lines[heading + 1..heading + 3],
+            [
+                format!("  src/recent.txt ({})", "a".repeat(64)),
+                format!("  src/previous.txt ({})", "a".repeat(64)),
+            ]
+        );
     }
 
     #[test]

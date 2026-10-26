@@ -3080,6 +3080,17 @@ fn recent_files_include_only_integrated_worker_publications() {
     assert!(
         crate::session::recent_files(&private_view.runs[0], private_view.last_sequence).is_empty()
     );
+
+    let mut conflict = fixture();
+    conflict.mutation();
+    let data = conflict.finish_worker();
+    let handover = conflict.handover(data.clone());
+    conflict.integrate(handover, data, ToolDisposition::Conflict);
+    let conflict_view = conflict.view();
+    assert!(
+        crate::session::recent_files(&conflict_view.runs[0], conflict_view.last_sequence)
+            .is_empty()
+    );
 }
 
 #[test]

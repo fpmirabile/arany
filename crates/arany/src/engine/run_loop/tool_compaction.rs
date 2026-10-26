@@ -752,8 +752,15 @@ impl RunLoop<'_> {
             let input = &mut request.input;
             let context = input.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
             context.history_summary = Some(
-                crate::session::render_recent_files(&record.recent_files)
-                    .map_or_else(|| summary.clone(), |files| format!("{summary}\n\n{files}")),
+                crate::session::render_recent_files(&record.recent_files).map_or_else(
+                    || summary.clone(),
+                    |files| {
+                        format!(
+                            "{summary}{}{files}",
+                            crate::session::COMPACTION_SUMMARY_SEPARATOR
+                        )
+                    },
+                ),
             );
             for feedback in &mut input.stop_hook_feedback {
                 feedback.after_step = feedback.after_step.saturating_sub(window.prefix_steps);
