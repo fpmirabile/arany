@@ -1126,7 +1126,10 @@ pub(super) mod cleanup_tests {
                 terminal.transcript.history_adjacent = false;
                 terminal.release_for_output().unwrap();
                 terminal
-                    .replace_released(released_terminal(Some(LinearState::new("screen-reader"))));
+                    .reacquire_with(|_, _, _| {
+                        Ok(released_terminal(Some(LinearState::new("screen-reader"))))
+                    })
+                    .unwrap();
                 assert_eq!(terminal.linear.as_ref().unwrap().written_tools(), written);
                 assert!(terminal.user_run_recorded(recorded));
                 for (history, kept, excluded) in [
