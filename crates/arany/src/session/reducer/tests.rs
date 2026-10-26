@@ -8609,19 +8609,24 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
+    fn file_versions_require_intent_bound_in_process_receipts() {
         use crate::tools::{Attestation, EnforcementCause, FileReceipt, GuardReceipt};
         let (mut view, goal, run, agent) = primary_tool_session(true);
-        let call = ToolCall::Mkdir {
-            path: "src/new".into(),
+        let call = ToolCall::Write {
+            path: "src/lib.rs".into(),
+            expected_digest: None,
+            content: "after".into(),
         };
         let mut intent = child_intent(run, agent, call);
         intent.enforcement_digest = FileReceipt::enforcement_digest();
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         apply(&mut view, tool_started(run, agent, &intent)).unwrap();
-        let finish = |observation| Event::ToolFinished {
-            checkpoint: None,
+        let finish = |observation: ToolObservation| Event::ToolFinished {
+            checkpoint: observation
+                .attestation
+                .is_some()
+                .then(crate::Checkpoint::not_needed),
             run_id: run,
             agent_run_id: agent,
             observation,
@@ -8643,7 +8648,7 @@ mod goal_replay_tests {
         let receipt = FileReceipt {
             intent_digest: intent.digest(),
             before: None,
-            after: None,
+            after: Some(crate::validate::digest(b"after")),
             executable: false,
         };
         let mut forged = receipt.clone();
