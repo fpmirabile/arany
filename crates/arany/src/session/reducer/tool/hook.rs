@@ -69,6 +69,15 @@ pub(super) fn started(
         || hook.intent.workspace_inode != tool.intent.workspace_inode
         || hook.intent.id == tool.intent.id
         || same_event >= crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
+        || post
+            && tool
+                .hooks
+                .iter()
+                .rev()
+                .find(|view| view.invocation.event == hook.event)
+                .is_some_and(|view| {
+                    (hook.group, hook.handler) <= (view.invocation.group, view.invocation.handler)
+                })
         || finished_restriction
         || tool
             .hooks

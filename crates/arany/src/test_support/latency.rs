@@ -458,6 +458,242 @@ pub fn percentiles(samples: &[u64]) -> Result<[u64; 3], LatencyError> {
 mod tests {
     use super::*;
 
+    fn read_step_history() -> [EventEnvelope; 5] {
+        let (session, run, agent) = (SessionId::new(), RunId::new(), AgentRunId::new());
+        let reads = ["src/main.rs", "src/lib.rs"].map(|path| crate::EffectIntent {
+            host: None,
+            host_command: None,
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: Uuid::now_v7(),
+            run_id: run,
+            agent_run_id: agent,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Read {
+                path: path.into(),
+                offset: None,
+                limit: None,
+            },
+            limits: crate::ToolLimits::default(),
+            use_count: 1,
+        });
+        let events = [
+            Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: agent,
+                record: crate::ProviderCallRecord {
+                    phase: crate::AgentPhase::RootPlan,
+                    disposition: ProviderCallDisposition::ToolRequested,
+                    requested_tools: 2,
+                    rate_limits: None,
+                    delegation: None,
+                    response_id: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    wire_provenance: None,
+                    failure_reason: None,
+                    refusal: None,
+                },
+            },
+            read_start(&reads[0]),
+            read_start(&reads[1]),
+            read_finish(&reads[1]),
+            read_finish(&reads[0]),
+        ];
+        let mut sequence = 0;
+        events.map(|event| {
+            sequence += 1;
+            EventEnvelope {
+                sequence,
+                session_id: session,
+                run_id: Some(run),
+                agent_run_id: Some(agent),
+                event,
+                created_at_ms: 0,
+            }
+        })
+    }
+
+    fn read_start(intent: &crate::EffectIntent) -> Event {
+        use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
+        Event::ToolStarted {
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
+            verdict: Some(PermissionVerdict {
+                host: None,
+                intent_digest: intent.digest(),
+                decision: Decision::Allow,
+                mode: None,
+                basis: PermissionSource::Mode,
+                source: PermissionSource::Mode,
+                approved: true,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+        }
+    }
+
+    fn read_finish(intent: &crate::EffectIntent) -> Event {
+        Event::ToolFinished {
+            checkpoint: None,
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            observation: crate::ToolObservation {
+                intent: intent.clone(),
+                disposition: ToolDisposition::Succeeded,
+                output: String::new(),
+                attestation: Some(crate::Attestation::for_site(intent)),
+                approval_cause: None,
+                cache_update: crate::CacheUpdate::NotApplicable,
+                enforcement_cause: None,
+                limit_cause: None,
+            },
+        }
+    }
+
+    fn read_step_recorder(events: &[EventEnvelope; 5]) -> (Recorder, Instant) {
+        let recorder = Recorder::default();
+        let received = Instant::now();
+        let requests = events[1..3]
+            .iter()
+            .map(|event| {
+                let Event::ToolStarted { intent, .. } = &event.event else {
+                    unreachable!()
+                };
+                crate::ToolRequest {
+                    id: crate::ToolUseId::new(intent.id.to_string()).unwrap(),
+                    call: intent.call.clone(),
+                }
+            })
+            .collect();
+        Receipt {
+            recorder: &recorder,
+            session_id: events[0].session_id,
+            run_id: events[0].run_id.unwrap(),
+            agent_run_id: events[0].agent_run_id.unwrap(),
+            call_index: 0,
+        }
+        .received(
+            &ProviderResponse {
+                outcome: ProviderOutcome::Tools(requests),
+                turn: crate::ProviderTurn::scripted(),
+                response_id: None,
+                usage: Default::default(),
+                wire_provenance: None,
+            },
+            received,
+        );
+        (recorder, received)
+    }
+
+    #[test]
+    fn multi_read_capture_rejects_duplicate_excess_and_unmatched_facts() {
+        let events = read_step_history();
+        let mut extra = events[1].clone();
+        let Event::ToolStarted {
+            intent, verdict, ..
+        } = &mut extra.event
+        else {
+            unreachable!()
+        };
+        intent.id = Uuid::now_v7();
+        verdict.as_mut().unwrap().intent_digest =
+            crate::EffectIntent::from(intent.clone()).digest();
+        for (name, indices, expected) in [
+            (
+                "repeated start",
+                vec![0, 1, 1],
+                LatencyError::MismatchedIntent,
+            ),
+            (
+                "excess start",
+                vec![0, 1, 2, 5],
+                LatencyError::MismatchedIntent,
+            ),
+            (
+                "finish before start",
+                vec![0, 3],
+                LatencyError::UnmatchedFinish,
+            ),
+            (
+                "repeated finish",
+                vec![0, 1, 2, 3, 3],
+                LatencyError::UnmatchedFinish,
+            ),
+        ] {
+            let (recorder, acknowledged) = read_step_recorder(&events);
+            let facts = [
+                &events[0], &events[1], &events[2], &events[3], &events[4], &extra,
+            ];
+            for index in indices {
+                recorder.committed(facts[index], acknowledged);
+            }
+            assert_eq!(recorder.samples(), Err(expected), "{name}");
+        }
+    }
+
+    #[test]
+    fn multi_read_capture_waits_for_every_success_and_audits_the_final_finish() {
+        let events = read_step_history();
+        for failed in [false, true] {
+            let (recorder, received) = read_step_recorder(&events);
+            for event in &events[..3] {
+                recorder.committed(event, received);
+            }
+            let mut first_finish = events[3].clone();
+            if failed {
+                let Event::ToolFinished { observation, .. } = &mut first_finish.event else {
+                    unreachable!()
+                };
+                observation.disposition = ToolDisposition::Failed;
+            }
+            recorder.committed(&first_finish, received);
+            assert!(recorder.has_pending());
+            assert!(recorder.samples().unwrap().is_empty());
+            recorder.committed(&events[4], received);
+            assert!(!recorder.has_pending());
+            let samples = recorder.samples().unwrap();
+            assert_eq!(samples.len(), 1);
+            let sample = &samples[0];
+            assert_eq!(sample.successful(), !failed);
+            assert_eq!(sample.tool_receipt_to_commit_us, (!failed).then_some(0));
+            assert_eq!(sample.finished_sequence, Some(events[4].sequence));
+            if failed {
+                continue;
+            }
+            sample.audit(&events).unwrap();
+            let missing = events
+                .iter()
+                .filter(|event| event.sequence != first_finish.sequence)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut premature = sample.clone();
+            let Event::ToolStarted { intent, .. } = &events[2].event else {
+                unreachable!()
+            };
+            premature.intent_id = Some(intent.id);
+            premature.started_sequence = Some(events[2].sequence);
+            premature.finished_sequence = Some(first_finish.sequence);
+            for (name, sample, history) in [
+                ("missing finish", sample, missing.as_slice()),
+                ("premature endpoint", &premature, events.as_slice()),
+            ] {
+                assert_eq!(
+                    sample.audit(history),
+                    Err(LatencyError::MismatchedFinishOrPermission),
+                    "{name}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn capture_never_replaces_an_attempt_on_overlap_or_overflow() {
         let run = RunId::new();

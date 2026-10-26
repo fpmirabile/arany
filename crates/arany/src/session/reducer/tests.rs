@@ -6721,38 +6721,8 @@ mod goal_replay_tests {
     fn concurrent_read_post_hooks_stay_in_their_step_after_interleaved_finishes() {
         use crate::tools::permissions::{HookOutcome, HookResult};
         for researcher in [false, true] {
-            let (mut view, goal, run, agent) = if researcher {
-                research_session()
-            } else {
-                primary_tool_session(true)
-            };
-            view.runs[0]
-                .config
-                .as_mut()
-                .unwrap()
-                .tool_policy
-                .as_mut()
-                .unwrap()
-                .permissions_digest = Some([3; 32]);
-            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-            let mut requested = if researcher {
-                child_record(run, agent, ProviderCallDisposition::ToolRequested)
-            } else {
-                requesting_step(run, agent, 2)
-            };
-            let Event::ProviderCallRecorded { record, .. } = &mut requested else {
-                unreachable!()
-            };
-            record.requested_tools = 2;
-            apply(&mut view, requested).unwrap();
-            let first = read_intent(run, agent, "src/lib.rs");
-            let second = read_intent(run, agent, "src/lib.rs");
-            for intent in [&first, &second] {
-                apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
-            }
-            for intent in [&first, &second] {
-                observe_in_process_read(&mut view, intent);
-            }
+            let (mut view, goal, [first, second]) = settled_read_hook_pair(researcher, false);
+            let (run, agent) = (first.run_id, first.agent_run_id);
             for source in [&first, &second] {
                 let hook = post_tool_hook(source);
                 let started = Event::HookStarted {
@@ -6781,6 +6751,115 @@ mod goal_replay_tests {
                     },
                 )
                 .unwrap();
+            }
+        }
+    }
+
+    fn settled_read_hook_pair(
+        researcher: bool,
+        reverse: bool,
+    ) -> (SessionView, GoalId, [EffectIntent; 2]) {
+        let (mut view, goal, run, agent) = if researcher {
+            research_session()
+        } else {
+            primary_tool_session(true)
+        };
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        let mut requested = if researcher {
+            child_record(run, agent, ProviderCallDisposition::ToolRequested)
+        } else {
+            requesting_step(run, agent, 2)
+        };
+        let Event::ProviderCallRecorded { record, .. } = &mut requested else {
+            unreachable!()
+        };
+        record.requested_tools = 2;
+        apply(&mut view, requested).unwrap();
+        let first = read_intent(run, agent, "src/lib.rs");
+        let second = read_intent(run, agent, "src/lib.rs");
+        for intent in [&first, &second] {
+            apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
+        }
+        let reads = [first, second];
+        for index in if reverse { [1, 0] } else { [0, 1] } {
+            observe_in_process_read(&mut view, &reads[index]);
+        }
+        (view, goal, reads)
+    }
+
+    fn apply_post_hook(
+        view: &mut SessionView,
+        hook: crate::tools::permissions::HookInvocation,
+    ) -> Result<(), ReplayError> {
+        use crate::tools::permissions::{HookOutcome, HookResult};
+        let (run_id, agent_run_id) = (hook.intent.run_id, hook.intent.agent_run_id);
+        apply(
+            view,
+            Event::HookStarted {
+                run_id,
+                agent_run_id,
+                hook: hook.clone(),
+            },
+        )?;
+        apply(
+            view,
+            Event::HookFinished {
+                run_id,
+                agent_run_id,
+                outcome: HookOutcome {
+                    boundary_active_ms: None,
+                    observation: observation_for(hook.intent, b""),
+                    result: HookResult::Passed,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn concurrent_read_post_hook_sets_follow_completion_and_handler_order() {
+        for researcher in [false, true] {
+            for reverse in [false, true] {
+                let (view, _, reads) = settled_read_hook_pair(researcher, reverse);
+                for (name, handlers, accepted) in [
+                    (
+                        "distinct handlers",
+                        vec![(0, 0, 0), (0, 0, 1), (0, 1, 0), (1, 0, 0)],
+                        true,
+                    ),
+                    ("repeated handler", vec![(0, 0, 0), (0, 0, 0)], false),
+                    ("reversed handlers", vec![(0, 0, 1), (0, 0, 0)], false),
+                    ("reversed groups", vec![(0, 1, 0), (0, 0, 1)], false),
+                    (
+                        "reopened source",
+                        vec![(0, 0, 0), (1, 0, 0), (0, 0, 1)],
+                        false,
+                    ),
+                    ("reversed sources", vec![(1, 0, 0), (0, 0, 0)], false),
+                ] {
+                    let mut candidate = view.clone();
+                    let result = handlers
+                        .into_iter()
+                        .try_for_each(|(index, group, handler)| {
+                            let source = if reverse { 1 - index } else { index };
+                            let mut hook = post_tool_hook(&reads[source]);
+                            hook.group = group;
+                            hook.handler = handler;
+                            apply_post_hook(&mut candidate, hook)
+                        });
+                    assert_eq!(
+                        result.is_ok(),
+                        accepted,
+                        "{name}, researcher={researcher}, reverse={reverse}"
+                    );
+                }
             }
         }
     }

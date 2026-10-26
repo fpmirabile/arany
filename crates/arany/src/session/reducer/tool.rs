@@ -238,19 +238,37 @@ fn post_target<'a>(
         .finished_sequence
         .max(tools[index].hook_sequence)
         .max(capture_sequence);
-    let read = tools[index].intent.call.site() == crate::tools::catalog::Site::InProcess
-        && !tools[index].intent.call.mutates()
-        && tools[index]
-            .observation
-            .as_ref()
-            .is_some_and(|observation| {
-                matches!(
-                    observation.attestation,
-                    Some(crate::tools::Attestation::InProcess { .. })
-                )
-            });
-    let adjacent = !awaiting_integration && (tail == Some(previous) || concurrent && read);
+    let adjacent = !awaiting_integration
+        && (tail == Some(previous) || concurrent && deferred_read_post(tools, index));
     Ok((&mut tools[index], adjacent))
+}
+
+fn deferred_read_post(tools: &[ToolView], index: usize) -> bool {
+    let source = &tools[index];
+    source.intent.call.site() == crate::tools::catalog::Site::InProcess
+        && !source.intent.call.mutates()
+        && source.observation.as_ref().is_some_and(|observation| {
+            matches!(
+                observation.attestation,
+                Some(crate::tools::Attestation::InProcess { .. })
+            )
+        })
+        && !source
+            .hooks
+            .iter()
+            .any(|hook| hook.invocation.event == HookEvent::PostToolUse)
+        && tools
+            .iter()
+            .filter(|tool| {
+                tool.hooks
+                    .iter()
+                    .any(|hook| hook.invocation.event == HookEvent::PostToolUse)
+            })
+            .all(|tool| {
+                tool.finished_sequence
+                    .zip(source.finished_sequence)
+                    .is_some_and(|(before, after)| before < after)
+            })
 }
 
 fn tool_by_digest<'a>(
