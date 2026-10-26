@@ -1014,9 +1014,9 @@ mod tests {
     use arany::RecordKind;
     #[cfg(target_os = "macos")]
     use arany::{
-        AgentPhase, Answer, ApprovalMode, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
-        OutputTokenBound, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
-        ProviderRequest, ProviderResponse, RunStatus,
+        AdmittedProviders, AgentPhase, Answer, ApprovalMode, ChatGptAdmission, ChatGptProvenance,
+        CollaborationPolicy, OutputTokenBound, Provenance, Provider, ProviderError,
+        ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunStatus,
     };
     use arany::{Effort, SessionView, StateRoot, Store};
     #[cfg(target_os = "macos")]
