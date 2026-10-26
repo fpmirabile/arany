@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 pub(crate) const MAX_SESSION_EVENTS: usize = 10_000;
+const MAX_EVENT_KIND_BYTES: usize = 32;
+const INVALID_KIND_MARKER: &str = "[invalid kind]";
 
 #[derive(Debug)]
 pub struct InspectedEvent {
@@ -133,7 +135,7 @@ fn scan_inspected_events(
     session_id: SessionId,
 ) -> Result<(Vec<InspectedEvent>, Option<InspectionFailure>), StoreError> {
     let mut statement = connection.prepare(&format!(
-        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND 32 THEN kind ELSE '[invalid kind]' END, event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
+        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND {MAX_EVENT_KIND_BYTES} THEN kind ELSE '{INVALID_KIND_MARKER}' END, event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
         MAX_LIST_SCAN_EVENTS + 1
     ))?;
     let mut rows = statement.query([session_id.to_string()])?;
@@ -215,14 +217,14 @@ fn inspected_kind(row: &Row<'_>) -> String {
         Ok(rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes)) => {
             bytes
         }
-        _ => return "[invalid kind]".into(),
+        _ => return INVALID_KIND_MARKER.into(),
     };
-    if !(1..=32).contains(&bytes.len()) {
-        return "[invalid kind]".into();
+    if !(1..=MAX_EVENT_KIND_BYTES).contains(&bytes.len()) {
+        return INVALID_KIND_MARKER.into();
     }
     std::str::from_utf8(bytes)
         .map(str::to_owned)
-        .unwrap_or_else(|_| "[invalid kind]".into())
+        .unwrap_or_else(|_| INVALID_KIND_MARKER.into())
 }
 
 fn project_inspected_prefix(
@@ -1242,7 +1244,10 @@ pub(super) fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
 
 impl RawRow {
     fn decode_inspected(self) -> Result<EventEnvelope, crate::session::ReplayError> {
-        if self.id_bytes != 36 || !(1..=32).contains(&self.kind_bytes) || self.created_at_ms < 0 {
+        if self.id_bytes != 36
+            || !(1..=MAX_EVENT_KIND_BYTES as i64).contains(&self.kind_bytes)
+            || self.created_at_ms < 0
+        {
             return Err(crate::session::ReplayError::InvalidPayload);
         }
         let id = SessionId::from_str(&self.session_id)
