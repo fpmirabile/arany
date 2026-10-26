@@ -567,16 +567,13 @@ impl RunTrace {
                 record,
                 ..
             } => self.provider_call(*agent_run_id, record, at),
-            Event::ToolStarted { intent, .. } if intent.call.is_unguarded() => {
+            Event::ToolStarted {
+                intent, verdict, ..
+            } if intent.call.is_unguarded() => {
                 self.unguarded_pending.insert(
                     crate::tools::EffectIntent::from(intent.clone()).digest(),
-                    false,
+                    verdict.as_ref().is_some_and(|verdict| verdict.approved),
                 );
-            }
-            Event::ToolPermissionDecided { verdict, .. } => {
-                if let Some(approved) = self.unguarded_pending.get_mut(&verdict.intent_digest) {
-                    *approved = verdict.approved;
-                }
             }
             Event::ToolFinished { observation, .. } => {
                 if observation.intent.call.is_unguarded()
@@ -1074,8 +1071,8 @@ impl From<&Event> for TraceEventKind {
             | Event::ProviderRetryScheduled { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
+            | Event::ToolProposed { .. }
             | Event::ToolActiveTimeReserved { .. }
-            | Event::ToolPermissionDecided { .. }
             | Event::HookStarted { .. }
             | Event::HookFinished { .. }
             | Event::ToolFinished { .. }

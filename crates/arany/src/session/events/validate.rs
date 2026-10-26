@@ -57,7 +57,7 @@ impl Event {
             | Self::ToolFinished { .. }
             | Self::HookStarted { .. }
             | Self::HookFinished { .. }
-            | Self::ToolPermissionDecided { .. } => Event::validate_tool(self),
+            | Self::ToolProposed { .. } => Event::validate_tool(self),
             Self::AgentSpawned { .. } => Event::validate_agent(self),
             Self::RunStarted { .. }
             | Self::ProviderFallbackUsed { .. }

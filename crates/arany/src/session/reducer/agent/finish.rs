@@ -91,7 +91,7 @@ fn validate_finish(
         && (run.agents[index]
             .tools
             .iter()
-            .any(|tool| tool.observation.is_none())
+            .any(|tool| tool.started_sequence.is_some() && tool.observation.is_none())
             || finish.disposition == AgentDisposition::Finished
                 && run.agents[index].tools.iter().any(|tool| {
                     tool.observation

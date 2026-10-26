@@ -522,7 +522,7 @@ fn provider_action_reserves_plan_recording_and_terminal_events() {
             steering: false
         }
         .max_events(),
-        7
+        6
     );
     assert_eq!(
         Action::Child {
@@ -707,7 +707,7 @@ fn staged_bounds_never_exceed_the_first_admission() {
         previews: true,
         steering: true,
     };
-    assert_eq!(call.max_events(), 7 + 1 + MAX_DISPLAY_CHUNKS);
+    assert_eq!(call.max_events(), 6 + 1 + MAX_DISPLAY_CHUNKS);
     let providers = Providers::all(vec![()]);
     let r = usize::from(crate::provider::MAX_PROVIDER_RETRIES);
     assert_eq!(

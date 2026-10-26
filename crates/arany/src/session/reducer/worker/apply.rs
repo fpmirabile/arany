@@ -99,10 +99,14 @@ fn chunk_limits(
 ) -> Result<(usize, usize), ReplayError> {
     let t = tool(run, actor)
         .filter(|t| {
-            t.observation.is_none()
-                || run.workers.capture.as_ref().is_some_and(|(a, id, data)| {
-                    *a == actor && *id == t.intent.id && data.assignment_id == c.assignment_id
-                })
+            t.started_sequence.is_some()
+                && t.permission_verdict
+                    .as_ref()
+                    .is_none_or(|verdict| verdict.approved)
+                && (t.observation.is_none()
+                    || run.workers.capture.as_ref().is_some_and(|(a, id, data)| {
+                        *a == actor && *id == t.intent.id && data.assignment_id == c.assignment_id
+                    }))
         })
         .ok_or(ReplayError::InvalidTransition)?;
     if t.intent.id != c.tool_id {

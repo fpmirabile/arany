@@ -50,7 +50,7 @@ Session and ancestor locks remain scoped to a Run, while the Store thread lives
 until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns Engine lifetime and admission.
 The binary's `serve` Server owns a bounded submission/response channel loop over
-that Engine. Its stdio adapter, ACP translator, attached terminal and in-process conformance
+that Engine. Its stdio adapter, ACP translator, attached terminal, headless `exec` and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
 vocabulary at the binary edge; its translator owns the exhaustive typed Tool
 projection and preserves serve's Move FileChange path while giving GhPrList an

@@ -1938,9 +1938,10 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolProposed
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1958,6 +1959,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
+ToolProposed
 ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved

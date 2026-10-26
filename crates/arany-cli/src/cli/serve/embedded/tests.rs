@@ -6,7 +6,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-async fn waiting_connection() -> (
+async fn waiting_connection(
+    headless: bool,
+) -> (
     tempfile::TempDir,
     Arc<Engine>,
     Controls,
@@ -38,7 +40,12 @@ async fn waiting_connection() -> (
         requests: Arc::new(Mutex::new(Vec::new())),
         identity: arany::ProviderIdentity::new("openai", "test-model", arany::Provenance::native()),
     });
-    let (controls, bootstrap) = Controls::new(ApprovalMode::Request, true);
+    let (controls, mut bootstrap) = Controls::new(ApprovalMode::Request, !headless);
+    if headless {
+        bootstrap.controls.approvals = None;
+        bootstrap.controls.hints = None;
+        bootstrap.controls.steering = None;
+    }
     let mut request = request(&workspace, "Inspect the folder");
     request.session_id = Some(session);
     request.title = None;
@@ -67,7 +74,14 @@ async fn waiting_connection() -> (
 #[tokio::test]
 async fn steering_withdrawal_pause_cancel_and_resync_use_the_server_connection() {
     let _deadline = crate::cli::serve::tests::deadline();
-    let (root, engine, controls, mut connection, session, dropped) = waiting_connection().await;
+    for headless in [false, true] {
+        assert_cancelled_connection(headless).await;
+    }
+}
+
+async fn assert_cancelled_connection(headless: bool) {
+    let (root, engine, controls, mut connection, session, dropped) =
+        waiting_connection(headless).await;
     let state = root.path().join("state");
     let mut view = controls.view(session).await.unwrap();
     assert_eq!(view.runs.last().unwrap().status, RunStatus::Active);
@@ -77,15 +91,21 @@ async fn steering_withdrawal_pause_cancel_and_resync_use_the_server_connection()
         run_id: run.id,
         agent_run_id: run.agents[0].id,
     };
-    assert_pending_controls(&controls, target).await;
-    assert_burst_bound(&controls, &mut view, &state).await;
+    if headless {
+        assert_unavailable_controls(&controls, target).await;
+    } else {
+        assert_pending_controls(&controls, target).await;
+        assert_burst_bound(&controls, &mut view, &state).await;
+    }
     connection
         .reduce(&mut view, Tapped::Resync { missed: 1 })
         .await
         .unwrap();
     assert_eq!(view.runs.last().unwrap().status, RunStatus::Active);
-    assert!(controls.pause().await.unwrap());
-    assert!(!controls.pause().await.unwrap());
+    if !headless {
+        assert!(controls.pause().await.unwrap());
+        assert!(!controls.pause().await.unwrap());
+    }
     assert!(controls.cancel().await.unwrap());
     assert!(!controls.cancel().await.unwrap());
     let mut sequence = 0;
@@ -127,7 +147,14 @@ async fn steering_withdrawal_pause_cancel_and_resync_use_the_server_connection()
 #[tokio::test]
 async fn server_loss_during_a_run_never_fabricates_a_settlement() {
     let _deadline = crate::cli::serve::tests::deadline();
-    let (_root, engine, _controls, mut connection, _session, dropped) = waiting_connection().await;
+    for headless in [false, true] {
+        assert_server_loss(headless).await;
+    }
+}
+
+async fn assert_server_loss(headless: bool) {
+    let (_root, engine, _controls, mut connection, _session, dropped) =
+        waiting_connection(headless).await;
     connection.server.abort();
     while let Ok(event) = connection.next().await {
         assert!(!matches!(event, Event::Finished(_)));
@@ -152,6 +179,25 @@ async fn server_loss_during_a_run_never_fabricates_a_settlement() {
         .close()
         .await
         .unwrap();
+}
+
+async fn assert_unavailable_controls(controls: &Controls, target: arany::ChildSteeringTarget) {
+    assert!(!controls.pause().await.unwrap());
+    assert_eq!(
+        controls.offer_note("primary note".into()).await.unwrap(),
+        Err(arany::SteeringRefused::Unavailable)
+    );
+    assert_eq!(
+        controls
+            .offer_child_note(target, "child note".into())
+            .await
+            .unwrap(),
+        Err(arany::SteeringRefused::Unavailable)
+    );
+    assert_eq!(controls.withdraw_note().await.unwrap(), None);
+    assert_eq!(controls.withdraw_child_note(target).await.unwrap(), None);
+    assert_eq!(controls.delivered_notes().await.unwrap(), 0);
+    controls.set_mode(ApprovalMode::AutoEdits).await.unwrap();
 }
 
 async fn assert_pending_controls(controls: &Controls, target: arany::ChildSteeringTarget) {

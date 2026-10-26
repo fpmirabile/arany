@@ -183,10 +183,12 @@ impl Approvals {
         self.changed.notify_one();
     }
 
-    #[cfg(test)]
-    pub fn empty_for_test() -> Self {
+    pub fn closed() -> Self {
         Self {
-            state: Default::default(),
+            state: Arc::new(Mutex::new(State {
+                pending: None,
+                closed: true,
+            })),
             changed: Default::default(),
             cancel: RunCancellation::new(),
             worker: None,
@@ -234,7 +236,7 @@ pub(super) async fn started_at(
     events
         .ok()?
         .into_iter()
-        .find(|event| matches!(&event.event, Event::ToolStarted { intent: started, .. } if *started == intent))
+        .find(|event| matches!(&event.event, Event::ToolProposed { intent: started, .. } if *started == intent))
         .map(|event| event.created_at_ms)
 }
 

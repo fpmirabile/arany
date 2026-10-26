@@ -1356,7 +1356,7 @@ fn selected_child_messaging_journey() {
         assert_eq!(run.agents[2].steering_notes, ["/literal guidance"]);
         assert_eq!(run.agents[2].grant, Some(arany::ChildGrant::NoTools));
         assert!(!events.iter().any(|event| event.run_id == Some(run.id)
-            && matches!(event.event, arany::Event::ToolPermissionDecided { .. })));
+            && matches!(event.event, arany::Event::ToolStarted { .. })));
     }
 }
 

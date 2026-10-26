@@ -3303,10 +3303,19 @@ mod tests {
     #[test]
     fn host_only_single_exact_non_fast_forward_is_definitely_failed() {
         let f = crate::session::host_protocol_fixture();
-        let crate::Event::ToolStarted { intent, .. } = &f.events[f.events.len() - 2] else {
-            unreachable!()
-        };
-        let intent = EffectIntent::from(intent.clone());
+        let intent = f
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                crate::Event::ToolStarted { intent, .. }
+                    if matches!(intent.call, ToolCall::GitPush { .. }) =>
+                {
+                    Some(EffectIntent::from(intent.clone()))
+                }
+                _ => None,
+            })
+            .expect("folded host push start");
         let row = format!(
             "!\t{}\t[rejected] (non-fast-forward)\n",
             intent.host.as_ref().unwrap().refspec
@@ -3512,9 +3521,12 @@ mod tests {
         let end = f.events.len();
         for event in &mut f.events[end - 2..] {
             match event {
-                crate::Event::ToolStarted { intent, .. } => *intent = approved.clone().into(),
-                crate::Event::ToolPermissionDecided { verdict, .. } => {
-                    verdict.intent_digest = approved.digest()
+                crate::Event::ToolProposed { intent, .. } => *intent = approved.clone().into(),
+                crate::Event::ToolStarted {
+                    intent, verdict, ..
+                } => {
+                    *intent = approved.clone().into();
+                    verdict.as_mut().unwrap().intent_digest = approved.digest();
                 }
                 _ => {}
             }

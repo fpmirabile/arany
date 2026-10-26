@@ -1757,6 +1757,7 @@ mod payload_version_tests {
             ));
         }
         for kind in [
+            "ToolProposed",
             "ToolStarted",
             "ToolFinished",
             "RunStarted",
@@ -1824,6 +1825,7 @@ mod payload_version_tests {
         observation.attestation = None;
         let events = [
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: observation.intent.clone().into(),
@@ -2003,17 +2005,20 @@ mod payload_version_tests {
             prefix_rule: None,
         };
         let started = Event::ToolStarted {
+            verdict: None,
             run_id: run,
             agent_run_id: agent,
-            intent: intent.into(),
+            intent: intent.clone().into(),
             active_ceiling_ms: 1,
         };
-        let verdict = Event::ToolPermissionDecided {
+        let verdict = Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
             run_id: run,
             agent_run_id: agent,
-            verdict: crate::tools::permissions::PermissionVerdict {
+            verdict: Some(crate::tools::permissions::PermissionVerdict {
                 host: None,
-                intent_digest: [3; 32],
+                intent_digest: intent.digest(),
                 decision: crate::tools::permissions::Decision::Allow,
                 mode: None,
                 basis: crate::tools::permissions::PermissionSource::SessionApproval,
@@ -2022,7 +2027,7 @@ mod payload_version_tests {
                 hook_restriction: None,
                 hooks: 0,
                 narrowed: false,
-            },
+            }),
         };
         let reservation = Event::ToolActiveTimeReserved {
             run_id: run,
@@ -2044,10 +2049,43 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(started.version()));
+        assert_eq!(payload_version("ToolPermissionDecided"), None);
+    }
+
+    #[test]
+    fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let proposed = Event::ToolProposed {
+            run_id: run,
+            agent_run_id: agent,
+            intent: read_observation(run, agent).intent.into(),
+            active_ceiling_ms: 1,
+        };
+        let payload = proposed.payload().unwrap();
         assert_eq!(
-            payload_version("ToolPermissionDecided"),
-            Some(verdict.version())
+            Event::decode(
+                proposed.kind(),
+                proposed.version(),
+                &payload,
+                Some(run),
+                Some(agent)
+            )
+            .unwrap(),
+            proposed
         );
+        let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        extra["verdict"] = serde_json::Value::Null;
+        assert!(matches!(
+            Event::decode(
+                proposed.kind(),
+                proposed.version(),
+                &extra.to_string(),
+                Some(run),
+                Some(agent)
+            ),
+            Err(ReplayError::InvalidPayload)
+        ));
     }
 
     #[test]
@@ -2182,6 +2220,7 @@ mod payload_version_tests {
                 active_ceiling_ms: 125_000,
             },
             Event::ToolStarted {
+                verdict: None,
                 run_id: run,
                 agent_run_id: agent,
                 intent: read_observation(run, agent).intent.into(),
@@ -2544,6 +2583,7 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
         ("AgentSpawned", "/assignment", "cache_generation"),
         ("AgentSpawned", "/assignment/grant", "commands"),
         ("ToolStarted", "/intent/target", "cache_generation"),
+        ("ToolStarted", "", "verdict"),
         ("ToolFinished", "/intent/target", "cache_generation"),
         ("WorkerHandoverRecorded", "", "criterion_evidence"),
     ] {

@@ -1,5 +1,4 @@
 use super::{GoalStatus, GoalUsage, GoalView, RunFailure, RunStatus, RunView, SessionView};
-use crate::tools::{CacheUpdate, ToolDisposition};
 
 /// The Goal budget dimension that admitted no next Run.
 #[must_use]
@@ -160,19 +159,11 @@ fn unknown_effect(run: &RunView) -> bool {
     run.tools
         .iter()
         .chain(run.agents.iter().flat_map(|agent| &agent.tools))
-        .any(|tool| {
-            tool.observation.as_ref().is_none_or(|observation| {
-                observation.disposition == ToolDisposition::Uncertain
-                    || observation.cache_update == CacheUpdate::Uncertain
-            }) || tool.hooks.iter().any(hook_unknown)
-        })
-        || run.lifecycle_hooks.iter().any(hook_unknown)
-}
-
-fn hook_unknown(hook: &super::reducer::HookView) -> bool {
-    hook.outcome
-        .as_ref()
-        .is_none_or(|outcome| outcome.observation.disposition == ToolDisposition::Uncertain)
+        .any(super::ToolView::outcome_unknown)
+        || run
+            .lifecycle_hooks
+            .iter()
+            .any(super::reducer::HookView::outcome_unknown)
 }
 
 // Replay accepts `budget_closed` only on a spent budget, so the last dimension is the one left.
@@ -235,6 +226,7 @@ mod tests {
     use super::*;
     use crate::session::tests::unanswered_run;
     use crate::session::{GoalBudget, GoalId, GoalPhase, GoalSuccessState, WorkspaceIdentity};
+    use crate::tools::{CacheUpdate, ToolDisposition};
 
     fn goal(status: GoalStatus, budget_closed: bool) -> GoalView {
         GoalView {
@@ -308,6 +300,7 @@ mod tests {
             active_time_reserved: false,
             narrowing_source: None,
             permission_verdict: None,
+            started_sequence: Some(1),
             hooks: Vec::new(),
             hook_sequence: None,
             intent: intent.clone(),
@@ -449,6 +442,15 @@ mod tests {
         let rows = [
             (Vec::new(), &open, RunStop::Interrupted),
             (vec![tool(known)], &open, RunStop::Interrupted),
+            (
+                vec![{
+                    let mut proposal = tool(None);
+                    proposal.started_sequence = None;
+                    proposal
+                }],
+                &open,
+                RunStop::Interrupted,
+            ),
             (vec![tool(None)], &open, RunStop::Uncertain),
             (
                 vec![
