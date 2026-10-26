@@ -458,6 +458,32 @@ struct Panels {
     usage_panel: Option<UsagePanel>,
 }
 
+struct Transcript {
+    history: History,
+    classic_history: History,
+    native: NativeTranscript,
+    transcript_open: bool,
+    // The pager's `[` left the alternate screen and capture; Enter reacquires them.
+    scrollback_dump: bool,
+    // The row above the Classic viewport holds history or shell output, not rows it vacated.
+    history_adjacent: bool,
+    kept_tools: Option<(arany::RunId, usize)>,
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self {
+            history: History::default(),
+            classic_history: History::default(),
+            native: NativeTranscript::default(),
+            transcript_open: false,
+            scrollback_dump: false,
+            history_adjacent: true,
+            kept_tools: None,
+        }
+    }
+}
+
 enum InputRead {
     Input(TerminalInput),
     PanelCopy(PanelCopyResult),
@@ -871,13 +897,8 @@ impl AttachedTerminal {
             mode,
             classic_pinned: false,
             panels: Panels::default(),
-            transcript_open: false,
-            scrollback_dump: false,
-            native: NativeTranscript::default(),
+            transcript: Transcript::default(),
             active_run: None,
-            history: History::default(),
-            classic_history: History::default(),
-            history_adjacent: true,
             pointer,
             image_chip_areas: Vec::new(),
             hovered_image: None,
@@ -886,7 +907,6 @@ impl AttachedTerminal {
             graphics_placement: None,
             hovered_image_digest: None,
             linear: mode_label.map(LinearState::new),
-            kept_tools: None,
             #[cfg(unix)]
             secret_echo: None,
             agent_panel: None,
@@ -1463,15 +1483,8 @@ pub struct AttachedTerminal {
     mode: TerminalMode,
     classic_pinned: bool,
     panels: Panels,
-    transcript_open: bool,
-    // The pager's `[` left the alternate screen and capture; Enter reacquires them.
-    scrollback_dump: bool,
-    native: NativeTranscript,
+    transcript: Transcript,
     active_run: Option<arany::RunId>,
-    history: History,
-    classic_history: History,
-    // The row above the Classic viewport holds history or shell output, not rows it vacated.
-    history_adjacent: bool,
     pointer: PointerSettings,
     image_chip_areas: Vec<(usize, Rect)>,
     hovered_image: Option<usize>,
@@ -1480,7 +1493,6 @@ pub struct AttachedTerminal {
     graphics_placement: Option<GraphicsPlacement>,
     hovered_image_digest: Option<[u8; 32]>,
     linear: Option<LinearState>,
-    kept_tools: Option<(arany::RunId, usize)>,
     #[cfg(unix)]
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
@@ -1691,7 +1703,7 @@ impl AttachedTerminal {
         self.prepare_frame_height(height)?;
         let palette = self.palette();
         let terminal = self.owned.terminal();
-        let history = &mut self.history;
+        let history = &mut self.transcript.history;
         let mut more = true;
         let mut history_area = None;
         terminal.draw(|frame| {
@@ -1795,8 +1807,8 @@ impl AttachedTerminal {
     pub async fn next_chat_input(&mut self) -> Result<TerminalInput, TerminalError> {
         self.read_input(
             !self.help_open()
-                && !self.transcript_open
-                && !self.scrollback_dump
+                && !self.transcript.transcript_open
+                && !self.transcript.scrollback_dump
                 && !self.agents_open(),
         )
         .await
@@ -1939,19 +1951,19 @@ impl AttachedTerminal {
     }
 
     pub fn user_run_recorded(&self, id: arany::RunId) -> bool {
-        self.native.objectives.contains(&id)
+        self.transcript.native.objectives.contains(&id)
     }
 
     pub fn finish_run_display(&mut self) {
         self.active_run = None;
-        self.history.set_preview(None);
-        self.classic_history.set_preview(None);
+        self.transcript.history.set_preview(None);
+        self.transcript.classic_history.set_preview(None);
     }
 
     pub fn set_preview(&mut self, preview: Option<arany::DisplayUpdate>) {
         if !self.is_linear() {
-            self.history.set_preview(preview.clone());
-            self.classic_history.set_preview(preview);
+            self.transcript.history.set_preview(preview.clone());
+            self.transcript.classic_history.set_preview(preview);
         }
     }
 
@@ -1961,7 +1973,7 @@ impl AttachedTerminal {
         text: &str,
         skill: Option<&str>,
     ) -> Result<(), TerminalError> {
-        self.history_adjacent = true;
+        self.transcript.history_adjacent = true;
         let palette = self.palette();
         let terminal = self.owned();
         let width = terminal.get_frame().area().width;
@@ -1997,10 +2009,10 @@ impl AttachedTerminal {
         if self.mode != TerminalMode::Classic {
             return Ok(());
         }
-        if self.native.session != Some(session.id) {
+        if self.transcript.native.session != Some(session.id) {
             let width = usize::from(self.owned().get_frame().area().width);
             let projection = history::classic_projection(session, width);
-            self.native = NativeTranscript {
+            self.transcript.native = NativeTranscript {
                 session: Some(session.id),
                 initial_run_count: Some(session.runs.len()),
                 first_projected_run_index: projection.first_run_index,
@@ -2010,18 +2022,20 @@ impl AttachedTerminal {
         }
         for (index, run) in session.runs.iter().enumerate() {
             if self
+                .transcript
                 .native
                 .initial_run_count
                 .is_some_and(|count| index < count)
                 && self
+                    .transcript
                     .native
                     .first_projected_run_index
                     .is_none_or(|first| index < first)
             {
                 continue;
             }
-            if !self.native.objectives.contains(&run.id) {
-                if self.native.objectives.is_empty() {
+            if !self.transcript.native.objectives.contains(&run.id) {
+                if self.transcript.native.objectives.is_empty() {
                     let terminal = self.owned();
                     let area = terminal.get_frame().area();
                     if history_top_padding(terminal.size()?.height.saturating_sub(area.height)) > 0
@@ -2036,13 +2050,18 @@ impl AttachedTerminal {
                     &crate::presentation::image_message_text(&run.objective, &run.images),
                     run.skill.as_deref(),
                 )?;
-                self.native.objectives.insert(run.id);
+                self.transcript.native.objectives.insert(run.id);
             }
             for (range, summary) in crate::presentation::settled_tool_groups(run) {
-                if !self.native.tools.contains(&(run.id, range.start)) {
+                if !self
+                    .transcript
+                    .native
+                    .tools
+                    .contains(&(run.id, range.start))
+                {
                     self.insert_native(history::MessageKind::Tool, &summary, None)?;
                     for index in range {
-                        self.native.tools.insert((run.id, index));
+                        self.transcript.native.tools.insert((run.id, index));
                     }
                 }
             }
@@ -2050,18 +2069,18 @@ impl AttachedTerminal {
                 run.status,
                 arany::RunStatus::Pending | arany::RunStatus::Active
             ) && run.assistant_message.is_none()
-                && !self.native.answers.contains(&run.id)
+                && !self.transcript.native.answers.contains(&run.id)
                 && let Some(text) = crate::presentation::display_answer(run)
             {
                 self.insert_native(history::MessageKind::Incomplete, &text, None)?;
-                self.native.answers.insert(run.id);
+                self.transcript.native.answers.insert(run.id);
             }
             if self.active_run != Some(run.id)
                 && let Some(answer) = &run.assistant_message
-                && !self.native.answers.contains(&run.id)
+                && !self.transcript.native.answers.contains(&run.id)
             {
                 self.insert_native(history::MessageKind::Assistant, answer, None)?;
-                self.native.answers.insert(run.id);
+                self.transcript.native.answers.insert(run.id);
             }
         }
         Ok(())
@@ -2080,10 +2099,12 @@ impl AttachedTerminal {
             self.prepare_frame()?;
             return self.insert_native(history::MessageKind::ToolDetails, &text, None);
         }
-        self.transcript_open = !self.transcript_open;
+        self.transcript.transcript_open = !self.transcript.transcript_open;
         // Details change the rows a selection anchors to.
-        self.history.clear_selection();
-        self.history.set_details(self.transcript_open);
+        self.transcript.history.clear_selection();
+        self.transcript
+            .history
+            .set_details(self.transcript.transcript_open);
         Ok(())
     }
 
@@ -2099,7 +2120,7 @@ impl AttachedTerminal {
         if let Some(mut keyboard) = self.owned.keyboard.take() {
             keyboard.release()?;
         }
-        self.scrollback_dump = true;
+        self.transcript.scrollback_dump = true;
         if let Some(mut alternate) = self.owned.alternate.take() {
             alternate.release()?;
         }
@@ -2112,11 +2133,11 @@ impl AttachedTerminal {
     }
 
     fn end_scrollback_dump(&mut self) -> Result<(), TerminalError> {
-        if !self.scrollback_dump {
+        if !self.transcript.scrollback_dump {
             return Ok(());
         }
         self.owned.alternate = Some(AlternateScreen::acquire()?);
-        self.scrollback_dump = false;
+        self.transcript.scrollback_dump = false;
         #[cfg(unix)]
         {
             let graphics_probe = graphics_probe_allowed(self.mode);
@@ -2147,8 +2168,8 @@ impl AttachedTerminal {
 
     pub fn handle_draft_detail(&mut self, composer: &mut Composer, input: TerminalInput) -> bool {
         if self.is_linear()
-            || (self.mode == TerminalMode::Fullscreen && self.transcript_open)
-            || self.scrollback_dump
+            || (self.mode == TerminalMode::Fullscreen && self.transcript.transcript_open)
+            || self.transcript.scrollback_dump
             || self.history_mut().find_open()
         {
             return false;
@@ -2182,14 +2203,15 @@ impl AttachedTerminal {
         input: TerminalInput,
         view: &SessionView,
     ) -> Result<bool, TerminalError> {
-        let pager =
-            self.mode == TerminalMode::Fullscreen && self.transcript_open && !self.is_linear();
+        let pager = self.mode == TerminalMode::Fullscreen
+            && self.transcript.transcript_open
+            && !self.is_linear();
         // The hidden composer must not change, so a paste or clipboard result is discarded.
-        if input == TerminalInput::Paste && (pager || self.scrollback_dump) {
+        if input == TerminalInput::Paste && (pager || self.transcript.scrollback_dump) {
             let _ = self.take_paste();
             return Ok(true);
         }
-        if self.scrollback_dump {
+        if self.transcript.scrollback_dump {
             return match input {
                 TerminalInput::Submit => self.end_scrollback_dump().map(|()| true),
                 // Ctrl+C returns to Arany so its cancellation or exit hint is visible.
@@ -2201,12 +2223,12 @@ impl AttachedTerminal {
         if pager {
             // Escape clears a selection before it closes the pager.
             if input == TerminalInput::Escape
-                && self.history.has_selection()
-                && !self.history.find_open()
+                && self.transcript.history.has_selection()
+                && !self.transcript.history.find_open()
             {
                 return Ok(false);
             }
-            return match self.history.pager_input(input, view) {
+            return match self.transcript.history.pager_input(input, view) {
                 history::Pager::Close => self.toggle_transcript(view).map(|()| true),
                 history::Pager::Dump => self.dump_to_scrollback(view).map(|()| true),
                 history::Pager::Handled => Ok(true),
@@ -2275,9 +2297,9 @@ impl AttachedTerminal {
 
     fn history_mut(&mut self) -> &mut History {
         if self.mode == TerminalMode::Fullscreen {
-            &mut self.history
+            &mut self.transcript.history
         } else {
-            &mut self.classic_history
+            &mut self.transcript.classic_history
         }
     }
 
@@ -2299,7 +2321,7 @@ impl AttachedTerminal {
         if let Some(handled) = self.pointer_input(input, view, composer).await {
             return handled;
         }
-        let handled = self.history.handle(input, view);
+        let handled = self.transcript.history.handle(input, view);
         if handled && input == TerminalInput::HistoryFind {
             self.cancel_clipboard_paste();
         }
@@ -2322,24 +2344,26 @@ impl AttachedTerminal {
                 clicks,
             } if selects => match self.history_cell(column, row) {
                 Some((row, column)) => {
-                    self.history.select_at(view, row, column, clicks);
+                    self.transcript.history.select_at(view, row, column, clicks);
                     Some(true)
                 }
-                None => self.history.clear_selection().then_some(true),
+                None => self.transcript.history.clear_selection().then_some(true),
             },
-            TerminalInput::PointerDrag { column, row } if selects && self.history.selecting() => {
+            TerminalInput::PointerDrag { column, row }
+                if selects && self.transcript.history.selecting() =>
+            {
                 let area = self.panels.history_area?;
                 // Dragging past either edge scrolls one row per motion event.
                 let row = if row < area.y {
-                    self.history.scroll(true, 1);
+                    self.transcript.history.scroll(true, 1);
                     0
                 } else if row >= area.bottom() {
-                    self.history.scroll(false, 1);
+                    self.transcript.history.scroll(false, 1);
                     area.height.saturating_sub(1)
                 } else {
                     row - area.y
                 };
-                self.history.extend_selection(
+                self.transcript.history.extend_selection(
                     view,
                     usize::from(row),
                     usize::from(column.saturating_sub(area.x)),
@@ -2353,11 +2377,11 @@ impl AttachedTerminal {
                 self.copy_selection(view).await.then_some(true)
             }
             TerminalInput::Escape
-                if self.history.has_selection()
+                if self.transcript.history.has_selection()
                     && self.clipboard.is_none()
-                    && !self.history.find_open() =>
+                    && !self.transcript.history.find_open() =>
             {
-                Some(self.history.clear_selection())
+                Some(self.transcript.history.clear_selection())
             }
             TerminalInput::Up | TerminalInput::Down
                 if !mouse_enabled
@@ -2365,7 +2389,11 @@ impl AttachedTerminal {
                     && !composer.has_open_menu()
                     && !composer.recall_pending() =>
             {
-                Some(self.history.scroll(input == TerminalInput::Up, 1))
+                Some(
+                    self.transcript
+                        .history
+                        .scroll(input == TerminalInput::Up, 1),
+                )
             }
             _ => None,
         }
@@ -2505,20 +2533,23 @@ impl AttachedTerminal {
                 !selects || !std::mem::take(&mut self.graphics_hover_changed)
             }
             TerminalInput::PointerClick { column, row, .. } => {
-                !selects || (self.history_cell(column, row).is_none() && !self.history.selecting())
+                !selects
+                    || (self.history_cell(column, row).is_none()
+                        && !self.transcript.history.selecting())
             }
             TerminalInput::PointerDrag { .. } => {
                 let graphics_changed = std::mem::take(&mut self.graphics_hover_changed);
-                !selects || (!self.history.selecting() && !graphics_changed)
+                !selects || (!self.transcript.history.selecting() && !graphics_changed)
             }
             TerminalInput::PointerRelease { .. } => {
-                if !self.history.has_selection() {
-                    self.history.clear_selection();
+                if !self.transcript.history.has_selection() {
+                    self.transcript.history.clear_selection();
                 }
                 let graphics_changed = std::mem::take(&mut self.graphics_hover_changed);
                 !selects
                     || (!graphics_changed
-                        && (!self.pointer.copy_on_select || !self.history.has_selection()))
+                        && (!self.pointer.copy_on_select
+                            || !self.transcript.history.has_selection()))
             }
             _ => false,
         }
@@ -2536,8 +2567,8 @@ impl AttachedTerminal {
 
     // Returns false when nothing is selected, so the input keeps its ordinary meaning.
     async fn copy_selection(&mut self, view: &SessionView) -> bool {
-        let Some(text) = self.history.selection_text(view) else {
-            self.history.clear_selection();
+        let Some(text) = self.transcript.history.selection_text(view) else {
+            self.transcript.history.clear_selection();
             return false;
         };
         let mut stderr = io::stderr();
@@ -2549,7 +2580,7 @@ impl AttachedTerminal {
         };
         match copied {
             Ok(cue) => {
-                self.history.clear_selection();
+                self.transcript.history.clear_selection();
                 self.panels.selection_cue =
                     Some(if SELECTION_HINT_SHOWN.swap(true, Ordering::Relaxed) {
                         cue
@@ -2560,7 +2591,10 @@ impl AttachedTerminal {
                         )
                     });
             }
-            Err(error) => self.history.record_notice(TerminalNotice::History(&error)),
+            Err(error) => self
+                .transcript
+                .history
+                .record_notice(TerminalNotice::History(&error)),
         }
         true
     }
@@ -2731,7 +2765,7 @@ impl AttachedTerminal {
         if let Some(panel) = &mut panel {
             panel.printed = None;
         }
-        let reading_panel = self.transcript_open;
+        let reading_panel = self.transcript.transcript_open;
         self.release()?;
         kill_process(getpid(), Signal::STOP).map_err(io::Error::from)?;
         let mut resumed = Self::acquire_with_mode(screen_reader, self.mode, self.pointer)?;
@@ -2745,8 +2779,8 @@ impl AttachedTerminal {
         resumed.reader().restore_input_capacity(input_capacity)?;
         self.replace_released(resumed);
         if reading_panel {
-            self.transcript_open = true;
-            self.history.set_details(true);
+            self.transcript.transcript_open = true;
+            self.transcript.history.set_details(true);
         }
         Ok(())
     }
@@ -2789,7 +2823,7 @@ impl AttachedTerminal {
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
             let before = terminal.get_frame().area();
-            let keep_top = classic_keeps_top(before, self.history_adjacent);
+            let keep_top = classic_keeps_top(before, self.transcript.history_adjacent);
             let resized = resize_classic(terminal, offset, height, keep_top, || {
                 let mut backend = TerminalBackend::new(TerminalMode::Classic, None);
                 backend.detach();
@@ -2801,7 +2835,7 @@ impl AttachedTerminal {
             }
             resized?;
             // A bottom-anchored shrink leaves cleared rows above the composer.
-            self.history_adjacent &= terminal.get_frame().area().y <= before.y;
+            self.transcript.history_adjacent &= terminal.get_frame().area().y <= before.y;
         } else {
             terminal.autoresize()?;
         }
@@ -2886,7 +2920,7 @@ impl AttachedTerminal {
         self.prepare_frame_height(height)?;
         let palette = self.palette();
         let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
-        let history = &mut self.history;
+        let history = &mut self.transcript.history;
         let feedback = if self.panels.panel_selection.enabled {
             self.panels.panel_selection.feedback.clone()
         } else {
@@ -2933,7 +2967,7 @@ impl AttachedTerminal {
             || self.panels.help_selected.is_some()
             || self.agent_panel.is_some()
             || self.agent_chat_shown(view)
-            || self.transcript_open
+            || self.transcript.transcript_open
             || composer.paste_detail().is_some()
         {
             self.clear_graphics_hover();
@@ -2943,9 +2977,9 @@ impl AttachedTerminal {
                 .map(TerminalNotice::Transient)
         });
         // The primary screen shows the dump until Enter; the Run keeps going without redraws.
-        if self.scrollback_dump {
+        if self.transcript.scrollback_dump {
             if let Some(notice) = notice {
-                self.history.record_notice(notice);
+                self.transcript.history.record_notice(notice);
             }
             return Ok(());
         }
@@ -3001,7 +3035,7 @@ impl AttachedTerminal {
                 view::draw_paste_detail(frame, area, &label, text, scroll, palette);
             });
         }
-        if self.mode == TerminalMode::Fullscreen && self.transcript_open {
+        if self.mode == TerminalMode::Fullscreen && self.transcript.transcript_open {
             return self.draw_pager(view, notice, screen);
         }
         let mut model = match state {
@@ -3019,13 +3053,16 @@ impl AttachedTerminal {
                 .max(8)
                 .min(screen.height)
         } else if self.mode == TerminalMode::Classic {
-            self.classic_history
-                .sync(view, usize::from(screen.width), usize::from(screen.height));
+            self.transcript.classic_history.sync(
+                view,
+                usize::from(screen.width),
+                usize::from(screen.height),
+            );
             view::classic_height(
                 &model,
                 composer,
                 screen,
-                self.classic_history.live_rows(view).len(),
+                self.transcript.classic_history.live_rows(view).len(),
             )
         } else {
             screen.height
@@ -3037,6 +3074,7 @@ impl AttachedTerminal {
         {
             let text = history::bounded_notice_text(text).into_owned();
             if self
+                .transcript
                 .native
                 .last_notice
                 .as_ref()
@@ -3044,7 +3082,7 @@ impl AttachedTerminal {
             {
                 let (kind, body) = history::notice_kind(&text);
                 self.insert_native(kind, body, None)?;
-                self.native.last_notice = Some((view.last_sequence, text));
+                self.transcript.native.last_notice = Some((view.last_sequence, text));
             }
         }
         let area = self
@@ -3085,16 +3123,16 @@ impl AttachedTerminal {
         let history_rows = if self.mode == TerminalMode::Fullscreen {
             self.history_mut().visible(view)
         } else {
-            self.classic_history.live_rows(view)
+            self.transcript.classic_history.live_rows(view)
         };
         let native_transcript = self.mode == TerminalMode::Classic && !view.runs.is_empty();
         let history_status = if native_transcript {
             let hint = classic_history_status(
                 area.width,
-                self.native.omitted_history,
+                self.transcript.native.omitted_history,
                 self.classic_pinned,
             );
-            if self.native.omitted_history {
+            if self.transcript.native.omitted_history {
                 Some(hint.to_owned())
             } else {
                 // State and model lead; the mode hint is secondary and truncation drops it first.
@@ -3212,18 +3250,18 @@ impl AttachedTerminal {
         notice: Option<TerminalNotice<'_>>,
         screen: Rect,
     ) -> Result<(), TerminalError> {
-        self.history.sync(
+        self.transcript.history.sync(
             view,
             usize::from(screen.width),
             usize::from(screen.height.saturating_sub(1)),
         );
         if let Some(notice) = notice {
-            self.history.record_notice(notice);
+            self.transcript.history.record_notice(notice);
         }
-        let rows = self.history.visible(view);
+        let rows = self.transcript.history.visible(view);
         let footer = match notice {
             Some(TerminalNotice::Transient(text)) => text.to_owned(),
-            _ => self.history.pager_status(),
+            _ => self.transcript.history.pager_status(),
         };
         let palette = self.palette();
         let mut history_area = Rect::default();
@@ -4060,7 +4098,7 @@ impl AttachedTerminal {
         let mut first_error = None;
         attempt_cleanup(&mut first_error, || self.delete_graphics_placement());
         let owned = &mut self.owned;
-        let scrollback_dump = &mut self.scrollback_dump;
+        let scrollback_dump = &mut self.transcript.scrollback_dump;
         #[cfg(unix)]
         let secret_echo = &mut self.secret_echo;
         let session_picker_area = &mut self.panels.session_picker_area;
@@ -4068,7 +4106,7 @@ impl AttachedTerminal {
         let history_area = &mut self.panels.history_area;
         let selection_cue = &mut self.panels.selection_cue;
         let linear = &mut self.linear;
-        let kept_tools = &mut self.kept_tools;
+        let kept_tools = &mut self.transcript.kept_tools;
         owned.release(
             scrollback_dump,
             &mut first_error,
@@ -4097,18 +4135,19 @@ impl AttachedTerminal {
 
     fn replace_released(&mut self, mut replacement: Self) {
         replacement.newline_shortcut = self.newline_shortcut;
-        replacement.history = std::mem::take(&mut self.history);
-        replacement.classic_history = std::mem::take(&mut self.classic_history);
+        replacement.transcript.history = std::mem::take(&mut self.transcript.history);
+        replacement.transcript.classic_history =
+            std::mem::take(&mut self.transcript.classic_history);
         replacement.panels.panel_selection = std::mem::take(&mut self.panels.panel_selection);
         replacement.panels.panel_copy = self.panels.panel_copy.take();
         replacement.panels.dialog_armed = self.panels.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
         replacement.child_drafts = std::mem::take(&mut self.child_drafts);
         replacement.primary_input_capacity = self.primary_input_capacity;
-        replacement.native = std::mem::take(&mut self.native);
+        replacement.transcript.native = std::mem::take(&mut self.transcript.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {
-            new.keep_written_tools(self.kept_tools);
+            new.keep_written_tools(self.transcript.kept_tools);
         }
         replacement.classic_pinned = self.classic_pinned;
         #[cfg(unix)]
@@ -5267,8 +5306,8 @@ mod pointer_tests {
                 composer.apply(TerminalInput::Home);
                 // Handled input never reaches the composer, so the hidden draft cannot change.
                 for (pager, dump) in [(true, false), (false, true)] {
-                    terminal.transcript_open = pager;
-                    terminal.scrollback_dump = dump;
+                    terminal.transcript.transcript_open = pager;
+                    terminal.transcript.scrollback_dump = dump;
                     for input in [TerminalInput::Tab, TerminalInput::Submit] {
                         assert!(!terminal.handle_draft_detail(&mut composer, input));
                         assert!(composer.paste_detail().is_none());
@@ -5286,14 +5325,24 @@ mod pointer_tests {
                         "the payload is consumed"
                     );
                 }
-                terminal.scrollback_dump = false;
-                assert!(terminal.history.handle(TerminalInput::HistoryFind, &view));
+                terminal.transcript.scrollback_dump = false;
+                assert!(
+                    terminal
+                        .transcript
+                        .history
+                        .handle(TerminalInput::HistoryFind, &view)
+                );
                 assert!(!terminal.handle_draft_detail(&mut composer, TerminalInput::Tab));
-                assert!(terminal.history.find_open());
+                assert!(terminal.transcript.history.find_open());
                 assert!(composer.paste_detail().is_none());
-                assert!(terminal.history.handle(TerminalInput::Escape, &view));
+                assert!(
+                    terminal
+                        .transcript
+                        .history
+                        .handle(TerminalInput::Escape, &view)
+                );
                 terminal.mode = TerminalMode::Classic;
-                terminal.transcript_open = true;
+                terminal.transcript.transcript_open = true;
                 assert!(terminal.handle_draft_detail(&mut composer, TerminalInput::Tab));
                 assert!(composer.paste_detail().is_some());
                 assert!(terminal.handle_draft_detail(&mut composer, TerminalInput::Escape));
@@ -5329,13 +5378,14 @@ mod pointer_tests {
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
-                terminal.history.sync(&view, 80, 20);
+                terminal.transcript.history.sync(&view, 80, 20);
                 terminal
+                    .transcript
                     .history
                     .record_notice(TerminalNotice::History("selected notice"));
-                terminal.history.select_at(&view, 0, 0, 1);
-                terminal.history.extend_selection(&view, 1, 79);
-                assert!(terminal.history.has_selection());
+                terminal.transcript.history.select_at(&view, 0, 0, 1);
+                terminal.transcript.history.extend_selection(&view, 1, 79);
+                assert!(terminal.transcript.history.has_selection());
                 let composer = Composer::default();
                 assert!(
                     !terminal
@@ -5343,14 +5393,17 @@ mod pointer_tests {
                         .await,
                     "an active Run or compaction receives Ctrl+C"
                 );
-                assert!(terminal.history.has_selection(), "nothing was copied");
+                assert!(
+                    terminal.transcript.history.has_selection(),
+                    "nothing was copied"
+                );
                 assert!(
                     terminal
                         .handle_history_input(TerminalInput::Escape, &view, &composer, true)
                         .await
                 );
                 assert!(
-                    !terminal.history.has_selection(),
+                    !terminal.transcript.history.has_selection(),
                     "Escape clears the selection"
                 );
             });
