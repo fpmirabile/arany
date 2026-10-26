@@ -995,7 +995,7 @@ pub(crate) fn escaped_terminal_width(value: &str) -> usize {
     }
 }
 
-fn escape_json_controls(value: &str) -> String {
+pub fn escape_json_controls(value: &str) -> String {
     let mut safe = String::with_capacity(value.len());
     for character in value.chars() {
         if unsafe_display_character(character) {

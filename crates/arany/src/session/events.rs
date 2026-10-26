@@ -530,7 +530,7 @@ pub struct ForkLineage {
     pub prefix_digest: [u8; 32],
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReplayError {
     #[error("invalid Event payload")]
     InvalidPayload,
