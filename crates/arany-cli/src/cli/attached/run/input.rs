@@ -66,11 +66,11 @@ impl RunProgress<'_> {
         ui: &mut RunUi<'_>,
         text: String,
     ) -> Result<Option<Feedback>, InputFailure> {
-        let feedback = if ui.terminal.is_linear() && self.held.is_some() {
+        let feedback = if ui.terminal.is_linear() && self.drafts.held.is_some() {
             Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
         } else if !ui.composer.images().is_empty() {
             Feedback::Transient("Steering notes are text only; draft retained".into())
-        } else if self.offered.is_some() && !ui.terminal.is_linear() {
+        } else if self.drafts.offered.is_some() && !ui.terminal.is_linear() {
             // The composer still holds the waiting note; editing it withdraws the offer.
             Feedback::Transient(
                 "Steering note waits for the agent's next step; editing withdraws it".into(),
@@ -78,9 +78,9 @@ impl RunProgress<'_> {
         } else {
             match self.controls.offer_note(text).await? {
                 Ok(()) => {
-                    self.offered = Some(ui.composer.text().to_owned());
+                    self.drafts.offered = Some(ui.composer.text().to_owned());
                     if ui.terminal.is_linear() {
-                        self.linear_offers.push(ui.composer.take_draft());
+                        self.drafts.linear_offers.push(ui.composer.take_draft());
                         Feedback::Transient("Steering note waits for the agent's next step".into())
                     } else {
                         Feedback::Transient(
@@ -94,10 +94,10 @@ impl RunProgress<'_> {
         };
         // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
         if ui.terminal.is_linear()
-            && self.held.is_none()
+            && self.drafts.held.is_none()
             && let Some(draft) = hold_draft(ui.composer)
         {
-            self.held = Some(draft);
+            self.drafts.held = Some(draft);
         }
         if ui
             .terminal
@@ -283,7 +283,7 @@ impl RunProgress<'_> {
     }
 
     fn continued_line(&self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
-        if self.held.is_some() {
+        if self.drafts.held.is_some() {
             ui.terminal
                 .restore_draft_input(ui.composer.input_capacity())
                 .map_err(|_| InputFailure::Shutdown("terminal input failed".to_owned()))?;
@@ -389,11 +389,12 @@ impl RunProgress<'_> {
     ) -> Result<(), InputFailure> {
         if !ui.terminal.is_linear()
             && self
+                .drafts
                 .offered
                 .as_deref()
                 .is_some_and(|text| ui.composer.text() != text || !ui.composer.images().is_empty())
         {
-            self.offered = None;
+            self.drafts.offered = None;
             notice = Some(if self.controls.withdraw_note().await?.is_some() {
                 Feedback::Transient("Steering note withdrawn; draft retained".into())
             } else {
@@ -438,8 +439,8 @@ impl RunProgress<'_> {
             return Ok(None);
         }
         if exits_after_settled_run(ui.composer, ui.view, self.starting_sequence) {
-            abandon_drafts_for_exit(ui.composer, &mut self.held, &self.controls).await;
-            self.offered = None;
+            abandon_drafts_for_exit(ui.composer, &mut self.drafts.held, &self.controls).await;
+            self.drafts.offered = None;
             ui.terminal
                 .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|_| InputFailure::Shutdown("terminal input failed".into()))?;

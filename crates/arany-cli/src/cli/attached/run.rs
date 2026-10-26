@@ -223,6 +223,13 @@ pub(super) struct RunUi<'a> {
     pub(super) composer: &'a mut Composer,
 }
 
+#[derive(Default)]
+struct Drafts {
+    offered: Option<String>,
+    linear_offers: Vec<ComposerDraft>,
+    held: Option<HeldDraft>,
+}
+
 pub(super) struct RunProgress<'a> {
     admission: &'a Admission,
     starting_sequence: u64,
@@ -232,9 +239,7 @@ pub(super) struct RunProgress<'a> {
     approval_ui: ApprovalUi,
     stop: ActiveStop,
     user_recorded: bool,
-    offered: Option<String>,
-    linear_offers: Vec<ComposerDraft>,
-    held: Option<HeldDraft>,
+    drafts: Drafts,
     seen_delivered: u64,
     shown_retries: (Option<arany::RunId>, usize),
     exit_after_run: bool,
@@ -272,9 +277,7 @@ impl<'a> RunProgress<'a> {
                 approval_ui: ApprovalUi::default(),
                 stop: ActiveStop::Running,
                 user_recorded: false,
-                offered: None,
-                linear_offers: Vec::new(),
-                held: None,
+                drafts: Drafts::default(),
                 seen_delivered: 0,
                 shown_retries: (None, 0),
                 exit_after_run: false,
@@ -373,14 +376,14 @@ impl<'a> RunProgress<'a> {
         child_follow: bool,
     ) -> Result<(), String> {
         // An undelivered note ends the Run as an ordinary retained draft.
-        let had_offer = self.offered.is_some();
+        let had_offer = self.drafts.offered.is_some();
         let sent = settle_recorded_note(
             self.controls.delivered_notes().await?,
             &mut self.seen_delivered,
-            &mut self.offered,
+            &mut self.drafts.offered,
             ui.composer,
         );
-        let had_held = self.held.is_some();
+        let had_held = self.drafts.held.is_some();
         // The undelivered note predates the held draft, so restore it ahead of that draft.
         let note = self
             .controls
@@ -389,13 +392,15 @@ impl<'a> RunProgress<'a> {
             .filter(|_| ui.terminal.is_linear());
         let withdrawn = note.is_some();
         let mut restored = self
+            .drafts
             .held
             .take()
             .is_none_or(|draft| release_held_draft(ui.composer, draft));
         if let Some(note) = note {
-            restored &= ui
-                .composer
-                .restore_draft(ComposerDraft::from_steering_note(note, &self.linear_offers));
+            restored &= ui.composer.restore_draft(ComposerDraft::from_steering_note(
+                note,
+                &self.drafts.linear_offers,
+            ));
         }
         if (failed || had_offer || sent || had_held)
             && ui
@@ -473,7 +478,7 @@ impl<'a> RunProgress<'a> {
         let sent = settle_recorded_note(
             self.controls.delivered_notes().await?,
             &mut self.seen_delivered,
-            &mut self.offered,
+            &mut self.drafts.offered,
             ui.composer,
         );
         if sent
@@ -566,7 +571,7 @@ impl<'a> RunProgress<'a> {
                 .map_err(|_| InputFailure::Shutdown("terminal rendering failed".to_owned()))?;
         }
         if input == TerminalInput::EndOfInput {
-            if !ui.composer.is_empty() || self.held.is_some() {
+            if !ui.composer.is_empty() || self.drafts.held.is_some() {
                 return Ok(Some(Feedback::Transient(
                     draft_retained_notice(self.autonomous).into(),
                 )));
