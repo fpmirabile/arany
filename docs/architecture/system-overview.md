@@ -146,7 +146,8 @@ flowchart LR
 
 Provider is the substitutable semantic inference interface. Wire adapters stay
 behind it; SQLite, replay, reducers and Tool dispatch remain concrete owners.
-`ProviderKind` owns native profile names and custom-profile syntax; telemetry
+`ProviderKind` owns native profile names, credential classification, catalog/check
+dispatch and custom-profile syntax; public strings are parsed at those edges. Telemetry
 maps those closed categories to its existing fixed labels.
 The CLI depends on `arany`; the library never depends on CLI, terminal,
 presentation or accounts, and has no ratatui, crossterm or keyring dependency.

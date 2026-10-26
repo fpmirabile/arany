@@ -426,7 +426,7 @@ pub const MAX_ANTHROPIC_WORKSPACE_ID_BYTES: usize = 128;
 /// A selected native key and its explicit API workspace, never ambient account state.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NativeApiCredentials {
-    profile: &'static str,
+    profile: ProviderKind,
     key: String,
     anthropic_workspace_id: Option<String>,
 }
@@ -437,10 +437,13 @@ impl NativeApiCredentials {
         key: String,
         anthropic_workspace_id: Option<String>,
     ) -> Result<Self, ProviderError> {
-        let profile = match profile {
-            "openai" if anthropic_workspace_id.is_none() => "openai",
-            "anthropic" => "anthropic",
-            _ => return Err(ProviderError::Rejected),
+        let profile = ProviderKind::parse(profile).ok_or(ProviderError::Rejected)?;
+        match profile {
+            ProviderKind::OpenAi if anthropic_workspace_id.is_none() => {}
+            ProviderKind::Anthropic => {}
+            ProviderKind::OpenAi | ProviderKind::ChatGpt | ProviderKind::Custom => {
+                return Err(ProviderError::Rejected);
+            }
         };
         if anthropic_workspace_id.as_deref().is_some_and(|id| {
             id.len() > MAX_ANTHROPIC_WORKSPACE_ID_BYTES
@@ -459,12 +462,13 @@ impl NativeApiCredentials {
     }
 
     pub fn from_env(profile: &str) -> Result<Self, ProviderError> {
-        let variable = match profile {
-            "openai" => "OPENAI_API_KEY",
-            "anthropic" => "ANTHROPIC_API_KEY",
-            _ => return Err(ProviderError::Rejected),
+        let kind = ProviderKind::parse(profile).ok_or(ProviderError::Rejected)?;
+        let variable = match kind {
+            ProviderKind::OpenAi => "OPENAI_API_KEY",
+            ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+            ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
         };
-        let workspace = if profile == "anthropic" {
+        let workspace = if kind == ProviderKind::Anthropic {
             match std::env::var("ANTHROPIC_WORKSPACE_ID") {
                 Ok(value) => Some(value),
                 Err(std::env::VarError::NotPresent) => None,
@@ -490,7 +494,7 @@ impl NativeApiCredentials {
     }
 
     pub(super) fn require_profile(&self, profile: &str) -> Result<(), ProviderError> {
-        if self.profile == profile {
+        if Some(self.profile) == ProviderKind::parse(profile) {
             Ok(())
         } else {
             Err(ProviderError::Rejected)
