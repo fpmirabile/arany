@@ -20,7 +20,9 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
-const UI_PREFERENCES_VERSION: u8 = 6;
+mod build_jobs;
+
+const UI_PREFERENCES_VERSION: u8 = 7;
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
     ("KB", 1024),
@@ -46,6 +48,10 @@ pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
         RecordStep {
             from: 5,
             transform: without_mouse_preference,
+        },
+        RecordStep {
+            from: 6,
+            transform: build_jobs::with_default,
         },
     ],
     accepts: |bytes| decode_settings(bytes).is_ok(),
@@ -85,9 +91,7 @@ fn without_mouse_preference(mut record: Value) -> Option<Value> {
         return None;
     }
     preferences.remove("mouse")?;
-    record
-        .as_object_mut()?
-        .insert("version".into(), UI_PREFERENCES_VERSION.into());
+    record.as_object_mut()?.insert("version".into(), 6.into());
     Some(record)
 }
 
@@ -121,7 +125,10 @@ impl Default for Preferences {
             completion: CompletionLayout::default(),
             view: TerminalMode::default(),
             goal_budget: arany::GoalBudget::default(),
-            resources: arany::ToolResourceSettings::default(),
+            resources: arany::ToolResourceSettings {
+                build_jobs: None,
+                ..Default::default()
+            },
             copy_on_select: PointerSettings::default().copy_on_select,
             newline: NewlineShortcut::default(),
         }
@@ -377,6 +384,7 @@ const SETTINGS: &[Setting] = &[
         },
         guidance: Some(AttachedTerminal::newline_shortcut_guidance),
     },
+    build_jobs::SETTING,
 ];
 
 fn show_limit(value: Option<u64>, format: impl FnOnce(u64) -> String) -> String {
@@ -1944,7 +1952,7 @@ mod tests {
             );
         }
         assert_eq!(
-            linear_setting_rows(preferences),
+            &linear_setting_rows(preferences)[..SETTINGS.len() - 1],
             [
                 "Slash menu: tabs (tabs|combined)",
                 "Chat view: fullscreen (fullscreen|classic)",
@@ -2041,6 +2049,7 @@ mod tests {
                 max_command_timeout_ms: 123_456,
                 build_memory_bytes: 1025,
                 build_processes: 17,
+                build_jobs: None,
                 build_project_bytes: 513 * 1024 * 1024,
                 build_cache_bytes: 1025 * 1024 * 1024,
             },
@@ -2303,7 +2312,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":6,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
+            br#"{"version":7,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
         );
         // A complete version-3 record upgrades in place, keeping its choices and adding newer defaults.
         let finite = Preferences {
@@ -2328,6 +2337,10 @@ mod tests {
         for mouse in ["wheel_and_clicks", "wheel_only", "off"] {
             let mut legacy: Value = serde_json::from_slice(&original).unwrap();
             legacy["version"] = 5.into();
+            legacy["preferences"]["resources"]
+                .as_object_mut()
+                .unwrap()
+                .remove("build_jobs");
             legacy["preferences"]["mouse"] = mouse.into();
             root.record(RecordKind::UiPreferences)
                 .replace(&serde_json::to_vec(&legacy).unwrap())
@@ -2347,6 +2360,10 @@ mod tests {
         for mouse in [false.into(), Value::Null, "unknown".into()] {
             let mut legacy: Value = serde_json::from_slice(&original).unwrap();
             legacy["version"] = 5.into();
+            legacy["preferences"]["resources"]
+                .as_object_mut()
+                .unwrap()
+                .remove("build_jobs");
             legacy["preferences"]["mouse"] = mouse;
             let legacy = serde_json::to_vec(&legacy).unwrap();
             root.record(RecordKind::UiPreferences)

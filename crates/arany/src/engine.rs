@@ -27,6 +27,7 @@ mod hints;
 mod ledger;
 mod lifecycle;
 mod report;
+mod resources;
 pub use report::budget_refusal_summary;
 mod rewind;
 pub use rewind::{
@@ -241,7 +242,10 @@ impl GoalRequest {
             id: None,
             phase: Some(phase),
             budget: Some(budget),
-            resource_settings: crate::tools::ToolResourceSettings::default(),
+            resource_settings: crate::tools::ToolResourceSettings {
+                build_jobs: None,
+                ..Default::default()
+            },
             finish_after_run: true,
             autonomous: false,
             continues: None,
@@ -898,7 +902,7 @@ fn resolve_goal_admission(
             phase: source.phase,
             budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
             autonomous: source.autonomous,
-            resource_settings: request.goal.resource_settings,
+            resource_settings: resources::admit(request.goal.resource_settings),
             plan_contract: None,
             entry: GoalEntry::New,
             usage: GoalUsage {
@@ -929,7 +933,7 @@ fn resolve_goal_admission(
             phase: request.goal.phase.ok_or(EngineError::InvalidRequest)?,
             budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
             autonomous: request.goal.autonomous,
-            resource_settings: request.goal.resource_settings,
+            resource_settings: resources::admit(request.goal.resource_settings),
             plan_contract: None,
             entry: GoalEntry::New,
             usage: GoalUsage {
