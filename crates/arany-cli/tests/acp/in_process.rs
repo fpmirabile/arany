@@ -1418,7 +1418,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
         ))
         .await
         .unwrap();
-    events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"item/completed".into(), params:Some(json!({"threadId":session,"turnId":run,"completedAtMs":0,"item":{"type":"agentMessage","id":format!("{run}:answer"),"text":"Committed","phase":"final_answer"}})) })).await.unwrap();
+    events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"item/completed".into(), params:Some(json!({"threadId":session,"turnId":run,"completedAtMs":0,"item":{"type":"agentMessage","id":format!("{run}:answer"),"text":"# Committed","phase":"final_answer"}})) })).await.unwrap();
     drop(events.reserve_many(256).await.unwrap());
     let cancel = wire::decode(
         &encode_line(
@@ -1441,7 +1441,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
     }
     let answer = output.recv().await.unwrap();
     validate(&answer);
-    assert_eq!(answer["params"]["update"]["content"]["text"], "Committed");
+    assert_eq!(answer["params"]["update"]["content"]["text"], "# Committed");
     events.send(reply(9, json!({}))).await.unwrap();
     events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"turn/completed".into(), params:Some(json!({"threadId":session,"turn":{"id":run,"goalId":goal,"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
     let cancelled = output.recv().await.unwrap();

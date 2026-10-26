@@ -4,6 +4,7 @@ use crate::presentation::{
     safe_truncate,
 };
 use arany::{RunId, RunView, SessionId, SessionView};
+use ratatui::text::Span;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -76,12 +77,14 @@ struct MessageIndex {
 }
 
 struct MessageRow {
+    cells: Option<Vec<super::markdown::Cell>>,
     text: String,
     source_byte: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TextPoint {
+    mapped: Option<(usize, usize)>,
     source: MessageSource,
     byte: usize,
     // A boundary sits between graphemes; otherwise the grapheme starting at `byte` is selected.
@@ -97,6 +100,7 @@ struct Selection {
 
 #[derive(Clone)]
 pub(super) struct HistoryRow {
+    pub(super) spans: Vec<Span<'static>>,
     pub(super) text: String,
     pub(super) slash_cells: usize,
     pub(super) speaker: MessageKind,
@@ -123,6 +127,7 @@ pub(super) struct History {
     find_failed: bool,
     last_find: Option<String>,
     matched_row: Option<usize>,
+    matched_source: Option<(MessageSource, usize)>,
     notices: VecDeque<Notice>,
     next_notice: u64,
     sequence: u64,
@@ -188,6 +193,7 @@ impl History {
                 self.find = None;
                 self.last_find = None;
                 self.matched_row = None;
+                self.matched_source = None;
                 self.notices.clear();
                 self.preview = None;
             }
@@ -404,6 +410,15 @@ impl History {
                 self.top = message.start + offset;
             }
         }
+        if rebuild && self.matched_row.is_some() {
+            self.matched_row = self.matched_source.and_then(|(source, byte)| {
+                let message = self.messages.iter().find(|entry| entry.source == source)?;
+                let text = message_text(view, message, &self.notices);
+                let rows = message_rows(message.kind, &text, width);
+                let offset = rows.partition_point(|row| row.source_byte <= byte);
+                Some(message.start + offset.saturating_sub(1))
+            });
+        }
         self.height = height;
         self.top = if self.follow_tail {
             self.tail()
@@ -413,14 +428,7 @@ impl History {
     }
 
     fn push(&mut self, source: MessageSource, kind: MessageKind, text: &str, width: usize) {
-        let rows = if matches!(
-            kind,
-            MessageKind::Supervisor | MessageKind::Tool | MessageKind::ToolDetails
-        ) {
-            message_rows(kind, text, width).len()
-        } else {
-            message_row_count(text, width)
-        };
+        let rows = indexed_row_count(kind, text, width);
         self.push_count(source, kind, rows);
     }
 
@@ -726,6 +734,7 @@ impl History {
         )?;
         let text = message_text(view, message, &self.notices);
         let boundary = |byte| TextPoint {
+            mapped: None,
             source: message.source,
             byte,
             boundary: true,
@@ -735,6 +744,28 @@ impl History {
             return Some(boundary(0));
         }
         let rows = message_rows(message.kind, &text, self.width);
+        if let Some(cells) = &rows[offset].cells {
+            let mut at = row_indent(message.kind);
+            if column < at {
+                return Some(boundary(rows[offset].source_byte));
+            }
+            for cell in cells {
+                at += cell.text.width();
+                if column < at {
+                    return Some(TextPoint {
+                        mapped: Some((cell.source.start, cell.source.end)),
+                        source: message.source,
+                        byte: cell.byte,
+                        boundary: false,
+                    });
+                }
+            }
+            return Some(boundary(
+                cells
+                    .last()
+                    .map_or(rows[offset].source_byte, |cell| cell.source.end),
+            ));
+        }
         let Some((start, end)) = row_span(&text, &rows, offset) else {
             return Some(boundary(text.len()));
         };
@@ -746,6 +777,7 @@ impl History {
             row_cells(&text, start, end, indent)
                 .find(|(_, cell, width)| column < cell + width)
                 .map_or(boundary(end), |(byte, _, _)| TextPoint {
+                    mapped: None,
                     source: message.source,
                     byte,
                     boundary: false,
@@ -769,6 +801,7 @@ impl History {
             .collect::<Vec<_>>();
         let at = graphemes.iter().position(|(byte, _)| *byte == point.byte)?;
         let at_index = |index: usize| TextPoint {
+            mapped: None,
             byte: graphemes[index].0,
             ..point
         };
@@ -813,6 +846,7 @@ impl History {
             .find(|message| message.source == point.source)?;
         let (start, end) = line_bounds(&message_text(view, message, &self.notices), point.byte);
         let boundary = |byte| TextPoint {
+            mapped: None,
             source: point.source,
             byte,
             boundary: true,
@@ -839,7 +873,10 @@ impl History {
         if order(high) < order(low) {
             std::mem::swap(&mut low, &mut high);
         }
-        let end = if high.1.boundary {
+        let start = low.1.mapped.map_or(low.1.byte, |(start, _)| start);
+        let end = if let Some((_, end)) = high.1.mapped {
+            end
+        } else if high.1.boundary {
             high.1.byte
         } else {
             let source = message_source(view, &self.messages[high.0], &self.notices);
@@ -849,7 +886,7 @@ impl History {
                 .filter(|grapheme| *grapheme != "\n")
                 .map_or(byte, |grapheme| byte + grapheme.len())
         };
-        Some(((low.0, low.1.byte), (high.0, end)))
+        Some(((low.0, start), (high.0, end)))
     }
 
     fn search(&mut self, view: &SessionView, query: &str) -> bool {
@@ -861,7 +898,11 @@ impl History {
             if let Some(byte) = text.find(query) {
                 let offset = if matches!(
                     message.kind,
-                    MessageKind::Supervisor | MessageKind::Tool | MessageKind::ToolDetails
+                    MessageKind::Supervisor
+                        | MessageKind::Tool
+                        | MessageKind::ToolDetails
+                        | MessageKind::Assistant
+                        | MessageKind::AgentResult
                 ) {
                     message_rows(message.kind, &text, self.width)
                         .iter()
@@ -870,14 +911,15 @@ impl History {
                 } else {
                     message_row_count(&text[..byte], self.width).saturating_sub(2)
                 };
-                self.show_match(message.start + offset);
+                self.show_match(message.start + offset, (message.source, byte));
                 return true;
             }
         }
         false
     }
 
-    fn show_match(&mut self, row: usize) {
+    fn show_match(&mut self, row: usize, source: (MessageSource, usize)) {
+        self.matched_source = Some(source);
         self.top = row.saturating_sub(1).min(self.tail());
         self.follow_tail = false;
         self.matched_row = Some(row);
@@ -899,10 +941,13 @@ impl History {
             let rows = message_rows(message.kind, &text, self.width);
             text.match_indices(query.as_str())
                 .map(|(byte, _)| {
-                    message.start
-                        + rows
-                            .partition_point(|row| row.source_byte <= byte)
-                            .saturating_sub(1)
+                    (
+                        message.start
+                            + rows
+                                .partition_point(|row| row.source_byte <= byte)
+                                .saturating_sub(1),
+                        (message.source, byte),
+                    )
                 })
                 .collect::<Vec<_>>()
         };
@@ -911,14 +956,21 @@ impl History {
                 .iter()
                 .rev()
                 .filter(|message| message.start < current)
-                .find_map(|message| rows(message).into_iter().rev().find(|row| *row < current))
+                .find_map(|message| {
+                    rows(message)
+                        .into_iter()
+                        .rev()
+                        .find(|(row, _)| *row < current)
+                })
         } else {
             self.messages
                 .iter()
                 .filter(|message| message.start + message.rows > current + 1)
-                .find_map(|message| rows(message).into_iter().find(|row| *row > current))
+                .find_map(|message| rows(message).into_iter().find(|(row, _)| *row > current))
         };
-        found.inspect(|row| self.show_match(*row)).is_some()
+        found
+            .inspect(|(row, source)| self.show_match(*row, *source))
+            .is_some()
     }
 
     // The transcript pager's less-style keys; find typing, pointer and process input pass through.
@@ -1196,7 +1248,7 @@ fn run_row_counts(runs: &[RunView], width: usize) -> Vec<(usize, Option<usize>)>
             message_row_count(&image_message_text(&run.objective, &run.images), width),
             run.assistant_message
                 .as_ref()
-                .map(|answer| message_row_count(answer, width)),
+                .map(|answer| indexed_row_count(MessageKind::Assistant, answer, width)),
         )
     };
     if total_bytes < 4 * 1024 * 1024 || workers < 2 || runs.len() < workers {
@@ -1263,7 +1315,10 @@ fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
         bytes = bytes.saturating_add(token.kind.len() + 3);
     }
     let mut add_message = |kind, text: &str| {
-        let (message_bytes, message_rows) = if kind == MessageKind::Tool {
+        let (message_bytes, message_rows) = if kind == MessageKind::Assistant {
+            let (bytes, rows) = markdown_cost(kind, text, width);
+            (bytes + native_marker(kind, true).len(), rows + 1)
+        } else if kind == MessageKind::Tool {
             let rendered = message_rows(kind, text, width);
             (
                 rendered.iter().map(|row| row.text.len()).sum(),
@@ -1405,6 +1460,15 @@ fn display_row(
     width: usize,
 ) -> HistoryRow {
     HistoryRow {
+        spans: row.cells.as_ref().map_or_else(Vec::new, |cells| {
+            std::iter::once(Span::raw(safe_truncate("  ", width)))
+                .chain(
+                    cells
+                        .iter()
+                        .map(|cell| Span::styled(cell.text.clone(), cell.style)),
+                )
+                .collect()
+        }),
         text: match slash.filter(|_| index == 0) {
             Some(token) => safe_truncate(&format!("You ({}):", token.kind), width),
             None => row.text.clone(),
@@ -1640,6 +1704,20 @@ fn selected_cells(
     if index < first || index > last || (offset == 0 && has_heading(kind)) {
         return None;
     }
+    if let Some(cells) = &rows[offset].cells {
+        let mut at = row_indent(kind);
+        let mut selected = None;
+        for cell in cells {
+            let next = at + cell.text.width();
+            if (index != first || cell.source.end > start)
+                && (index != last || cell.source.start < end)
+            {
+                selected = Some((selected.map_or(at, |(from, _)| from), next));
+            }
+            at = next;
+        }
+        return selected;
+    }
     let (row_start, row_end) = row_span(text, rows, offset)?;
     let from = if index == first { start } else { 0 };
     let to = if index == last { end } else { usize::MAX };
@@ -1678,6 +1756,42 @@ fn message_heading(kind: MessageKind) -> &'static str {
 }
 
 fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
+    if !matches!(kind, MessageKind::Assistant | MessageKind::AgentResult) {
+        return literal_rows(kind, text, width);
+    }
+    let body_width = width.min(MAX_ROW_CELLS).saturating_sub(2);
+    let ((body, _, _), cue) = super::markdown::project(text, body_width, true);
+    let mut rows = literal_rows(kind, "", width);
+    rows.truncate(1);
+    rows.extend(body.into_iter().map(|row| {
+        let mut text = safe_truncate("  ", width);
+        text.extend(row.cells.iter().map(|cell| cell.text.as_str()));
+        MessageRow {
+            text,
+            source_byte: row.source_byte,
+            cells: Some(row.cells),
+        }
+    }));
+    rows.push(MessageRow {
+        text: String::new(),
+        source_byte: text.len(),
+        cells: None,
+    });
+    if let Some(cue) = cue {
+        rows.extend(
+            literal_rows(MessageKind::Notice, cue, width)
+                .into_iter()
+                .skip(1)
+                .map(|mut row| {
+                    row.source_byte = text.len();
+                    row
+                }),
+        );
+    }
+    rows
+}
+
+fn literal_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
     if kind == MessageKind::Supervisor {
         let mut rows = message_rows(MessageKind::Commentary, text, width);
         rows.remove(0);
@@ -1693,6 +1807,7 @@ fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
         vec![MessageRow {
             text: safe_truncate(heading, width),
             source_byte: 0,
+            cells: None,
         }]
     };
     let mut line_start = 0;
@@ -1707,6 +1822,7 @@ fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
                 rows.push(MessageRow {
                     text: row,
                     source_byte: row_start,
+                    cells: None,
                 });
                 row = String::from(indent);
                 cells = indent.len();
@@ -1723,14 +1839,38 @@ fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
         rows.push(MessageRow {
             text: safe_truncate(&row, width),
             source_byte: row_start,
+            cells: None,
         });
         line_start += logical.len() + 1;
     }
     rows.push(MessageRow {
         text: String::new(),
         source_byte: text.len(),
+        cells: None,
     });
     rows
+}
+
+fn indexed_row_count(kind: MessageKind, text: &str, width: usize) -> usize {
+    match kind {
+        MessageKind::Assistant | MessageKind::AgentResult => markdown_cost(kind, text, width).1,
+        MessageKind::Supervisor | MessageKind::Tool | MessageKind::ToolDetails => {
+            message_rows(kind, text, width).len()
+        }
+        _ => message_row_count(text, width),
+    }
+}
+
+fn markdown_cost(kind: MessageKind, text: &str, width: usize) -> (usize, usize) {
+    let width = width.min(MAX_ROW_CELLS);
+    let body_width = width.saturating_sub(2);
+    let ((_, bytes, rows), cue) = super::markdown::project(text, body_width, false);
+    let (_, cue_bytes, cue_rows) = cue.map_or((Vec::new(), 0, 0), |cue| {
+        super::markdown::literal(cue, body_width, false)
+    });
+    let heading = safe_truncate(message_heading(kind), width);
+    let bytes = bytes + cue_bytes + (rows + cue_rows) * width.min(2) + heading.len();
+    (bytes, rows + cue_rows + 2 + usize::from(cue.is_some()))
 }
 
 fn message_row_count(text: &str, width: usize) -> usize {
@@ -1815,7 +1955,7 @@ mod tests {
     use arany::{StateRoot, Store};
     use std::time::Instant;
 
-    fn session() -> SessionView {
+    pub(super) fn session() -> SessionView {
         SessionView {
             usage: Default::default(),
             rewinds: Default::default(),
@@ -1837,7 +1977,7 @@ mod tests {
         }
     }
 
-    fn run(objective: &str, answer: &str) -> RunView {
+    pub(super) fn run(objective: &str, answer: &str) -> RunView {
         RunView {
             skill: None,
             supervisor: Default::default(),
@@ -1890,11 +2030,13 @@ mod tests {
         assert_eq!(rows[2].slash_cells, 0);
         history.selection = Some(Selection {
             anchor: TextPoint {
+                mapped: None,
                 source: MessageSource::User(0),
                 byte: 0,
                 boundary: true,
             },
             head: TextPoint {
+                mapped: None,
                 source: MessageSource::User(0),
                 byte: text.len(),
                 boundary: true,
@@ -3293,3 +3435,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod markdown_tests;
