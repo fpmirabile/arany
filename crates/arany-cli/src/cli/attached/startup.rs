@@ -581,7 +581,7 @@ impl Startup {
             ),
         };
         let mut parts = SessionParts {
-            engine,
+            engine: std::sync::Arc::new(engine),
             view,
             composer: self.composer,
             terminal: self.terminal,
@@ -630,7 +630,7 @@ impl Startup {
             skill: startup_skill,
             draft: None,
         }
-        .submit(&mut parts.terminal, &mut parts.view, &mut parts.composer)
+        .run(&mut parts.terminal, &mut parts.view, &mut parts.composer)
         .await?;
         Ok(())
     }
