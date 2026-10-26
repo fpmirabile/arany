@@ -386,8 +386,8 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
     // A sealed-data allowance budgets its own chunks, so it is not headroom for later Events.
     let admissions: Vec<_> = super::admissions::recorded(events[0].session_id)
         .into_iter()
-        .filter(|(_, _, kind)| *kind != crate::store::AdmissionKind::SealedData)
-        .map(|(count, slots, _)| (count, slots))
+        .filter(|(_, _, kind, _)| *kind != crate::store::AdmissionKind::SealedData)
+        .map(|(count, slots, _, _)| (count, slots))
         .collect();
     assert!(!admissions.is_empty(), "the Store recorded no admissions");
     let first = admissions.iter().map(|(count, _)| *count).min();

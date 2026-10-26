@@ -434,7 +434,11 @@ impl RunLoop<'_> {
                         .saturating_add(2 * hook_occurrences),
                     action
                         .tool_observations()
-                        .saturating_add(intents.len())
+                        .saturating_add(
+                            intents
+                                .len()
+                                .saturating_mul(intent::MAX_INTENT_RECORDS_PER_TOOL),
+                        )
                         .saturating_add(hook_occurrences),
                 )
                 .await?;

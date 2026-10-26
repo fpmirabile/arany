@@ -5423,7 +5423,7 @@ async fn two_child_research_delegation_admission_covers_its_spawns() {
     assert!(
         arany::test_support::admissions::recorded(outcome.session_id)
             .iter()
-            .any(|(_, slots, kind)| {
+            .any(|(_, slots, kind, _)| {
                 *slots > 200 && *kind != arany::test_support::admissions::AdmissionKind::SealedData
             }),
         "the research delegation admission exceeds 200 slots"
@@ -9564,10 +9564,22 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
             assert!(
                 arany::test_support::admissions::recorded(outcome.session_id)
                     .iter()
-                    .all(|(count, _, _)| {
+                    .all(|(count, _, _, _)| {
                         *count < proposals[0] as usize || *count >= proposals[3] as usize
                     }),
                 "initial intents commit without a second admission boundary"
+            );
+            let oversized_slots: Vec<_> =
+                arany::test_support::admissions::recorded(outcome.session_id)
+                    .into_iter()
+                    .filter(|(count, _, _, _)| *count + 1 == proposals[0] as usize)
+                    .map(|(_, _, _, observations)| observations)
+                    .collect();
+            let per_call = oversized_slots.iter().min().expect("per-call admission");
+            let batch = oversized_slots.iter().max().expect("batch admission");
+            assert!(
+                *batch >= count * per_call,
+                "batch admission must retain every call's oversized payload allowance"
             );
             for (index, reservation) in reservations.iter().enumerate() {
                 assert!(

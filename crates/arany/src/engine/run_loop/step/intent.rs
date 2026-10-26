@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const EDITOR_RUNTIME_DIVISOR: u64 = 4;
-const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
+pub(super) const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
 // Cache restoration and publication need additional time within the delegation allowance.
 const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
 
