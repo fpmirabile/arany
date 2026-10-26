@@ -10,23 +10,27 @@ use std::str::FromStr;
 
 pub(crate) const MAX_SESSION_EVENTS: usize = 10_000;
 
+#[derive(Debug)]
 pub struct InspectedEvent {
     pub sequence: u64,
     pub kind: String,
     pub event: Result<EventEnvelope, crate::session::ReplayError>,
 }
 
+#[derive(Debug)]
 pub struct SessionInspection {
     pub events: Vec<InspectedEvent>,
     pub failure: Option<InspectionFailure>,
     pub prefix_view: Option<SessionView>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InspectionFailure {
     pub sequence: u64,
     pub cause: InspectionCause,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InspectionCause {
     Replay(crate::session::ReplayError),
     JournalSequenceGap,
@@ -109,14 +113,14 @@ pub(super) fn inspect_session(
 ) -> Result<SessionInspection, StoreError> {
     let (events, mut failure) = scan_inspected_events(connection, session_id)?;
     let replay_limit = failure.as_ref().map_or(u64::MAX, |f| f.sequence);
-    if let Some(replay_failure) = replay_failure(connection, session_id, &events, replay_limit)
+    if let Some(replay_failure) = replay_failure(connection, session_id, &events, replay_limit)?
         && failure
             .as_ref()
             .is_none_or(|current| replay_failure.sequence < current.sequence)
     {
         failure = Some(replay_failure);
     }
-    let prefix_view = project_inspected_prefix(connection, session_id, &events, &failure);
+    let prefix_view = project_inspected_prefix(connection, session_id, &events, &failure)?;
     Ok(SessionInspection {
         events,
         failure,
@@ -226,14 +230,14 @@ fn project_inspected_prefix(
     session_id: SessionId,
     events: &[InspectedEvent],
     failure: &Option<InspectionFailure>,
-) -> Option<SessionView> {
+) -> Result<Option<SessionView>, StoreError> {
     let prefix: Vec<_> = events
         .iter()
         .take_while(|item| failure.as_ref().is_none_or(|f| item.sequence < f.sequence))
         .filter_map(|item| item.event.as_ref().ok().cloned())
         .collect();
     let mut total_events = prefix.len();
-    replay_through(
+    match replay_through(
         connection,
         session_id,
         &prefix,
@@ -241,9 +245,10 @@ fn project_inspected_prefix(
         &mut total_events,
         true,
         None,
-    )
-    .ok()
-    .flatten()
+    ) {
+        Ok(view) => Ok(view),
+        Err(error) => inspection_rejection(error).map(|_| None),
+    }
 }
 
 fn replay_failure(
@@ -251,13 +256,13 @@ fn replay_failure(
     session_id: SessionId,
     events: &[InspectedEvent],
     before_sequence: u64,
-) -> Option<InspectionFailure> {
+) -> Result<Option<InspectionFailure>, StoreError> {
     let decoded = decoded_prefix(events, before_sequence);
     let mut failures = compaction_failures(&decoded);
-    if let Some(failure) = canonical_replay_failure(connection, session_id, &decoded) {
+    if let Some(failure) = canonical_replay_failure(connection, session_id, &decoded)? {
         failures.push(failure);
     }
-    failures.into_iter().min_by_key(|failure| failure.sequence)
+    Ok(failures.into_iter().min_by_key(|failure| failure.sequence))
 }
 
 fn decoded_prefix(events: &[InspectedEvent], before_sequence: u64) -> Vec<EventEnvelope> {
@@ -288,9 +293,9 @@ fn canonical_replay_failure(
     connection: &Connection,
     session_id: SessionId,
     events: &[EventEnvelope],
-) -> Option<InspectionFailure> {
+) -> Result<Option<InspectionFailure>, StoreError> {
     if events.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut total_events = events.len();
     let replayed = replay_through(
@@ -302,8 +307,11 @@ fn canonical_replay_failure(
         true,
         None,
     );
-    let error = replayed.as_ref().err()?;
-    let index = first_rejecting_prefix(connection, session_id, events);
+    let error = match replayed {
+        Ok(_) => return Ok(None),
+        Err(error) => inspection_rejection(error)?,
+    };
+    let index = first_rejecting_prefix(connection, session_id, events)?;
     let mut total_events = index;
     let prefix_replay = replay_through(
         connection,
@@ -315,29 +323,33 @@ fn canonical_replay_failure(
         None,
     );
     let cause = match prefix_replay {
-        Err(StoreError::InvalidSnapshot) => crate::session::ReplayError::InvalidSnapshot,
-        Err(_) => crate::session::ReplayError::InvalidTransition,
-        Ok(_) => match error {
-            StoreError::InvalidSnapshot => crate::session::ReplayError::InvalidSnapshot,
-            _ => crate::session::ReplayError::InvalidTransition,
-        },
+        Err(error) => inspection_rejection(error)?,
+        Ok(_) => error,
     };
-    Some(InspectionFailure {
+    Ok(Some(InspectionFailure {
         sequence: events[index - 1].sequence,
         cause: InspectionCause::Replay(cause),
-    })
+    }))
+}
+
+fn inspection_rejection(error: StoreError) -> Result<crate::session::ReplayError, StoreError> {
+    match error {
+        StoreError::InvalidHistory => Ok(crate::session::ReplayError::InvalidTransition),
+        StoreError::InvalidSnapshot => Ok(crate::session::ReplayError::InvalidSnapshot),
+        other => Err(other),
+    }
 }
 
 fn first_rejecting_prefix(
     connection: &Connection,
     session_id: SessionId,
     events: &[EventEnvelope],
-) -> usize {
+) -> Result<usize, StoreError> {
     let (mut low, mut high) = (1, events.len());
     while low < high {
         let middle = low + (high - low) / 2;
         let mut total_events = middle;
-        if replay_through(
+        if let Err(error) = replay_through(
             connection,
             session_id,
             &events[..middle],
@@ -345,15 +357,14 @@ fn first_rejecting_prefix(
             &mut total_events,
             false,
             None,
-        )
-        .is_err()
-        {
+        ) {
+            inspection_rejection(error)?;
             high = middle;
         } else {
             low = middle + 1;
         }
     }
-    low
+    Ok(low)
 }
 
 pub(super) fn session_for_run(
