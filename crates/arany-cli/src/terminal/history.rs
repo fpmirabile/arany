@@ -1640,6 +1640,13 @@ fn line_bounds(text: &str, byte: usize) -> (usize, usize) {
 }
 
 fn row_of_byte(rows: &[MessageRow], byte: usize) -> usize {
+    if let Some(row) = rows.iter().position(|row| {
+        row.cells
+            .as_ref()
+            .is_some_and(|cells| cells.iter().any(|cell| cell.source.contains(&byte)))
+    }) {
+        return row;
+    }
     rows.partition_point(|row| row.source_byte <= byte)
         .saturating_sub(1)
 }

@@ -224,3 +224,208 @@ fn code_whitespace_info_strings_and_narrow_geometry() {
         }
     }
 }
+
+const TABLE: &str = "| Name | Description |\n| --- | --- |\n| **Result** | escaped \\| pipe and *value* |\n| `code` | https://example.test/a/long/path/to/result |\n| `left\\|right` | extra |\n| empty |";
+
+#[test]
+fn tables_fit_or_use_records_with_source_copy_find_and_exact_classic_costs() {
+    for source in [
+        TABLE,
+        "| Result | Value |\n| --- | --- |\n| 中 e\u{301} 👩‍💻 | &#27;]52;c;text&#7; |",
+        "Result | Description\n--- | ---\nx aaaaaa&#27; | bbbbbbbbbbbbbbbb",
+    ] {
+        for width in [0, 1, 2, 3, 16, 21, 40, 50, 80, 120] {
+            let mut view = session();
+            view.runs.push(run("objective", source));
+            let rows = display_rows(MessageKind::Assistant, source, width, None);
+            assert_eq!(
+                markdown_cost(MessageKind::Assistant, source, width),
+                (rows.iter().map(|row| row.text.len()).sum(), rows.len())
+            );
+            assert!(rows.iter().all(|row| row.text.width() <= width && !row.text.contains(['\u{1b}', '\u{7}'])));
+            if width < 16 {
+                continue;
+            }
+            let user = display_rows(MessageKind::User, "objective", width, None);
+            assert_eq!(
+                classic_run_cost(&view.runs[0], width),
+                (
+                    user.iter()
+                        .chain(&rows)
+                        .map(
+                            |row| native_line(row, width as u16, Palette { color: false })
+                                .to_string()
+                                .len()
+                        )
+                        .sum(),
+                    user.len() + rows.len() + 2,
+                )
+            );
+            for kind in [MessageKind::Assistant, MessageKind::AgentResult] {
+                let rows = display_rows(kind, source, width, None);
+                let palette = Palette { color: false };
+                let area = Rect::new(0, 0, width as u16, rows.len() as u16);
+                let mut terminal =
+                    Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+                terminal
+                    .draw(|frame| draw_history_rows(frame, area, &rows, palette))
+                    .unwrap();
+                for (line, row) in terminal.backend().buffer().content.chunks(width).zip(&rows) {
+                    let mut skip = 0;
+                    let text: String = line
+                        .iter()
+                        .filter_map(|cell| {
+                            if skip > 0 {
+                                skip -= 1;
+                                return None;
+                            }
+                            skip = cell.symbol().width().saturating_sub(1);
+                            Some(cell.symbol())
+                        })
+                        .collect();
+                    assert_eq!(
+                        text.trim_end(),
+                        native_line(row, area.width, palette).to_string().trim_end()
+                    );
+                }
+            }
+            for agent in [false, true] {
+                let mut history = History {
+                    agent,
+                    details: true,
+                    ..History::default()
+                };
+                history.sync(&view, width, 100);
+                assert_eq!(history.total_rows, history.visible(&view).len());
+                history.top = history.messages[1].start;
+                history.select_at(&view, 1, 0, 1);
+                history.extend_selection(&view, history.messages[1].rows - 1, width);
+                assert_eq!(
+                    history.selection_text(&view).unwrap().unwrap(),
+                    display_text(source)
+                );
+                history.sync(&view, 24, 100);
+                assert_eq!(
+                    history.selection_text(&view).unwrap().unwrap(),
+                    display_text(source)
+                );
+                assert!(history.search(&view, "Result"));
+                history.sync(&view, 80, 100);
+                assert!(
+                    history
+                        .visible(&view)
+                        .iter()
+                        .any(|row| row.matched && row.text.contains("Result"))
+                );
+                if source == TABLE {
+                    let body = rows
+                        .iter()
+                        .map(|row| row.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if width == 16 {
+                        assert!(body.contains("Name: Result"));
+                    }
+                    if width >= 80 {
+                        history.top = history.messages[1].start;
+                        history.select_at(&view, 2, 2, 2);
+                        assert_eq!(history.selection_text(&view).unwrap().unwrap(), "Result");
+                        history.select_at(&view, 3, 2, 2);
+                        assert_eq!(history.selection_text(&view).unwrap().unwrap(), "code");
+                        assert!(history.search(&view, "long/path"));
+                        assert!(history.search(&view, "---"));
+                        assert!(body.contains("escaped | pipe and value"));
+                        assert!(body.contains("left|right"));
+                        assert!(body.contains("│"));
+                        assert!(!body.contains("**"));
+                        let value = rows
+                            .iter()
+                            .flat_map(|row| &row.spans)
+                            .find(|span| span.content == "R")
+                            .unwrap();
+                        assert!(value.style.add_modifier.contains(Modifier::BOLD));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn table_matrix_padding_and_output_limits_fall_back_as_whole_messages() {
+    let columns = markdown::MAX_MARKDOWN_TABLE_COLUMNS;
+    let rows = markdown::MAX_MARKDOWN_TABLE_ROWS;
+    let table = |columns, rows| {
+        format!(
+            "{}\n{}\n{}",
+            "Name |".repeat(columns),
+            "--- |".repeat(columns),
+            "value\n".repeat(rows)
+        )
+    };
+    let at_limit = table(columns, rows);
+    let too_wide = table(columns + 1, 1);
+    let too_tall = table(1, rows + 1);
+    let padding = table(columns * rows, rows + 1);
+    let long_header = format!(
+        "{} | Value\n--- | ---\n{}",
+        "heading ".repeat(160),
+        "value | text\n".repeat(rows)
+    );
+    let output = format!(
+        "{} | Value\n--- | ---\n{}",
+        "heading".repeat(600),
+        "value | text\n".repeat(rows)
+    );
+    for (source, width, limited) in [
+        (&at_limit, 120, false),
+        (&too_wide, 80, true),
+        (&too_tall, 80, true),
+        (&padding, 80, true),
+        (&long_header, 16, true),
+        (&output, MAX_ROW_CELLS, true),
+    ] {
+        assert!(source.len() <= markdown::MAX_MARKDOWN_PARSE_BYTES);
+        let rows = display_rows(MessageKind::Assistant, source, width, None);
+        assert_eq!(
+            markdown_cost(MessageKind::Assistant, source, width),
+            (rows.iter().map(|row| row.text.len()).sum(), rows.len())
+        );
+        assert_eq!(
+            rows.iter()
+                .any(|row| row.text.contains(markdown::LIMIT_CUE)),
+            limited
+        );
+        if limited {
+            let literal = literal_rows(MessageKind::Assistant, source, width);
+            assert_eq!(
+                rows[..literal.len()]
+                    .iter()
+                    .map(|row| &row.text)
+                    .collect::<Vec<_>>(),
+                literal.iter().map(|row| &row.text).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn classic_rejects_the_whole_run_when_generated_records_exceed_its_budget() {
+    let source = format!(
+        "{} | {}\n{}\n{}",
+        "heading".repeat(155),
+        "Name |".repeat(markdown::MAX_MARKDOWN_TABLE_COLUMNS - 1),
+        "--- |".repeat(markdown::MAX_MARKDOWN_TABLE_COLUMNS),
+        "value\n".repeat(markdown::MAX_MARKDOWN_TABLE_ROWS / 2)
+    );
+    let mut view = session();
+    view.runs.push(run("objective", &source));
+    let rows = display_rows(MessageKind::Assistant, &source, 40, None);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.text.contains(markdown::LIMIT_CUE))
+    );
+    assert!(rows.iter().map(|row| row.text.len()).sum::<usize>() > MAX_CLASSIC_HISTORY_BYTES);
+    assert!(classic_projection(&view, 40).first_run_index.is_none());
+}

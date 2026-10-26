@@ -1,5 +1,6 @@
 use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_terminal_width};
 mod blocks;
+mod tables;
 use blocks::BlockLine;
 use ratatui::style::Modifier;
 use std::ops::Range;
@@ -11,8 +12,11 @@ pub(super) const MAX_MARKDOWN_DEPTH: usize = 32;
 pub(super) const MAX_MARKDOWN_EVENTS: usize = 65_536;
 pub(super) const MAX_MARKDOWN_OUTPUT_BYTES: usize = 16 * MAX_MARKDOWN_PARSE_BYTES;
 pub(super) const MAX_MARKDOWN_ROWS: usize = super::history::MAX_CLASSIC_HISTORY_ROWS;
+pub(super) const MAX_MARKDOWN_TABLE_COLUMNS: usize = 16;
+pub(super) const MAX_MARKDOWN_TABLE_ROWS: usize = 128;
 pub(super) const LIMIT_CUE: &str = "Markdown formatting limit; showing source";
 
+#[derive(Clone)]
 pub(super) struct Cell {
     pub(super) byte: usize,
     pub(super) source: Range<usize>,
@@ -52,7 +56,11 @@ fn layout(
         let line = projection.map(|lines| &lines[index]);
         if !line.is_some_and(|line| line.hidden) {
             let content = line.map_or(text, |line| &source[line.content.clone()]);
-            layout_line((start, content), line, width, capture, &mut record)?;
+            if let Some(table) = line.and_then(|line| line.table.as_ref()) {
+                tables::layout(table, width, capture, &mut record)?;
+            } else {
+                layout_line((start, content), line, width, capture, &mut record)?;
+            }
         }
         start += text.len() + 1;
     }
@@ -189,4 +197,6 @@ pub(super) const LIMITS: &[arany::limits::Limit] = &[
     limit!(MAX_MARKDOWN_EVENTS, "events"),
     limit!(MAX_MARKDOWN_OUTPUT_BYTES, "bytes"),
     limit!(MAX_MARKDOWN_ROWS, "rows"),
+    limit!(MAX_MARKDOWN_TABLE_COLUMNS, "columns"),
+    limit!(MAX_MARKDOWN_TABLE_ROWS, "data rows"),
 ];
