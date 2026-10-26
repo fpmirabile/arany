@@ -1160,9 +1160,10 @@ async fn inspect_custom_route(
     };
     let details = format!(
         "Protocol: {}\nDestination: {}\nModel: {}\nCredential: {} — not checked by listing\nCheck: {status}",
-        match profile.endpoint().contains("/v1/messages") {
-            true => "Anthropic Messages",
-            false => "OpenAI Responses",
+        match profile.draft().protocol {
+            CustomProtocol::OpenaiResponses => "OpenAI Responses",
+            CustomProtocol::AnthropicMessages => "Anthropic Messages",
+            CustomProtocol::OpenaiChatCompletions => "OpenAI Chat Completions",
         },
         escape_terminal(&profile.check_destination()),
         escape_terminal(profile.model()),
