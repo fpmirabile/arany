@@ -393,6 +393,16 @@ mod injection {
                 {
                     intent.workspace_inode = intent.workspace_inode.saturating_add(1);
                 }
+                if let Event::ToolStarted {
+                    intent,
+                    verdict: Some(verdict),
+                    ..
+                } = event
+                {
+                    // Keep the payload valid so the changed Workspace pin reaches the reducer.
+                    verdict.intent_digest =
+                        crate::tools::EffectIntent::from(intent.clone()).digest();
+                }
                 let _ = entered.send(());
             }
         }
