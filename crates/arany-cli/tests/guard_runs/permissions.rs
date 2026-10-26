@@ -361,17 +361,26 @@ async fn typed_mutations_cancelled_approval_and_lost_receipt_never_retry() {
             cancelled_or_lost_mutation(call.clone(), fault).await;
         }
     }
+    cancelled_or_lost_mutation(
+        removal(true),
+        MutationFailure::ParentSyncWithDestinationParent,
+    )
+    .await;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum MutationFailure {
     Cancelled,
     ReceiptLost,
     ParentSync,
+    ParentSyncWithDestinationParent,
 }
 
 async fn cancelled_or_lost_mutation(call: arany::ToolCall, fault: MutationFailure) {
     let fixture = Fixture::new(None, true);
+    if matches!(fault, MutationFailure::ParentSyncWithDestinationParent) {
+        std::fs::create_dir(fixture.workspace.join("notes/nested")).unwrap();
+    }
     let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(call.clone())]));
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let cancellation = RunCancellation::new();
@@ -400,7 +409,7 @@ async fn cancelled_or_lost_mutation(call: arany::ToolCall, fault: MutationFailur
                     asked += 1;
                     match fault {
                         MutationFailure::ReceiptLost => arany::FaultPlan::lose_guard_receipt(approval.intent.id),
-                        MutationFailure::ParentSync => arany::FaultPlan::fail_file_parent_sync(approval.intent.id),
+                        MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent => arany::FaultPlan::fail_file_parent_sync(approval.intent.id),
                         MutationFailure::Cancelled => { cancellation.cancel(); }
                     }
                     approval.decide(true);
@@ -433,30 +442,45 @@ async fn assert_stopped_mutation(
     fault: MutationFailure,
 ) {
     let published = !matches!(fault, MutationFailure::Cancelled);
-    let partial_move = matches!(fault, MutationFailure::ParentSync)
-        && matches!(call, arany::ToolCall::Move { .. });
+    let move_sync_failed = matches!(
+        fault,
+        MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent
+    ) && matches!(call, arany::ToolCall::Move { .. });
     let removed = published
-        && !partial_move
+        && !move_sync_failed
         && matches!(
             call,
             arany::ToolCall::Delete { .. } | arany::ToolCall::Move { .. }
         );
-    assert_eq!(fixture.workspace.join("notes/facts.txt").exists(), !removed);
+    assert_eq!(
+        fixture.workspace.join("notes/facts.txt").exists(),
+        !removed,
+        "{fault:?}"
+    );
     if !removed {
         assert_eq!(
             std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
-            if published && !partial_move {
+            if published && !move_sync_failed {
                 b"done".as_slice()
             } else {
                 b"Fact".as_slice()
             }
         );
     }
+    let destination_published = matches!(call, arany::ToolCall::Move { .. })
+        && matches!(
+            fault,
+            MutationFailure::ReceiptLost | MutationFailure::ParentSyncWithDestinationParent
+        );
     assert_eq!(
         fixture.workspace.join("notes/nested/moved.txt").exists(),
-        published && matches!(call, arany::ToolCall::Move { .. })
+        destination_published,
+        "{fault:?}"
     );
-    if published && matches!(call, arany::ToolCall::Move { .. }) {
+    if matches!(call, arany::ToolCall::Move { .. }) {
+        assert_eq!(fixture.workspace.join("notes/nested").is_dir(), published);
+    }
+    if destination_published {
         assert_eq!(
             std::fs::read(fixture.workspace.join("notes/nested/moved.txt")).unwrap(),
             b"Fact"
@@ -469,7 +493,10 @@ async fn assert_stopped_mutation(
         assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
         assert_eq!(
             observation.attestation.is_some(),
-            matches!(fault, MutationFailure::ParentSync)
+            matches!(
+                fault,
+                MutationFailure::ParentSync | MutationFailure::ParentSyncWithDestinationParent
+            )
         );
     } else {
         assert!(observation.attestation.is_none());
