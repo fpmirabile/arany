@@ -73,7 +73,10 @@ it during admission, so the source dependency points from Engine to Tools.
 Engine permission selection, host session reuse and remembering eligibility live
 in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
 shared ask and dispatch flow. Focused definition-mode and typed-prefix approval
-tests live with that permission policy.
+tests live with that permission policy. Cancellation settlement evidence lives
+beside `settle_cancelled` in `step/intent.rs`; `step/ask.rs` owns the source check
+that human waits and pinned dispatch do not consult the system clock. Parent
+step tests retain cross-flow decision tables.
 The Engine composes per-dispatch queue progress, active-action and checkpoint
 senders through consuming ToolRuntime builders; Guard dispatch makes one owned
 copy from its borrowed runtime before consuming that chain.
