@@ -49,7 +49,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Architecture residue](./architecture-residue/README.md) | `In progress`; R1 diagnostic cycle, R2 remaining bounded setup moves from R2p5, R3p1/E8b implemented pending CI evidence → R3p2/E8c Engine cancellation/clock tests in parallel with R3e remaining focused Run tests, R4 Transcript (#485, open), R5 native Provider-name residue; R2c5/R6b closes only after the evidence checklist is complete |
+| [Architecture residue](./architecture-residue/README.md) | `In progress`; R1 diagnostic cycle, R2 remaining bounded setup moves from R2p5, R3p1/E8b implemented pending CI evidence → R3p2/E8c Engine cancellation/clock tests (R3a–R3e Run ownership implemented; execution evidence pending), R4 Transcript (#485, open), R5 native Provider-name residue; R2c5/R6b closes only after the evidence checklist is complete |
 | [Image chip hover preview](./image-hover-preview/README.md) | `In progress`; S1 Kitty and S2 iTerm2 implemented; only S3 Sixel remains, gated on `png` dependency approval and serialized with architecture-residue R4 |
 | [Spec limits generation](./spec-limits-generation/README.md) | `In progress`; S1/S2 exports implemented; S3 blocking spec-budget/restatement check after architecture-residue R1–R5 spec edits, then S4 native Tools split |
 | [Context budgets](./context-budgets/README.md) | `In progress`; remaining output spill S3a–S3d and separate storage report; compaction summary budget and recent-file hints implemented |

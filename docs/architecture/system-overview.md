@@ -359,7 +359,7 @@ The sole connection opens in a private owner-verified local state directory with
 
 The attached Run's private `Drafts` owns offered steering text, linear offers and the held draft, shared by Run input and settlement. Composer owns editing and capacity; the Server owns steering delivery and withdrawal.
 
-Attached Run budget, Escape, approval-reply and current-Run exit-settlement tests live in [run/tests.rs](../../crates/arany-cli/src/cli/attached/run/tests.rs); process and macOS tests retain their separate inline owner in [run.rs](../../crates/arany-cli/src/cli/attached/run.rs).
+Attached Run budget, Escape, approval-reply, steering delivery, draft retention/overflow and current-Run exit-settlement tests live in [run/tests.rs](../../crates/arany-cli/src/cli/attached/run/tests.rs); process and macOS tests retain their separate inline owner in [run.rs](../../crates/arany-cli/src/cli/attached/run.rs).
 
 The presentation layer owns the committed budget-refusal lookup and Run feedback projection. `exec` retains its looser admission-refusal fallback, while committed receipts render the exact Run being reported.
 
