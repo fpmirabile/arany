@@ -224,9 +224,7 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
             .chain((0..3).map(|_| arany::test_support::scenario::plan_outcome(plan.clone())))
             .collect(),
     )
-    .with_before_call(0, || {
-        std::thread::sleep(std::time::Duration::from_millis(20))
-    });
+    .with_active_time_per_call(Duration::from_secs(1));
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let outcome = run_with(

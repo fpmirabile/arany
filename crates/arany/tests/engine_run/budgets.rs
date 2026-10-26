@@ -4,6 +4,7 @@ use super::goals::{
 };
 use super::*;
 use arany::WorkspaceIdentity;
+use arany::test_support::MAX_SESSION_EVENTS;
 use arany::test_support::goals::*;
 
 #[tokio::test]
@@ -2169,26 +2170,13 @@ async fn steered_run(
     .session_id;
     engine.close().await.expect("initial shutdown");
     if let Some(free) = free_at_second_call {
-        let prefix = 10_000 - run_offset - free;
-        let mut connection =
-            rusqlite::Connection::open(state_path.join("events.sqlite3")).expect("events");
-        let transaction = connection.transaction().expect("transaction");
-        let first_padding: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
-                [],
-                |row| row.get(0),
-            )
-            .expect("next sequence");
-        for sequence in first_padding..=i64::try_from(prefix).expect("prefix") {
-            transaction
-                .execute(
-                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
-                )
-                .expect("padding");
-        }
-        transaction.commit().expect("padding commit");
+        let prefix = MAX_SESSION_EVENTS - run_offset - free;
+        pad_capacity_history(
+            &state_path,
+            session_id,
+            i64::try_from(prefix).expect("padding prefix"),
+            false,
+        );
     }
     let steering = RunSteering::new();
     let offer = steering.clone();
@@ -2337,26 +2325,13 @@ async fn reviewed_write_run(
     .session_id;
     engine.close().await.expect("initial shutdown");
     if let Some(free) = free_at_tool_admission {
-        let prefix = 10_000 - run_offset - free;
-        let mut connection =
-            rusqlite::Connection::open(state_path.join("events.sqlite3")).expect("events");
-        let transaction = connection.transaction().expect("transaction");
-        let first_padding: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
-                [],
-                |row| row.get(0),
-            )
-            .expect("next sequence");
-        for sequence in first_padding..=i64::try_from(prefix).expect("prefix") {
-            transaction
-                .execute(
-                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
-                )
-                .expect("padding");
-        }
-        transaction.commit().expect("padding commit");
+        let prefix = MAX_SESSION_EVENTS - run_offset - free;
+        pad_capacity_history(
+            &state_path,
+            session_id,
+            i64::try_from(prefix).expect("padding prefix"),
+            false,
+        );
     }
     let mut provider = ScriptedProvider::new(vec![
         arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
@@ -2479,16 +2454,13 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
         std::fs::set_permissions(&permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
         engine.close().await.unwrap();
         if let Some((offset, free)) = free {
-            let mut connection =
-                rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
-            let transaction = connection.transaction().unwrap();
-            for sequence in 2..=i64::try_from(10_000 - offset - free).unwrap() {
-                transaction.execute(
-                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")],
-                ).unwrap();
-            }
-            transaction.commit().unwrap();
+            let prefix = MAX_SESSION_EVENTS - offset - free;
+            pad_capacity_history(
+                &state_path,
+                session,
+                i64::try_from(prefix).expect("padding prefix"),
+                false,
+            );
         }
         let engine = facts_engine(StateRoot::open_existing(&state_path).unwrap(), &state_path);
         let provider = Arc::new(ScriptedProvider::new(vec![finish_with("candidate"); 9]));
