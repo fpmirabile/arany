@@ -816,7 +816,7 @@ async fn report_stale_git_locks(
     if !tools {
         return Err(EngineError::GoalUnavailable);
     }
-    crate::tools::worker::recover_private(&git_writes).await?;
+    crate::tools::recover_private(&git_writes).await?;
     for id in git_writes {
         let workspace = workspace.to_owned();
         tokio::task::spawn_blocking(move || crate::tools::report_git_locks(&workspace, id))
@@ -1899,7 +1899,7 @@ impl Engine {
                 if submission.tools.is_none() {
                     return Err(EngineError::GoalUnavailable);
                 }
-                crate::tools::worker::recover_private(&ids).await?;
+                crate::tools::recover_private(&ids).await?;
             }
         }
         if entry == GoalEntry::Resume {

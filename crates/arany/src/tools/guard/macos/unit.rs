@@ -11,9 +11,9 @@ use super::{
 };
 use crate::private_fs::{PrivateDirectory, open_directory};
 use crate::tools::Cancellation;
+use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
 use crate::tools::process::MAX_ARGUMENT_BYTES;
 use crate::tools::types::{CommandResult, ToolDisposition, ToolLimits, ToolResourceClass};
-use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
@@ -868,10 +868,10 @@ fn action_deadlines(
     let go_deadline = active_window.map_or(
         preparation_deadline
             + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
-            + super::super::super::worker::transfer_time(intent),
+            + crate::tools::guard::transfer::transfer_time(intent),
         |window| window.go_deadline,
     );
-    let go_deadline = if super::super::super::worker::transfer_time(intent).is_zero() {
+    let go_deadline = if crate::tools::guard::transfer::transfer_time(intent).is_zero() {
         go_deadline
     } else {
         go_deadline.min(fallback_started + Duration::from_millis(u64::from(WORKER_PREPARATION_MS)))
@@ -886,7 +886,7 @@ fn action_deadlines(
                     u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
                 )
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-                + super::super::super::worker::transfer_overhead(intent)
+                + crate::tools::guard::transfer::transfer_overhead(intent)
                 + Duration::from_secs(10)
         },
         |window| window.completion_deadline,
@@ -993,11 +993,11 @@ pub(super) async fn execute(
                             })??;
                 } else if bytes == b"WORKER_READY\n" && !image_sent {
                     image_sent = true;
-                    let input = super::super::super::worker::bulk_input(runtime)
+                    let input = crate::tools::guard::transfer::bulk_input(runtime)
                         .ok_or(ToolError::Configuration)?;
                     tokio::time::timeout_at(
                         go_deadline,
-                        super::super::super::worker::send_frame(stream.get_mut(), input),
+                        crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
                     )
                     .await
                     .map_err(|_| ToolError::Limit)??;
@@ -1141,7 +1141,7 @@ pub(super) async fn execute(
                             runtime,
                             intent,
                             Duration::from_millis(u64::from(intent.limits.runtime_ms))
-                                + super::super::super::worker::transfer_time(intent)
+                                + crate::tools::guard::transfer::transfer_time(intent)
                                 + TEARDOWN_WAIT,
                         )
                         .await
@@ -1295,11 +1295,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             stream
                 .write_all(b"WORKER_READY\n")
                 .map_err(|_| ToolError::Operation)?;
-            let bytes = super::super::super::worker::read_frame(&mut stream)?;
+            let bytes = crate::tools::guard::transfer::read_frame(&mut stream)?;
             if let Some(transfer) = &task.worker {
                 transfer.decode(&bytes)?;
             } else {
-                super::super::super::worker::decode_handover(&task.intent, &bytes, &task.config)?;
+                crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
             }
             Some(bytes)
         } else {
@@ -1586,7 +1586,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         let (image, capture) = if observation.disposition
                             == ToolDisposition::Succeeded
                         {
-                            crate::tools::worker::command_capture(
+                            crate::tools::guard::transfer::command_capture(
                                 &before,
                                 &crate::tools::fs::open_directory(
                                     &path.parent().ok_or(ToolError::Path)?.join("workspace/tree"),
@@ -1782,7 +1782,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     .map_err(|_| ToolError::Operation)?
                     .take()
                     .ok_or(ToolError::Operation)?;
-                super::super::super::worker::send_frame(&mut output, &bytes).await?;
+                crate::tools::guard::transfer::send_frame(&mut output, &bytes).await?;
             }
             output.shutdown().await.map_err(|_| ToolError::Operation)?;
             result.map(|_| ())
