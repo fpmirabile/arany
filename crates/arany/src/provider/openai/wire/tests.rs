@@ -1102,7 +1102,7 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
         }
         let shape = format!(
             "{:?}",
-            crate::diagnostics::ToolArgumentShape::from_call(&calls[0].call)
+            crate::provider::diagnostics::ToolArgumentShape::from_call(&calls[0].call)
         );
         assert!(shape.contains("program_chars: Some(2)"));
         assert!(shape.contains("args_count: Some(2)"));

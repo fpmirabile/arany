@@ -2,7 +2,7 @@
 
 This contract owns activation, privacy, retention and safe failure metadata. [Execution](./execution.md) owns outcome acceptance. Editing practice: [diagnosing failures](../../agents/testing.md#diagnosing-failures).
 
-Provider failure stages, stream counts and response-shape metadata have one type owner in `provider::diagnostics`. The diagnostics sink continues to own record rendering, activation, locking, record bounds, file admission and append behavior. This ownership change preserves diagnostic bytes and observations.
+Provider failure stages, stream counts, response-shape metadata and Tool argument shape construction/Debug formatting have one owner in `provider::diagnostics`. The diagnostics sink continues to own stream/failure and context record rendering, activation, locking, record bounds, file admission and append behavior. This ownership change preserves diagnostic bytes and observations, including the argument privacy and bounded-file evidence below.
 
 `cargo run` uses this repository's development build; `cargo run --release` uses its optimized build. Development chat and `exec` automatically record runtime failures in `development.log` beneath their admitted Session State directory, outside the Workspace. No flag is required. With an explicit `--state-dir`, that is `STATE_DIR/development.log`; Linux's ordinary default is `$XDG_STATE_HOME/arany/development.log`, or `$HOME/.local/state/arany/development.log` when that variable is absent. The macOS default is `~/Library/Application Support/dev.Arany.arany/development.log`. This Session path is distinct from the stable OS-user account root. The optimized build does not enable this log.
 
