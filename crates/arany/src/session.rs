@@ -39,6 +39,7 @@ pub(crate) use compaction::{
     MAX_COMPACTION_RECENT_CONTEXT_BYTES, MAX_COMPACTION_SUMMARY_BYTES, MAX_COMPACTION_TURNS,
     MIN_RECORDED_COMPACTION_COMPILER_VERSION, PreparedCompaction, join_recent_files, recent_files,
     recent_files_across, recent_files_match, render_recent_files, validate_compaction_references,
+    validate_compactions_with_sequence, validate_goal_context_compactions_with_sequence,
 };
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
