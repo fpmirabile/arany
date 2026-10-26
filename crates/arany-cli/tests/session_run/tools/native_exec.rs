@@ -1303,7 +1303,7 @@ async fn offline_cargo_helper() {
         .iter()
         .find(|choice| choice.group == "Rust")
         .expect("one explicit private Rust toolchain");
-    assert!(!rust.selected);
+    assert!(rust.selected);
     permissions
         .remember_profiles(
             true,
