@@ -172,6 +172,14 @@ fn source_range(line: Option<&BlockLine>, mut mapped: Range<usize>) -> Range<usi
     mapped
 }
 type Layout = (Vec<Row>, usize, usize);
+pub(super) fn content_at(source: &str, byte: usize, width: usize) -> Option<Range<usize>> {
+    let lines = blocks::project(source).ok()?;
+    layout(source, width, false, Some(&lines)).ok()?;
+    lines
+        .iter()
+        .find(|line| !line.hidden && line.content.contains(&byte))
+        .map(|line| line.content.clone())
+}
 pub(super) fn project(source: &str, width: usize, capture: bool) -> (Layout, Option<&'static str>) {
     match blocks::project(source).and_then(|lines| layout(source, width, capture, Some(&lines))) {
         Ok(layout) => (layout, None),
