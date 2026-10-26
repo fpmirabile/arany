@@ -306,33 +306,17 @@ impl BoundedOutput for Command {
         self.stdin(Stdio::null());
         self.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = OwnedChild(self.spawn()?);
-        child.capture(duration, cap)
+        try_capture(&mut child.0, duration, cap)
     }
 
     fn bounded_output_with_input(&mut self) -> io::Result<Output> {
         self.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = OwnedChild(self.spawn()?);
-        child.capture(Duration::from_secs(30), 32 * 1024 * 1024)
+        try_capture(&mut child.0, Duration::from_secs(30), 32 * 1024 * 1024)
     }
 }
 
 struct OwnedChild(Child);
-
-impl OwnedChild {
-    fn capture(&mut self, duration: Duration, cap: usize) -> io::Result<Output> {
-        let result = try_capture(&mut self.0, duration, cap);
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut)
-        {
-            if self.0.try_wait()?.is_none() {
-                self.0.kill()?;
-            }
-            self.0.wait()?;
-        }
-        result
-    }
-}
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -524,6 +508,10 @@ fn capture_streams(
     let mut stderr = Vec::new();
     loop {
         if Instant::now() >= deadline {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+            }
+            child.wait()?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "subprocess exit/output EOF deadline exceeded",
@@ -717,29 +705,57 @@ mod tests {
                 .env("ARANY_CAPTURE_CASE", case);
             command
         };
-        let mut held = OwnedChild(
-            command("held")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("held capture child"),
-        );
-        let pid = rustix::process::Pid::from_child(&held.0);
-        let error = held
-            .capture(Duration::ZERO, OUTPUT_CAP)
-            .expect_err("expired capture must not fabricate an output");
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(matches!(
-            rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
-            Err(rustix::io::Errno::CHILD)
-        ));
-        let status = held
-            .0
-            .try_wait()
-            .expect("timeout child status")
-            .expect("timeout child reaped");
-        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+        type Capture = fn(&mut std::process::Child) -> std::io::Result<std::process::Output>;
+        let captures: [(Capture, bool); 3] = [
+            (
+                |child| super::try_capture(child, Duration::ZERO, OUTPUT_CAP),
+                false,
+            ),
+            (
+                |child| Ok(super::capture(child, Duration::ZERO, OUTPUT_CAP)),
+                true,
+            ),
+            (
+                |child| {
+                    Ok(super::capture_terminal(
+                        child,
+                        tempfile::tempfile().expect("terminal capture descriptor"),
+                        Duration::ZERO,
+                        OUTPUT_CAP,
+                        |_| {},
+                    ))
+                },
+                true,
+            ),
+        ];
+        for (capture, panics) in captures {
+            let mut held = OwnedChild(
+                command("held")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("held capture child"),
+            );
+            let pid = rustix::process::Pid::from_child(&held.0);
+            let observation =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| capture(&mut held.0)));
+            assert_eq!(observation.is_err(), panics);
+            if let Ok(result) = observation {
+                let error = result.expect_err("expired capture must not fabricate an output");
+                assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            }
+            assert!(matches!(
+                rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
+                Err(rustix::io::Errno::CHILD)
+            ));
+            let status = held
+                .0
+                .try_wait()
+                .expect("timeout child status")
+                .expect("timeout child reaped");
+            assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+        }
         let output = command("complete")
             .bounded_output_for(NEXT_DEADLINE, OUTPUT_CAP)
             .expect("next command after timeout");
