@@ -2239,11 +2239,11 @@ pub(super) fn reject_overlap(path: &Path, protected: &Path) -> Result<(), ToolEr
 pub(super) fn worker_image(
     root: &Dir,
     paths: &[String],
-) -> Result<super::worker::Image, ToolError> {
+) -> Result<super::guard::transfer::Image, ToolError> {
     worker_snapshot(root, paths, SnapshotKind::Worker)
 }
 
-pub(super) fn worker_command_image(root: &Dir) -> Result<super::worker::Image, ToolError> {
+pub(super) fn worker_command_image(root: &Dir) -> Result<super::guard::transfer::Image, ToolError> {
     worker_snapshot(root, &[".".into()], SnapshotKind::WorkerCommand)
 }
 
@@ -2251,8 +2251,8 @@ fn worker_snapshot(
     root: &Dir,
     paths: &[String],
     kind: SnapshotKind,
-) -> Result<super::worker::Image, ToolError> {
-    use super::worker::{Entry as WorkerEntry, Image};
+) -> Result<super::guard::transfer::Image, ToolError> {
+    use super::guard::transfer::{Entry as WorkerEntry, Image};
     let mut entries = BTreeMap::new();
     let mut budget = ScanBudget::default();
     let mut retained = 0usize;
