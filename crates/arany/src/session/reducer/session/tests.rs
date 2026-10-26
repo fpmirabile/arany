@@ -28,9 +28,19 @@ fn a_forks_boundary_compaction_is_refused_while_its_own_run_is_open() {
     ));
     let open = journal(fork, events.clone());
     assert!(SessionView::replay_open(fork, &open).unwrap().is_some());
-    events.push(Event::ContextCompacted {
+    let compacted = Event::ContextCompacted {
         record: failed_compaction_record(source_run, 1),
         active_ms: None,
-    });
-    assert!(SessionView::replay_open(fork, &journal(fork, events)).is_err());
+    };
+    let boundary_only = journal(fork, vec![events[0].clone(), compacted.clone()]);
+    assert!(
+        SessionView::replay_open(fork, &boundary_only)
+            .unwrap()
+            .is_some()
+    );
+    events.push(compacted);
+    assert!(matches!(
+        SessionView::replay_open(fork, &journal(fork, events)),
+        Err(ReplayError::InvalidSnapshot)
+    ));
 }
