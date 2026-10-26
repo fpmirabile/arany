@@ -346,9 +346,10 @@ fn record_tool_ceiling(
         && run
             .tools
             .iter()
-            .any(|tool| tool.intent.digest() == *digest && read(tool))
+            .rev()
+            .any(|tool| read(tool) && tool.intent.digest() == *digest)
         && run.tools.iter().any(|tool| {
-            tool.intent.digest() != *digest && tool.dispatch_in_progress() && read(tool)
+            tool.dispatch_in_progress() && read(tool) && tool.intent.digest() != *digest
         });
     let ceiling_ms = if overlaps {
         active_run_goal(current, run_id)
