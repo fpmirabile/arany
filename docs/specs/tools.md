@@ -1144,6 +1144,22 @@ Private worker commands reconstruct their image on the fresh project tmpfs after
 
 Byte and entry bounds on synchronous snapshot preparation do not guarantee a finite response from stalled host storage or an uninterruptible kernel operation. Process deadlines and cleanup bound ordinary payload execution; they are not hard-real-time or kernel-failure guarantees. Native file preconditions do not make a multi-file transaction or exclude concurrent hostile host mutation.
 
+### Ubuntu namespace-entry diagnosis
+
+Successful user-namespace creation does not establish permission to mount inside it. On Ubuntu 24.04, AppArmor can deny namespace capabilities to an unprofiled executable, producing `ProtectionUnavailable` even with the required kernel facilities installed. A mount denial alone does not identify AppArmor: compare the failure stage, profile labels and capability sets. Check the installed launcher profile too; an installed `/usr/bin/unshare` does not establish that it is distribution-profiled. Missing namespace authorization and missing kernel/tmpfs-user-xattr enforcement are separate prerequisites; the entry probe below tests the former, not xattrs or overlay support.
+
+From the checkout, in a disposable unprivileged account on the same stock Ubuntu 24.04 host, run:
+
+```sh
+cargo run --locked --offline -p arany --example namespace_entry_probe
+```
+
+The [native entry probe](../../crates/arany/examples/namespace_entry/probe.rs) compares in-process namespace setup with `/usr/bin/unshare --user --map-current-user --mount --propagation private --keep-caps --` exec into the same pinned executable. It records kernel/package/profile provenance, labels across entry, UID/GID maps, capabilities and positive process teardown. Successful setup additionally proves bounded tmpfs mount/write/read/unmount, capability removal and no-new-privileges across a further exec. A result without the completed probe-entry snapshot is a startup failure, not a mount/capability observation. It launches no command payload. Retain both results and verify unchanged distribution policy; version strings and a passing entry alone do not establish stock-host or overlay support.
+
+The [accepted supervisor work](../../planning/command-workspace-overlay/README.md) requires stock-host evidence before admitting either new entry. Prefer in-process entry if it passes; otherwise require the distro-launcher route to pass, clearing all capability sets before bwrap. Neither is a current command-dispatch option. After the evidence-selected entry is implemented and admitted, retry the original command through that entry; do not add `--keep-caps` to the current direct-to-bwrap bootstrap. If both stock entries fail, keep the design gate open with no copy or host fallback.
+
+An administrator may separately choose an executable-specific `/etc/apparmor.d` profile containing `userns,`, or run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` by hand. Arany never performs these policy changes. Neither is a prerequisite or qualifying result for stock Ubuntu support.
+
 ## Acceptance scenarios and evidence owners
 
 | Scenario | Required observation | Existing owner |
