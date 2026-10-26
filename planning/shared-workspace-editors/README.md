@@ -4,7 +4,7 @@
 
 - Status: `Ready` (implementation gated as listed under Gates)
 - Owner: harness maintainers
-- Last updated: 2026-10-25
+- Last updated: 2026-10-26
 
 ## Outcome and scope
 
@@ -63,4 +63,4 @@ Trust: editor authority is unchanged (lease ∩ parent grant ∩ plan ∩ defini
 
 ## Gates
 
-Opens only after [command Workspace overlay](../command-workspace-overlay/README.md) slice 1 (editor commands need the overlay to be lease-validated changesets). Upfront editor validation, Tool-family dispatch and multi-call S1 prerequisites are implemented. Slice 1 edits `engine/run_loop/{worker,children}.rs`, `step/intent.rs`, `step/checkpoint.rs`, `session/reducer/worker.rs`, `session/checkpoint.rs`: reserve these against active Engine work. Slice 2 edits `session/events.rs`, `events/records.rs`, `store/migrate.rs`, `tools/types.rs`, `cli/acp/translate.rs`, `presentation/*`, `telemetry.rs`: coordinate floor bumps so each kind rises once. Slice 3 edits `guard/linux.rs`, `guard/macos/*`, `store/state/build_cache.rs` (or its overlay-plan successor): after overlay slice 2.
+Owner decision O2, 2026-10-26: S1 depends only on in-process-file-mutations S2 and G5 (upfront editor validation, #441), both landed. Typed mutations do not need the overlay; a command changeset is validated against the lease at publication with either the snapshot or overlay mechanism. Tool-family dispatch and multi-call S1 prerequisites are implemented. Slice 1 edits `engine/run_loop/{worker,children}.rs`, `step/intent.rs`, `step/checkpoint.rs`, `session/reducer/worker.rs`, `session/checkpoint.rs`: reserve these against active Engine work. Slice 2 edits `session/events.rs`, `events/records.rs`, `store/migrate.rs`, `tools/types.rs`, `cli/acp/translate.rs`, `presentation/*`, `telemetry.rs`: coordinate floor bumps so each kind rises once. Slice 3 edits `guard/linux.rs`, `guard/macos/*`, `store/state/build_cache.rs` (or its overlay-plan successor): after overlay slice 2.
