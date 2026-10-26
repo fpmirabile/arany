@@ -2525,7 +2525,10 @@ int main(void) {
                 .join(format!("{}.txt", spill.r#ref));
             let raw = std::fs::read(file).unwrap();
             assert_eq!(raw.len() as u64, spill.bytes);
-            assert!(raw.starts_with(b"payload-started"));
+            let padding = raw
+                .strip_prefix(b"payload-started")
+                .expect("retained output starts with the command prefix");
+            assert!(padding.iter().all(|byte| *byte == b' '));
             assert!(
                 result["stdout"]
                     .as_str()
