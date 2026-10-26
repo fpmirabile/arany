@@ -1,0 +1,15 @@
+[budgets]
+"README.md" = 1000
+"acp.md" = 5000
+"chatgpt.md" = 4000
+"credentials.md" = 3500
+"diagnostics.md" = 1500
+"execution.md" = 18000
+"goals.md" = 8500
+"limits.md" = 1000
+"provider.md" = 10250
+"serve.md" = 6500
+"session.md" = 7500
+"telemetry.md" = 1500
+"terminal.md" = 22500
+"tools.md" = 44750

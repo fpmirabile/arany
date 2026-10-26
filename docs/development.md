@@ -23,6 +23,9 @@ consume API or plan usage. The default tests need no real Provider account.
 For documentation-only changes, review prose, local links and anchors; no Rust
 build is needed. Development skill changes also follow the
 [skill source workflow](../agents/skills/README.md#update-a-local-skill).
+CI checks per-spec word budgets and scans for bounds that should link to the
+[generated limits table](specs/limits.md); run `python3 scripts/spec-budget.py`
+locally after changing a spec.
 
 For code changes, run formatting, Clippy and the tests that cover what you
 touched:
