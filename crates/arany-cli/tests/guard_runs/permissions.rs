@@ -4343,6 +4343,138 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
 }
 
 #[tokio::test]
+async fn hook_narrowed_read_batch_commits_replacement_before_sibling_reservations() {
+    let narrowed = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: None,
+        limit: Some(8),
+    };
+    let fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(&narrowing_script(
+                &json!(narrowed),
+                "\"limit\":32",
+            ))],
+        )),
+        true,
+    );
+    let requests = (0..4)
+        .map(|index| arany::ToolRequest {
+            id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+            call: if index == 0 {
+                call("read")
+            } else {
+                arany::ToolCall::Read {
+                    path: "notes/facts.txt".into(),
+                    offset: None,
+                    limit: Some(16),
+                }
+            },
+        })
+        .collect();
+    let (result, requests, humans) = fixture
+        .run(
+            vec![ProviderOutcome::Tools(requests), finish("answer")],
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert_eq!(humans, 0);
+    assert_eq!(requests.len(), 2);
+    let step = &requests[1].input.tools.as_ref().unwrap().steps[0];
+    assert_eq!(step.requests.len(), 4);
+    assert_eq!(step.observations.len(), 5);
+    assert_eq!(
+        step.narrowed_observations
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+    assert_eq!(step.observations[0].intent.call, step.requests[0].call);
+    assert_eq!(
+        step.observations[0].disposition,
+        arany::ToolDisposition::Denied
+    );
+    assert!(step.observations[0].attestation.is_none());
+    assert_eq!(step.observations[1].intent.call, narrowed);
+    for (observation, request) in step.observations[2..].iter().zip(&step.requests[1..]) {
+        assert_eq!(observation.intent.call, request.call);
+    }
+    assert!(
+        step.observations[1..]
+            .iter()
+            .all(
+                |observation| observation.disposition == arany::ToolDisposition::Succeeded
+                    && matches!(
+                        observation.attestation,
+                        Some(arany::Attestation::InProcess { .. })
+                    )
+            )
+    );
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(
+        view.runs[0], result.run,
+        "closed replay preserves the complete batch"
+    );
+    assert_narrowed_read_batch_order(&events, &view.runs[0]);
+}
+
+fn assert_narrowed_read_batch_order(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 5);
+    let (original, replacement) = (&run.tools[0], &run.tools[1]);
+    assert!(original.permission_verdict.as_ref().unwrap().narrowed);
+    assert_eq!(
+        replacement.narrowing_source,
+        Some(original.permission_verdict.as_ref().unwrap().intent_digest)
+    );
+    assert!(
+        !replacement.active_time_reserved,
+        "the replacement reserves through its own ToolStarted"
+    );
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolStarted { intent, .. } => Some((event.sequence, intent.id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 5);
+    assert_eq!(starts[0].1, original.intent.id);
+    assert_eq!(starts[4].1, replacement.intent.id);
+    assert_eq!(
+        starts[1..4].iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        run.tools[2..]
+            .iter()
+            .map(|tool| tool.intent.id)
+            .collect::<Vec<_>>()
+    );
+    let first_finish = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. }
+                if observation.intent.id == original.intent.id =>
+            {
+                Some(event.sequence)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(starts[3].0 < first_finish && first_finish < starts[4].0);
+    let reservations: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolActiveTimeReserved { .. }))
+        .collect();
+    assert_eq!(reservations.len(), 4);
+    assert!(
+        reservations[1].sequence > starts[4].0,
+        "the replacement restores request accounting before sibling reservation"
+    );
+}
+
+#[tokio::test]
 async fn narrowed_batch_stops_when_replacement_preparation_exhausts_active_time() {
     const ACTIVE_ALLOWANCE_MS: u64 = 100_000;
     const REMAINING_BEFORE_REPLACEMENT_MS: u64 = 5_000;

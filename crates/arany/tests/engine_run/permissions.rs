@@ -811,22 +811,148 @@ async fn assert_decline_summaries_retained(
 }
 
 #[tokio::test]
-async fn multi_call_cancellation_settles_the_undispatched_suffix() {
-    const TEST_TIMEOUT: Duration = Duration::from_secs(180);
-    let _deadline = engine_support::deadline("multi-call cancellation", TEST_TIMEOUT);
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
-    for name in ["pending", "final"] {
-        std::fs::write(workspace.join(format!("notes/{name}.txt")), "Fact").unwrap();
+async fn concurrent_read_limit_withdraws_pending_approval_before_late_reply() {
+    for late_reply in [false, true] {
+        let _deadline =
+            engine_support::deadline("read limit during approval", Duration::from_secs(180));
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+        std::fs::write(workspace.join("notes/pending.txt"), "Pending fact").unwrap();
+        let state = temp.path().join("state");
+        let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        private_file(
+            &state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Read(./notes/pending.txt)"]}}"#,
+        );
+        let (provider, gates) = gated_read_approval_provider(&["facts", "pending"]);
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let mut events = engine.subscribe();
+        let mut input = request(&workspace, "Read two files");
+        input.include_paths.clear();
+        input.goal.budget = Some(arany::GoalBudget {
+            max_active_ms: Some(120_000),
+            ..Default::default()
+        });
+        let drive = async {
+            let gate = gates.await.unwrap().pop().unwrap();
+            drive_read_limit_approval(gate, &mut inbox, &mut events, late_reply).await;
+        };
+        let (outcome, ()) = tokio::join!(
+            run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    approvals: Some(approvals),
+                    ..Default::default()
+                }
+            ),
+            drive
+        );
+        let outcome = outcome.unwrap();
+        engine.close().await.unwrap();
+        let (events, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+        assert_eq!(view.runs[0], outcome.run);
+        assert_eq!(outcome.run.status, RunStatus::Failed);
+        assert_eq!(outcome.run.failure, Some(arany::RunFailure::ToolStopped));
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert_stopped_read_approval(&events, &outcome.run);
     }
-    let state = temp.path().join("state");
-    let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
-    private_file(
-        &state.join("permissions.json"),
-        br#"{"permissions":{"ask":["Read(./notes/pending.txt)"]}}"#,
+}
+
+fn assert_stopped_read_approval(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    let observations: Vec<_> = run
+        .tools
+        .iter()
+        .map(|tool| tool.observation.as_ref().unwrap())
+        .collect();
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[0].disposition, arany::ToolDisposition::Limit);
+    assert_eq!(
+        observations[0].limit_cause,
+        Some(arany::LimitCause::Timeout)
     );
-    let requests = ["facts", "facts", "pending", "final"]
-        .into_iter()
+    assert_eq!(observations[1].disposition, arany::ToolDisposition::Denied);
+    assert!(observations[1].output.starts_with("not_dispatched:"));
+    assert!(
+        observations
+            .iter()
+            .all(|observation| observation.attestation.is_none())
+    );
+    let finished: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. } => Some(observation.intent.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        observations
+            .iter()
+            .map(|observation| observation.intent.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+async fn drive_read_limit_approval(
+    (entered, release): (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ),
+    inbox: &mut arany::ApprovalInbox,
+    events: &mut arany::Subscription,
+    late_reply: bool,
+) {
+    entered.await.unwrap();
+    let mut approval = inbox.next().await.expect("second read approval");
+    assert!(
+        matches!(&approval.intent.call, arany::ToolCall::Read { path, .. } if path == "notes/pending.txt")
+    );
+    let runtime_ms = loop {
+        let event = next_committed(events, "first read runtime").await;
+        if let Event::ToolStarted { intent, .. } = &event.event
+            && matches!(&intent.call, arany::ToolCall::Read { path, .. } if path == "notes/facts.txt")
+        {
+            break intent.limits.runtime_ms;
+        }
+    };
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(u64::from(runtime_ms) + 1)).await;
+    tokio::time::resume();
+    loop {
+        let event = next_committed(events, "read limit commits without approval reply").await;
+        if let Event::ToolFinished { observation, .. } = &event.event {
+            assert!(
+                matches!(&observation.intent.call, arany::ToolCall::Read { path, .. } if path == "notes/facts.txt")
+            );
+            assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+            break;
+        }
+    }
+    approval.abandoned().await;
+    if late_reply {
+        approval.decide(true);
+    } else {
+        assert_eq!(approval.withdrawal_committed().await, Some(true));
+    }
+    drop(release);
+}
+
+type ReadGate = (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+);
+
+fn gated_read_approval_provider(
+    names: &[&str],
+) -> (
+    Arc<ScriptedProvider>,
+    tokio::sync::oneshot::Receiver<Vec<ReadGate>>,
+) {
+    let calls: Vec<_> = names
+        .iter()
         .enumerate()
         .map(|(index, name)| arany::ToolRequest {
             id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
@@ -837,57 +963,164 @@ async fn multi_call_cancellation_settles_the_undispatched_suffix() {
             },
         })
         .collect();
-    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Tools(
-        requests,
-    )]));
-    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    let cancellation = RunCancellation::new();
-    let mut input = request(&workspace, "Read four files");
-    input.include_paths.clear();
-    let controls = RunControls {
-        tools: ToolGrant::Configured,
-        approvals: Some(approvals),
-        cancellation: cancellation.clone(),
-        ..Default::default()
-    };
-    let cancel = async {
-        let approval = inbox.next().await.expect("pending read approval");
-        assert!(
-            matches!(&approval.intent.call, arany::ToolCall::Read { path, .. } if path == "notes/pending.txt")
-        );
-        cancellation.cancel();
-        approval.decide(true);
-    };
-    let (outcome, ()) = tokio::join!(run_with(&engine, &provider, input, controls), cancel);
-    let outcome = outcome.unwrap();
-    engine.close().await.unwrap();
-    let (events, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
-    assert_eq!(view.runs[0], outcome.run);
-    assert_eq!(outcome.run.status, RunStatus::Cancelled);
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    let observations: Vec<_> = outcome
-        .run
-        .tools
+    let gated: Vec<_> = calls[..calls.len() - 1]
         .iter()
-        .map(|tool| tool.observation.as_ref().unwrap())
+        .map(|request| request.call.clone())
         .collect();
-    assert_eq!(observations.len(), 4);
-    assert!(
-        observations[..2]
+    let provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Tools(calls),
+        arany::test_support::goals::finish_with("Read step complete"),
+    ]);
+    let recorded = Arc::clone(&provider.requests);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let send = Mutex::new(Some(send));
+    let provider = provider.with_before_call(0, move || {
+        let run = recorded.lock().unwrap()[0].run_id;
+        let gates = gated
             .iter()
-            .all(|observation| observation.disposition == arany::ToolDisposition::Succeeded)
-    );
-    assert!(
-        observations[2..]
+            .map(|call| arany::FaultPlan::gate_in_process_read(run, call.clone()))
+            .collect();
+        send.lock().unwrap().take().unwrap().send(gates).unwrap();
+    });
+    (Arc::new(provider), receive)
+}
+
+const READ_APPROVAL_ACTIVE_MS: u64 = 10_000;
+const READ_POST_APPROVAL_ACTIVE_MS: u64 = 10_000;
+const READ_APPROVAL_IDLE_MS: u64 = 60_000;
+const READ_ACCOUNTING_TOLERANCE_MS: u64 = 5_000;
+
+#[tokio::test]
+async fn concurrent_reads_charge_active_time_after_denied_or_unavailable_approval() {
+    for (unavailable, idle) in [(false, false), (true, false), (false, true), (true, true)] {
+        let _deadline =
+            engine_support::deadline("read approval active time", Duration::from_secs(180));
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+        for name in ["overlap", "pending"] {
+            std::fs::write(workspace.join(format!("notes/{name}.txt")), "Other fact").unwrap();
+        }
+        let state = temp.path().join("state");
+        let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+        private_file(
+            &state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Read(./notes/pending.txt)"]}}"#,
+        );
+        let (provider, gates) = gated_read_approval_provider(&["facts", "overlap", "pending"]);
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let mut events = engine.subscribe();
+        let mut input = request(&workspace, "Read three files");
+        input.include_paths.clear();
+        input.goal.budget = Some(arany::GoalBudget {
+            max_active_ms: Some(120_000),
+            ..Default::default()
+        });
+        let drive = async {
+            drive_read_approval_accounting(
+                gates.await.unwrap(),
+                &mut inbox,
+                &mut events,
+                unavailable,
+                idle,
+            )
+            .await
+        };
+        let (outcome, expected_ms) = tokio::join!(
+            run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    approvals: Some(approvals),
+                    ..Default::default()
+                }
+            ),
+            drive
+        );
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        engine.close().await.unwrap();
+        let (events, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+        let active_ms = events
             .iter()
-            .all(|observation| observation.attestation.is_none())
-    );
-    assert!(observations[3].output.starts_with("not_dispatched:"));
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
-            .count(),
-        4
-    );
+            .find_map(|event| match event.event {
+                Event::RunFinished { active_ms, .. } => Some(active_ms),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            (expected_ms..expected_ms + READ_ACCOUNTING_TOLERANCE_MS).contains(&active_ms),
+            "unavailable={unavailable}, idle={idle}: {active_ms} versus {expected_ms}"
+        );
+        assert_eq!(view.runs[0], outcome.run);
+        assert_eq!(view.goals[0].active_ms, active_ms);
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    }
+}
+
+async fn drive_read_approval_accounting(
+    gates: Vec<ReadGate>,
+    inbox: &mut arany::ApprovalInbox,
+    events: &mut arany::Subscription,
+    unavailable: bool,
+    idle: bool,
+) -> u64 {
+    let [
+        (first_entered, first_release),
+        (overlap_entered, overlap_release),
+    ]: [ReadGate; 2] = gates.try_into().unwrap();
+    first_entered.await.unwrap();
+    overlap_entered.await.unwrap();
+    let approval = inbox.next().await.expect("last read approval");
+    advance_read_clock(READ_APPROVAL_ACTIVE_MS).await;
+    overlap_release.send(()).unwrap();
+    let mut first_release = Some(first_release);
+    if idle {
+        first_release.take().unwrap().send(()).unwrap();
+    }
+    for _ in 0..if idle { 2 } else { 1 } {
+        let observation = next_read_observation(events).await;
+        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+    }
+    if idle {
+        advance_read_clock(READ_APPROVAL_IDLE_MS).await;
+    }
+    if unavailable {
+        drop(approval);
+    } else {
+        approval.decide(false);
+    }
+    let denied = next_read_observation(events).await;
+    assert_eq!(denied.disposition, arany::ToolDisposition::Denied);
+    assert!(denied.attestation.is_none());
+    assert!(denied.output.contains(if unavailable {
+        "channel_unavailable"
+    } else {
+        "user_declined"
+    }));
+    if let Some(release) = first_release {
+        advance_read_clock(READ_POST_APPROVAL_ACTIVE_MS).await;
+        release.send(()).unwrap();
+        let observation = next_read_observation(events).await;
+        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+        READ_APPROVAL_ACTIVE_MS + READ_POST_APPROVAL_ACTIVE_MS
+    } else {
+        READ_APPROVAL_ACTIVE_MS
+    }
+}
+
+async fn next_read_observation(events: &mut arany::Subscription) -> arany::ToolObservation {
+    loop {
+        let event = next_committed(events, "read result").await;
+        if let Event::ToolFinished { observation, .. } = &event.event {
+            return observation.clone();
+        }
+    }
+}
+
+async fn advance_read_clock(milliseconds: u64) {
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(milliseconds)).await;
+    tokio::time::resume();
 }

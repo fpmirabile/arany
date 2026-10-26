@@ -96,6 +96,7 @@ pub struct Sample {
     pub agent_run_id: AgentRunId,
     pub call_index: usize,
     pub operation: Operation,
+    pub requested_tools: usize,
     pub provider_sequence: Option<u64>,
     pub provider_disposition: Option<ProviderCallDisposition>,
     pub intent_id: Option<Uuid>,
@@ -108,6 +109,9 @@ pub struct Sample {
 struct Pending {
     sample: Sample,
     received: Instant,
+    started: Vec<(Uuid, u64)>,
+    finished: Vec<Uuid>,
+    failed: bool,
 }
 
 struct State {
@@ -170,7 +174,16 @@ impl<'a> Receipt<'a> {
             state.invalid = Some(LatencyError::Overflow);
             return;
         }
-        let call = (requests.len() == 1).then(|| &requests[0].call);
+        let call = requests
+            .first()
+            .filter(|first| {
+                requests.len() <= usize::from(crate::session::MAX_STEP_TOOL_CALLS)
+                    && requests.iter().enumerate().all(|(index, request)| {
+                        operation(&request.call) == operation(&first.call)
+                            && requests[..index].iter().all(|prior| prior.id != request.id)
+                    })
+            })
+            .map(|request| &request.call);
         state.pending = Some(Pending {
             sample: Sample {
                 session_id: self.session_id,
@@ -178,6 +191,7 @@ impl<'a> Receipt<'a> {
                 agent_run_id: self.agent_run_id,
                 call_index: self.call_index,
                 operation: call.map_or(Operation::InvalidProposal, operation),
+                requested_tools: requests.len(),
                 provider_sequence: None,
                 provider_disposition: None,
                 intent_id: None,
@@ -187,6 +201,9 @@ impl<'a> Receipt<'a> {
                 tool_receipt_to_commit_us: None,
             },
             received,
+            started: Vec::new(),
+            finished: Vec::new(),
+            failed: false,
         });
     }
 }
@@ -251,24 +268,42 @@ impl Recorder {
                 }
             }
             Event::ToolStarted { intent, .. } => {
-                if sample.started_sequence.is_some() || sample.operation != operation(&intent.call)
+                if pending.started.len() >= sample.requested_tools
+                    || pending.started.iter().any(|(id, _)| *id == intent.id)
+                    || sample.operation != operation(&intent.call)
                 {
                     state.invalid = Some(LatencyError::MismatchedIntent);
                     return;
                 }
+                pending.started.push((intent.id, envelope.sequence));
                 sample.intent_id = Some(intent.id);
                 sample.started_sequence = Some(envelope.sequence);
             }
             Event::ToolFinished { observation, .. } => {
-                if sample.intent_id != Some(observation.intent.id) {
+                let start = pending
+                    .started
+                    .iter()
+                    .find(|(id, _)| *id == observation.intent.id);
+                if start.is_none() || pending.finished.contains(&observation.intent.id) {
                     state.invalid = Some(LatencyError::UnmatchedFinish);
                     return;
                 }
+                pending.finished.push(observation.intent.id);
+                pending.failed |= observation.disposition != ToolDisposition::Succeeded;
+                if pending.finished.len() < sample.requested_tools {
+                    return;
+                }
+                sample.intent_id = Some(observation.intent.id);
+                sample.started_sequence = start.map(|(_, sequence)| *sequence);
                 sample.finished_sequence = Some(envelope.sequence);
                 sample.disposition = Some(observation.disposition);
-                sample.tool_receipt_to_commit_us = acknowledged
-                    .checked_duration_since(pending.received)
-                    .and_then(|duration| u64::try_from(duration.as_micros()).ok());
+                sample.tool_receipt_to_commit_us = (!pending.failed)
+                    .then(|| {
+                        acknowledged
+                            .checked_duration_since(pending.received)
+                            .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+                    })
+                    .flatten();
                 let pending = state.pending.take().expect("acknowledged measurement");
                 state.samples.push(pending.sample);
             }
@@ -334,7 +369,7 @@ impl Sample {
             };
             if Some(intent.id) != self.intent_id
                 || operation(&intent.call) != self.operation
-                || record.requested_tools != 1
+                || record.requested_tools as usize != self.requested_tools
                 || record.disposition != ProviderCallDisposition::ToolRequested
                 || provider.sequence >= started.sequence
             {
@@ -368,6 +403,26 @@ impl Sample {
             || self.tool_receipt_to_commit_us.is_some()
         {
             return Err(LatencyError::MissingFinish);
+        }
+        if self.successful() {
+            let finishes: Vec<_> = events
+                .iter()
+                .filter(scoped)
+                .filter(|event| {
+                    event.sequence > provider.sequence
+                        && calls
+                            .get(self.call_index + 1)
+                            .is_none_or(|next| event.sequence < next.sequence)
+                        && matches!(&event.event, Event::ToolFinished { .. })
+                })
+                .collect();
+            if finishes.len() != self.requested_tools
+                || finishes.iter().any(|event| !matches!(&event.event,
+                    Event::ToolFinished { observation, .. } if observation.disposition == ToolDisposition::Succeeded))
+                || finishes.last().map(|event| event.sequence) != self.finished_sequence
+            {
+                return Err(LatencyError::MismatchedFinishOrPermission);
+            }
         }
         let interval = |start: &EventEnvelope| {
             finished.and_then(|end| end.created_at_ms.checked_sub(start.created_at_ms))

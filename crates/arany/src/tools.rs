@@ -1456,10 +1456,36 @@ impl ToolRuntime {
         }
     }
 
+    pub(crate) fn concurrent_read(&self, intent: &EffectIntent) -> bool {
+        intent.target == crate::worker::EffectTarget::Workspace
+            && intent.call.facts().site == Site::InProcess
+            && !intent.call.facts().mutates
+            && self.intent_reservation_overhead(intent).is_zero()
+    }
+
+    pub(crate) async fn execute_concurrent_read(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        self.execute_inner(intent, cancellation, ReadDispatch::InProcess)
+            .await
+    }
+
     pub(crate) async fn execute(
         &self,
         intent: EffectIntent,
         cancellation: Cancellation,
+    ) -> ToolObservation {
+        self.execute_inner(intent, cancellation, ReadDispatch::Automatic)
+            .await
+    }
+
+    async fn execute_inner(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+        reads: ReadDispatch,
     ) -> ToolObservation {
         if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
             && !self.guard_available
@@ -1512,7 +1538,10 @@ impl ToolRuntime {
             Site::InProcess if intent.call.facts().mutates => {
                 self.run_file(intent, cancellation).await
             }
-            Site::InProcess => self.run_read(intent, cancellation).await,
+            Site::InProcess => match reads {
+                ReadDispatch::Automatic => self.run_read(intent, cancellation).await,
+                ReadDispatch::InProcess => self.run_in_process(intent, cancellation).await,
+            },
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
@@ -1758,6 +1787,15 @@ impl ToolRuntime {
                 "In-process read capacity is full; nothing was read",
             );
         };
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return cancelled_read(intent),
+            ready = tokio::time::timeout_at(deadline, crate::fault::in_process_read(&intent)) => {
+                if ready.is_err() {
+                    return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+                }
+            },
+        }
         let (runtime, read_intent) = (self.clone(), intent.clone());
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1847,6 +1885,11 @@ impl ToolRuntime {
         }
         observation
     }
+}
+
+enum ReadDispatch {
+    Automatic,
+    InProcess,
 }
 
 #[derive(Clone)]

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const FIXTURE: &str = "fn main() {}\n";
+const READ_COUNTS: [usize; 2] = [1, 4];
 const WARMUPS: usize = 10;
 const MEASURED: usize = 100;
 const REPORT_CAP: u64 = 1024 * 1024;
@@ -17,6 +18,14 @@ fn private_file(path: &Path, bytes: &[u8]) {
 }
 
 fn fixture(root: &Path, path: &str) -> (Engine, Arc<ScriptedProvider>, arany::RunRequest) {
+    fixture_reads(root, path, 1)
+}
+
+fn fixture_reads(
+    root: &Path,
+    path: &str,
+    reads: usize,
+) -> (Engine, Arc<ScriptedProvider>, arany::RunRequest) {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     private_file(
@@ -43,11 +52,18 @@ fn fixture(root: &Path, path: &str) -> (Engine, Arc<ScriptedProvider>, arany::Ru
     private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            tool_outcome(arany::ToolCall::Read {
-                path: path.into(),
-                offset: None,
-                limit: None,
-            }),
+            ProviderOutcome::Tools(
+                (0..reads)
+                    .map(|index| arany::ToolRequest {
+                        id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
+                        call: arany::ToolCall::Read {
+                            path: path.into(),
+                            offset: None,
+                            limit: None,
+                        },
+                    })
+                    .collect(),
+            ),
             arany::test_support::goals::finish_with("Read completed"),
         ])
         .with_known_input_tokens(),
@@ -70,12 +86,12 @@ fn controls() -> RunControls {
     }
 }
 
-fn assert_read(view: &SessionView) {
+fn assert_read(view: &SessionView, reads: usize) {
     assert_eq!(view.runs.len(), 1);
     let run = &view.runs[0];
     assert_eq!(run.status, RunStatus::Finished);
     assert_eq!(run.assistant_message.as_deref(), Some("Read completed"));
-    assert_eq!(run.tools.len(), 1);
+    assert_eq!(run.tools.len(), reads);
     assert!(
         run.agents
             .iter()
@@ -84,24 +100,26 @@ fn assert_read(view: &SessionView) {
     assert!(view.compactions.is_empty());
     assert!(run.provider_fallbacks.is_empty());
     assert!(run.provider_retries.is_empty());
-    let observation = run.tools[0].observation.as_ref().unwrap();
-    assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
-    assert!(matches!(
-        observation.attestation,
-        Some(arany::Attestation::InProcess { .. })
-    ));
-    let page: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
-    let digest = Sha256::digest(FIXTURE.repeat(4096).as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    assert_eq!(
-        page,
-        serde_json::json!({
-            "sha256":digest, "total_lines":4096, "start_line":1, "end_line":2000,
-            "next_line":2001, "truncated":true, "text":(1..=2000).map(|line| format!("{line}\t{FIXTURE}")).collect::<String>(),
-        })
-    );
+    for tool in &run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::InProcess { .. })
+        ));
+        let page: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        let digest = Sha256::digest(FIXTURE.repeat(4096).as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            page,
+            serde_json::json!({
+                "sha256":digest, "total_lines":4096, "start_line":1, "end_line":2000,
+                "next_line":2001, "truncated":true, "text":(1..=2000).map(|line| format!("{line}\t{FIXTURE}")).collect::<String>(),
+            })
+        );
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,8 +132,8 @@ struct AuditedSample {
     effective_bounds: serde_json::Value,
 }
 
-async fn measure(root: &Path, ordinal: usize) {
-    let (engine, provider, input) = fixture(root, "src/main.rs");
+async fn measure(root: &Path, ordinal: usize, reads: usize) {
+    let (engine, provider, input) = fixture_reads(root, "src/main.rs", reads);
     let recorder = engine_support::record_tool_latency(&engine);
     let result = run_with(&engine, &provider, input, controls()).await;
     private_file(
@@ -130,7 +148,7 @@ async fn measure(root: &Path, ordinal: usize) {
     let (events, view) =
         arany::test_support::goals::replayed(&root.join("state"), outcome.session_id).await;
     assert_eq!(view.runs[0], outcome.run);
-    assert_read(&view);
+    assert_read(&view, reads);
     private_file(
         &root.join("expected-show.jsonl"),
         arany_cli::presentation::render_session(
@@ -177,7 +195,10 @@ fn audit_show(root: &Path, sample: &Sample, remaining: Duration) {
         .args([&sample.session_id.to_string(), "--output", "jsonl"]);
     use process::BoundedOutput;
     let output = command
-        .bounded_output_for(remaining.min(Duration::from_secs(10)), 64 * 1024)
+        .bounded_output_for(
+            remaining.min(Duration::from_secs(10)),
+            64 * 1024 * sample.requested_tools.max(1),
+        )
         .unwrap();
     private_file(&root.join("show-stdout.jsonl"), &output.stdout);
     private_file(&root.join("show-stderr.txt"), &output.stderr);
@@ -311,7 +332,14 @@ fn linux_tool_latency_sample() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(measure(&root, ordinal));
+        .block_on(measure(
+            &root,
+            ordinal,
+            std::env::var("ARANY_LATENCY_READS")
+                .unwrap()
+                .parse()
+                .unwrap(),
+        ));
 }
 
 pub(super) fn corpus() {
@@ -319,6 +347,13 @@ pub(super) fn corpus() {
     let _gate = process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
+    for reads in READ_COUNTS {
+        corpus_row(reads, deadline);
+    }
+}
+
+fn corpus_row(reads: usize, deadline: std::time::Instant) {
     let parent = PathBuf::from(
         std::env::var_os("ARANY_LATENCY_ROOT")
             .expect("set ARANY_LATENCY_ROOT to an existing local-disk evidence directory"),
@@ -366,7 +401,7 @@ pub(super) fn corpus() {
     let binary_sha256 = executable_digest(Path::new(env!("CARGO_BIN_EXE_arany")));
     let test_binary_sha256 = executable_digest(&std::env::current_exe().unwrap());
     let root = tempfile::Builder::new()
-        .prefix("arany-tool-latency-")
+        .prefix(&format!("arany-tool-latency-{reads}-"))
         .tempdir_in(&parent)
         .unwrap()
         .keep();
@@ -379,12 +414,13 @@ pub(super) fn corpus() {
             "local disk required; tmpfs is not this workload"
         );
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(30 * 60);
     let mut samples = Vec::with_capacity(WARMUPS + MEASURED);
     let mut failure = None;
     let mut attempted = 0;
     for ordinal in 0..WARMUPS + MEASURED {
-        if std::time::Instant::now() >= deadline || bytes_under(&root) + SAMPLE_CAP > EVIDENCE_CAP {
+        if std::time::Instant::now() >= deadline
+            || bytes_under(&root) + SAMPLE_CAP > EVIDENCE_CAP / READ_COUNTS.len() as u64
+        {
             failure = Some("invocation deadline or evidence capacity");
             break;
         }
@@ -403,7 +439,8 @@ pub(super) fn corpus() {
                 "--test-threads=1",
             ])
             .env("ARANY_LATENCY_SAMPLE", &sample_root)
-            .env("ARANY_LATENCY_ORDINAL", ordinal.to_string());
+            .env("ARANY_LATENCY_ORDINAL", ordinal.to_string())
+            .env("ARANY_LATENCY_READS", reads.to_string());
         use process::BoundedOutput;
         let sample_deadline = deadline.min(std::time::Instant::now() + Duration::from_secs(120));
         let remaining = sample_deadline.saturating_duration_since(std::time::Instant::now());
@@ -475,16 +512,16 @@ pub(super) fn corpus() {
         None
     };
     let report = serde_json::json!({
-        "corpus_version":1, "operation":"read", "profile":"release with test-support", "host":host,
+        "corpus_version":1, "operation":"read", "calls_per_step":reads, "profile":"release with test-support", "host":host,
         "binary_sha256":binary_sha256,"test_binary_sha256":test_binary_sha256,"package_version":env!("CARGO_PKG_VERSION"),
         "failed_capture":failed_capture,
         "evidence_root":root, "workload":"warm 53248-byte file, default 2000-line page, fresh State/Workspace per sample",
-        "endpoint":"complete typed Provider receipt to ToolFinished durable append acknowledgement",
+        "endpoint":"complete typed Provider receipt to final ToolFinished durable append acknowledgement",
         "excluded":"Provider transport/inference/decoding, startup, final answer, rendering, show; no Guard spawn for Read",
         "attempted":attempted, "warmups":samples.iter().filter(|sample| sample.warmup).count(), "measured":measured.len(),
         "failed_or_incomplete":attempted - samples.len(), "valid":valid, "failure":failure, "samples":samples,
-        "p50_p95_max_us":summary, "provisional_p95_objective_us":100_000,
-        "objective_met":summary.map(|values| values[1] <= 100_000),
+        "p50_p95_max_us":summary, "provisional_p95_objective_us":(reads == 1).then_some(100_000),
+        "objective_met":summary.filter(|_| reads == 1).map(|values| values[1] <= 100_000),
     });
     let bytes = serde_json::to_vec_pretty(&report).unwrap();
     assert!(bytes.len() as u64 <= REPORT_CAP);
@@ -574,7 +611,7 @@ async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
                 .await;
         if acknowledge {
             assert_eq!(view.runs[0], result.unwrap().run);
-            assert_read(&view);
+            assert_read(&view, 1);
             samples[0].audit(&events).unwrap();
             for disposition in [
                 arany::ToolDisposition::Denied,

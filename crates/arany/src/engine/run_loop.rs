@@ -410,6 +410,8 @@ impl<'a> RunLoop<'a> {
             .active_elapsed()
             .saturating_sub(pause.activity_started);
         let sampled_at = pause.paused_at + active_during;
+        let resume_at =
+            resume_at.or_else(|| self.ledger().activity_in_progress().then(Instant::now));
         self.settle_active_segment_at(pause.segment, sampled_at, resume_at)
     }
 

@@ -6464,6 +6464,102 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn concurrent_read_post_hooks_stay_in_their_step_after_interleaved_finishes() {
+        use crate::tools::permissions::{HookOutcome, HookResult};
+        for researcher in [false, true] {
+            let (mut view, goal, run, agent) = if researcher {
+                research_session()
+            } else {
+                primary_tool_session(true)
+            };
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .permissions_digest = Some([3; 32]);
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            let mut requested = if researcher {
+                child_record(run, agent, ProviderCallDisposition::ToolRequested)
+            } else {
+                requesting_step(run, agent, 2)
+            };
+            let Event::ProviderCallRecorded { record, .. } = &mut requested else {
+                unreachable!()
+            };
+            record.requested_tools = 2;
+            apply(&mut view, requested).unwrap();
+            let first = read_intent(run, agent, "src/lib.rs");
+            let second = read_intent(run, agent, "src/lib.rs");
+            for intent in [&first, &second] {
+                apply(&mut view, tool_started(run, agent, intent)).unwrap();
+            }
+            for intent in [&first, &second] {
+                observe_in_process_read(&mut view, intent);
+            }
+            for source in [&first, &second] {
+                let hook = post_tool_hook(source);
+                let started = Event::HookStarted {
+                    run_id: run,
+                    agent_run_id: agent,
+                    hook: hook.clone(),
+                };
+                let mut next = view.clone();
+                apply(&mut next, reserve_child_call(goal, run, agent)).unwrap();
+                assert!(
+                    rejected(&next, started.clone()),
+                    "a new Provider reservation closes the hook window"
+                );
+                apply(&mut view, started)
+                    .expect("read hooks may follow sibling admission and finishes");
+                apply(
+                    &mut view,
+                    Event::HookFinished {
+                        run_id: run,
+                        agent_run_id: agent,
+                        outcome: HookOutcome {
+                            boundary_active_ms: None,
+                            observation: observation_for(hook.intent, b""),
+                            result: HookResult::Passed,
+                        },
+                    },
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    fn observe_in_process_read(view: &mut SessionView, intent: &EffectIntent) {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let (run, agent) = (intent.run_id, intent.agent_run_id);
+        apply(
+            view,
+            verdict_event(
+                intent,
+                Some(PermissionMode::Default),
+                Decision::Allow,
+                PermissionSource::Mode,
+                PermissionSource::Mode,
+                true,
+            ),
+        )
+        .unwrap();
+        let mut finished = tool_finished(run, agent, intent, b"Fact");
+        let Event::ToolFinished { observation, .. } = &mut finished else {
+            unreachable!()
+        };
+        observation.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
+            policy_digest: intent.policy_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+        });
+        apply(view, finished).unwrap();
+    }
+
+    #[test]
     fn batch_reservations_wait_for_post_tool_hook_settlement() {
         use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
         const FIRST_CEILING_MS: u64 = 1000;
@@ -8619,14 +8715,16 @@ mod goal_replay_tests {
                 active_ceiling_ms,
             };
         apply(&mut view, reservation(&first, FIRST_ACTIVE_CEILING_MS)).expect("first reserved");
+        apply(&mut view, reservation(&second, SECOND_ACTIVE_CEILING_MS))
+            .expect("read reservations may overlap");
+        assert_eq!(view.goals[0].active_ceiling_ms, FIRST_ACTIVE_CEILING_MS);
         assert!(
             rejected(&view, reservation(&second, SECOND_ACTIVE_CEILING_MS)),
-            "an open action's ceiling cannot be replaced by another intent"
+            "one reservation per intent"
         );
-        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
-        apply(&mut view, reservation(&second, SECOND_ACTIVE_CEILING_MS))
-            .expect("second reserved after the first observation");
-        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        apply(&mut view, tool_finished(run, agent, &second, b"two"))
+            .expect("second completes first");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first completes last");
         assert!(
             rejected(&view, tool_started(run, agent, &third)),
             "every declared request is already started"

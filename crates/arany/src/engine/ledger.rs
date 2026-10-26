@@ -533,6 +533,10 @@ impl GoalLedger {
         self.activity.elapsed()
     }
 
+    pub(super) fn activity_in_progress(&self) -> bool {
+        self.activity.active()
+    }
+
     pub(super) fn active_deadline(
         &self,
         allowance_ms: u64,

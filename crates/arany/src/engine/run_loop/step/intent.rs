@@ -566,6 +566,17 @@ impl RunLoop<'_> {
         Ok(())
     }
 
+    pub(super) async fn finish_answer(&self, answer: &Answer) -> Result<(), EngineError> {
+        self.append(Event::ToolFinished {
+            checkpoint: answer.checkpoint.clone(),
+            run_id: self.run_id,
+            agent_run_id: answer.observation.intent.agent_run_id,
+            observation: answer.observation.clone(),
+        })
+        .await?;
+        self.commit_approval_withdrawal(answer.observation.intent.id)
+    }
+
     pub(super) async fn dispatch_intent(
         &self,
         grant: &Grant<'_>,
@@ -574,12 +585,11 @@ impl RunLoop<'_> {
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
         let agent_run_id = intent.agent_run_id;
-        let intent_id = intent.id;
         let permission = self.permission(grant, runtime, &intent.call);
         let mut narrowed = None;
         let mut candidate = None;
         let Admission::Reserved(verdict) = self
-            .before_dispatch(grant, runtime, intent, permission, narrowable)
+            .before_dispatch(grant, runtime, intent, permission, narrowable, None)
             .await?
         else {
             return Ok(Err(StopCause::ActiveTime));
@@ -651,14 +661,7 @@ impl RunLoop<'_> {
                 }
             },
         };
-        self.append(Event::ToolFinished {
-            checkpoint: answer.checkpoint.clone(),
-            run_id: self.run_id,
-            agent_run_id,
-            observation: answer.observation.clone(),
-        })
-        .await?;
-        self.commit_approval_withdrawal(intent_id)?;
+        self.finish_answer(&answer).await?;
         if let Some((candidate, data)) = candidate {
             self.worker
                 .lock()
