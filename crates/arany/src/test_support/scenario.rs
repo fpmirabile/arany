@@ -870,10 +870,16 @@ printf retained > "$CARGO_TARGET_DIR/prior-marker"
             true,
         ),
         (
+            "timeout",
+            "printf retained > \"$CARGO_TARGET_DIR/timeout-marker\"; printf timeout-cache-ready; while :; do :; done",
+            false,
+        ),
+        (
             "warm",
             // macOS gives each command a new source path, invalidating Cargo fingerprints.
             r#"set -eu
 test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained
+test "$(cat "$CARGO_TARGET_DIR/timeout-marker")" = retained
 cargo test --locked --lib --no-run
 cargo test --locked --lib --verbose
 "#,
@@ -941,7 +947,7 @@ printf cache-changed
                 paths: Vec::new(),
                 commands: vec!["sh".into()],
                 resource_class: ToolResourceClass::Build,
-                command_timeout_ms: Some(60_000),
+                command_timeout_ms: Some(if case == "timeout" { 10_000 } else { 60_000 }),
                 skills: Vec::new(),
                 mcp_tools: Vec::new(),
                 success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
@@ -1102,12 +1108,18 @@ printf cache-changed
             );
             assert_eq!(
                 observation.cache_update,
-                if success {
+                if success || case == "timeout" {
                     CacheUpdate::Published
                 } else {
                     CacheUpdate::NotAttempted
                 }
             );
+            if case == "timeout" {
+                assert_eq!(observation.disposition, crate::ToolDisposition::Limit);
+                assert_eq!(observation.limit_cause, Some(crate::LimitCause::Timeout));
+                assert_eq!(result["stdout"], "timeout-cache-ready");
+                assert_eq!(result["changeset"]["files"], serde_json::json!([]));
+            }
             if matches!(case, "guarded" | "warm" | "retained") {
                 let stdout = result["stdout"].as_str().unwrap();
                 assert!(
