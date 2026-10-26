@@ -231,6 +231,8 @@ async fn transport_failure(
         | TransportError::Unavailable => CheckDisposition::Uncertain,
         TransportError::Rejected
         | TransportError::InvalidOutcome
+        | TransportError::InvalidResponseContract
+        | TransportError::InvalidOutcomeContract
         | TransportError::HttpServerUnavailable(_)
         | TransportError::RateLimited(_)
         | TransportError::QuotaExceeded => CheckDisposition::Rejected,
@@ -246,6 +248,22 @@ fn usage(usage: &crate::Usage) -> Option<CheckUsage> {
         input_tokens: usage.input_tokens?,
         output_tokens: usage.output_tokens?,
     })
+}
+
+fn answer_probe_matches(
+    outcome: &ProviderOutcome,
+    protocol: &super::Protocol,
+    preview: &str,
+) -> bool {
+    let ProviderOutcome::Answer(value) = outcome else {
+        return false;
+    };
+    match protocol {
+        super::Protocol::OpenaiChatCompletions { .. } => !value.text.trim().is_empty(),
+        super::Protocol::OpenaiResponses | super::Protocol::AnthropicMessages { .. } => {
+            !preview.is_empty() && value.text.starts_with(preview)
+        }
+    }
 }
 
 async fn probe(
@@ -266,18 +284,29 @@ async fn probe(
         max_output_tokens: profile.max_output_tokens(),
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
-    let (preview, observed) = crate::provider::ResponsePreview::new();
     let token = journal
         .call_started(CheckCallKind::Answer)
         .await
         .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-    let direct_response = transport.run_streamed(&direct, None, Some(preview)).await;
+    let chat_completions = matches!(
+        &profile.protocol,
+        super::Protocol::OpenaiChatCompletions { .. }
+    );
+    let (preview, observed) = crate::provider::ResponsePreview::new();
+    let direct_response = if chat_completions {
+        transport.run(&direct, None).await
+    } else {
+        transport.run_streamed(&direct, None, Some(preview)).await
+    };
     let direct_response = match direct_response {
         Ok(value) => value,
         Err(error) => return Err(transport_failure(journal, error).await),
     };
-    if !matches!(&direct_response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer))
-    {
+    if !answer_probe_matches(
+        &direct_response.outcome,
+        &profile.protocol,
+        &observed.borrow().answer,
+    ) {
         return Err(rejected(journal).await);
     }
     let direct_id = direct_response.response_id.clone();
@@ -371,15 +400,22 @@ async fn probe(
             .call_started(CheckCallKind::Answer)
             .await
             .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        let response = transport
-            .run_streamed(&selected, Some(*effort), Some(preview))
-            .await;
+        let response = if chat_completions {
+            transport.run(&selected, Some(*effort)).await
+        } else {
+            transport
+                .run_streamed(&selected, Some(*effort), Some(preview))
+                .await
+        };
         let response = match response {
             Ok(value) => value,
             Err(error) => return Err(transport_failure(journal, error).await),
         };
-        if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer))
-        {
+        if !answer_probe_matches(
+            &response.outcome,
+            &profile.protocol,
+            &observed.borrow().answer,
+        ) {
             return Err(rejected(journal).await);
         }
         let id = response.response_id.clone();
@@ -469,6 +505,12 @@ pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
                 super::MessagesAuth::Bearer => "bearer",
                 super::MessagesAuth::ApiKey => "x-api-key",
             },
+        ),
+        super::Protocol::OpenaiChatCompletions { base_url } => (
+            "openai-chat-completions",
+            base_url.as_str(),
+            "json_schema",
+            "bearer",
         ),
     };
     let mut digest = Sha256::new();
@@ -1329,6 +1371,12 @@ mod tests {
                     super::super::MessagesAuth::Bearer => "bearer",
                     super::super::MessagesAuth::ApiKey => "x-api-key",
                 },
+            ),
+            super::super::Protocol::OpenaiChatCompletions { base_url } => (
+                "openai-chat-completions",
+                base_url.as_str(),
+                "json_schema",
+                "bearer",
             ),
         };
         for version in [
