@@ -41,6 +41,7 @@ async fn waiting_connection() -> (
     let (controls, bootstrap) = Controls::new(ApprovalMode::Request, true);
     let mut request = request(&workspace, "Inspect the folder");
     request.session_id = Some(session);
+    request.title = None;
     request.launch_directory = Some(workspace);
     let connection = Connection::start(
         engine.clone(),
@@ -56,7 +57,10 @@ async fn waiting_connection() -> (
             })
         },
     );
-    starts.recv().await.unwrap();
+    starts
+        .recv()
+        .await
+        .expect("embedded Run reaches the held Provider call");
     (root, engine, controls, connection, session, dropped)
 }
 
