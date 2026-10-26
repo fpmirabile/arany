@@ -995,6 +995,7 @@ async fn create_compacted_fork(
     );
     let mut second_request = scenario::request(workspace, "Select inherited compaction");
     second_request.session_id = Some(source);
+    second_request.title = None;
     second_request.include_paths.clear();
     super::engine_support::run_to_end(&engine, &second_provider, second_request)
         .await
