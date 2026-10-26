@@ -69,8 +69,9 @@ async fn run_case(root: &Path, workspace: &Path, phase: &str) {
         SessionView::replay(outcome.session_id, &events)
             .unwrap()
             .unwrap()
-            .runs,
-        [outcome.run.clone()]
+            .runs
+            .as_slice(),
+        std::slice::from_ref(&outcome.run)
     );
     report(&outcome, phase, started.elapsed());
 }
