@@ -1244,7 +1244,7 @@ fn inspect(
             offset,
             limit,
         } => {
-            if path.starts_with("spill:") {
+            if super::spill::read_reference(path).is_some() {
                 return Err(ToolError::SpillUnavailable);
             }
             let Some(Entry::File { content, .. }) = image.entries.get(path) else {

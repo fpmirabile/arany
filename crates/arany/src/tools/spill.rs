@@ -2,6 +2,13 @@ use super::{ToolCall, ToolError, ToolObservation};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
+pub(crate) const READ_PREFIX: &str = "spill:";
+
+pub(crate) fn read_reference(path: &str) -> Option<&str> {
+    path.strip_prefix(READ_PREFIX)
+        .filter(|reference| crate::validate::valid_digest(reference))
+}
+
 pub(crate) const MAX_SPILL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_SPILL_RUN_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_REPORT_BYTES: usize =

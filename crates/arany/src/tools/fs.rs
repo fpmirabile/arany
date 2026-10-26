@@ -23,8 +23,8 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             offset,
             limit,
         } => {
-            (if let Some(reference) = path.strip_prefix("spill:") {
-                valid_digest(reference)
+            (if path.starts_with(super::spill::READ_PREFIX) {
+                super::spill::read_reference(path).is_some()
             } else {
                 valid_relative(path, false)
             }) && offset.is_none_or(|n| n >= 1)
@@ -101,7 +101,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "read" => vec![
             (
                 "path",
-                json!({"type":"string", "description":"Workspace file path, or spill:<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output."}),
+                json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
             ),
             (
                 "offset",

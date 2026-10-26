@@ -280,25 +280,24 @@ mod tests {
         assert!(access.read(&reference).is_err());
         assert!(access.read(&"e".repeat(64)).is_err());
     }
-}
 
-#[cfg(test)]
-#[test]
-fn written_spill_has_no_read_authority_until_its_reference_is_retained() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let access = state.admit_spills(RunId::new(), &[]).unwrap();
-    let reference = "a".repeat(64);
-    assert!(access.reserve(3).unwrap());
-    access
-        .write(
-            &reference,
-            b"one",
-            &AtomicBool::new(false),
-            &mut crate::fault::SpillWriteGate::default(),
-        )
-        .unwrap();
-    assert!(access.read(&reference).is_err());
-    access.retain(&reference).unwrap();
-    assert!(access.read(&reference).is_ok());
+    #[test]
+    fn written_spill_has_no_read_authority_until_its_reference_is_retained() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let access = state.admit_spills(RunId::new(), &[]).unwrap();
+        let reference = "a".repeat(64);
+        assert!(access.reserve(3).unwrap());
+        access
+            .write(
+                &reference,
+                b"one",
+                &AtomicBool::new(false),
+                &mut crate::fault::SpillWriteGate::default(),
+            )
+            .unwrap();
+        assert!(access.read(&reference).is_err());
+        access.retain(&reference).unwrap();
+        assert!(access.read(&reference).is_ok());
+    }
 }

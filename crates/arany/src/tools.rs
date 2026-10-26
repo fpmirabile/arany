@@ -1910,7 +1910,7 @@ impl ToolRuntime {
                 offset,
                 limit,
             } = &read_intent.call
-                && let Some(reference) = path.strip_prefix("spill:")
+                && let Some(reference) = spill::read_reference(path)
             {
                 let file = runtime
                     .spill_access

@@ -579,11 +579,7 @@ impl GoalPlanContract {
     pub(crate) fn allows_call(&self, call: &crate::tools::ToolCall) -> bool {
         use crate::tools::ToolCall;
         match call {
-            ToolCall::Read { path, .. }
-                if path
-                    .strip_prefix("spill:")
-                    .is_some_and(crate::validate::valid_digest) =>
-            {
+            ToolCall::Read { path, .. } if crate::tools::spill::read_reference(path).is_some() => {
                 true
             }
             ToolCall::ParseAgentDefinition { .. }
