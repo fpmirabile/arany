@@ -51,11 +51,9 @@ the Server owns its Run tasks and connection controls. The caller owns
 connection shutdown and the human approval channel. Terminal approval requests
 retain the existing rendered lines and choice identities, and abandoned
 requests retire through a reliable local cancellation notification without a
-human verdict. Further terminal asks wait in the existing bounded approval
-inbox while a dialog is open; terminal delivery also waits for outbound capacity
-under the [approval lifecycle rules](#server-requests). Stdio and ACP retain
-their existing busy-ask refusal. The library has no protocol dependency. Stdio and ACP retain
-their existing wire vocabulary and approval restrictions.
+human verdict. The [Server requests](#server-requests) section owns
+channel-specific approval backpressure. The library has no protocol dependency.
+Stdio and ACP retain their existing wire vocabulary and approval restrictions.
 
 ## Framing and envelope
 
