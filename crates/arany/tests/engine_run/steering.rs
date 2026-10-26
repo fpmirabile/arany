@@ -319,6 +319,7 @@ async fn child_note_reaches_only_the_next_target_boundary() {
 
 #[tokio::test]
 async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation() {
+    const STOP_TIMEOUT: Duration = Duration::from_secs(30);
     for pause in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = facts_workspace(temp.path(), "v1");
@@ -382,17 +383,19 @@ async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation()
             .unwrap();
         let driver = {
             let (steering, cancel) = (steering.clone(), cancel.clone());
-            tokio::spawn(async move {
+            async move {
                 let (first, (entered, release)) = published.await.expect("first child dispatched");
                 let mut children = Vec::new();
                 while children.len() < 2 {
-                    if let Some(arany::Tapped::Committed(envelope)) = events.next().await
-                        && let Event::AgentSpawned {
-                            role: arany::AgentRole::Child,
-                            run_id,
-                            agent_run_id,
-                            ..
-                        } = envelope.event
+                    let Some(arany::Tapped::Committed(envelope)) = events.next().await else {
+                        panic!("child spawn stream closed or required resynchronization");
+                    };
+                    if let Event::AgentSpawned {
+                        role: arany::AgentRole::Child,
+                        run_id,
+                        agent_run_id,
+                        ..
+                    } = envelope.event
                     {
                         children.push((run_id, agent_run_id));
                     }
@@ -420,12 +423,12 @@ async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation()
                     cancel.cancel();
                 }
                 release.send(()).expect("release the reservation");
-            })
+            }
         };
-        let result = tokio::time::timeout(Duration::from_secs(30), result)
-            .await
-            .expect("Run settles");
-        driver.await.unwrap();
+        let (result, ()) =
+            tokio::time::timeout(STOP_TIMEOUT, async { tokio::join!(result, driver) })
+                .await
+                .expect("Run and child steering driver settle");
         assert!(result.is_ok(), "pause={pause}");
         engine.close().await.unwrap();
         let (events, _) = replayed(&state_path, session).await;
