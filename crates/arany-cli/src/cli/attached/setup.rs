@@ -22,7 +22,7 @@ use arany::{
     MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_NATIVE_API_KEY_BYTES, MessagesAuth, ModelEntry,
     NativeApiCredentials, ProviderKind, ProviderSetupDisposition, ProviderSetupTarget,
     ProviderSetupTargetKind, RunCancellation, SessionDefaults, SessionId, StateRoot, Store,
-    StoreError, create_session, list_native_models_with_credentials, validate_native_api_key,
+    StoreError, create_session, validate_native_api_key,
 };
 use sha2::{Digest, Sha256};
 use std::future::Future;
@@ -2438,19 +2438,6 @@ pub(super) async fn await_operation<T>(
     }
 }
 
-fn native_catalog_default<'a>(provider: &str, items: &'a [ModelEntry]) -> Option<(&'a str, bool)> {
-    let preferred: &[&str] = match ProviderKind::parse(provider) {
-        Some(ProviderKind::OpenAi) => &["gpt-5.6-luna"],
-        Some(ProviderKind::Anthropic) => &["claude-sonnet-5-5", "claude-sonnet-5"],
-        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => return None,
-    };
-    preferred
-        .iter()
-        .find_map(|id| items.iter().find(|item| item.id == *id))
-        .map(|item| (item.id.as_str(), true))
-        .or_else(|| items.first().map(|item| (item.id.as_str(), false)))
-}
-
 async fn choose(
     terminal: &mut AttachedTerminal,
     step: u8,
@@ -2823,26 +2810,10 @@ async fn read_workspace_id(
     }
 }
 
-async fn load_catalog(
-    terminal: &mut AttachedTerminal,
-    provider: &str,
-    credentials: &NativeApiCredentials,
-) -> Result<Option<Vec<arany::ModelEntry>>, SetupError> {
-    await_operation(
-        terminal,
-        "Loading models",
-        "Reading the selected account's model catalog; Ctrl+C cancels",
-        list_native_models_with_credentials(provider, credentials),
-    )
-    .await?
-    .transpose()
-    .map_err(SetupError::recoverable)
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::accounts::credentials::{CredentialError, SavedAccount};
+    use crate::accounts::credentials::CredentialError;
 
     pub(crate) enum SetupPublication {
         NativeSave,
@@ -3046,49 +3017,6 @@ pub(super) mod tests {
             chatgpt_account_label(second, first)
         );
         assert!(chatgpt_account_label(second, first).contains(&second.to_string()));
-    }
-
-    #[test]
-    fn setup_account_requires_explicit_effort_for_unreviewed_model() {
-        assert!(
-            SavedAccount::new("openai".into(), "future-model".into(), None, "key".into()).is_err()
-        );
-        assert!(
-            SavedAccount::new(
-                "openai".into(),
-                "future-model".into(),
-                Some(Effort::High),
-                "key".into(),
-            )
-            .is_ok()
-        );
-        for (provider, preference) in [
-            ("openai", "gpt-5.6-luna"),
-            ("anthropic", "claude-sonnet-5-5"),
-        ] {
-            let mut items = vec![ModelEntry::exact_custom("future-model".into())];
-            assert_eq!(
-                native_catalog_default(provider, &items),
-                Some(("future-model", false))
-            );
-            items.push(ModelEntry::exact_custom(preference.into()));
-            assert_eq!(
-                native_catalog_default(provider, &items),
-                Some((preference, true))
-            );
-            assert_eq!(items[0].id, "future-model", "catalog order is unchanged");
-            let (model, _) = native_catalog_default(provider, &items).unwrap();
-            let account = SavedAccount::new(
-                provider.into(),
-                model.into(),
-                Some(Effort::Low),
-                "synthetic-key".into(),
-            )
-            .unwrap();
-            assert_eq!(native::defaults(&account).effort, Some(Effort::Low));
-            assert!(native_catalog_default(provider, &[]).is_none());
-        }
-        assert!(native_catalog_default("custom:local", &[]).is_none());
     }
 
     #[test]
