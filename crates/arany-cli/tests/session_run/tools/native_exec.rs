@@ -1372,7 +1372,7 @@ const SPILL_SETTLE_WAIT: Duration = Duration::from_secs(10);
     ignore = "native Linux spill persistence cancellation and deadline"
 )]
 fn spill_persistence_stall_preserves_completed_effects_and_reopens() {
-    if !super::super::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let _gate = crate::process::NATIVE_GATE
