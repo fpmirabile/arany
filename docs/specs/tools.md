@@ -1149,7 +1149,7 @@ Byte and entry bounds on synchronous snapshot preparation do not guarantee a fin
 
 ### Ubuntu namespace-entry diagnosis
 
-Successful user-namespace creation does not establish permission to mount inside it. On Ubuntu 24.04, AppArmor can deny namespace capabilities to an unprofiled executable, producing `ProtectionUnavailable` even with the required kernel facilities installed. A mount denial alone does not identify AppArmor: compare the failure stage, profile labels and capability sets. Check the installed launcher profile too; an installed `/usr/bin/unshare` does not establish that it is distribution-profiled. Missing namespace authorization and missing kernel/tmpfs-user-xattr enforcement are separate prerequisites; the entry probe below tests the former, not xattrs or overlay support.
+Successful user-namespace creation does not establish permission to mount inside it. On Ubuntu 24.04, [AppArmor can restrict an unprofiled executable's use of unprivileged user namespaces](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/#apparmor-unprivileged-user-namespace-restrictions), producing `ProtectionUnavailable` even with the required kernel facilities installed. A mount denial alone does not identify AppArmor: compare the failure stage, profile labels and capability sets. Check the installed launcher profile too; an installed `/usr/bin/unshare` does not establish that it is distribution-profiled. Missing namespace authorization and missing kernel/tmpfs-user-xattr enforcement are separate prerequisites; the entry probe below tests the former, not xattrs or overlay support.
 
 From the checkout, in a disposable unprivileged account on the same stock Ubuntu 24.04 host, run:
 
