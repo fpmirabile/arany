@@ -749,3 +749,215 @@ pub(super) fn requesting_step(run: RunId, agent: AgentRunId, requested_tools: u8
         },
     }
 }
+
+pub(super) fn research_session() -> (SessionView, GoalId, RunId, AgentRunId) {
+    let mut view = delegated_session(0);
+    view.runs[0].config = Some(config(
+        CollaborationPolicy::Auto {
+            max_active_children: 1,
+        },
+        true,
+    ));
+    apply_child_spawn(
+        &mut view,
+        ChildGrant::ReadOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        },
+    )
+    .expect("research child spawn");
+    let (goal, run, child) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[1].id);
+    (view, goal, run, child)
+}
+
+pub(super) fn child_record(
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+    disposition: ProviderCallDisposition,
+) -> Event {
+    Event::ProviderCallRecorded {
+        run_id,
+        agent_run_id,
+        record: record(AgentPhase::ChildWork, disposition, Some(0)),
+    }
+}
+
+pub(super) fn rejected(view: &SessionView, event: Event) -> bool {
+    apply(&mut view.clone(), event).is_err()
+}
+
+pub(super) fn tool_finished(
+    run: RunId,
+    agent: AgentRunId,
+    intent: &EffectIntent,
+    content: &[u8],
+) -> Event {
+    Event::ToolFinished {
+        checkpoint: crate::session::checkpoint::publication(intent).then(|| {
+            if matches!(
+                intent.call,
+                ToolCall::Write {
+                    expected_digest: None,
+                    ..
+                }
+            ) {
+                crate::Checkpoint::not_needed()
+            } else {
+                crate::Checkpoint::skipped(crate::CheckpointReason::StoreUnavailable)
+            }
+        }),
+        run_id: run,
+        agent_run_id: agent,
+        observation: observation_for(intent.clone(), content),
+    }
+}
+
+pub(super) fn verdict_event(
+    intent: &EffectIntent,
+    mode: Option<crate::tools::permissions::PermissionMode>,
+    decision: crate::tools::permissions::Decision,
+    basis: crate::tools::permissions::PermissionSource,
+    source: crate::tools::permissions::PermissionSource,
+    approved: bool,
+) -> Event {
+    Event::ToolStarted {
+        intent: intent.clone().into(),
+        active_ceiling_ms: 0,
+        run_id: intent.run_id,
+        agent_run_id: intent.agent_run_id,
+        verdict: Some(crate::tools::permissions::PermissionVerdict {
+            host: (approved && intent.call.is_unguarded()).then_some(
+                crate::tools::permissions::HostApproval {
+                    rule: None,
+                    epoch: uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501),
+                    session: false,
+                    source_intent: None,
+                },
+            ),
+            intent_digest: intent.digest(),
+            decision,
+            mode,
+            basis,
+            source,
+            approved,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        }),
+    }
+}
+
+pub(super) fn batch_start(
+    intent: &EffectIntent,
+    mode: Option<crate::tools::permissions::PermissionMode>,
+    approved: bool,
+) -> Event {
+    use crate::tools::permissions::{Decision, PermissionSource};
+    if mode.is_some() {
+        verdict_event(
+            intent,
+            mode,
+            Decision::Allow,
+            PermissionSource::Mode,
+            PermissionSource::Mode,
+            approved,
+        )
+    } else {
+        tool_started(intent.run_id, intent.agent_run_id, intent)
+    }
+}
+
+pub(super) fn reserved_read_pair() -> (SessionView, [EffectIntent; 2]) {
+    const ACTIVE_CEILING_MS: u64 = 1000;
+    let (mut view, goal, run, agent) = primary_tool_session(false);
+    let intents = [
+        read_intent(run, agent, "src/lib.rs"),
+        read_intent(run, agent, "src/main.rs"),
+    ];
+    apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+    apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+    for intent in &intents {
+        apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
+    }
+    for intent in &intents {
+        apply(
+            &mut view,
+            Event::ToolActiveTimeReserved {
+                run_id: run,
+                agent_run_id: agent,
+                intent_digest: intent.digest(),
+                active_ceiling_ms: ACTIVE_CEILING_MS,
+            },
+        )
+        .unwrap();
+        apply(&mut view, batch_start(intent, None, true)).unwrap();
+    }
+    (view, intents)
+}
+
+pub(super) fn assert_exhausted_crash_receipt(view: &SessionView) {
+    let mut view = view.clone();
+    view.goals[0].budget.max_active_ms = Some(1000);
+    if let Some(contract) = &mut view.goals[0].plan_contract {
+        contract.budget.max_active_ms = Some(1000);
+    }
+    let goal = &view.goals[0];
+    assert_eq!(goal.effective_budget().max_active_ms, Some(1000));
+    let usage = goal.resume_usage(&view);
+    assert!(!usage.token_usage_unknown);
+    assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
+    assert_eq!(usage.active_ms, 1000);
+    let mut refusal = goal
+        .effective_budget()
+        .refusal(usage, crate::BudgetAction::Resume)
+        .expect("finite active budget refuses the recovered ceiling");
+    let mut close = Event::GoalFinished {
+        goal_id: goal.id,
+        status: GoalStatus::Failed,
+        active_ms: usage.active_ms,
+        report: GoalReport {
+            summary: "Out of budget.".into(),
+            changes: Vec::new(),
+            evidence: Vec::new(),
+            unresolved: Vec::new(),
+            cached_input_tokens: goal.known_cached_tokens,
+        },
+        exhausted: true,
+        budget_refusal: Some(refusal),
+    };
+    assert!(
+        rejected(&view, close.clone()),
+        "pending time is not observed"
+    );
+    refusal.charge_basis = crate::BudgetChargeBasis::Conservative;
+    if let Event::GoalFinished { budget_refusal, .. } = &mut close {
+        *budget_refusal = Some(refusal);
+    }
+    apply(&mut view, close.clone()).expect("crash ceiling closes conservatively");
+    let goal = &view.goals[0];
+    assert_eq!((goal.active_ms, goal.uncertain_active_ms), (1000, 1000));
+    assert_eq!(goal.active_ceiling_ms, 0);
+    assert_eq!(goal.budget_refusal, Some(refusal));
+    assert_eq!(goal.status, GoalStatus::Failed);
+    assert!(rejected(&view, close), "a closed Goal cannot charge twice");
+}
+
+pub(super) fn recorded_supervisor_verdict(view: &SessionView, actor: AgentRunId) -> Event {
+    Event::SupervisorVerdictRecorded {
+        run_id: view.runs[0].id,
+        agent_run_id: actor,
+        verdict: crate::supervisor::SupervisorVerdict {
+            subject_sequence: view.last_sequence,
+            site: crate::supervisor::Site::ToolOutcome,
+            evaluator: 1,
+            mode: crate::supervisor::Mode::Shadow,
+            signals: vec![crate::supervisor::Signal {
+                signal: crate::supervisor::SignalKind::Loop,
+                level: crate::supervisor::Level::Notice,
+                would_response: None,
+                features: crate::supervisor::Features::Loop(Default::default()),
+                evidence: vec![view.last_sequence],
+            }],
+            capped: false,
+        },
+    }
+}
