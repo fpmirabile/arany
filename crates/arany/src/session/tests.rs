@@ -14,15 +14,17 @@ fn old_source_compilers_rebuild_history_instead_of_reusing_the_summary() {
             _ => None,
         })
         .unwrap();
-    let summary = "unsafe legacy summary canary";
+    let summary = "L".repeat(MAX_COMPACTION_SUMMARY_BYTES);
+    let content_digest = crate::validate::digest(summary.as_bytes());
+    let summary_bytes = summary.len() as u32;
     record.compiler_version = MIN_RECORDED_COMPACTION_COMPILER_VERSION;
     record.covered_sequence = view.runs[0].finished_sequence.unwrap();
     record.source_digest = prefix_digest(&events, record.covered_sequence).unwrap();
     record.status = CompactionStatus::Succeeded {
-        summary: summary.into(),
-        content_digest: crate::validate::digest(summary.as_bytes()),
-        summary_bytes: summary.len() as u32,
-        summary_tokens_estimate: summary.len().div_ceil(4) as u32,
+        summary: summary.clone(),
+        content_digest,
+        summary_bytes,
+        summary_tokens_estimate: summary_bytes.div_ceil(4),
     };
     view.compactions.push(CompactionView {
         event_sequence: view.last_sequence + 1,
@@ -54,7 +56,7 @@ fn old_source_compilers_rebuild_history_instead_of_reusing_the_summary() {
         context
             .history
             .iter()
-            .all(|turn| !turn.user.contains(summary) && !turn.assistant.contains(summary))
+            .all(|turn| !turn.user.contains(&summary) && !turn.assistant.contains(&summary))
     );
 }
 

@@ -404,7 +404,14 @@ impl RunLoop<'_> {
             .or_else(|| active_segment.as_ref().map(super::ActiveSegment::deadline))
             .ok_or(EngineError::InvalidRequest)?;
         let slots = Action::Compaction.max_events_for_admitted(&self.routing.providers);
-        self.journal.admit(self.session_id, slots, 0).await?;
+        self.journal
+            .admit_as(
+                self.session_id,
+                slots,
+                0,
+                crate::store::AdmissionKind::Compaction,
+            )
+            .await?;
         self.append(Event::GoalCompactionCallReserved {
             goal_id: self.goal()?,
             run_id: self.run_id,
@@ -714,10 +721,11 @@ impl RunLoop<'_> {
             status: summary.status,
         };
         self.journal
-            .admit(
+            .admit_as(
                 self.session_id,
                 Action::Compaction.remaining(1, &self.routing.providers),
                 0,
+                crate::store::AdmissionKind::Compaction,
             )
             .await?;
         self.append(Event::GoalContextCompacted {
