@@ -1023,7 +1023,6 @@ impl Task {
             hook_stdin: self.hook_stdin.map(Into::into),
             checkpoint_gate: None,
             cache_state: None,
-            spill_access: None,
             config: self.config,
             workspace: self.workspace,
             reads: None,
