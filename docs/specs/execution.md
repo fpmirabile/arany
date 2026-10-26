@@ -356,6 +356,7 @@ Finished records its own rewind ID, closed `restored`, `conflict`, `denied`, `fa
 | Direct-Session projection cache | [generated hot Session cache bound](./limits.md#max_hot_session_payload_bytes) of serialized Event payload | not kept; the next append replays strictly |
 | Supervisor verdicts | [generated verdict size](./limits.md#max_verdict_bytes); at most [the generated per-Run verdict count](./limits.md#max_verdicts); the verdict reaching that limit has `capped: true` | oversized payload rejected; after the limit evaluation continues without another verdict |
 | Event payload, default | [generated Event payload bound](./limits.md#max_event_bytes) | append refused |
+| `ContextCompacted` and `GoalContextCompacted` | [generated compaction Event bound](./limits.md#max_compaction_event_bytes), including JSON escaping; admits a summary at the [generated summary bound](./limits.md#max_compaction_summary_bytes) containing worst-case escaped bytes; compaction admission reserves this additional Event headroom | append refused |
 | `MessageAccepted` | [generated message payload bound](./limits.md#max_message_accepted_bytes), with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | [generated Goal start bound](./limits.md#max_goal_started_bytes) | pre-admission `GoalInputTooLarge` ("objective plus includes too large"); no Event or Provider call |
 | `GoalFinished` | [generated Goal finish bound](./limits.md#max_goal_finished_bytes) | append refused |
