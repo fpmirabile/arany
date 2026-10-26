@@ -132,6 +132,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: intent.agent_run_id,
             observation: ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition,
                 attestation,
@@ -1562,6 +1563,7 @@ fn stop_editor_hook(f: &mut Fixture) {
         outcome: HookOutcome {
             boundary_active_ms: None, result: HookResult::Stopped { reason: None },
             observation: ToolObservation {
+                spill: None,
                 attestation: Some(Attestation::Guard(receipt(&intent))), intent,
                 disposition: ToolDisposition::Succeeded, enforcement_cause: None,
                 limit_cause: None, approval_cause: None, cache_update: CacheUpdate::NotApplicable,
@@ -3173,6 +3175,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             run_id: f.run,
             agent_run_id: f.child,
             observation: ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 enforcement_cause: None,
@@ -3433,6 +3436,7 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
         run_id: f.run,
         agent_run_id: f.child,
         observation: ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             attestation: Some(attestation),
@@ -3589,6 +3593,77 @@ fn recent_files_include_only_integrated_worker_publications() {
         crate::session::recent_files(&conflict_view.runs[0], conflict_view.last_sequence)
             .is_empty()
     );
+}
+
+#[test]
+fn refused_integration_releases_its_handover_without_an_observation_or_budget_stop() {
+    for proposed in [false, true] {
+        let mut f = fixture();
+        f.mutation();
+        let data = f.finish_worker();
+        let handover = f.handover(data.clone());
+        let intent = f.intent(
+            f.primary,
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::WorkerHandover {
+                    assignment_id: f.child,
+                    handover_sequence: handover,
+                    data,
+                },
+            },
+            EffectTarget::Workspace,
+        );
+        if proposed {
+            f.push(Event::ToolProposed {
+                run_id: f.run,
+                agent_run_id: f.primary,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            });
+        }
+        let refusal = f.push(Event::ToolPreflightRefused {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: crate::session::ToolPreflightRefusal {
+                intent_digest: intent.digest(),
+                refusal: crate::session::ToolRefusal::INVALID_TRANSITION,
+                verdict: None,
+            },
+        });
+        let discarded = Event::WorkerHandoverDiscarded {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: WorkerSettlement {
+                assignment_id: f.child,
+                handover_sequence: Some(handover),
+                reason: WorkerSettlementReason::Stopped,
+                cause_sequence: refusal,
+            },
+        };
+        let mut forged = discarded.clone();
+        if let Event::WorkerHandoverDiscarded { record, .. } = &mut forged {
+            record.cause_sequence = handover;
+        }
+        refused(&f, forged, "discard needs the committed refusal sequence");
+        let discarded = f.push(discarded);
+        f.push(Event::WorkerLeaseReleased {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: WorkerSettlement {
+                assignment_id: f.child,
+                handover_sequence: Some(handover),
+                reason: WorkerSettlementReason::Stopped,
+                cause_sequence: discarded,
+            },
+        });
+        let view = f.view();
+        let run = &view.runs[0];
+        let assignment = run.agents[1].assignment.as_ref().unwrap();
+        assert!(assignment.released.is_some() && assignment.integration.is_none());
+        assert!(run.workers.stop.is_none());
+        assert!(run.tools.iter().all(|tool| tool.intent.id != intent.id
+            || tool.started_sequence.is_none() && tool.observation.is_none()));
+    }
 }
 
 #[test]
@@ -4408,6 +4483,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             }
         };
         let observation = ToolObservation {
+            spill: None,
             attestation: Some(Attestation::Guard(receipt(&intent))),
             intent,
             disposition: if site == "stopped" {
@@ -4470,6 +4546,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                     run_id: f.run,
                     agent_run_id: actor,
                     observation: ToolObservation {
+                        spill: None,
                         intent: pending,
                         disposition: ToolDisposition::Denied,
                         output: "Hook denied this Tool: blocked".into(),
@@ -4826,6 +4903,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             ),
         };
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(), disposition, output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":exit,"stdout":stdout,"stderr":stderr,"stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":(stderr).len(),"lines":(stderr).lines().count()},"changeset":{"files":[]}}).to_string(),
             attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(crate::LimitCause::Resource),
@@ -4983,6 +5061,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: self.child,
             observation: ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Succeeded,
                 enforcement_cause: None,

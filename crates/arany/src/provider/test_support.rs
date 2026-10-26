@@ -132,6 +132,7 @@ pub(crate) fn observation(
     let intent = intent(call);
     let attestation = crate::tools::Attestation::for_site(&intent);
     crate::tools::ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         attestation: Some(attestation),

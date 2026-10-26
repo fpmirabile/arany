@@ -1148,6 +1148,23 @@ fn forked_rewind_fixture(
 }
 
 #[test]
+fn fork_inspection_preserves_sqlite_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let (connection, _, child, _) = forked_rewind_fixture(&root);
+    let inspection = super::super::replay::inspect_session(&connection, child).unwrap();
+    assert!(inspection.failure.is_none());
+    assert!(inspection.prefix_view.is_some());
+    connection
+        .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 1)
+        .unwrap();
+    assert!(matches!(
+        super::super::replay::inspect_session(&connection, child),
+        Err(StoreError::Sqlite(_))
+    ));
+}
+
+#[test]
 fn rewind_right_after_a_fork_survives_cold_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let root = StateRoot::admit(&temp.path().join("state")).expect("private rewind State root");

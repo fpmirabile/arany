@@ -448,6 +448,7 @@ impl TeamProvider {
                                 | "primary_time"
                                 | "primary_delegation_deadline"
                                 | "primary_denial"
+                                | "wave_tool_refused"
                                 | "cancel_background"
                         ) {
                             WorkerMode::Background
@@ -623,6 +624,27 @@ impl TeamProvider {
             .iter()
             .filter(|r| r.phase == AgentPhase::RootSynthesis)
             .count();
+        if self.case == "wave_tool_refused" {
+            self.check(prior == 1, "primary continued after the refused wave Tool");
+            return if prior == 1 {
+                ProviderOutcome::Tools(vec![
+                    ToolRequest {
+                        id: ToolUseId::new("verify-worker").unwrap(),
+                        call: Self::read("notes/1"),
+                    },
+                    ToolRequest {
+                        id: ToolUseId::new("refused-write").unwrap(),
+                        call: ToolCall::Write {
+                            path: "notes/free".into(),
+                            expected_digest: None,
+                            content: "primary".into(),
+                        },
+                    },
+                ])
+            } else {
+                finish_with("Primary continued after refusal")
+            };
+        }
         let tools = request.input.tools.as_ref().unwrap();
         let boundary = tools
             .steps
@@ -786,6 +808,12 @@ impl Provider for TeamProvider {
             tokio::time::advance(std::time::Duration::from_secs(3600)).await;
             // Resume before native Guard work: blocking tasks inhibit paused-clock auto-advance.
             tokio::time::resume();
+        }
+        if self.case == "wave_tool_refused"
+            && request.phase == AgentPhase::RootSynthesis
+            && step == 2
+        {
+            self.gates[6].acquire().await.unwrap().forget();
         }
         if matches!(self.case, "primary_denial" | "primary_delegation_deadline")
             && request.phase == AgentPhase::RootSynthesis
@@ -1162,6 +1190,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let mut primary_tool_gated = false;
     let mut approval_journey = ApprovalJourney::new(case);
     let finished = Notify::new();
+    let mut start_refusal = None;
     let execution = async {
         let result = (&mut handle.result).await;
         finished.notify_one();
@@ -1172,6 +1201,14 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             tokio::select! {
                 () = finished.notified() => break,
                 Some(approval) = inbox.next() => {
+                    if case == "integration_refused" && matches!(approval.intent.call, ToolCall::ApplyChangeset { .. })
+                        || case == "wave_tool_refused" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free")
+                    {
+                        assert!(start_refusal.is_none(), "only one Tool start may be refused");
+                        let session = provider.requests.lock().unwrap()[0].session_id;
+                        start_refusal = Some(crate::FaultPlan::corrupt_tool_preflight(session, "ToolStarted"));
+                    }
+
                     if case == "review_exhaustion" {
                         panic!("expired AI review must not fall back to a human ask");
                     }
@@ -1234,6 +1271,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                             integrated.push(record.assignment_id);
                             if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command") { provider.gates[0].add_permits(1); }
                         }
+                        Event::WorkerLeaseReleased { record, .. } if case == "wave_tool_refused" && record.reason == crate::worker::WorkerSettlementReason::Integrated => provider.gates[6].add_permits(1),
                         Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
                         Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
                         Event::ToolFinished { observation, .. } if case != "primary_delegation_deadline" && matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free") => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
@@ -1270,6 +1308,13 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             view,
         };
     }
+    if matches!(case, "integration_refused" | "wave_tool_refused") {
+        start_refusal
+            .as_mut()
+            .expect("Tool approval reached")
+            .try_recv()
+            .expect("final-start candidate reached the reducer validator");
+    }
     let result = result.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
     drop(handle);
     assert!(
@@ -1297,6 +1342,26 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let (events, view) = replayed(&state, session).await;
     assert_action_bounds(&events, false, false);
     let run = &view.runs[0];
+    if case == "integration_refused" {
+        assert_refused_integration(&result.run.run, run, &events, &workspace);
+        assert_eq!(result.stopped, view.run_stop(run));
+        return TeamObservation {
+            directory,
+            session,
+            events,
+            view,
+        };
+    }
+    if case == "wave_tool_refused" {
+        assert_refused_wave_tool(&result.run.run, run, &events, &workspace);
+        assert_eq!(result.stopped, view.run_stop(run));
+        return TeamObservation {
+            directory,
+            session,
+            events,
+            view,
+        };
+    }
     if let Some((_, cause)) = INVALID_EDITOR_CASES.iter().find(|(name, _)| *name == case) {
         assert_eq!(run.status, RunStatus::Failed);
         assert_eq!(run.agents.len(), 1, "no child spawn");
@@ -1696,6 +1761,152 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
 }
 
+fn assert_refused_integration(
+    live: &RunView,
+    replayed: &RunView,
+    events: &[EventEnvelope],
+    workspace: &Path,
+) {
+    let sequence = assert_refused_team(live, replayed, events);
+    let refusal = replayed.primary().unwrap().tool_refusal.as_ref().unwrap();
+    let proposal = replayed
+        .tools
+        .iter()
+        .find(|tool| tool.intent.digest() == refusal.intent_digest)
+        .unwrap();
+    assert!(matches!(
+        proposal.intent.call,
+        ToolCall::ApplyChangeset { .. }
+    ));
+    assert!(proposal.started_sequence.is_none() && proposal.observation.is_none());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::WorkerIntegrationRecorded { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(&event.event, Event::WorkerHandoverDiscarded { record, .. }
+        if record.cause_sequence == sequence && record.reason == crate::worker::WorkerSettlementReason::Stopped)));
+    for index in 0..2 {
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(format!("notes/{index}"))).unwrap(),
+            format!("original {index}")
+        );
+    }
+}
+
+fn assert_refused_team(live: &RunView, replayed: &RunView, events: &[EventEnvelope]) -> u64 {
+    assert_eq!(live, replayed);
+    assert_eq!(replayed.status, RunStatus::Failed);
+    assert_eq!(replayed.failure, Some(RunFailure::ProposalRefused));
+    let actor = replayed.primary().unwrap();
+    assert_eq!(actor.status, AgentStatus::Failed);
+    let refusal = actor.tool_refusal.as_ref().unwrap();
+    assert_eq!(refusal.refusal.cause, ProposalRefusalCause::Phase);
+    assert_eq!(refusal.refusal.reason, ToolRefusalReason::Transition);
+    let sequence = actor.tool_refusal_sequence.unwrap();
+    assert!(events.iter().any(|event| event.sequence == sequence
+        && matches!(event.event, Event::ToolPreflightRefused { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::WorkerStopObserved { .. }))
+    );
+    assert!(replayed.agents.iter().skip(1).all(|agent| {
+        agent.status != AgentStatus::Active
+            && agent
+                .assignment
+                .as_ref()
+                .is_some_and(|worker| worker.released.is_some())
+    }));
+    let terminal = events.iter().filter(|event| event.sequence > sequence);
+    assert!(terminal.clone().any(|event| matches!(event.event, Event::AgentFinished { agent_run_id, disposition: AgentDisposition::Failed, .. } if agent_run_id == actor.id)));
+    assert!(terminal.clone().any(|event| matches!(
+        event.event,
+        Event::RunFinished {
+            disposition: RunDisposition::Failed,
+            failure: Some(RunFailure::ProposalRefused),
+            ..
+        }
+    )));
+    assert!(!terminal.into_iter().any(|event| matches!(
+        event.event,
+        Event::GoalProviderCallReserved { .. }
+            | Event::ToolStarted { .. }
+            | Event::HookStarted { .. }
+            | Event::AgentSpawned { .. }
+    )));
+    sequence
+}
+
+fn assert_refused_wave_tool(
+    live: &RunView,
+    replayed: &RunView,
+    events: &[EventEnvelope],
+    workspace: &Path,
+) {
+    let sequence = assert_refused_team(live, replayed, events);
+    assert_eq!(replayed.agents.len(), 3);
+    let actor = replayed.primary().unwrap();
+    assert_eq!(actor.provider_calls.last().unwrap().requested_tools, 2);
+    assert_eq!(
+        actor
+            .provider_calls
+            .iter()
+            .filter(|call| call.phase == AgentPhase::RootSynthesis)
+            .count(),
+        1
+    );
+    let refusal = actor.tool_refusal.as_ref().unwrap();
+    let proposed = replayed
+        .tools
+        .iter()
+        .find(|tool| tool.intent.digest() == refusal.intent_digest)
+        .unwrap();
+    assert!(matches!(&proposed.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
+    assert!(proposed.started_sequence.is_none() && proposed.observation.is_none());
+    let read = replayed
+        .tools
+        .iter()
+        .find(|tool| matches!(&tool.intent.call, ToolCall::Read { path, .. } if path == "notes/1"))
+        .unwrap();
+    let observation = read.observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert!(observation.attestation.is_some() && observation.output.contains("edited 1"));
+    let finished = read.finished_sequence.unwrap();
+    assert!(finished < sequence);
+    let integrated = replayed.agents[2].assignment.as_ref().unwrap();
+    assert_eq!(integrated.pins.request.mode, WorkerMode::Background);
+    assert_eq!(
+        integrated.integration.as_ref().unwrap().1.outcome,
+        WorkerIntegrationOutcome::Integrated
+    );
+    assert!(integrated.released.unwrap() < read.started_sequence.unwrap());
+    assert!(integrated.verification.is_none());
+    let sibling = &replayed.agents[1];
+    assert_eq!(sibling.status, AgentStatus::Cancelled);
+    let worker = sibling.assignment.as_ref().unwrap();
+    assert_eq!(worker.pins.request.mode, WorkerMode::Background);
+    assert_eq!(
+        worker.discarded.as_ref().unwrap().1.cause_sequence,
+        sequence
+    );
+    assert!(worker.released.unwrap() > sequence);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::WorkerVerificationRecorded { .. }))
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/0")).unwrap(),
+        "original 0"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/1")).unwrap(),
+        "edited 1"
+    );
+    assert!(!workspace.join("notes/free").exists());
+}
+
 fn assert_primary_denial_preserves_workers(run: &RunView, workspace: &Path) {
     assert_eq!(run.agents.len(), 3, "primary and two in-flight editors");
     assert_eq!(run.failure, None);
@@ -1823,6 +2034,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation: ToolObservation {
+                    spill: None,
                     intent: intent.clone().into(),
                     disposition: ToolDisposition::Uncertain,
                     output: "Private outcome unknown".into(),

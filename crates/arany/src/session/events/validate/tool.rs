@@ -3,6 +3,13 @@ use super::*;
 impl Event {
     pub(super) fn validate_tool(&self) -> Result<(), ReplayError> {
         match self {
+            Self::ToolPreflightRefused { record, .. } => {
+                if record.intent_digest != [0; 32] && record.refusal.valid() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::ToolActiveTimeReserved {
                 intent_digest,
                 active_ceiling_ms,

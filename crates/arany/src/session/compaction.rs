@@ -304,6 +304,12 @@ impl PreparedCompaction {
 }
 
 pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), ReplayError> {
+    validate_compactions_with_sequence(events).map_err(|(_, cause)| cause)
+}
+
+pub(crate) fn validate_compactions_with_sequence(
+    events: &[EventEnvelope],
+) -> Result<(), (u64, ReplayError)> {
     if !events
         .iter()
         .any(|envelope| matches!(envelope.event, Event::ContextCompacted { .. }))
@@ -321,7 +327,7 @@ pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), Repla
                     record.source_digest,
                 ))
             {
-                return Err(ReplayError::InvalidSnapshot);
+                return Err((envelope.sequence, ReplayError::InvalidSnapshot));
             }
             if let CompactionStatus::Succeeded {
                 summary,
@@ -330,10 +336,12 @@ pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), Repla
             } = &record.status
                 && Sha256::digest(summary.as_bytes()).as_slice() != content_digest
             {
-                return Err(ReplayError::InvalidSnapshot);
+                return Err((envelope.sequence, ReplayError::InvalidSnapshot));
             }
         }
-        hasher.update(envelope)?;
+        hasher
+            .update(envelope)
+            .map_err(|cause| (envelope.sequence, cause))?;
         match &envelope.event {
             Event::SessionForked { source_run_id, .. } => {
                 boundary = Some((*source_run_id, envelope.sequence, hasher.digest()));
@@ -355,13 +363,21 @@ pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), Repla
 pub(crate) fn validate_goal_context_compactions(
     events: &[EventEnvelope],
 ) -> Result<(), ReplayError> {
+    validate_goal_context_compactions_with_sequence(events).map_err(|(_, cause)| cause)
+}
+
+pub(crate) fn validate_goal_context_compactions_with_sequence(
+    events: &[EventEnvelope],
+) -> Result<(), (u64, ReplayError)> {
     let mut hasher = PrefixHasher::new();
     // Child Tools finish under the same Run, so the reducer binds the covered count to its sequence.
     let mut tool_prefixes = HashMap::<super::RunId, Vec<(u64, [u8; 32])>>::new();
     let mut last_attempts = HashMap::<super::RunId, (u32, u64)>::new();
     for envelope in events {
         if let Event::ToolFinished { run_id, .. } = &envelope.event {
-            hasher.update(envelope)?;
+            hasher
+                .update(envelope)
+                .map_err(|cause| (envelope.sequence, cause))?;
             tool_prefixes
                 .entry(*run_id)
                 .or_default()
@@ -382,7 +398,7 @@ pub(crate) fn validate_goal_context_compactions(
                         .iter()
                         .find(|(sequence, _)| *sequence == record.covered_sequence)
                 })
-                .ok_or(ReplayError::InvalidSnapshot)?;
+                .ok_or((envelope.sequence, ReplayError::InvalidSnapshot))?;
             if record.covered_run_id != *run_id
                 || record.source_digest != point.1
                 || matches!(
@@ -397,11 +413,13 @@ pub(crate) fn validate_goal_context_compactions(
                     .get(run_id)
                     .is_some_and(|(count, _)| *covered_tool_count <= *count)
             {
-                return Err(ReplayError::InvalidSnapshot);
+                return Err((envelope.sequence, ReplayError::InvalidSnapshot));
             }
             last_attempts.insert(*run_id, (*covered_tool_count, record.covered_sequence));
         }
-        hasher.update(envelope)?;
+        hasher
+            .update(envelope)
+            .map_err(|cause| (envelope.sequence, cause))?;
     }
     Ok(())
 }

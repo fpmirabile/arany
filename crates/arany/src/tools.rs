@@ -19,6 +19,8 @@ mod guard;
 mod mcp;
 pub(crate) use mcp::FRAME_BYTES;
 mod output;
+pub(crate) mod spill;
+pub use spill::OutputSpill;
 pub mod permissions;
 mod process;
 mod search;
@@ -1450,10 +1452,27 @@ impl ToolRuntime {
         runtime.run_file(intent, cancellation).await
     }
 
+    pub(crate) async fn execute_concurrent_read(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::InProcess)).await
+    }
+
     pub(crate) async fn execute(
         &self,
         intent: EffectIntent,
         cancellation: Cancellation,
+    ) -> ToolObservation {
+        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::Automatic)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+        reads: ReadDispatch,
     ) -> ToolObservation {
         if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
             && !self.guard_available
@@ -1466,6 +1485,7 @@ impl ToolRuntime {
         ) && matches!(intent.call, ToolCall::Command { .. })
         {
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent,
@@ -1492,6 +1512,7 @@ impl ToolRuntime {
             || !self.config.allows(&intent.call)
         {
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 intent,
@@ -1506,7 +1527,10 @@ impl ToolRuntime {
             Site::InProcess if intent.call.facts().mutates => {
                 self.run_file(intent, cancellation).await
             }
-            Site::InProcess => self.run_read(intent, cancellation).await,
+            Site::InProcess => match reads {
+                ReadDispatch::Automatic => self.run_read(intent, cancellation).await,
+                ReadDispatch::InProcess => self.run_in_process(intent, cancellation).await,
+            },
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
@@ -1613,6 +1637,7 @@ impl ToolRuntime {
         if unguarded::prohibited_intent(&intent) {
             let output = unguarded::manual_handoff(&intent.call);
             return ToolObservation {
+                spill: None,
                 enforcement_cause: None,
                 limit_cause: None,
                 approval_cause: None,
@@ -1674,6 +1699,7 @@ impl ToolRuntime {
             })
         });
         let mut observation = ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: outcome.limit_cause,
             attestation,
@@ -1683,7 +1709,11 @@ impl ToolRuntime {
             approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
+        if self.hook_stdin.is_none() {
+            observation.spill = spill::OutputSpill::captured(&observation, outcome.captured);
+        }
         if !observation.valid() {
+            observation.spill = None;
             observation.disposition = ToolDisposition::Limit;
             observation.limit_cause = Some(crate::tools::LimitCause::Resource);
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
@@ -1760,6 +1790,15 @@ impl ToolRuntime {
                 "In-process read capacity is full; nothing was read",
             );
         };
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return cancelled_read(intent),
+            ready = tokio::time::timeout_at(deadline, crate::fault::in_process_read(&intent)) => {
+                if ready.is_err() {
+                    return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+                }
+            },
+        }
         let (runtime, read_intent) = (self.clone(), intent.clone());
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -1827,6 +1866,7 @@ impl ToolRuntime {
                 None
             };
         let mut observation = ToolObservation {
+            spill: None,
             attestation: Some(Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -1851,6 +1891,11 @@ impl ToolRuntime {
     }
 }
 
+enum ReadDispatch {
+    Automatic,
+    InProcess,
+}
+
 #[derive(Clone)]
 struct InProcessReads {
     skills: std::collections::BTreeMap<String, Option<std::sync::Arc<cap_std::fs::Dir>>>,
@@ -1868,6 +1913,7 @@ static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semapho
 
 fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: Some(cause),
         intent,
@@ -1881,6 +1927,7 @@ fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> To
 
 fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent,
@@ -2011,6 +2058,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         }
     }
     ToolObservation {
+        spill: None,
         enforcement_cause,
         limit_cause: resource_limit.then_some(LimitCause::Resource),
         output,
@@ -2034,6 +2082,7 @@ pub(super) fn uncertain_observation(
     record_failure("Guard", &intent, &error);
     let stage = failure_stage(&error);
     ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent,

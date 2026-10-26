@@ -3,11 +3,14 @@ use arany::test_support::scenario::{ScriptedProvider, WaitingProvider};
 use arany::{Event, Provider, StateRoot, Store};
 use arany_cli::protocol::protocol_schema;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::{
-    Arc, Mutex,
+    Arc, LazyLock, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
+
+static PROTOCOL_SCHEMA: LazyLock<Value> = LazyLock::new(protocol_schema);
 
 struct TestDeadline {
     done: std::sync::mpsc::SyncSender<()>,
@@ -32,7 +35,11 @@ pub(in crate::cli) fn deadline() -> impl Drop {
         if receiver.recv_timeout(Duration::from_secs(30))
             == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         {
-            eprintln!("{name} exceeded its 30-second deadline");
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "{name} exceeded its 30-second deadline"
+            );
             std::process::abort();
         }
     });
@@ -76,9 +83,11 @@ async fn next_with_timeout(output: &mut mpsc::Receiver<Message>, timeout: Durati
     serde_json::to_value(message).unwrap()
 }
 fn validate(message: &Message) {
-    let schema = protocol_schema();
+    static ENVELOPE: LazyLock<jsonschema::Validator> =
+        LazyLock::new(|| jsonschema::validator_for(&PROTOCOL_SCHEMA).unwrap());
+    let schema = &*PROTOCOL_SCHEMA;
     let value = serde_json::to_value(message).unwrap();
-    assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&value));
+    assert!(ENVELOPE.is_valid(&value));
     let reference = match message {
         Message::Notification(note) => {
             Some(schema["notifications"][&note.method]["params"].clone())
@@ -96,19 +105,36 @@ fn validate(message: &Message) {
         _ => None,
     };
     if let Some(reference) = reference {
-        let part =
-            json!({"$schema":schema["$schema"],"$defs":schema["$defs"],"$ref":reference["$ref"]});
         let payload = if matches!(message, Message::Notification(_) | Message::Request(_)) {
             &value["params"]
         } else {
             &value["result"]
         };
-        assert!(
-            jsonschema::validator_for(&part).unwrap().is_valid(payload),
-            "{value}"
-        );
+        assert!(payload_validator(&reference).is_valid(payload), "{value}");
     }
     assert!(encode_line(message).unwrap().len() <= MAX_RPC_LINE_BYTES);
+}
+
+fn payload_validator(reference: &Value) -> &'static jsonschema::Validator {
+    static VALIDATORS: LazyLock<BTreeMap<String, OnceLock<jsonschema::Validator>>> =
+        LazyLock::new(|| {
+            ["methods", "notifications", "serverRequests"]
+                .into_iter()
+                .flat_map(|group| PROTOCOL_SCHEMA[group].as_object().unwrap().values())
+                .flat_map(|entry| entry.as_object().unwrap().values())
+                .map(|reference| {
+                    (
+                        reference["$ref"].as_str().unwrap().to_owned(),
+                        OnceLock::new(),
+                    )
+                })
+                .collect()
+        });
+    let reference = reference["$ref"].as_str().unwrap();
+    VALIDATORS[reference].get_or_init(|| {
+        let part = json!({"$schema":PROTOCOL_SCHEMA["$schema"],"$defs":PROTOCOL_SCHEMA["$defs"],"$ref":reference});
+        jsonschema::validator_for(&part).unwrap()
+    })
 }
 fn engine(state: &std::path::Path) -> Engine {
     Engine::open(
@@ -605,7 +631,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
     use arany::test_support::scenario::tool_outcome;
     use sha2::{Digest, Sha256};
     let _gate = crate::test_process::NATIVE_GATE.lock().unwrap();
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(Box::pin(async {
     arany::test_support::isolate_account_root();
     for case in [
         "success",
@@ -936,7 +962,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
             }
         }
     }
-    });
+    }));
 }
 
 async fn closed_view(
@@ -1810,6 +1836,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         (ToolDisposition::Uncertain, "uncertain"),
     ] {
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition,
             enforcement_cause: None,
@@ -1830,6 +1857,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         assert_eq!(item["output"], "bounded\noutput");
     }
     let observation = ToolObservation {
+        spill: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         enforcement_cause: None,
@@ -1950,6 +1978,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     }
     let canary = "historical protocol hook canary";
     run.tools[0].observation = Some(ToolObservation {
+        spill: None,
         intent: run.tools[0].intent.clone(),
         disposition: ToolDisposition::Denied,
         enforcement_cause: None,
@@ -1986,6 +2015,8 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     let mut child_tool = run.tools.pop().unwrap();
     child_tool.intent.id = uuid::Uuid::now_v7();
     run.agents.push(arany::AgentView {
+        tool_refusal: None,
+        tool_refusal_sequence: None,
         profile: None,
         assignment: None,
         id: child_tool.intent.agent_run_id,

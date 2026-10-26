@@ -63,7 +63,13 @@ impl SessionView {
             stop,
             provider_disposition: call.map(|call| call.disposition),
             provider_failure: call.and_then(|call| call.failure_reason),
-            refusal_cause: call.and_then(|call| call.refusal.as_ref().map(|refusal| refusal.cause)),
+            refusal_cause: run
+                .primary()
+                .and_then(|agent| agent.tool_refusal.as_ref())
+                .map(|record| record.refusal.cause)
+                .or_else(|| {
+                    call.and_then(|call| call.refusal.as_ref().map(|refusal| refusal.cause))
+                }),
         })
     }
 
@@ -306,6 +312,7 @@ mod tests {
             intent: intent.clone(),
             observation: observed.map(|(disposition, cache_update)| {
                 crate::tools::ToolObservation {
+                    spill: None,
                     enforcement_cause: None,
                     limit_cause: None,
                     intent,

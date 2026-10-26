@@ -583,6 +583,7 @@ pub(super) struct Outcome {
     pub(super) disposition: ToolDisposition,
     pub(super) limit_cause: Option<LimitCause>,
     pub(super) output: String,
+    pub(super) captured: Option<Vec<u8>>,
     pub(super) spawned: bool,
     pub(super) descendants_stopped: bool,
     pub(super) pid: u32,
@@ -595,6 +596,7 @@ impl Outcome {
             disposition,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(LimitCause::Resource),
             output: output.into(),
+            captured: None,
             spawned: false,
             descendants_stopped: false,
             pid: 0,
@@ -607,6 +609,7 @@ impl Outcome {
             disposition,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(LimitCause::Resource),
             output: output.into(),
+            captured: None,
             spawned: true,
             descendants_stopped,
             pid: 0,
@@ -746,6 +749,7 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
             )
             .unwrap_or_else(|_| "Tool runtime expired; host effects may have occurred".into());
             let mut outcome = Outcome::started(ToolDisposition::Limit, &output, stopped);
+            outcome.captured = Some(super::spill::streams(&stdout, &stderr));
             outcome.limit_cause = Some(LimitCause::Timeout);
             outcome
         }
@@ -786,6 +790,7 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
                 limit_cause: (disposition == ToolDisposition::Limit)
                     .then_some(LimitCause::Resource),
                 output,
+                captured: Some(super::spill::streams(&stdout, &stderr)),
                 spawned: true,
                 descendants_stopped: stopped,
                 pid: 0,
@@ -804,8 +809,8 @@ async fn wait(
     let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
         return Ended::Failed(ToolError::Operation);
     };
-    let mut stdout = Window::new(cap);
-    let mut stderr = Window::new(cap);
+    let mut stdout = Window::capturing(cap);
+    let mut stderr = Window::capturing(cap);
     let work = tokio::time::timeout(deadline, async {
         tokio::try_join!(
             async {

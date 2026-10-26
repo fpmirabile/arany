@@ -569,7 +569,10 @@ fn wave_stop_after(
     end: Option<AgentDisposition>,
     hook: HookFacts,
 ) -> Option<WaveStop> {
-    if let Some(cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline)) = queue_stop {
+    if let Some(cause @ StopCause::ToolRefused(_)) = queue_stop {
+        Some(WaveStop::Abort(cause))
+    } else if let Some(cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline)) = queue_stop
+    {
         Some(WaveStop::Boundary(cause))
     } else if queue_stop.is_some() {
         Some(WaveStop::BUDGET)
@@ -987,6 +990,7 @@ impl RunLoop<'_> {
                 {
                     WorkerSettlementProgress::Settled => {}
                     WorkerSettlementProgress::Exhausted => return Ok(Admission::Exhausted),
+                    WorkerSettlementProgress::ToolRefused(_) => {}
                 }
             } else {
                 self.finish_child(
@@ -1158,6 +1162,10 @@ impl RunLoop<'_> {
             let mut child = match self.begin_worker(root, editor).await? {
                 WorkerAdmission::Admitted(child) => Some(*child),
                 WorkerAdmission::Refused => None,
+                WorkerAdmission::ToolRefused(refusal) => {
+                    queue.stop = Some(StopCause::ToolRefused(refusal));
+                    return Ok(RunProgress::Ready(None));
+                }
                 WorkerAdmission::Exhausted => {
                     return Ok(RunProgress::Stopped(RunRefusal::Budget));
                 }
@@ -1614,16 +1622,22 @@ impl RunLoop<'_> {
                 | StopCause::ContextFull
                 | StopCause::DelegationDeadline
                 | StopCause::Refused(_)
+                | StopCause::ToolRefused(_)
                 | StopCause::ToolStopped
                 | StopCause::InvalidCommandResult,
             ) => end,
         };
+        wave.queue.primary_pending = false;
         if let StepEnd::Stopped(cause) = end {
             *abort = self
                 .hook_facts()?
                 .stop()
                 .or(*abort)
                 .or(Some(WaveStop::Abort(cause)));
+            if matches!(cause, StopCause::ToolRefused(_)) {
+                wave.queue.stop = Some(cause);
+                return Ok(());
+            }
         }
         if wave.queue.stop.is_none() {
             self.verify_workers().await?;
@@ -1642,7 +1656,6 @@ impl RunLoop<'_> {
                 None
             }
         };
-        wave.queue.primary_pending = false;
         Ok(())
     }
 
@@ -1909,6 +1922,10 @@ impl RunLoop<'_> {
         {
             WorkerSettlementProgress::Settled => {}
             WorkerSettlementProgress::Exhausted => return Ok(Admission::Exhausted),
+            WorkerSettlementProgress::ToolRefused(refusal) => {
+                wave.queue.stop = Some(StopCause::ToolRefused(refusal));
+                return Ok(Admission::Reserved(AgentDisposition::Finished));
+            }
         }
         *wave.segments = match self
             .reserve_active_segment(
@@ -1950,6 +1967,7 @@ impl RunLoop<'_> {
             && abort.is_none()
         {
             *abort = Some(match cause {
+                cause @ StopCause::ToolRefused(_) => WaveStop::Abort(cause),
                 cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline) => {
                     WaveStop::Boundary(cause)
                 }
@@ -2253,6 +2271,7 @@ impl RunLoop<'_> {
                 | StopCause::ContextFull
                 | StopCause::DelegationDeadline
                 | StopCause::Refused(_)
+                | StopCause::ToolRefused(_)
                 | StopCause::ToolStopped
                 | StopCause::InvalidCommandResult,
             ) => {}
@@ -2578,6 +2597,8 @@ impl RunLoop<'_> {
     fn unstarted_stop(&self, queue: &ChildQueue) -> Option<WaveStop> {
         if self.pause_requested() {
             Some(WaveStop::Boundary(StopCause::Paused))
+        } else if let Some(cause @ StopCause::ToolRefused(_)) = queue.stop {
+            Some(WaveStop::Abort(cause))
         } else if let Some(
             cause @ (StopCause::ContextFull
             | StopCause::Cancelled
@@ -3301,6 +3322,7 @@ mod child_tool_report_tests {
             checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
+                spill: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Denied,
                 enforcement_cause: Some(EnforcementCause::FilesystemDenied),
@@ -4234,6 +4256,18 @@ mod decision_tests {
         let boundary = |cause| Some(WaveStop::Boundary(cause));
         // (queue stop, cancelled, paused, child end, hook state, wave stop)
         let rows = [
+            (
+                Some(StopCause::ToolRefused(
+                    crate::session::ToolRefusal::INVALID_TRANSITION,
+                )),
+                false,
+                false,
+                Some(Finished),
+                settled,
+                abort(StopCause::ToolRefused(
+                    crate::session::ToolRefusal::INVALID_TRANSITION,
+                )),
+            ),
             (
                 Some(StopCause::Budget),
                 true,

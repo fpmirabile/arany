@@ -422,9 +422,19 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     .and_then(|agent| agent.provider_calls.last())
                     .and_then(|call| call.refusal.as_ref())
                     .map(|refusal| refusal_notice(refusal.cause));
-                let detail = match (run.failure, last_refusal) {
-                    (Some(arany::RunFailure::ProposalRefused), Some(cause)) => cause.to_owned(),
-                    (Some(arany::RunFailure::RefusalLimit), Some(cause)) => {
+                let preflight = run
+                    .agents
+                    .iter()
+                    .find(|agent| agent.role == arany::AgentRole::Primary)
+                    .and_then(|agent| agent.tool_refusal.as_ref());
+                let detail = match (run.failure, preflight, last_refusal) {
+                    (Some(arany::RunFailure::ProposalRefused), Some(record), _) => {
+                        format!("{} The refused action was not dispatched.", record.refusal)
+                    }
+                    (Some(arany::RunFailure::ProposalRefused), None, Some(cause)) => {
+                        cause.to_owned()
+                    }
+                    (Some(arany::RunFailure::RefusalLimit), _, Some(cause)) => {
                         format!("{reason} {cause}")
                     }
                     _ => reason.to_owned(),
@@ -985,7 +995,7 @@ pub(crate) fn escaped_terminal_width(value: &str) -> usize {
     }
 }
 
-fn escape_json_controls(value: &str) -> String {
+pub fn escape_json_controls(value: &str) -> String {
     let mut safe = String::with_capacity(value.len());
     for character in value.chars() {
         if unsafe_display_character(character) {
@@ -1564,6 +1574,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
     arany::ToolView {
         checkpoint: None,
         observation: Some(arany::ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: arany::ToolDisposition::Succeeded,
             output: output.into(),

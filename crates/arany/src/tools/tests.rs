@@ -1906,6 +1906,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limits: intent.limits.clone(),
     };
     let observation = ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: intent.clone(),
@@ -1952,6 +1953,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limits: command_intent.limits.clone(),
     };
     let uncertain_cache = ToolObservation {
+        spill: None,
         enforcement_cause: None,
         limit_cause: None,
         intent: command_intent,
@@ -2289,6 +2291,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         intent.limits.cache_bytes = cache_requested_bytes;
         intent.limits.cache_candidate_bytes = 0;
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
@@ -3110,6 +3113,7 @@ async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> Too
     let (disposition, output, enforcement_cause, limit_cause) =
         super::dispatch::outcome(&intent, result);
     ToolObservation {
+        spill: None,
         attestation: Some(Attestation::Guard(super::GuardReceipt {
             contract_version: 1,
             intent_digest: intent.digest(),

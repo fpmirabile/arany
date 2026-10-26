@@ -3,7 +3,7 @@ use super::super::{
     AgentStatus, AgentView, RunView, SessionView, ToolView, active_run, active_run_goal,
     current_goal_mut, pending_original_tool_requests, pending_tool_requests,
 };
-use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError, RunConfig};
+use crate::session::events::{Event, ProviderCallDisposition, ReplayError, RunConfig};
 use crate::session::{AgentRunId, RunId};
 use crate::tools::EffectIntent;
 use crate::tools::permissions::{PermissionMode, PermissionSource};
@@ -147,6 +147,23 @@ pub(super) fn finished(
     else {
         return Err(ReplayError::InvalidTransition);
     };
+    if let Some(spill) = &observation.spill {
+        let run = current
+            .runs
+            .iter()
+            .find(|run| run.id == *run_id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        let used: u64 = run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .filter_map(|tool| tool.observation.as_ref()?.spill.as_ref())
+            .map(|spill| spill.bytes)
+            .sum();
+        if used.saturating_add(spill.bytes) > crate::tools::spill::MAX_SPILL_RUN_BYTES {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
     if names_child(current, *run_id, *agent_run_id) {
         if checkpoint.is_some() {
             return Err(ReplayError::InvalidTransition);
@@ -307,7 +324,13 @@ pub(super) fn proposed(
     } else {
         start_primary_tool(current, run_id, agent_run_id, intent)?;
     }
-    super::record_run_ceiling(current, run_id, active_ceiling_ms)
+    super::record_tool_ceiling(
+        current,
+        run_id,
+        agent_run_id,
+        &intent.digest(),
+        active_ceiling_ms,
+    )
 }
 
 fn start_primary_tool(
@@ -317,27 +340,12 @@ fn start_primary_tool(
     intent: &EffectIntent,
 ) -> Result<(), ReplayError> {
     let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
-    let phase_allows_call =
-        goal.phase == GoalPhase::Implementation || intent.call.is_goal_plan_prelude();
-    let plan_allows_call = if matches!(
-        intent.call,
-        crate::tools::ToolCall::ParseAgentDefinition { .. }
-    ) {
-        true
-    } else if let Some(contract) = &goal.plan_contract {
-        !goal.awaiting_plan_contract
-            && (matches!(intent.call, crate::tools::ToolCall::PrepareWorker { .. })
-                || contract.allows_call(&intent.call)
-                || matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. }))
-    } else {
-        true
-    };
-    if !phase_allows_call
-        || !plan_allows_call
-        || goal
-            .effective_budget()
-            .max_tokens
-            .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
+    super::validate_primary_tool_scope(current, run_id, &intent.call)
+        .map_err(|_| ReplayError::InvalidTransition)?;
+    if goal
+        .effective_budget()
+        .max_tokens
+        .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
     {
         return Err(ReplayError::InvalidTransition);
     }
@@ -510,6 +518,12 @@ pub(super) fn started(
         &EffectIntent::from(intent.clone()).digest(),
     )?
     .started_sequence = Some(prior);
-    super::record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
+    super::record_tool_ceiling(
+        current,
+        *run_id,
+        *agent_run_id,
+        &EffectIntent::from(intent.clone()).digest(),
+        *active_ceiling_ms,
+    )?;
     Ok(())
 }

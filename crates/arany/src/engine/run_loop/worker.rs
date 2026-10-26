@@ -18,6 +18,7 @@ use std::time::Duration;
 pub(super) enum WorkerAdmission {
     Admitted(Box<ChildWork>),
     Refused,
+    ToolRefused(crate::session::ToolRefusal),
     Exhausted,
     CapacityExhausted,
 }
@@ -74,6 +75,7 @@ struct WorkerCleanup {
 pub(super) enum WorkerSettlementProgress {
     Settled,
     Exhausted,
+    ToolRefused(crate::session::ToolRefusal),
 }
 
 struct WorkerSpawn<'a> {
@@ -167,12 +169,14 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
 #[derive(Debug, PartialEq, Eq)]
 enum IntegrationDecision {
     RecordCapacityStop,
+    ToolRefused(crate::session::ToolRefusal),
     Continue,
 }
 
 fn integration_decision(observation: WorkerObservation) -> IntegrationDecision {
     match observation {
         WorkerObservation::CapacityExhausted => IntegrationDecision::RecordCapacityStop,
+        WorkerObservation::ToolRefused(refusal) => IntegrationDecision::ToolRefused(refusal),
         WorkerObservation::Observed(_)
         | WorkerObservation::ActiveTimeExhausted
         | WorkerObservation::Stopped => IntegrationDecision::Continue,
@@ -185,6 +189,7 @@ enum WorkerObservation {
     Observed(Box<ToolObservation>),
     ActiveTimeExhausted,
     CapacityExhausted,
+    ToolRefused(crate::session::ToolRefusal),
     Stopped,
 }
 
@@ -193,6 +198,7 @@ fn worker_observation(result: IntentResult) -> WorkerObservation {
         Ok((observation, _)) => WorkerObservation::Observed(Box::new(observation)),
         Err(StopCause::ActiveTime) => WorkerObservation::ActiveTimeExhausted,
         Err(StopCause::Capacity) => WorkerObservation::CapacityExhausted,
+        Err(StopCause::ToolRefused(refusal)) => WorkerObservation::ToolRefused(refusal),
         Err(
             StopCause::Uncertain
             | StopCause::Cancelled
@@ -231,6 +237,7 @@ fn step_cause(stop: StopCause) -> WorkerCause {
         | StopCause::ContextFull
         | StopCause::DelegationDeadline
         | StopCause::Refused(_)
+        | StopCause::ToolRefused(_)
         | StopCause::ToolStopped => WorkerCause::ToolFailed,
     }
 }
@@ -614,6 +621,7 @@ impl RunLoop<'_> {
             Ok(view) => view,
             Err(error) => {
                 return Ok(ToolObservation {
+                    spill: None,
                     intent,
                     disposition: ToolDisposition::Failed,
                     output: error.to_string(),
@@ -629,6 +637,7 @@ impl RunLoop<'_> {
             Ok(bytes) => bytes,
             Err(error) => {
                 return Ok(ToolObservation {
+                    spill: None,
                     intent,
                     disposition: ToolDisposition::Failed,
                     output: error.to_string(),
@@ -649,6 +658,7 @@ impl RunLoop<'_> {
             )
             .await?;
         let observation = ToolObservation {
+            spill: None,
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "Worker base captured; Workspace unchanged".into(),
@@ -798,6 +808,9 @@ impl RunLoop<'_> {
             WorkerObservation::ActiveTimeExhausted => return Ok(WorkerAdmission::Exhausted),
             WorkerObservation::CapacityExhausted => return Ok(WorkerAdmission::CapacityExhausted),
             WorkerObservation::Stopped => return Ok(WorkerAdmission::Refused),
+            WorkerObservation::ToolRefused(refusal) => {
+                return Ok(WorkerAdmission::ToolRefused(refusal));
+            }
         };
         let Some(Attestation::WorkerData { data: base, .. }) = observation.attestation else {
             return Ok(WorkerAdmission::Refused);
@@ -1115,7 +1128,8 @@ impl RunLoop<'_> {
             }),
             WorkerObservation::ActiveTimeExhausted
             | WorkerObservation::CapacityExhausted
-            | WorkerObservation::Stopped => Ok(None),
+            | WorkerObservation::Stopped
+            | WorkerObservation::ToolRefused(_) => Ok(None),
         }
     }
 
@@ -1176,6 +1190,7 @@ impl RunLoop<'_> {
     ) -> Result<WorkerSettlementProgress, EngineError> {
         let id = child.agent_run_id;
         let finished = self.sequence()?;
+        let mut progress = WorkerSettlementProgress::Settled;
         match completed {
             WorkerCompletion::Discard(reason) => {
                 let cause_sequence = if reason == WorkerSettlementReason::Stopped {
@@ -1203,19 +1218,14 @@ impl RunLoop<'_> {
                 })
                 .await?;
                 let sequence = self.ledger().view(|v| v.previous_subject_sequence())?;
-                match Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
-                    WorkerSettlementProgress::Exhausted => {
-                        return Ok(WorkerSettlementProgress::Exhausted);
-                    }
-                    WorkerSettlementProgress::Settled => {}
-                }
+                progress = Box::pin(self.integrate_worker(root, id, sequence, data)).await?;
             }
         }
         self.handover
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?
             .remove(&id);
-        Ok(WorkerSettlementProgress::Settled)
+        Ok(progress)
     }
 
     async fn capture_handover(
@@ -1308,6 +1318,16 @@ impl RunLoop<'_> {
             .await;
         match integration_decision(worker_intent_observation(result)?) {
             IntegrationDecision::RecordCapacityStop => self.record_capacity_stop().await?,
+            IntegrationDecision::ToolRefused(refusal) => {
+                self.discard_worker(
+                    id,
+                    Some(handover_sequence),
+                    WorkerSettlementReason::Stopped,
+                    self.stop_sequence()?,
+                )
+                .await?;
+                return Ok(WorkerSettlementProgress::ToolRefused(refusal));
+            }
             IntegrationDecision::Continue => {}
         }
         self.finish_worker_integration(runtime, id, handover_sequence, tool_id)
@@ -1488,7 +1508,14 @@ impl RunLoop<'_> {
 
     fn stop_sequence(&self) -> Result<u64, EngineError> {
         self.ledger()
-            .view(|v| v.runs.last().and_then(|r| r.workers.stop).map(|(s, _)| s))?
+            .view(|v| {
+                v.runs.last().and_then(|r| {
+                    r.workers
+                        .stop
+                        .map(|(s, _)| s)
+                        .or_else(|| r.primary().and_then(|actor| actor.tool_refusal_sequence))
+                })
+            })?
             .ok_or(EngineError::InvalidHistory)
     }
     pub(super) async fn observe_worker_stop(&self) -> Result<bool, EngineError> {
@@ -1496,6 +1523,14 @@ impl RunLoop<'_> {
             .ledger()
             .view(|v| v.runs.last().is_some_and(|r| r.workers.stop.is_some()))?
         {
+            return Ok(true);
+        }
+        if self.ledger().view(|view| {
+            view.runs
+                .last()
+                .and_then(|run| run.primary())
+                .is_some_and(|actor| actor.tool_refusal.is_some())
+        })? {
             return Ok(true);
         }
         let reason = if self.controls.cancellation.is_cancelled() {
@@ -1619,7 +1654,7 @@ mod terminal_tests {
     use super::*;
     use crate::provider::test_support::observation;
 
-    fn stop_outcomes() -> [(StopCause, WorkerObservation, IntegrationDecision); 12] {
+    fn stop_outcomes() -> [(StopCause, WorkerObservation, IntegrationDecision); 13] {
         use IntegrationDecision::{Continue, RecordCapacityStop};
         use WorkerObservation::{ActiveTimeExhausted, CapacityExhausted, Stopped};
         [
@@ -1636,6 +1671,11 @@ mod terminal_tests {
                 StopCause::Refused(crate::session::ProposalRefusalCause::InvalidArguments),
                 Stopped,
                 Continue,
+            ),
+            (
+                StopCause::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION),
+                WorkerObservation::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION),
+                IntegrationDecision::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION),
             ),
             (StopCause::ToolStopped, Stopped, Continue),
             (StopCause::InvalidCommandResult, Stopped, Continue),

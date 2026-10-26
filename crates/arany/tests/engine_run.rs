@@ -1337,6 +1337,43 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
     });
 }
 
+fn pad_capacity_history(path: &Path, session: SessionId, prefix: i64, branch: bool) {
+    let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let (first_padding_sequence, last_padding_sequence) = if branch {
+        let (first, boundary): (i64, i64) = transaction
+            .query_row(
+                "SELECT MIN(sequence), MAX(CASE WHEN kind = 'RunFinished' THEN sequence END) FROM events WHERE session_id = ?1",
+                [session.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let padding = prefix - boundary;
+        assert!(padding > 0);
+        // Fork capacity counts the selected prefix, so padding must precede its Run boundary.
+        transaction
+            .execute(
+                "UPDATE events SET sequence = sequence + ?1 WHERE session_id = ?2 AND sequence > ?3",
+                rusqlite::params![padding, session.to_string(), first],
+            )
+            .unwrap();
+        (first + 1, first + padding)
+    } else {
+        let first: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (first, prefix)
+    };
+    for sequence in first_padding_sequence..=last_padding_sequence {
+        transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn persistence_capacity_is_admitted_before_provider_usage() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1369,18 +1406,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let id = run_to_end(&engine, &provider, request(&workspace, "Initial")).await.unwrap().session_id;
             engine.close().await.unwrap();
-            let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
-            let transaction = connection.transaction().unwrap();
-            let first_padding_sequence: i64 = transaction
-                .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
-            }
-            transaction.commit().unwrap();
-            drop(connection);
+            pad_capacity_history(&path, id, i64::from(prefix), branch);
             let responses = if matches!(policy, CollaborationPolicy::Team { .. }) {
                 vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Child".into(), profile: None }] }), finish(), finish()]
             } else { vec![finish()] };

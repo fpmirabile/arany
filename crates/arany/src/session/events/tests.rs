@@ -38,6 +38,7 @@ mod goal_success_tests {
             use_count: 1,
         };
         ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                 .then_some(crate::tools::LimitCause::Resource),
@@ -1901,6 +1902,7 @@ mod payload_version_tests {
             use_count: 1,
         };
         crate::tools::ToolObservation {
+            spill: None,
             enforcement_cause: None,
             limit_cause: None,
             attestation: Some(crate::tools::Attestation::InProcess {
@@ -2888,6 +2890,39 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
+}
+
+#[test]
+fn tool_preflight_refusal_payload_is_closed_and_keeps_its_fixed_reason() {
+    let (run, agent) = (RunId::new(), AgentRunId::new());
+    let event = Event::ToolPreflightRefused {
+        run_id: run,
+        agent_run_id: agent,
+        record: ToolPreflightRefusal {
+            intent_digest: [1; 32],
+            refusal: ToolRefusal::INVALID_TRANSITION,
+            verdict: None,
+        },
+    };
+    let payload = event.payload().unwrap();
+    assert_eq!(
+        Event::decode(event.kind(), 1, &payload, Some(run), Some(agent)).unwrap(),
+        event
+    );
+    for case in ["cause", "reason", "digest", "extra"] {
+        let mut forged: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        match case {
+            "cause" => forged["refusal"]["cause"] = serde_json::json!("lease_overlap"),
+            "reason" => forged["refusal"]["reason"] = serde_json::json!("untrusted reason"),
+            "digest" => forged["intent_digest"] = serde_json::json!(vec![0; 32]),
+            "extra" => forged["extra"] = serde_json::json!(true),
+            _ => unreachable!(),
+        }
+        assert!(
+            Event::decode(event.kind(), 1, &forged.to_string(), Some(run), Some(agent)).is_err(),
+            "{case}"
+        );
+    }
 }
 
 #[test]
