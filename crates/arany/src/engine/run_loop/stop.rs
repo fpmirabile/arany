@@ -17,6 +17,7 @@ pub(super) enum StopCause {
     ContextFull,
     DelegationDeadline,
     Refused(ProposalRefusalCause),
+    ToolRefused(crate::session::ToolRefusal),
     ToolStopped,
     InvalidCommandResult,
 }
@@ -33,7 +34,7 @@ impl StopCause {
             Self::Capacity => 6,
             Self::ContextFull => 5,
             Self::DelegationDeadline => 4,
-            Self::Refused(_) => 3,
+            Self::Refused(_) | Self::ToolRefused(_) => 3,
             Self::ToolStopped => 2,
             Self::InvalidCommandResult => 1,
         }
@@ -140,6 +141,7 @@ pub(super) struct RunFacts {
     pub(super) action_cancelled: bool,
     pub(super) hook_stop: bool,
     pub(super) uncertain: bool,
+    pub(super) tool_refusal: Option<crate::session::ToolRefusal>,
     // The Goal is open for this Run with no reservation, no other agent is active, and every
     // primary Tool is acknowledged unless the Run is cancelled.
     pub(super) settleable: bool,
@@ -199,7 +201,10 @@ impl RunFacts {
             let acknowledged = current.tools.iter().all(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition != ToolDisposition::Uncertain
-                })
+                }) || tool.started_sequence.is_none()
+                    && current
+                        .primary()
+                        .is_some_and(|agent| agent.tool_refusal.is_some())
             });
             let goal_open = goal.status == GoalStatus::Running
                 && goal.active_run == Some(run.run_id)
@@ -212,6 +217,10 @@ impl RunFacts {
                     .is_some_and(|agent| agent.outcome_correction_pending()),
                 hook_stop: current.hooks_settled() && current.hook_stop_reason().is_some(),
                 uncertain,
+                tool_refusal: current
+                    .primary()
+                    .and_then(|actor| actor.tool_refusal.as_ref())
+                    .map(|record| record.refusal),
                 settleable: goal_open
                     && !active_reserved
                     && current.status == RunStatus::Active
@@ -255,6 +264,7 @@ impl RunFacts {
         ]
         .into_iter()
         .filter_map(|(seen, cause)| seen.then_some(cause))
+        .chain(self.tool_refusal.map(StopCause::ToolRefused))
         .reduce(StopCause::merge)
     }
 }
@@ -360,6 +370,7 @@ fn stopped(cause: StopCause, facts: &RunFacts) -> Settlement {
         StopCause::ActiveTime | StopCause::Budget => Settlement::BUDGET,
         StopCause::ContextFull => Settlement::failed(RunFailure::ToolContextFull),
         StopCause::Refused(_) => Settlement::failed(RunFailure::RefusalLimit),
+        StopCause::ToolRefused(_) => Settlement::failed(RunFailure::ProposalRefused),
         StopCause::Capacity
         | StopCause::DelegationDeadline
         | StopCause::ToolStopped
@@ -391,7 +402,7 @@ impl RunFacts {
 mod tests {
     use super::*;
 
-    const CAUSES: [StopCause; 13] = [
+    const CAUSES: [StopCause; 14] = [
         StopCause::Uncertain,
         StopCause::Cancelled,
         StopCause::HookStop,
@@ -403,6 +414,7 @@ mod tests {
         StopCause::DelegationDeadline,
         StopCause::Refused(ProposalRefusalCause::Phase),
         StopCause::Refused(ProposalRefusalCause::InvalidArguments),
+        StopCause::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION),
         StopCause::ToolStopped,
         StopCause::InvalidCommandResult,
     ];
@@ -487,6 +499,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn committed_tool_refusal_survives_internal_failure_and_keeps_stop_precedence() {
+        let refusal = crate::session::ToolRefusal::INVALID_TRANSITION;
+        let facts = RunFacts::ready().with(|facts| facts.tool_refusal = Some(refusal));
+        for end in [
+            PrimaryEnd::Failed(RunFailure::DefinitionInvalid),
+            PrimaryEnd::Stopped(StopCause::ToolStopped),
+        ] {
+            assert_eq!(
+                settle(end, &facts),
+                Settlement::failed(RunFailure::ProposalRefused)
+            );
+        }
+        for (cause, expected) in [
+            (StopCause::HookStop, Settlement::HookStop),
+            (StopCause::Cancelled, Settlement::Cancel),
+            (StopCause::Budget, Settlement::BUDGET),
+            (StopCause::Uncertain, Settlement::Unknown),
+        ] {
+            assert_eq!(settle(PrimaryEnd::Stopped(cause), &facts), expected);
+        }
+    }
+
     fn facts(bits: [bool; 5]) -> RunFacts {
         let [cancelled, hook_stop, uncertain, budget_closed, settleable] = bits;
         RunFacts::ready().with(|facts| {
@@ -523,6 +558,11 @@ mod tests {
             (
                 StopCause::Refused(ProposalRefusalCause::Phase),
                 Settlement::failed(RunFailure::RefusalLimit),
+                true,
+            ),
+            (
+                StopCause::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION),
+                Settlement::failed(RunFailure::ProposalRefused),
                 true,
             ),
             (StopCause::ToolStopped, tool(), true),

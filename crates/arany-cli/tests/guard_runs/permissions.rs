@@ -644,6 +644,7 @@ struct Fixture {
     state: std::path::PathBuf,
     engine: Engine,
     deny_humans: bool,
+    refuse_start: bool,
     restricted_approvals: bool,
     command_maximum: Option<u32>,
     max_children: u8,
@@ -695,6 +696,7 @@ impl Fixture {
             state,
             engine,
             deny_humans: false,
+            refuse_start: false,
             restricted_approvals: false,
             command_maximum: None,
             max_children: 1,
@@ -756,6 +758,21 @@ impl Fixture {
             input.goal.resource_settings.default_command_timeout_ms = maximum;
             input.goal.resource_settings.max_command_timeout_ms = maximum;
         }
+        let mut injected = if self.refuse_start {
+            let session = self
+                .engine
+                .create_session(self.workspace.clone(), None)
+                .await
+                .unwrap();
+            input.session_id = Some(session);
+            input.title = None;
+            Some(arany::FaultPlan::corrupt_tool_preflight(
+                session,
+                "ToolStarted",
+            ))
+        } else {
+            None
+        };
         let running = run_with(&self.engine, &provider, input, controls);
         tokio::pin!(running);
         let mut humans = 0;
@@ -776,6 +793,9 @@ impl Fixture {
                 }
             }
         };
+        if let Some(injected) = &mut injected {
+            injected.try_recv().expect("final-start preflight reached");
+        }
         let requests = provider.requests.lock().unwrap().clone();
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
@@ -4250,38 +4270,70 @@ async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity()
 
 #[tokio::test]
 async fn hook_pre_tool_use_continue_false_stops_before_primary_or_child_tool_dispatch() {
-    for child in [false, true] {
-        let fixture = Fixture::new(
-            Some(&hook_settings(
-                json!({}),
-                vec![shell_hook(
-                    r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#,
-                )],
-            )),
-            false,
-        );
-        let mut outcomes = Vec::new();
-        if child {
-            outcomes.push(ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect facts".into(),
-                    profile: None,
-                }],
-            }));
+    for refused in [false, true] {
+        for child in [false, true] {
+            stopped_pre_hook_with_start_refusal(child, refused).await;
         }
-        outcomes.push(tool_outcome(call("read")));
-        let (result, _, _) = fixture.run(outcomes, None, child).await;
-        assert_eq!(result.run.status, RunStatus::StoppedByHook);
-        assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
-        assert!(result.run.assistant_message.is_none());
-        let (_, view) = fixture.reopen(result.session_id).await;
-        let tool = if child {
-            &view.runs[0].agents[1].tools[0]
-        } else {
-            &view.runs[0].tools[0]
-        };
+    }
+}
+
+async fn stopped_pre_hook_with_start_refusal(child: bool, refused: bool) {
+    let mut fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook(
+                r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#,
+            )],
+        )),
+        false,
+    );
+    fixture.refuse_start = refused;
+    let mut outcomes = Vec::new();
+    if child {
+        outcomes.push(ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                editor: None,
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
+        }));
+    }
+    outcomes.push(tool_outcome(call("read")));
+    let (result, _, _) = fixture.run(outcomes, None, child).await;
+    assert_eq!(result.run.status, RunStatus::StoppedByHook);
+    assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
+    assert!(result.run.assistant_message.is_none());
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(view.runs[0], result.run);
+    let actor = &view.runs[0].agents[usize::from(child)];
+    assert_eq!(actor.status, arany::AgentStatus::StoppedByHook);
+    assert_eq!(actor.tool_refusal.is_some(), refused);
+    let tool = if child {
+        &actor.tools[0]
+    } else {
+        &view.runs[0].tools[0]
+    };
+    if refused {
+        assert!(tool.started_sequence.is_none());
+        assert!(tool.observation.is_none());
+        let stopped = events.iter().position(|event| matches!(&event.event,
+            Event::HookFinished { outcome, .. } if matches!(outcome.result, arany::permissions::HookResult::Stopped { .. })
+        )).unwrap();
+        let refusal = events
+            .iter()
+            .position(|event| matches!(event.event, Event::ToolPreflightRefused { .. }))
+            .unwrap();
+        assert!(stopped < refusal);
+        assert!(events[refusal + 1..].iter().any(|event| matches!(
+            event.event,
+            Event::RunFinished {
+                disposition: arany::RunDisposition::StoppedByHook,
+                failure: None,
+                ..
+            }
+        )));
+    } else {
         assert!(tool.observation.as_ref().unwrap().attestation.is_none());
     }
 }

@@ -750,6 +750,8 @@ pub(crate) mod tests {
             config: None,
             agents: vec![
                 AgentView {
+                    tool_refusal: None,
+                    tool_refusal_sequence: None,
                     profile: None,
                     assignment: None,
                     definition: None,
@@ -766,6 +768,8 @@ pub(crate) mod tests {
                     status: AgentStatus::Finished,
                 },
                 AgentView {
+                    tool_refusal: None,
+                    tool_refusal_sequence: None,
                     profile: None,
                     assignment: None,
                     definition: None,
