@@ -414,8 +414,16 @@ impl RunLoop<'_> {
         batch: &mut ReadBatch<'_>,
     ) -> Result<(), EngineError> {
         for observation in std::mem::take(&mut batch.post_hooks) {
-            if matches!(batch.end, StepEnd::Stopped(_)) {
-                break;
+            match post_hook_progress(
+                batch.end,
+                self.controls.cancellation.is_cancelled(),
+                self.pause_requested(),
+            ) {
+                StepEnd::Continue => {}
+                stopped @ StepEnd::Stopped(_) => {
+                    batch.end = batch.end.merge(stopped);
+                    break;
+                }
             }
             let end = self
                 .post_step_call(grant, runtime, step, observation)
@@ -423,6 +431,32 @@ impl RunLoop<'_> {
             batch.end = batch.end.merge(end);
         }
         Ok(())
+    }
+}
+
+fn post_hook_progress(end: StepEnd, cancelled: bool, paused: bool) -> StepEnd {
+    let end = if cancelled {
+        end.merge(StepEnd::Stopped(StopCause::Cancelled))
+    } else if paused {
+        end.merge(StepEnd::Stopped(StopCause::Paused))
+    } else {
+        end
+    };
+    match end {
+        StepEnd::Continue | StepEnd::Stopped(StopCause::ToolStopped) => StepEnd::Continue,
+        StepEnd::Stopped(
+            StopCause::Uncertain
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::Paused
+            | StopCause::ActiveTime
+            | StopCause::Budget
+            | StopCause::Capacity
+            | StopCause::ContextFull
+            | StopCause::DelegationDeadline
+            | StopCause::Refused(_)
+            | StopCause::InvalidCommandResult,
+        ) => end,
     }
 }
 
@@ -476,6 +510,78 @@ pub(super) fn model_order(step: &mut ToolStep, order: &[usize]) {
         }
         if let Some(lines) = feedback.remove(&old) {
             step.hook_feedback.insert(next, lines);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_hooks_continue_after_tool_limits_and_respect_terminal_stops() {
+        assert_eq!(
+            post_hook_progress(StepEnd::Continue, false, false),
+            StepEnd::Continue
+        );
+        for cause in [
+            StopCause::Uncertain,
+            StopCause::Cancelled,
+            StopCause::HookStop,
+            StopCause::Paused,
+            StopCause::ActiveTime,
+            StopCause::Budget,
+            StopCause::Capacity,
+            StopCause::ContextFull,
+            StopCause::DelegationDeadline,
+            StopCause::Refused(crate::session::ProposalRefusalCause::Phase),
+            StopCause::ToolStopped,
+            StopCause::InvalidCommandResult,
+        ] {
+            let stopped = StepEnd::Stopped(cause);
+            let expected = if cause == StopCause::ToolStopped {
+                StepEnd::Continue
+            } else {
+                stopped
+            };
+            assert_eq!(
+                post_hook_progress(stopped, false, false),
+                expected,
+                "{cause:?}"
+            );
+        }
+        for (end, cancelled, paused, expected) in [
+            (StepEnd::Continue, true, false, StopCause::Cancelled),
+            (StepEnd::Continue, false, true, StopCause::Paused),
+            (
+                StepEnd::Stopped(StopCause::ToolStopped),
+                true,
+                false,
+                StopCause::Cancelled,
+            ),
+            (
+                StepEnd::Stopped(StopCause::ToolStopped),
+                false,
+                true,
+                StopCause::Paused,
+            ),
+            (
+                StepEnd::Stopped(StopCause::Uncertain),
+                true,
+                false,
+                StopCause::Uncertain,
+            ),
+            (
+                StepEnd::Stopped(StopCause::HookStop),
+                false,
+                true,
+                StopCause::HookStop,
+            ),
+        ] {
+            assert_eq!(
+                post_hook_progress(end, cancelled, paused),
+                StepEnd::Stopped(expected)
+            );
         }
     }
 }

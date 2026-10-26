@@ -258,6 +258,7 @@ pub(super) struct DispatchFacts<'a> {
 // Read after the Ask, or where it would have been.
 pub(super) struct AfterAsk {
     pub(super) approval: Option<Resolution>,
+    pub(super) interrupted: bool,
     pub(super) paused: bool,
     pub(super) can_start_provider_call: bool,
     pub(super) cancelled: bool,
@@ -421,7 +422,15 @@ fn approval_gate(facts: &DispatchFacts<'_>, after: &AfterAsk) -> (bool, Permissi
     };
     let active_time_exhausted =
         active_time_exhausted || after.deadline == Some(ActiveDeadlineCause::Goal);
-    (approved, source, active_time_exhausted)
+    if after.interrupted && facts.permission.approval.is_some() {
+        (
+            false,
+            PermissionSource::UnavailableApproval,
+            active_time_exhausted,
+        )
+    } else {
+        (approved, source, active_time_exhausted)
+    }
 }
 
 fn host_gate(
@@ -976,6 +985,7 @@ mod tests {
         Batch,
         Paused,
         Cancelled,
+        Interrupted,
         Deadline,
         GoalDeadline,
     }
@@ -1021,6 +1031,7 @@ mod tests {
         };
         let after = AfterAsk {
             approval,
+            interrupted: has(Fact::Interrupted),
             paused: has(Fact::Paused),
             can_start_provider_call: !has(Fact::TokensSpent) && !has(Fact::TokensSpentAfterAsk),
             cancelled: has(Fact::Cancelled),
@@ -1196,6 +1207,9 @@ mod tests {
             (decide(Primary, asks(Auto), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Mode), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), allow_, S::Mode),
             // The primary after its Ask, or where it would have been.
+            (decide(Primary, asks(Request), &none, &[InProcess, Interrupted], None), Some(Request), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[InProcess, Interrupted], ok(true, S::Human)), Some(Request), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[InProcess, Interrupted], None), Some(Request), no(N::ApprovalUnavailable, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Offered], ok(true, S::Human)), Some(Request), Ok(Dispatch::QueuePause), ask_, S::Human),
             (decide(Primary, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::QueuePause), allow_, S::Rule),
             (decide(Primary, allow(S::Rule), &none, &[InProcess], None), None, Ok(Dispatch::Direct), allow_, S::Rule),

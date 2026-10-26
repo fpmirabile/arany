@@ -3510,6 +3510,120 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
 }
 
 #[tokio::test]
+async fn hook_post_tool_use_finishes_successful_reads_after_a_sibling_limit() {
+    let fixture = Fixture::new(
+        Some(&read_post_settings(vec![shell_hook(
+            "echo checked >&2; exit 2",
+        )])),
+        false,
+    );
+    let calls: Vec<_> = ["facts", "limited", "other"]
+        .into_iter()
+        .map(|name| {
+            std::fs::write(fixture.workspace.join(format!("notes/{name}.txt")), "Fact").unwrap();
+            arany::ToolRequest {
+                id: arany::ToolUseId::new(format!("call_{name}")).unwrap(),
+                call: arany::ToolCall::Read {
+                    path: format!("notes/{name}.txt"),
+                    offset: None,
+                    limit: Some(32),
+                },
+            }
+        })
+        .collect();
+    let limited = calls[1].call.clone();
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Tools(calls)]);
+    let requests = Arc::clone(&provider.requests);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let send = Mutex::new(Some(send));
+    let provider = Arc::new(provider.with_before_call(0, move || {
+        let run = requests.lock().unwrap()[0].run_id;
+        let gate = arany::FaultPlan::gate_in_process_read(run, limited.clone());
+        send.lock().unwrap().take().unwrap().send(gate).unwrap();
+    }));
+    let mut events = fixture.engine.subscribe();
+    let drive = async {
+        let (entered, release) = receive.await.unwrap();
+        entered.await.unwrap();
+        expire_read_after_successes(&mut events).await;
+        release
+    };
+    let ((result, requests, humans), _held_release) =
+        tokio::join!(fixture.run_provider(provider, None, false, budget()), drive);
+    assert_eq!(result.run.status, RunStatus::Failed);
+    assert_eq!(result.run.failure, Some(arany::RunFailure::ToolStopped));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(humans, 0);
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(view.runs[0], result.run);
+    assert_read_post_hooks_after_limit(&events, &view.runs[0]);
+}
+
+async fn expire_read_after_successes(events: &mut arany::Subscription) {
+    let mut succeeded = 0;
+    let mut runtime_ms = None;
+    while succeeded < 2 || runtime_ms.is_none() {
+        let Some(arany::Tapped::Committed(event)) = events.next().await else {
+            panic!("read completion tap must not lag");
+        };
+        match &event.event {
+            Event::ToolStarted { intent, .. } if matches!(&intent.call, arany::ToolCall::Read { path, .. } if path == "notes/limited.txt") =>
+            {
+                runtime_ms = Some(intent.limits.runtime_ms);
+            }
+            Event::ToolFinished { observation, .. }
+                if observation.disposition == arany::ToolDisposition::Succeeded =>
+            {
+                succeeded += 1;
+            }
+            _ => {}
+        }
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(u64::from(runtime_ms.unwrap()) + 1)).await;
+    tokio::time::resume();
+}
+
+fn assert_read_post_hooks_after_limit(events: &[arany::EventEnvelope], run: &arany::RunView) {
+    assert_eq!(run.tools.len(), 3);
+    for tool in &run.tools {
+        let observation = tool.observation.as_ref().unwrap();
+        if observation.disposition == arany::ToolDisposition::Succeeded {
+            assert_eq!(tool.hook_feedback(), ["hook feedback: checked"]);
+            assert_eq!(tool.hooks.len(), 1);
+            let hook = &tool.hooks[0];
+            assert_eq!(
+                hook.invocation.event,
+                arany::permissions::HookEvent::PostToolUse
+            );
+            let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&tool.intent).unwrap()).into();
+            assert_eq!(hook.invocation.subject_digest, digest);
+            assert!(
+                hook.outcome
+                    .as_ref()
+                    .unwrap()
+                    .observation
+                    .attestation
+                    .is_some()
+            );
+        } else {
+            assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+            assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+            assert!(tool.hooks.is_empty());
+        }
+    }
+    let last_read = events
+        .iter()
+        .rposition(|e| matches!(e.event, Event::ToolFinished { .. }))
+        .unwrap();
+    let first_hook = events
+        .iter()
+        .position(|e| matches!(e.event, Event::HookStarted { .. }))
+        .unwrap();
+    assert!(last_read < first_hook);
+}
+
+#[tokio::test]
 async fn hook_post_tool_use_continue_false_stops_after_the_committed_effect() {
     let case = post_run(shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"review required","decision":"block","reason":"not model feedback"}'"#), true).await;
     assert_eq!(case.status, RunStatus::StoppedByHook);

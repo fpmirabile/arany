@@ -760,7 +760,12 @@ impl RunLoop<'_> {
                 None,
             ),
         };
-        let decided = self.dispatch_decision(grant, &facts, approval);
+        let decided = self.dispatch_decision(
+            grant,
+            &facts,
+            approval,
+            interrupted.is_some_and(RunCancellation::is_cancelled),
+        );
         let resolution = self.dispatch_verdict(&phase, decided, save)?;
         self.record_permission_verdict(grant, runtime, &phase, &facts, &resolution)
             .await?;
@@ -934,11 +939,13 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         facts: &DispatchFacts<'a>,
         approval: Option<Resolution>,
+        interrupted: bool,
     ) -> dispatch::DispatchDecision<'a> {
         decide_dispatch(
             facts,
             &AfterAsk {
                 approval,
+                interrupted,
                 paused: self.pause_requested(),
                 can_start_provider_call: self.ledger().can_start_provider_call(),
                 cancelled: self.controls.cancellation.is_cancelled(),

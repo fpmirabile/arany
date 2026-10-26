@@ -1041,6 +1041,13 @@ fn assert_stopped_read_approval(events: &[arany::EventEnvelope], run: &arany::Ru
     );
     assert_eq!(observations[1].disposition, arany::ToolDisposition::Denied);
     assert!(observations[1].output.starts_with("not_dispatched:"));
+    let verdict = run.tools[1].permission_verdict.as_ref().unwrap();
+    assert_eq!(verdict.decision, arany::permissions::Decision::Ask);
+    assert_eq!(
+        verdict.source,
+        arany::permissions::PermissionSource::UnavailableApproval
+    );
+    assert!(!verdict.approved);
     assert!(
         observations
             .iter()
