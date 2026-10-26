@@ -952,6 +952,7 @@ pub(super) fn apply(
                 ))
                 .ok_or(ReplayError::InvalidTransition)?;
             let run = active_run(current, *run_id)?;
+            run.tool_compaction_recent_files = record.recent_files.clone();
             if let CompactionStatus::Succeeded { summary, .. } = &record.status {
                 run.tool_compaction_summary = Some(summary.clone());
                 run.tool_compaction_covered_count = *covered_tool_count;

@@ -534,7 +534,11 @@ impl RunLoop<'_> {
         if boundaries.len() != total_observations {
             return Err(EngineError::InvalidHistory);
         }
-        let summary_placeholder = "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
+        let summary_placeholder = "x".repeat(
+            crate::session::MAX_COMPACTION_SUMMARY_BYTES
+                + crate::session::MAX_COMPACTION_RECENT_CONTEXT_BYTES
+                + crate::session::COMPACTION_SUMMARY_SEPARATOR_BYTES,
+        );
         let previous_summary = context.history_summary.clone();
         let last_attempted = events
             .iter()
@@ -698,11 +702,20 @@ impl RunLoop<'_> {
             .routing
             .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
         let identity = provider.identity();
+        let recent_files = self.ledger().view(|view| {
+            view.runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .map_or_else(Vec::new, |run| {
+                    crate::session::recent_files(run, window.covered_sequence)
+                })
+        })?;
         let record = CompactionRecord {
             rate_limits: summary.rate_limits,
             covered_run_id: self.run_id,
             covered_sequence: window.covered_sequence,
             source_digest: window.source_digest,
+            recent_files: recent_files.clone(),
             provider: identity.profile.clone(),
             model: identity.model.clone(),
             prompt_version: 1,
@@ -738,7 +751,10 @@ impl RunLoop<'_> {
         if let CompactionStatus::Succeeded { summary, .. } = &record.status {
             let input = &mut request.input;
             let context = input.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
-            context.history_summary = Some(summary.clone());
+            context.history_summary = Some(
+                crate::session::render_recent_files(&record.recent_files)
+                    .map_or_else(|| summary.clone(), |files| format!("{summary}\n\n{files}")),
+            );
             for feedback in &mut input.stop_hook_feedback {
                 feedback.after_step = feedback.after_step.saturating_sub(window.prefix_steps);
                 feedback.turn.without_thinking();

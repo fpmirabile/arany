@@ -120,12 +120,8 @@ impl Engine {
                 crate::store::AdmissionKind::Compaction,
             )
             .await?;
-        let source_digest =
-            prefix_digest(&events, covered_sequence).map_err(|_| EngineError::InvalidHistory)?;
-        let prepared = PreparedCompaction::prepare(&view).map_err(|error| match error {
-            CompactionInputError::Empty => EngineError::CompactionInputEmpty,
-            CompactionInputError::TooLarge => EngineError::CompactionInputTooLarge,
-        })?;
+        let (source_digest, recent_files) = compaction_source(&view, &events, covered_sequence)?;
+        let prepared = prepare_compaction(&view)?;
         let compiler_version = prepared.compiler_version;
         let requested_identity = compaction_trace_identity(last_run, identity);
         let trace = self.config.telemetry.begin_compaction(
@@ -180,6 +176,7 @@ impl Engine {
                 covered_run_id,
                 covered_sequence,
                 source_digest,
+                recent_files,
                 compiler_version,
                 source_bytes,
             },
@@ -472,6 +469,7 @@ struct CompactionSource {
     covered_run_id: crate::session::RunId,
     covered_sequence: u64,
     source_digest: [u8; 32],
+    recent_files: Vec<crate::session::RecentFile>,
     compiler_version: u16,
     source_bytes: u32,
 }
@@ -488,6 +486,7 @@ fn compaction_record(
         covered_run_id,
         covered_sequence,
         source_digest,
+        recent_files,
         compiler_version,
         source_bytes,
     } = source;
@@ -496,6 +495,7 @@ fn compaction_record(
         covered_run_id,
         covered_sequence,
         source_digest,
+        recent_files,
         provider: identity.profile.clone(),
         model: identity.model.clone(),
         prompt_version: 1,
@@ -565,6 +565,26 @@ fn covered_sequence(
             _ => None,
         })
         .ok_or(EngineError::CompactionNotIdle)
+}
+
+fn compaction_source(
+    view: &crate::session::SessionView,
+    events: &[crate::session::EventEnvelope],
+    covered_sequence: u64,
+) -> Result<([u8; 32], Vec<crate::session::RecentFile>), EngineError> {
+    let digest =
+        prefix_digest(events, covered_sequence).map_err(|_| EngineError::InvalidHistory)?;
+    let recent_files = crate::session::recent_files_across(&view.runs, covered_sequence);
+    Ok((digest, recent_files))
+}
+
+fn prepare_compaction(
+    view: &crate::session::SessionView,
+) -> Result<PreparedCompaction, EngineError> {
+    PreparedCompaction::prepare(view).map_err(|error| match error {
+        CompactionInputError::Empty => EngineError::CompactionInputEmpty,
+        CompactionInputError::TooLarge => EngineError::CompactionInputTooLarge,
+    })
 }
 
 fn checked_source_bytes(request: &CompactionRequest) -> Result<u32, EngineError> {

@@ -90,13 +90,11 @@ fn synthetic_server(
     compaction_started: mpsc::Sender<()>,
     compaction_release: mpsc::Receiver<()>,
     roster_path: std::path::PathBuf,
+    state_path: std::path::PathBuf,
+    workspace_path: std::path::PathBuf,
 ) {
     listener.set_nonblocking(true).expect("bounded accept");
-    let request_count = if matches!(case, CompactionCase::ProviderFailure) {
-        7
-    } else {
-        6
-    };
+    let request_count = 8;
     for index in 0..request_count {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
@@ -121,27 +119,32 @@ fn synthetic_server(
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
         assert_eq!(wire["model"], "model-1");
         assert!(wire.get("text").is_none());
-        if index == 2 || index >= 5 {
+        if index == 2
+            || index == 6
+            || (index == 7 && matches!(case, CompactionCase::ProviderFailure))
+        {
             crate::loopback::assert_compaction_request(&wire);
         }
         assert_eq!(
             wire["max_output_tokens"],
             match index {
-                0 | 3 | 4 => 4096,
+                0 | 3 | 4 | 5 => 4096,
                 1 | 2 => 128,
-                _ => 4096,
+                6 | 7 => 4096,
+                _ => unreachable!("bounded synthetic request index"),
             }
         );
         let input: serde_json::Value = crate::semantic::input(&wire);
         match index {
-            0..=2 => {
+            0 | 1 => {
                 assert!(
                     input
                         .get("workspace_guidance")
                         .is_none_or(serde_json::Value::is_null)
                 );
             }
-            3 => {
+            2 => {}
+            3 | 4 => {
                 assert_eq!(input["objective"].as_str().unwrap().len(), 8192);
                 assert_eq!(
                     input["workspace_guidance"][0]["text"]
@@ -166,13 +169,55 @@ fn synthetic_server(
                         "include {index} identity, digest and content"
                     );
                 }
-                assert!(input["history"].as_array().unwrap().is_empty());
             }
-            4 => {
+            5 => {
                 assert_eq!(input["objective"], "second");
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("history runtime");
+                let expected_tool_history = runtime.block_on(async {
+                    let sessions = arany::list_sessions(
+                        StateRoot::open_existing(&state_path).expect("State reopen"),
+                        workspace_path.clone(),
+                    )
+                    .await
+                    .expect("fixture Session");
+                    assert_eq!(sessions.len(), 1);
+                    let store = Store::open_read_only(
+                        StateRoot::open_existing(&state_path).expect("State reopen"),
+                    )
+                    .expect("read-only Store");
+                    let view = store
+                        .load_view(sessions[0].id)
+                        .await
+                        .expect("committed view")
+                        .expect("Session");
+                    let tool_history = arany::test_support::history_tool_block(&view.runs[0]);
+                    store.close().await.expect("close Store");
+                    tool_history
+                });
+                let expected_history = format!(
+                    "{expected_tool_history}\nFinal answer (untrusted data):\n{}",
+                    "A".repeat(24 * 1024)
+                );
+                assert_eq!(input["history"][0]["assistant"], expected_history);
+            }
+            6 => {
+                assert_eq!(input["items"].as_array().unwrap().len(), 2);
+            }
+            7 if matches!(case, CompactionCase::Success) => {
+                assert_eq!(input["objective"], "third");
+                use sha2::{Digest, Sha256};
+                let digest: String = Sha256::digest(b"committed before compaction")
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                let recent_files = format!(
+                    "Files changed before compaction; Read them for current content\n[{{\"path\":\"src/recent.txt\",\"digest\":\"{digest}\"}}]"
+                );
                 assert_eq!(
-                    input["history"][0]["assistant"].as_str().unwrap().len(),
-                    24 * 1024
+                    input["derived_context_summary"],
+                    format!("{}\n\n{recent_files}", compaction_summary())
                 );
             }
             _ => {
@@ -181,10 +226,10 @@ fn synthetic_server(
                 assert_eq!(input["items"].as_array().unwrap().len(), 2);
             }
         }
-        if index == 4 && matches!(case, CompactionCase::Success) {
+        if index == 5 && matches!(case, CompactionCase::Success) {
             std::fs::write(&roster_path, b"changed preset after Run admission").unwrap();
         }
-        if index == 5 {
+        if index == 6 {
             compaction_started
                 .send(())
                 .expect("compaction request gate");
@@ -213,7 +258,7 @@ fn synthetic_server(
                 }
             }
         }
-        if index == 6 {
+        if index == 7 && matches!(case, CompactionCase::ProviderFailure) {
             assert!(matches!(case, CompactionCase::ProviderFailure));
             compaction_started.send(()).expect("manual request gate");
             compaction_release
@@ -226,16 +271,49 @@ fn synthetic_server(
             .expect("manual compaction rejection");
             continue;
         }
+        if index == 3 {
+            let response = serde_json::json!({
+                "id":"resp_recent_write",
+                "status":"completed",
+                "model":"model-1",
+                "output":[{
+                    "type":"function_call",
+                    "id":"fc_recent_write",
+                    "call_id":"call_recent_write",
+                    "status":"completed",
+                    "name":"arany_write",
+                    "arguments":serde_json::json!({
+                        "path":"src/recent.txt",
+                        "expected_digest":null,
+                        "content":"committed before compaction"
+                    }).to_string()
+                }],
+                "usage":{"input_tokens":20,"output_tokens":10}
+            });
+            let (content_type, response) = if wire["stream"] == true {
+                (
+                    "text/event-stream",
+                    crate::loopback::responses_stream(response),
+                )
+            } else {
+                ("application/json", response.to_string())
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .expect("Write function-call response");
+            continue;
+        }
         let text = match index {
             0 => serde_json::json!("ok"),
             1 => {
                 serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
             }
             2 => serde_json::json!(r#"synthetic summary"#),
-            3 => {
-                serde_json::json!("A".repeat(24 * 1024))
-            }
-            4 => {
+            4 => serde_json::json!("A".repeat(24 * 1024)),
+            5 => {
                 let result = if matches!(case, CompactionCase::Success) {
                     format!(
                         "second answer{}",
@@ -246,9 +324,13 @@ fn synthetic_server(
                 };
                 serde_json::json!(result)
             }
+            7 if matches!(case, CompactionCase::Success) => serde_json::json!("third answer"),
             _ => serde_json::json!(compaction_summary()),
         };
-        if index == 2 || index >= 5 {
+        if index == 2
+            || index == 6
+            || (index == 7 && matches!(case, CompactionCase::ProviderFailure))
+        {
             if index == 2 {
                 assert_eq!(text, "synthetic summary", "plain-text compaction reply");
             } else {
@@ -272,6 +354,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
+    std::fs::create_dir(workspace.join("src")).expect("Write parent directory");
     std::fs::write(workspace.join("AGENTS.md"), "G".repeat(20 * 1024)).expect("guidance");
     // Attached Runs reserve steering context, so includes stay below the old budget edge.
     std::fs::write(workspace.join("a.txt"), "A".repeat(120 * 1024)).expect("first include");
@@ -279,6 +362,14 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     std::fs::write(workspace.join("private.txt"), "OMITTED_CANARY").expect("omitted input");
     let state = temp.path().join("state");
     StateRoot::admit(&state).expect("state root");
+    private_file(
+        &state.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    );
+    private_file(
+        &state.join("permissions.json"),
+        br#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
+    );
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     let profile = serde_json::json!({
@@ -302,16 +393,22 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let (request_sender, request_ready) = mpsc::channel();
     let (release_compaction, compaction_release) = mpsc::sync_channel(1);
     let roster_path = state.join("provider-roster.json");
+    let roster_bytes = serde_json::to_vec(&serde_json::json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
     if matches!(case, CompactionCase::Success) {
-        private_file(&roster_path, &serde_json::to_vec(&serde_json::json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap());
+        private_file(&roster_path, &roster_bytes);
     }
+    let server_roster_path = roster_path.clone();
+    let server_state_path = state.clone();
+    let server_workspace_path = workspace.clone();
     let server = thread::spawn(move || {
         synthetic_server(
             listener,
             case,
             request_sender,
             compaction_release,
-            roster_path,
+            server_roster_path,
+            server_state_path,
+            server_workspace_path,
         )
     });
 
@@ -334,9 +431,9 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     assert_eq!(checked.stderr, b"");
 
     let shell = if matches!(case, CompactionCase::Interrupted) {
-        "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
+        "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --tools --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     } else {
-        "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\""
+        "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --tools --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\""
     };
     let shell = if matches!(case, CompactionCase::Success) {
         shell.replace(
@@ -346,10 +443,8 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     } else {
         shell.to_owned()
     };
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
+    let mut attached = Command::new("/usr/bin/script");
     attached
-        .env_clear()
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state)
         .env("ARANY_TEST_WORKSPACE", &workspace)
@@ -383,6 +478,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         let mut manual_reported = false;
         let mut admission_reported = false;
         let mut second_output_paused = false;
+        let mut third_reported = false;
         let mut source_mismatch_reported = false;
         let mut continuation_reported = false;
         let mut retention_count = 0;
@@ -427,6 +523,17 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 output_resume
                     .recv_timeout(Duration::from_secs(10))
                     .expect("resume second output");
+            }
+            if matches!(case, CompactionCase::Success)
+                && !third_reported
+                && bytes
+                    .windows(b"third answer".len())
+                    .any(|part| part == b"third answer")
+            {
+                sender
+                    .send("third committed output")
+                    .expect("stage receiver");
+                third_reported = true;
             }
             if !first_reported
                 // The receipt is emitted before terminal input is reacquired.
@@ -596,6 +703,49 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             )
             .await
             .expect("change only next-Run defaults during restored output");
+            let store =
+                Store::open_read_only(StateRoot::open_existing(&state).expect("State reopen"))
+                    .expect("read-only Store");
+            let changed = store
+                .load_view(sessions[0].id)
+                .await
+                .expect("changed committed view")
+                .expect("Session");
+            assert_eq!(changed.defaults.account_id, Some(future_account));
+            assert_eq!(changed.defaults.provider.as_deref(), Some("openai"));
+            assert!(changed.runs.iter().all(|run| {
+                run.config
+                    .as_ref()
+                    .is_some_and(|config| config.provider.profile() == "custom:local")
+            }));
+            store.close().await.expect("close Store");
+        });
+        private_file(&roster_path, &roster_bytes);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("restore defaults runtime");
+        runtime.block_on(async {
+            let sessions = arany::list_sessions(
+                StateRoot::open_existing(&state).expect("State reopen"),
+                workspace.clone(),
+            )
+            .await
+            .expect("fixture Session");
+            assert_eq!(sessions.len(), 1);
+            arany::set_session_defaults(
+                StateRoot::open_existing(&state).expect("State reopen"),
+                workspace.clone(),
+                sessions[0].id,
+                arany::SessionDefaults {
+                    provider: Some("custom:local".into()),
+                    model: Some("model-1".into()),
+                    effort: None,
+                    account_id: None,
+                    policy: arany::CollaborationPolicy::Single,
+                },
+            )
+            .await
+            .expect("restore matching next-Run defaults before compaction reload");
         });
         resume_output.send(()).expect("release second output");
     }
@@ -626,6 +776,12 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .write_all(b"\x03")
         .expect("explicitly clear retained draft");
     receive_stage(&receiver, "draft cleared");
+    if matches!(case, CompactionCase::Success) {
+        input
+            .write_all(b"third\n")
+            .expect("submit after compaction");
+        receive_stage(&receiver, "third committed output");
+    }
     if matches!(case, CompactionCase::ProviderFailure) {
         input
             .write_all(b"/compact\n")
@@ -739,10 +895,63 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let view = SessionView::replay(session_id, &events)
         .expect("strict replay")
         .expect("Session");
-    assert_eq!(view.runs.len(), 2);
+    assert_eq!(
+        view.runs.len(),
+        if matches!(case, CompactionCase::Success) {
+            3
+        } else {
+            2
+        }
+    );
     if matches!(case, CompactionCase::Success) {
-        assert_eq!(view.defaults.account_id, Some(future_account));
-        assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
+        let record = events.iter().find_map(|envelope| match &envelope.event {
+            arany::Event::ContextCompacted { record, .. } => Some(record),
+            _ => None,
+        });
+        let record = record.expect("committed Session compaction");
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(b"committed before compaction")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            record.recent_files,
+            [arany::RecentFile {
+                path: "src/recent.txt".into(),
+                digest: digest.clone(),
+            }]
+        );
+        assert_eq!(
+            serde_json::to_value(record).expect("compaction record")["recent_files"][0],
+            serde_json::json!({"path":"src/recent.txt","digest":digest})
+        );
+        let shown = Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .current_dir(&workspace)
+            .args(["show", "--state-dir"])
+            .arg(&state)
+            .args(["--output", "jsonl"])
+            .arg(session_id.to_string())
+            .bounded_output_for(Duration::from_secs(30), 4 * 1024 * 1024)
+            .expect("show reopened Session");
+        assert!(shown.status.success());
+        assert!(shown.stderr.is_empty());
+        let shown_events: Vec<arany_cli::protocol::EventLine> = String::from_utf8(shown.stdout)
+            .expect("show JSONL UTF-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("show EventLine"))
+            .collect();
+        assert_eq!(
+            shown_events,
+            events
+                .iter()
+                .map(arany_cli::protocol::EventLine::from)
+                .collect::<Vec<_>>()
+        );
+    }
+    if matches!(case, CompactionCase::Success) {
+        assert_eq!(view.defaults.account_id, None);
+        assert_eq!(view.defaults.provider.as_deref(), Some("custom:local"));
         for run in &view.runs {
             let config = run.config.as_ref().expect("pinned config");
             assert_eq!(config.provider.profile(), "custom:local");
@@ -751,7 +960,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         }
         assert_eq!(
             std::fs::read(state.join("provider-roster.json")).unwrap(),
-            b"changed preset after Run admission"
+            roster_bytes.as_slice()
         );
     }
     assert!(
@@ -820,7 +1029,14 @@ fn run_attached_auto_compaction(case: CompactionCase) {
 }
 
 #[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux PTY, account isolation, and successful Guard publication"
+)]
 fn attached_context_threshold_preserves_history_after_success_failure_or_interruption() {
+    if !crate::isolation::enter_native_account_isolated_test() {
+        return;
+    }
     run_attached_auto_compaction(CompactionCase::Success);
     run_attached_auto_compaction(CompactionCase::ProviderFailure);
     run_attached_auto_compaction(CompactionCase::Interrupted);

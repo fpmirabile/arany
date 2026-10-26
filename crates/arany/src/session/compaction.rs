@@ -1,8 +1,160 @@
 use super::lineage::PrefixHasher;
-use super::{CompactionStatus, Event, EventEnvelope, ReplayError, RunStatus, SessionView};
+use super::{
+    CompactionStatus, Event, EventEnvelope, RecentFile, ReplayError, RunStatus, RunView,
+    SessionView,
+};
 use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
+use crate::session::EffectTarget;
+use crate::tools::{ToolCall, ToolDisposition};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+
+pub(crate) fn recent_files(run: &RunView, covered_sequence: u64) -> Vec<RecentFile> {
+    recent_files_across(std::slice::from_ref(run), covered_sequence)
+}
+
+pub(crate) fn recent_files_across(runs: &[RunView], covered_sequence: u64) -> Vec<RecentFile> {
+    let mut recent = Vec::new();
+    let mut paths = std::collections::HashSet::new();
+    for run in runs
+        .iter()
+        .rev()
+        .filter(|run| run.accepted_sequence <= covered_sequence)
+    {
+        for tool in run.tools.iter().rev().filter(|tool| {
+            tool.finished_sequence
+                .is_some_and(|sequence| sequence <= covered_sequence)
+        }) {
+            let Some(observation) = tool.observation.as_ref().filter(|observation| {
+                observation.disposition == ToolDisposition::Succeeded
+                    && observation.intent.target == EffectTarget::Workspace
+            }) else {
+                continue;
+            };
+            for (path, digest) in observation_changes(run, tool, observation) {
+                if !crate::validate::valid_relative(&path, false) || !paths.insert(path.clone()) {
+                    continue;
+                }
+                let Some(digest) = digest else { continue };
+                let mut candidate = recent.clone();
+                candidate.push(RecentFile { path, digest });
+                if serde_json::to_vec(&candidate).is_ok_and(|bytes| {
+                    bytes.len() <= super::events::MAX_COMPACTION_RECENT_FILES_BYTES
+                }) {
+                    recent = candidate;
+                    if recent.len() == super::events::MAX_COMPACTION_RECENT_FILES {
+                        return recent;
+                    }
+                }
+            }
+        }
+    }
+    recent
+}
+
+type RecentChange = (String, Option<String>);
+
+fn observation_changes(
+    run: &RunView,
+    tool: &super::ToolView,
+    observation: &crate::tools::ToolObservation,
+) -> Vec<RecentChange> {
+    match &observation.intent.call {
+        ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } => publication_digest(&observation.output)
+            .map(|digest| vec![(path.clone(), Some(digest))])
+            .unwrap_or_default(),
+        ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => changeset
+            .files
+            .iter()
+            .map(|change| {
+                (
+                    change.path.clone(),
+                    change.after.as_ref().map(|after| after.sha256.clone()),
+                )
+            })
+            .collect(),
+        ToolCall::ApplyChangeset {
+            source:
+                crate::session::worker::ChangesetSource::WorkerHandover {
+                    assignment_id,
+                    data,
+                    ..
+                },
+        } => worker_changes(run, tool, *assignment_id, data),
+        _ => Vec::new(),
+    }
+}
+
+fn worker_changes(
+    run: &RunView,
+    tool: &super::ToolView,
+    assignment_id: super::AgentRunId,
+    data: &crate::session::worker::WorkerDataRef,
+) -> Vec<RecentChange> {
+    let integrated = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == assignment_id)
+        .and_then(|agent| agent.assignment.as_ref())
+        .and_then(|worker| worker.integration.as_ref())
+        .is_some_and(|(_, record)| {
+            Some(record.finished_sequence) == tool.finished_sequence
+                && record.outcome == crate::session::worker::WorkerIntegrationOutcome::Integrated
+        });
+    if !integrated {
+        return Vec::new();
+    }
+    run.workers
+        .data
+        .iter()
+        .find(|sealed| &sealed.reference == data)
+        .and_then(|sealed| match &sealed.facts {
+            crate::session::worker::WorkerDataFacts::Changes(changes) => Some(
+                changes
+                    .iter()
+                    .map(|change| {
+                        let digest = match &change.after {
+                            crate::session::worker::WorkerBaseVersion::File { sha256, .. } => {
+                                Some(sha256.clone())
+                            }
+                            _ => None,
+                        };
+                        (change.path.clone(), digest)
+                    })
+                    .collect(),
+            ),
+            crate::session::worker::WorkerDataFacts::Manifest(_) => None,
+        })
+        .unwrap_or_default()
+}
+
+fn publication_digest(output: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    let digest = value.get("sha256")?.as_str()?;
+    crate::validate::valid_digest(digest).then(|| digest.to_owned())
+}
+
+pub(crate) fn render_recent_files(files: &[RecentFile]) -> Option<String> {
+    (!files.is_empty()).then(|| {
+        format!(
+            "{}\n{}",
+            RECENT_FILES_HEADING,
+            serde_json::to_string(files).expect("typed recent files are serializable")
+        )
+    })
+}
+
+const RECENT_FILES_HEADING: &str = "Files changed before compaction; Read them for current content";
+pub(crate) const MAX_COMPACTION_RECENT_CONTEXT_BYTES: usize =
+    RECENT_FILES_HEADING.len() + 1 + super::events::MAX_COMPACTION_RECENT_FILES_BYTES;
+pub(crate) const COMPACTION_SUMMARY_SEPARATOR: &str = "\n\n";
+pub(crate) const COMPACTION_SUMMARY_SEPARATOR_BYTES: usize = COMPACTION_SUMMARY_SEPARATOR.len();
 
 pub(crate) const COMPACTION_COMPILER_VERSION: u16 = 5;
 pub(crate) const MIN_RECORDED_COMPACTION_COMPILER_VERSION: u16 = 3;

@@ -261,6 +261,26 @@ fn agent_lines(
             agent.objective.as_deref().unwrap_or(&run.objective)
         ),
     ];
+    let recent_files = (!run.tool_compaction_recent_files.is_empty())
+        .then_some(run.tool_compaction_recent_files.as_slice())
+        .or_else(|| {
+            view.compactions
+                .iter()
+                .rev()
+                .find(|compaction| {
+                    compaction.record.covered_run_id == run.id
+                        && !compaction.record.recent_files.is_empty()
+                })
+                .map(|compaction| compaction.record.recent_files.as_slice())
+        });
+    if let Some(recent_files) = recent_files {
+        let files = recent_files
+            .iter()
+            .map(|file| format!("{} ({})", file.path, file.digest))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Files changed before compaction: {files}"));
+    }
     if let Some(worker) = run
         .worker_history()
         .into_iter()
@@ -525,6 +545,7 @@ impl AgentTranscript {
                     failure: None,
                     tools: agent.tools[first_tool..].to_vec(),
                     tool_compaction_summary: None,
+                    tool_compaction_recent_files: Vec::new(),
                     tool_compaction_covered_count: 0,
                     tool_results_cleared_count: 0,
                     definitions: Default::default(),
@@ -768,6 +789,7 @@ pub(crate) mod tests {
             failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
+            tool_compaction_recent_files: Vec::new(),
             tool_compaction_covered_count: 0,
             tool_results_cleared_count: 0,
             definitions: Default::default(),
@@ -813,6 +835,24 @@ pub(crate) mod tests {
                     .any(|line| line.starts_with("Supervisor (shadow):"))
             );
         }
+    }
+
+    #[test]
+    fn agent_inspector_renders_the_recorded_recent_file_digest() {
+        let mut view = view();
+        let mut run = run(0);
+        run.tool_compaction_recent_files = vec![arany::RecentFile {
+            path: "src/recent.txt".into(),
+            digest: "a".repeat(64),
+        }];
+        view.runs.push(run);
+        let inspector = AgentInspectorModel::from_session(&view, &focused(&view, 0, 1), 120, false);
+        assert!(inspector.lines.iter().any(|line| {
+            line == &format!(
+                "Files changed before compaction: src/recent.txt ({})",
+                "a".repeat(64)
+            )
+        }));
     }
 
     #[test]

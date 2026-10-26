@@ -8,6 +8,28 @@ use crate::provider::{
 };
 
 const MAX_CHILD_CONTEXT_BYTES: usize = 20 * 1024 + 64;
+const SUMMARY_CONTEXT_OVERHEAD_BYTES: usize = 64;
+
+fn summary_context_cost(
+    summary_bytes: usize,
+    recent_files_bytes: usize,
+    join: bool,
+) -> Option<usize> {
+    summary_bytes
+        .checked_add(recent_files_bytes)?
+        .checked_add(if join {
+            super::COMPACTION_SUMMARY_SEPARATOR_BYTES
+        } else {
+            0
+        })?
+        .checked_add(SUMMARY_CONTEXT_OVERHEAD_BYTES)
+}
+
+fn fits_history_budget(used: usize, addition: Option<usize>, budget: usize) -> bool {
+    addition
+        .and_then(|addition| used.checked_add(addition))
+        .is_some_and(|total| total <= budget)
+}
 
 pub(crate) struct ContextTooLarge;
 
@@ -79,19 +101,32 @@ impl CompiledContext {
             .into_iter()
             .flat_map(|view| view.compactions.iter().rev())
             .find_map(|compaction| {
+                let recent_files = super::render_recent_files(&compaction.record.recent_files);
                 if compaction.record.compiler_version == super::COMPACTION_COMPILER_VERSION
                     && let CompactionStatus::Succeeded {
                         summary,
                         content_digest,
                         ..
                     } = &compaction.record.status
-                    && used + summary.len() + 64 <= history_budget
+                    && fits_history_budget(
+                        used,
+                        summary_context_cost(
+                            summary.len(),
+                            recent_files.as_ref().map_or(0, String::len),
+                            recent_files.is_some(),
+                        ),
+                        history_budget,
+                    )
                 {
+                    let summary = recent_files.map_or_else(
+                        || summary.clone(),
+                        |files| format!("{summary}{}{files}", super::COMPACTION_SUMMARY_SEPARATOR),
+                    );
                     return Some((
                         compaction.event_sequence,
                         compaction.record.covered_sequence,
                         *content_digest,
-                        summary.clone(),
+                        summary,
                     ));
                 }
                 None
@@ -99,7 +134,7 @@ impl CompiledContext {
         let covered_sequence = selected_compaction.as_ref().map_or(0, |value| value.1);
         let (compaction_event_sequence, compaction_content_digest, mut summary) =
             if let Some((event_sequence, _, digest, summary)) = selected_compaction {
-                used += summary.len() + 64;
+                used += summary.len() + SUMMARY_CONTEXT_OVERHEAD_BYTES;
                 (Some(event_sequence), Some(digest), Some(summary))
             } else {
                 (None, None, None)
@@ -107,7 +142,7 @@ impl CompiledContext {
         if let Some(facts) =
             session.and_then(|v| super::rewind::history_facts(v, covered_sequence, v.last_sequence))
         {
-            used += facts.len() + 64;
+            used += facts.len() + usize::from(summary.is_some()) + SUMMARY_CONTEXT_OVERHEAD_BYTES;
             if used > budget {
                 return Err(ContextTooLarge);
             }
@@ -178,6 +213,31 @@ impl CompiledContext {
         selected.reverse();
         let excluded_history_runs =
             u32::try_from(runs.len().saturating_sub(selected.len())).unwrap_or(u32::MAX);
+        if let Some(files) = session
+            .into_iter()
+            .flat_map(|view| view.runs.iter().rev())
+            .find(|run| {
+                run.accepted_sequence > covered_sequence
+                    && !run.tool_compaction_recent_files.is_empty()
+            })
+            .and_then(|run| super::render_recent_files(&run.tool_compaction_recent_files))
+            .filter(|files| {
+                fits_history_budget(
+                    used,
+                    summary_context_cost(0, files.len(), summary.is_some()),
+                    history_budget,
+                )
+            })
+        {
+            used +=
+                summary_context_cost(0, files.len(), summary.is_some()).ok_or(ContextTooLarge)?;
+            summary = Some(match summary {
+                Some(summary) => {
+                    format!("{summary}{}{files}", super::COMPACTION_SUMMARY_SEPARATOR)
+                }
+                None => files,
+            });
+        }
         let mut images = Vec::with_capacity(image_count);
         for (turn_index, (run, _)) in selected.iter().enumerate() {
             images.extend(run.images.iter().cloned().map(|image| ProviderImage {
@@ -225,5 +285,27 @@ impl CompiledContext {
             },
             tool_context_budget_bytes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_admission_counts_the_recent_file_join_exactly() {
+        let summary_bytes = 17;
+        let recent_files_bytes = 31;
+        let cost = summary_context_cost(summary_bytes, recent_files_bytes, true).unwrap();
+        assert_eq!(
+            cost,
+            summary_bytes + recent_files_bytes + 2 + SUMMARY_CONTEXT_OVERHEAD_BYTES
+        );
+        assert!(fits_history_budget(7, Some(cost), 7 + cost));
+        assert!(!fits_history_budget(7, Some(cost), 6 + cost));
+        assert_eq!(
+            summary_context_cost(summary_bytes, recent_files_bytes, false),
+            Some(summary_bytes + recent_files_bytes + SUMMARY_CONTEXT_OVERHEAD_BYTES)
+        );
     }
 }

@@ -597,6 +597,7 @@ fn failed_compaction(run: RunId, covered_sequence: u64, digest: [u8; 32]) -> Com
         covered_run_id: run,
         covered_sequence,
         source_digest: digest,
+        recent_files: Vec::new(),
         provider: "openai".into(),
         model: "test".into(),
         prompt_version: 1,

@@ -1463,6 +1463,7 @@ fn compaction_record(status: CompactionStatus) -> crate::session::CompactionReco
         covered_run_id: RunId::new(),
         covered_sequence: 1,
         source_digest: [0; 32],
+        recent_files: Vec::new(),
         provider: "other".into(),
         model: "model-1".into(),
         prompt_version: 1,

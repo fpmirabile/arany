@@ -2,7 +2,7 @@ use super::*;
 use crate::provider::{AgentPhase, ProviderKind};
 use crate::tools::types::HostCommandPin;
 use crate::tools::{EffectIntent, HostIntent, ToolCall, ToolLimits};
-use crate::validate::MAX_PATH_BYTES;
+use crate::validate::{MAX_PATH_BYTES, valid_digest, valid_relative};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -630,6 +630,8 @@ pub struct CompactionRecord {
     pub covered_run_id: RunId,
     pub covered_sequence: u64,
     pub source_digest: [u8; 32],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_files: Vec<RecentFile>,
     pub provider: String,
     pub model: String,
     pub prompt_version: u16,
@@ -655,6 +657,13 @@ pub struct CompactionRecord {
     pub status: CompactionStatus,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentFile {
+    pub path: String,
+    pub digest: String,
+}
+
 impl CompactionRecord {
     fn usage(&self) -> crate::provider::Usage {
         crate::provider::Usage {
@@ -673,6 +682,16 @@ impl CompactionRecord {
             .is_some_and(|limits| !limits.valid())
             || !serde_json::to_vec(self)
                 .is_ok_and(|bytes| bytes.len() <= crate::store::MAX_COMPACTION_RECORD_BYTES)
+            || self.recent_files.len() > MAX_COMPACTION_RECENT_FILES
+            || !serde_json::to_vec(&self.recent_files)
+                .is_ok_and(|bytes| bytes.len() <= MAX_COMPACTION_RECENT_FILES_BYTES)
+            || self.recent_files.iter().enumerate().any(|(index, file)| {
+                !valid_relative(&file.path, false)
+                    || !valid_digest(&file.digest)
+                    || self.recent_files[..index]
+                        .iter()
+                        .any(|previous| previous.path == file.path)
+            })
             || self.covered_sequence == 0
             || self.prompt_version != 1
             || self.schema_version != 1

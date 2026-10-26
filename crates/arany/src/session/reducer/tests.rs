@@ -86,6 +86,7 @@ mod goal_recovery_tests {
                 finished_sequence: None,
                 tools: vec![tool],
                 tool_compaction_summary: None,
+                tool_compaction_recent_files: Vec::new(),
                 tool_compaction_covered_count: 0,
                 tool_results_cleared_count: 0,
                 definitions: Default::default(),
@@ -927,6 +928,7 @@ mod goal_replay_tests {
                         paused.runs[0].finished_sequence.unwrap(),
                     )
                     .unwrap(),
+                    recent_files: Vec::new(),
                     provider: "openai".into(),
                     model: if drifted { "different" } else { "gpt-5.4" }.into(),
                     prompt_version: 1,
@@ -1670,6 +1672,7 @@ mod goal_replay_tests {
                 covered_run_id: source_run,
                 covered_sequence: 1,
                 source_digest: [0; 32],
+                recent_files: Vec::new(),
                 provider: "openai".into(),
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
@@ -3875,6 +3878,7 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 tools: Vec::new(),
                 tool_compaction_summary: None,
+                tool_compaction_recent_files: Vec::new(),
                 tool_compaction_covered_count: 0,
                 tool_results_cleared_count: 0,
                 definitions: Default::default(),
@@ -5136,6 +5140,7 @@ mod goal_replay_tests {
                     finished_sequence: Some(2),
                 }],
                 tool_compaction_summary: None,
+                tool_compaction_recent_files: Vec::new(),
                 tool_compaction_covered_count: 0,
                 tool_results_cleared_count: 0,
                 definitions: Default::default(),
@@ -5289,6 +5294,7 @@ mod goal_replay_tests {
                         finished_sequence: Some(1),
                     }],
                     tool_compaction_summary: None,
+                    tool_compaction_recent_files: Vec::new(),
                     tool_compaction_covered_count: 0,
                     tool_results_cleared_count: 0,
                     definitions: Default::default(),
@@ -5335,6 +5341,7 @@ mod goal_replay_tests {
                     finished_sequence: None,
                     tools: Vec::new(),
                     tool_compaction_summary: None,
+                    tool_compaction_recent_files: Vec::new(),
                     tool_compaction_covered_count: 0,
                     tool_results_cleared_count: 0,
                     definitions: Default::default(),
@@ -8642,6 +8649,7 @@ mod goal_replay_tests {
                 covered_run_id: run,
                 covered_sequence: covered.finished_sequence.expect("observed Tool"),
                 source_digest: [0; 32],
+                recent_files: Vec::new(),
                 provider: "openai".into(),
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
@@ -8662,6 +8670,81 @@ mod goal_replay_tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn recent_compaction_files_use_newest_committed_workspace_digest() {
+        let (mut view, _, _) = compacting_session();
+        for (index, digest, call) in [
+            (
+                0,
+                "a".repeat(64),
+                crate::tools::ToolCall::Write {
+                    path: "src/lib.rs".into(),
+                    expected_digest: None,
+                    content: "first".into(),
+                },
+            ),
+            (
+                1,
+                "b".repeat(64),
+                crate::tools::ToolCall::Edit {
+                    path: "src/lib.rs".into(),
+                    expected_digest: "a".repeat(64),
+                    old: "first".into(),
+                    new: "second".into(),
+                },
+            ),
+        ] {
+            let tool = &mut view.runs[0].tools[index];
+            let observation = tool.observation.as_mut().unwrap();
+            observation.intent.call = call.clone();
+            tool.intent.call = call;
+            observation.output = serde_json::json!({ "sha256": digest }).to_string();
+        }
+        let run = &view.runs[0];
+        let covered_sequence = run.tools[1].finished_sequence.unwrap();
+        let recent_files = crate::session::recent_files(run, covered_sequence);
+        assert_eq!(
+            recent_files,
+            [crate::session::RecentFile {
+                path: "src/lib.rs".into(),
+                digest: "b".repeat(64),
+            }]
+        );
+        let expected = format!(
+            "Files changed before compaction; Read them for current content\n[{{\"path\":\"src/lib.rs\",\"digest\":\"{}\"}}]",
+            "b".repeat(64)
+        );
+        assert_eq!(
+            crate::session::render_recent_files(&recent_files).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            crate::session::recent_files(
+                run,
+                run.tools[0].finished_sequence.unwrap().saturating_sub(1)
+            ),
+            []
+        );
+        assert_eq!(
+            crate::session::recent_files(run, run.tools[0].finished_sequence.unwrap()),
+            [crate::session::RecentFile {
+                path: "src/lib.rs".into(),
+                digest: "a".repeat(64),
+            }]
+        );
+        let mut earlier_run = run.clone();
+        earlier_run.tools = vec![run.tools[0].clone()];
+        let mut covered_run = run.clone();
+        covered_run.tools = vec![run.tools[1].clone()];
+        assert_eq!(
+            crate::session::recent_files_across(&[earlier_run, covered_run], covered_sequence),
+            [crate::session::RecentFile {
+                path: "src/lib.rs".into(),
+                digest: "b".repeat(64),
+            }]
+        );
     }
 
     fn background_primary_tool_session() -> (SessionView, GoalId, RunId, AgentRunId, AgentRunId) {
@@ -8834,12 +8917,18 @@ mod goal_replay_tests {
         };
         let summary = "S".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
         record.compiler_version = crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION;
+        record.recent_files = vec![crate::session::RecentFile {
+            path: "src/main.rs".into(),
+            digest: "a".repeat(64),
+        }];
         record.status = crate::session::events::CompactionStatus::Succeeded {
             content_digest: crate::validate::digest(summary.as_bytes()),
             summary_bytes: summary.len() as u32,
             summary_tokens_estimate: summary.len().div_ceil(4) as u32,
             summary: summary.clone(),
         };
+        let mut invalid_record = record.clone();
+        invalid_record.recent_files[0].digest = "x".repeat(64);
 
         apply(
             &mut view,
@@ -8855,6 +8944,15 @@ mod goal_replay_tests {
             view.runs[0].tool_compaction_summary.as_deref(),
             Some(summary.as_str())
         );
+        assert_eq!(
+            view.runs[0].tool_compaction_recent_files,
+            [crate::session::RecentFile {
+                path: "src/main.rs".into(),
+                digest: "a".repeat(64),
+            }]
+        );
+        assert_eq!(view.runs[0].tools.len(), 2);
+        assert!(invalid_record.validate().is_err());
     }
 
     #[test]

@@ -24,14 +24,17 @@ pub use records::{
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
     DisplayChunk, EffectTarget, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES,
     MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal,
-    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition,
-    RunFailure, SessionDefaults, ToolIntentRecord,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RecentFile, RunConfig,
+    RunDisposition, RunFailure, SessionDefaults, ToolIntentRecord,
 };
 use validate::bounded;
 
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use uuid::{Uuid, Version};
+
+pub(crate) const MAX_COMPACTION_RECENT_FILES: usize = 8;
+pub(crate) const MAX_COMPACTION_RECENT_FILES_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WorkspaceIdentity {
