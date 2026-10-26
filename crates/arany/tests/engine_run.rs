@@ -35,6 +35,15 @@ mod budgets;
 #[path = "engine_run/plan_contract.rs"]
 mod plan_contract;
 
+#[path = "engine_run/team.rs"]
+mod team;
+
+#[path = "engine_run/steering.rs"]
+mod steering;
+
+#[path = "engine_run/recovery.rs"]
+mod recovery;
+
 #[path = "engine_run/routing.rs"]
 mod routing;
 

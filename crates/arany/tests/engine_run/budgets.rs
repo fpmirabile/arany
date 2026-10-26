@@ -1,7 +1,9 @@
 use super::goals::{
-    AUTONOMOUS_OBJECTIVE, autonomous_input, call_facts, child_tool_starts, facts_digest,
-    facts_engine, facts_plan, facts_read, steering_note_at,
+    AUTONOMOUS_OBJECTIVE, autonomous_input, call_facts, facts_digest, facts_engine, facts_plan,
+    facts_read,
 };
+use super::steering::steering_note_at;
+use super::team::child_tool_starts;
 use super::*;
 use arany::WorkspaceIdentity;
 use arany::test_support::MAX_SESSION_EVENTS;
