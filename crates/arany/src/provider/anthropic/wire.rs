@@ -108,7 +108,7 @@ impl<'a> MessageStream<'a> {
             Ok(None)
         })();
         if result.is_err() {
-            crate::diagnostics::messages_failure(self.stage, self.counts());
+            crate::provider::diagnostics::messages_failure(self.stage, self.counts());
         }
         result
     }
@@ -460,7 +460,7 @@ pub(in crate::provider) fn decode_run_with_counts(
 ) -> Result<ProviderResponse, ProviderError> {
     let (result, stage, tool_arguments) = decode_run_staged(bytes, scope);
     if result.is_err() {
-        crate::diagnostics::messages_failure(
+        crate::provider::diagnostics::messages_failure(
             stage,
             crate::provider::diagnostics::StreamCounts {
                 tool_arguments,
@@ -604,7 +604,7 @@ fn decode_compaction_observed(
         })
     })();
     if result.is_err() {
-        crate::diagnostics::messages_failure(
+        crate::provider::diagnostics::messages_failure(
             stage,
             crate::provider::diagnostics::StreamCounts { ..counts },
         );

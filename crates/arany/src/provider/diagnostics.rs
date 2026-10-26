@@ -1,4 +1,5 @@
-use std::fmt;
+use crate::diagnostics::{BoundedRecord, record_local};
+use std::fmt::{self, Write};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SubscriptionFailureStage {
@@ -216,5 +217,90 @@ impl ToolArgumentShape {
             _ => {}
         }
         shape
+    }
+}
+
+pub(crate) fn stream_limit(bytes: usize, events: usize) {
+    record_local(stream_limit_record(bytes, events));
+}
+
+fn stream_limit_record(bytes: usize, events: usize) -> BoundedRecord {
+    let mut record = BoundedRecord::default();
+    let _ = writeln!(
+        record,
+        "stream reason=StreamProtocol stage=StreamLimit bytes={bytes} events={events}"
+    );
+    record
+}
+
+pub(crate) fn subscription_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
+    if crate::diagnostics::enabled() {
+        record_local(failure_record("subscription", stage, counts));
+    }
+}
+
+pub(crate) fn messages_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
+    if crate::diagnostics::enabled() {
+        record_local(failure_record("messages", stage, counts));
+    }
+}
+
+pub(crate) fn failure_record(
+    site: &str,
+    stage: SubscriptionFailureStage,
+    counts: StreamCounts,
+) -> BoundedRecord {
+    let mut record = BoundedRecord::default();
+    let _ = writeln!(
+        record,
+        "{site} stage={stage:?} bytes={} events={} http_status={:?}",
+        counts.bytes, counts.events, counts.http_status
+    );
+    if let Some(shape) = counts.response_shape {
+        let _ = writeln!(
+            record,
+            "response_shape messages={} commentary={} finals={} unphased={} done_messages={} done_finals={}",
+            shape.messages,
+            shape.commentary,
+            shape.finals,
+            shape.unphased,
+            shape.done_messages,
+            shape.done_finals,
+        );
+    }
+    if let Some(shape) = counts.tool_arguments {
+        let _ = writeln!(record, "tool_arguments {shape:?}");
+    }
+    record
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_limit_record_names_the_reason_stage_and_counts() {
+        assert_eq!(
+            stream_limit_record(1024, 12).to_string(),
+            "stream reason=StreamProtocol stage=StreamLimit bytes=1024 events=12\n"
+        );
+    }
+
+    #[test]
+    fn failure_record_names_site_stage_and_observed_status() {
+        assert_eq!(
+            failure_record(
+                "messages",
+                SubscriptionFailureStage::OutcomeToolArguments,
+                StreamCounts {
+                    bytes: 2048,
+                    events: 9,
+                    http_status: Some(200),
+                    ..Default::default()
+                },
+            )
+            .to_string(),
+            "messages stage=OutcomeToolArguments bytes=2048 events=9 http_status=Some(200)\n"
+        );
     }
 }

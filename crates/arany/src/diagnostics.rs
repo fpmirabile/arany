@@ -1,4 +1,3 @@
-use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage};
 use crate::store::StateRoot;
 use std::fmt::{self, Write};
 use std::sync::{Mutex, OnceLock};
@@ -42,77 +41,6 @@ pub fn record_development_failure(stage: DevelopmentFailure) {
     let mut record = BoundedRecord(String::new());
     let _ = writeln!(record, "runtime stage={stage:?}");
     record_local(record);
-}
-
-pub(crate) fn stream_limit(bytes: usize, events: usize) {
-    record_local(stream_limit_record(bytes, events));
-}
-
-fn stream_limit_record(bytes: usize, events: usize) -> BoundedRecord {
-    let mut record = BoundedRecord(String::new());
-    let _ = writeln!(
-        record,
-        "stream reason=StreamProtocol stage=StreamLimit bytes={bytes} events={events}"
-    );
-    record
-}
-
-pub(crate) fn subscription_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(root) = ROOT.get() else { return };
-    let Ok(root) = root.try_lock() else { return };
-    write_failure(&root, stage, counts);
-}
-
-pub(crate) fn messages_failure(stage: SubscriptionFailureStage, counts: StreamCounts) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(root) = ROOT.get() else { return };
-    let Ok(root) = root.try_lock() else { return };
-    write_record(&root, BoundedRecord(messages_failure_record(stage, counts)));
-}
-
-pub(crate) fn messages_failure_record(
-    stage: SubscriptionFailureStage,
-    counts: StreamCounts,
-) -> String {
-    failure_record("messages", stage, counts).0
-}
-
-fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: StreamCounts) {
-    write_record(root, failure_record("subscription", stage, counts));
-}
-
-fn failure_record(
-    site: &str,
-    stage: SubscriptionFailureStage,
-    counts: StreamCounts,
-) -> BoundedRecord {
-    let mut record = BoundedRecord(String::new());
-    let _ = writeln!(
-        record,
-        "{site} stage={stage:?} bytes={} events={} http_status={:?}",
-        counts.bytes, counts.events, counts.http_status
-    );
-    if let Some(shape) = counts.response_shape {
-        let _ = writeln!(
-            record,
-            "response_shape messages={} commentary={} finals={} unphased={} done_messages={} done_finals={}",
-            shape.messages,
-            shape.commentary,
-            shape.finals,
-            shape.unphased,
-            shape.done_messages,
-            shape.done_finals,
-        );
-    }
-    if let Some(shape) = counts.tool_arguments {
-        let _ = writeln!(record, "tool_arguments {shape:?}");
-    }
-    record
 }
 
 pub(crate) fn tool_context_full(
@@ -389,7 +317,7 @@ pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) 
     record_local(record);
 }
 
-fn record_local(record: BoundedRecord) {
+pub(crate) fn record_local(record: BoundedRecord) {
     if !cfg!(debug_assertions) {
         return;
     }
@@ -428,7 +356,14 @@ fn write_record(root: &StateRoot, details: BoundedRecord) {
     let _ = root.append_development_diagnostic(record.0.as_bytes());
 }
 
-struct BoundedRecord(String);
+#[derive(Default)]
+pub(crate) struct BoundedRecord(String);
+
+impl fmt::Display for BoundedRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 impl Write for BoundedRecord {
     fn write_str(&mut self, text: &str) -> fmt::Result {
@@ -449,33 +384,9 @@ impl Write for BoundedRecord {
 
 #[cfg(all(test, unix))]
 mod tests {
-    #[test]
-    fn stream_limit_record_names_the_reason_stage_and_counts() {
-        assert_eq!(
-            stream_limit_record(1024, 12).0,
-            "stream reason=StreamProtocol stage=StreamLimit bytes=1024 events=12\n"
-        );
-    }
-
-    #[test]
-    fn failure_record_names_site_stage_and_observed_status() {
-        assert_eq!(
-            failure_record(
-                "messages",
-                SubscriptionFailureStage::OutcomeToolArguments,
-                StreamCounts {
-                    bytes: 2048,
-                    events: 9,
-                    http_status: Some(200),
-                    ..Default::default()
-                },
-            )
-            .0,
-            "messages stage=OutcomeToolArguments bytes=2048 events=9 http_status=Some(200)\n"
-        );
-    }
-
-    use crate::provider::diagnostics::ToolArgumentShape;
+    use crate::provider::diagnostics::{
+        StreamCounts, SubscriptionFailureStage, ToolArgumentShape, failure_record,
+    };
 
     use super::test_process::BoundedOutput;
     use super::*;
@@ -578,13 +489,16 @@ mod tests {
             old: CANARY.into(),
             new: CANARY.into(),
         };
-        write_failure(
+        write_record(
             &root,
-            SubscriptionFailureStage::OutcomeToolDigest,
-            StreamCounts {
-                tool_arguments: Some(ToolArgumentShape::from_call(&call)),
-                ..StreamCounts::default()
-            },
+            failure_record(
+                "subscription",
+                SubscriptionFailureStage::OutcomeToolDigest,
+                StreamCounts {
+                    tool_arguments: Some(ToolArgumentShape::from_call(&call)),
+                    ..StreamCounts::default()
+                },
+            ),
         );
         let shape_log = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -602,13 +516,16 @@ mod tests {
             body: CANARY.into(),
             draft: false,
         };
-        write_failure(
+        write_record(
             &root,
-            SubscriptionFailureStage::OutcomeToolDigest,
-            StreamCounts {
-                tool_arguments: Some(ToolArgumentShape::from_call(&host)),
-                ..StreamCounts::default()
-            },
+            failure_record(
+                "subscription",
+                SubscriptionFailureStage::OutcomeToolDigest,
+                StreamCounts {
+                    tool_arguments: Some(ToolArgumentShape::from_call(&host)),
+                    ..StreamCounts::default()
+                },
+            ),
         );
         tool_failure("host", &crate::tools::ToolError::Operation);
         record_development_failure(DevelopmentFailure::ProviderAdmission);
