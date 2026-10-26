@@ -1353,7 +1353,12 @@ impl Provider for SpillJourney {
                     limit: Some(1),
                 })
             }
-            [_, _] => ProviderOutcome::Answer(Answer {
+            [_, _] => crate::tool_outcome(ToolCall::Read {
+                path: "src/current.txt".into(),
+                offset: None,
+                limit: None,
+            }),
+            [_, _, _] => ProviderOutcome::Answer(Answer {
                 text: "Paged retained output".into(),
             }),
             _ => return Err(ProviderError::InvalidOutcome),
@@ -1462,6 +1467,7 @@ async fn spill_read_journey() {
     .await
     .unwrap();
     assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(provider.script.requests.lock().unwrap().len(), 5);
     let command = outcome.run.tools[0].observation.as_ref().unwrap();
     let spill = command.spill.as_ref().unwrap();
     assert!(!spill.truncated);
@@ -1493,6 +1499,7 @@ async fn spill_read_journey() {
     let (events, replay) =
         arany::test_support::goals::replayed(&state_path, outcome.session_id).await;
     assert_eq!(replay.runs[0], outcome.run);
+    assert_eq!(replay.goals[0].status, arany::GoalStatus::Completed);
     let text = arany_cli::presentation::render_session(
         &replay,
         &events,
