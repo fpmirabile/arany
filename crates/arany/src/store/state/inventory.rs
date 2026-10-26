@@ -274,7 +274,7 @@ impl Scan<'_> {
             let category = if walk.depth == 0 && walk.category == Category::Records {
                 if name == super::build_cache::DIRECTORY {
                     Category::BuildCache
-                } else if name == "spill" {
+                } else if name == super::spill::DIRECTORY {
                     Category::OutputSpill
                 } else {
                     walk.category
