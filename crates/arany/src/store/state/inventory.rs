@@ -18,6 +18,20 @@ const DEADLINE: Duration = Duration::from_secs(30);
 static INVENTORY: Mutex<()> = Mutex::new(());
 type Identity = (u64, u64);
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Category {
+    Records,
+    BuildCache,
+    OutputSpill,
+}
+
+#[derive(Clone, Copy)]
+struct Walk {
+    category: Category,
+    depth: usize,
+    path_bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageStatus {
     Complete,
@@ -232,111 +246,51 @@ impl Scan<'_> {
     fn walk(
         &mut self,
         dir: &Dir,
-        row: &mut StorageCategory,
-        cache: &mut StorageCategory,
-        depth: usize,
-        path_bytes: usize,
-        cache_root: bool,
+        rows: &mut [StorageCategory; 3],
+        walk: Walk,
     ) -> Result<(), StorageReason> {
         self.check()?;
         let before = dir_metadata(dir)?;
         private_fs::check_directory(dir, true).map_err(|_| StorageReason::UnsafeDirectory)?;
-        self.account(&before, if cache_root { cache } else { row })?;
+        self.account(&before, &mut rows[walk.category as usize])?;
         let entries = dir
             .entries()
             .map_err(|_| StorageReason::DirectoryUnavailable)?;
         let mut cache_tokens = BTreeSet::new();
         for entry in entries {
-            self.entry(path_bytes)?;
+            self.entry(walk.path_bytes)?;
             let name = entry
                 .map_err(|_| StorageReason::DirectoryChangedOrUnavailable)?
                 .file_name();
-            let next_bytes = path_bytes
+            let path_bytes = walk
+                .path_bytes
                 .checked_add(name.len() + 1)
                 .filter(|bytes| *bytes <= MAX_PATH_BYTES)
                 .ok_or(StorageReason::PathLimit)?;
             // Guard records and backing storage have a separate ownership collector.
-            if depth == 0 && name == "guard" && !cache_root {
+            if walk.depth == 0 && name == "guard" && walk.category == Category::Records {
                 continue;
             }
-            let is_cache = depth == 0 && name == super::build_cache::DIRECTORY && !cache_root;
-            let result = (|| {
-                self.check()?;
-                let object = metadata_file(dir, Path::new(&name), false)?;
-                let metadata = object
-                    .metadata()
-                    .map_err(|_| StorageReason::MetadataUnavailable)?;
-                if identity(&metadata) == self.workspace {
-                    return Ok(());
-                }
-                if self.roots.contains(&identity(&metadata)) {
-                    return Ok(());
-                }
-                if metadata.dev() != before.dev() {
-                    return Err(StorageReason::UnownedMount);
-                }
-                check_private(&object, &metadata)?;
-                if metadata.is_dir() {
-                    if cache_root {
-                        return Err(StorageReason::UnexpectedCacheObject);
-                    }
-                    if depth >= MAX_DEPTH {
-                        return Err(StorageReason::DepthLimit);
-                    }
-                    let opened = metadata_file(dir, Path::new(&name), true)?;
-                    let current = opened
-                        .metadata()
-                        .map_err(|_| StorageReason::DirectoryUnavailable)?;
-                    if !same(&metadata, &current) {
-                        return Err(StorageReason::Changed);
-                    }
-                    let child = Dir::from_std_file(opened);
-                    if is_cache {
-                        cache.path = row
-                            .path
-                            .as_ref()
-                            .map(|path| path.join(super::build_cache::DIRECTORY));
-                        self.walk(&child, row, cache, 0, next_bytes, true)?;
-                    } else {
-                        self.walk(&child, row, cache, depth + 1, next_bytes, false)?;
-                    }
-                } else if metadata.is_file() {
-                    if cache_root {
-                        let name = name.to_str().ok_or(StorageReason::UnknownCacheRecord)?;
-                        let (token, pending) = super::build_cache::inventory_record(name)
-                            .ok_or(StorageReason::UnknownCacheRecord)?;
-                        if let Some(token) = token
-                            && !cache_tokens.contains(token)
-                        {
-                            if cache_tokens.len() == super::build_cache::MAX_IDENTITIES {
-                                return Err(StorageReason::CacheIdentityLimit);
-                            }
-                            cache_tokens.insert(token.to_owned());
-                        }
-                        if pending && cache.status == StorageStatus::Complete {
-                            cache.status = StorageStatus::Busy;
-                            cache.reason = Some(StorageReason::PendingCache);
-                        }
-                    }
-                    self.account(&metadata, if cache_root { cache } else { row })?;
-                    self.check()?;
-                    let current = metadata_file(dir, Path::new(&name), false)?
-                        .metadata()
-                        .map_err(|_| StorageReason::MetadataUnavailable)?;
-                    if !same(&metadata, &current) {
-                        return Err(StorageReason::Changed);
-                    }
+            let category = if walk.depth == 0 && walk.category == Category::Records {
+                if name == super::build_cache::DIRECTORY {
+                    Category::BuildCache
+                } else if name == super::spill::DIRECTORY {
+                    Category::OutputSpill
                 } else {
-                    return Err(StorageReason::UnsafeObject);
+                    walk.category
                 }
-                Ok(())
-            })();
-            if let Err(reason) = result {
-                if cache_root || is_cache {
-                    cache.partial(reason);
-                } else {
-                    row.partial(reason);
-                }
+            } else {
+                walk.category
+            };
+            let next = Walk {
+                category,
+                path_bytes,
+                ..walk
+            };
+            if let Err(reason) =
+                self.walk_entry(dir, Path::new(&name), rows, next, &mut cache_tokens)
+            {
+                rows[category as usize].partial(reason);
                 if reason.is_fatal() {
                     return Err(reason);
                 }
@@ -346,6 +300,102 @@ impl Scan<'_> {
         self.check()?;
         if !same(&before, &dir_metadata(dir)?) {
             return Err(StorageReason::Changed);
+        }
+        Ok(())
+    }
+
+    fn walk_entry(
+        &mut self,
+        dir: &Dir,
+        name: &Path,
+        rows: &mut [StorageCategory; 3],
+        walk: Walk,
+        cache_tokens: &mut BTreeSet<String>,
+    ) -> Result<(), StorageReason> {
+        self.check()?;
+        let object = metadata_file(dir, name, false)?;
+        let metadata = object
+            .metadata()
+            .map_err(|_| StorageReason::MetadataUnavailable)?;
+        if identity(&metadata) == self.workspace || self.roots.contains(&identity(&metadata)) {
+            return Ok(());
+        }
+        if metadata.dev() != dir_metadata(dir)?.dev() {
+            return Err(StorageReason::UnownedMount);
+        }
+        check_private(&object, &metadata)?;
+        if walk.depth == 0 && walk.category == Category::OutputSpill && !metadata.is_dir() {
+            return Err(StorageReason::UnsafeObject);
+        }
+        if metadata.is_dir() {
+            if walk.category == Category::BuildCache && walk.depth != 0 {
+                return Err(StorageReason::UnexpectedCacheObject);
+            }
+            if walk.depth >= MAX_DEPTH {
+                return Err(StorageReason::DepthLimit);
+            }
+            let opened = metadata_file(dir, name, true)?;
+            let current = opened
+                .metadata()
+                .map_err(|_| StorageReason::DirectoryUnavailable)?;
+            if !same(&metadata, &current) {
+                return Err(StorageReason::Changed);
+            }
+            if walk.depth == 0 && walk.category != Category::Records {
+                rows[walk.category as usize].path = rows[Category::Records as usize]
+                    .path
+                    .as_ref()
+                    .map(|path| path.join(name));
+            }
+            let row = &mut rows[walk.category as usize];
+            if row.status == StorageStatus::Absent {
+                row.status = StorageStatus::Complete;
+            }
+            self.walk(
+                &Dir::from_std_file(opened),
+                rows,
+                Walk {
+                    depth: walk.depth + 1,
+                    ..walk
+                },
+            )?;
+        } else if metadata.is_file() {
+            if walk.category == Category::BuildCache {
+                Self::cache_record(name, cache_tokens, &mut rows[walk.category as usize])?;
+            }
+            self.account(&metadata, &mut rows[walk.category as usize])?;
+            self.check()?;
+            let current = metadata_file(dir, name, false)?
+                .metadata()
+                .map_err(|_| StorageReason::MetadataUnavailable)?;
+            if !same(&metadata, &current) {
+                return Err(StorageReason::Changed);
+            }
+        } else {
+            return Err(StorageReason::UnsafeObject);
+        }
+        Ok(())
+    }
+
+    fn cache_record(
+        name: &Path,
+        tokens: &mut BTreeSet<String>,
+        cache: &mut StorageCategory,
+    ) -> Result<(), StorageReason> {
+        let name = name.to_str().ok_or(StorageReason::UnknownCacheRecord)?;
+        let (token, pending) =
+            super::build_cache::inventory_record(name).ok_or(StorageReason::UnknownCacheRecord)?;
+        if let Some(token) = token
+            && !tokens.contains(token)
+        {
+            if tokens.len() == super::build_cache::MAX_IDENTITIES {
+                return Err(StorageReason::CacheIdentityLimit);
+            }
+            tokens.insert(token.to_owned());
+        }
+        if pending && cache.status == StorageStatus::Complete {
+            cache.status = StorageStatus::Busy;
+            cache.reason = Some(StorageReason::PendingCache);
         }
         Ok(())
     }
@@ -466,37 +516,44 @@ fn collect(
     }
     let mut categories = Vec::new();
     let mut subtotal = StorageUsage::default();
-    for (mut row, directory) in opened {
-        let mut cache = StorageCategory::new("Private build cache");
-        cache.status = StorageStatus::Absent;
+    for (row, directory) in opened {
+        let mut rows = [
+            row,
+            StorageCategory::new("Private build cache"),
+            StorageCategory::new("Output spill"),
+        ];
+        rows[Category::BuildCache as usize].status = StorageStatus::Absent;
+        rows[Category::OutputSpill as usize].status = StorageStatus::Absent;
         if let Some(directory) = directory {
-            cache.status = StorageStatus::Complete;
-            let result = scan.entry(directory.path.as_os_str().len()).and_then(|()| {
+            let path_bytes = directory.path.as_os_str().len();
+            let result = scan.entry(path_bytes).and_then(|()| {
                 scan.walk(
                     &directory.dir,
-                    &mut row,
-                    &mut cache,
-                    0,
-                    directory.path.as_os_str().len(),
-                    false,
+                    &mut rows,
+                    Walk {
+                        category: Category::Records,
+                        depth: 0,
+                        path_bytes,
+                    },
                 )
             });
             if let Err(reason) = result {
-                row.partial(reason);
-            }
-            if cache.path.is_none() && cache.status == StorageStatus::Complete {
-                cache.status = StorageStatus::Absent;
+                rows[Category::Records as usize].partial(reason);
             }
             if let Err(reason) = recheck_root(&directory, || scan.check()) {
-                row.partial(reason);
+                rows[Category::Records as usize].partial(reason);
             }
         }
-        if subtotal.add(row.usage).is_err() || subtotal.add(cache.usage).is_err() {
-            row.partial(StorageReason::ByteOverflow);
-        }
-        categories.push(row);
-        if cache.path.is_some() || cache.status != StorageStatus::Absent {
-            categories.push(cache);
+        for (index, mut row) in rows.into_iter().enumerate() {
+            if subtotal.add(row.usage).is_err() {
+                row.partial(StorageReason::ByteOverflow);
+            }
+            if index == Category::Records as usize
+                || row.path.is_some()
+                || row.status != StorageStatus::Absent
+            {
+                categories.push(row);
+            }
         }
     }
     if cancelled.load(Ordering::Acquire) {
@@ -665,6 +722,19 @@ mod tests {
         let token = "a".repeat(64);
         let pending = cache.join(format!("reserve-{token}.reserve"));
         file(&pending, b"unparsed pending record");
+        let spill = state.join("spill");
+        directory(&spill);
+        let run = spill.join("private-run-name");
+        directory(&run);
+        let output = run.join("private-output-name.txt");
+        file(&output, b"PRIVATE_SPILL_CANARY");
+        #[cfg(target_os = "linux")]
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o000))
+            .expect("spill metadata without payload read permission");
+        let writer = run.join("writer.lock");
+        file(&writer, b"");
+        let writer_lock = File::open(&writer).expect("writer lock fixture");
+        writer_lock.lock().expect("active spill writer");
         let guard = state.join("guard");
         directory(&guard);
         file(&guard.join("excluded"), b"Guard collector deferred");
@@ -681,11 +751,35 @@ mod tests {
         .expect("metadata report");
         assert!(!report.complete());
         assert_eq!(
-            report.subtotal.files, 4,
+            report.subtotal.files, 6,
             "categories: {:?}",
             report.categories
         );
-        assert_eq!(report.subtotal.directories, 3);
+        assert_eq!(report.subtotal.directories, 5);
+        let spill_row = report
+            .categories
+            .iter()
+            .find(|row| row.name == "Output spill")
+            .expect("spill category");
+        assert_eq!(spill_row.status, StorageStatus::Complete);
+        assert_eq!(spill_row.path.as_ref(), Some(&spill));
+        assert_eq!(spill_row.usage.files, 2);
+        assert_eq!(spill_row.usage.directories, 2);
+        let records = report
+            .categories
+            .iter()
+            .find(|row| row.name == "Selected StateRoot")
+            .expect("records category");
+        assert_eq!(records.usage.files, 2);
+        assert_eq!(records.usage.directories, 1);
+        assert_eq!(
+            report
+                .categories
+                .iter()
+                .filter(|row| row.name == "Output spill")
+                .count(),
+            1
+        );
         assert!(report.subtotal.logical_bytes >= 16 * 1024 * 1024);
         assert!(
             report
@@ -708,6 +802,8 @@ mod tests {
             &state.join("events.sqlite3"),
             &account.join("account-credentials.json"),
             &pending,
+            &output,
+            &writer,
         ]
         .into_iter()
         .map(|path| std::fs::metadata(path).expect("record metadata"))
@@ -717,7 +813,7 @@ mod tests {
             .chain([&sparse_metadata])
             .map(|metadata| metadata.blocks() * 512)
             .sum::<u64>()
-            + [&state, &account, &cache]
+            + [&state, &account, &cache, &spill, &run]
                 .into_iter()
                 .map(|path| {
                     std::fs::metadata(path)
@@ -749,7 +845,7 @@ mod tests {
                 .expect("selected category");
             assert_eq!(selected.status, StorageStatus::Partial);
             assert!(selected.reason.is_some());
-            assert_eq!(report.subtotal.files, 3);
+            assert_eq!(report.subtotal.files, 5);
             let retained = sparse.metadata().expect("retained unreadable record");
             assert_eq!(retained.len(), sparse_metadata.len());
             assert_eq!(retained.permissions().mode() & 0o777, 0);
@@ -760,6 +856,68 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn spill_rows_share_scan_bounds_across_distinct_roots() {
+        let temp = tempfile::tempdir().expect("spill inventory fixture");
+        let workspace = temp.path().join("workspace");
+        directory(&workspace);
+        let selected = temp.path().join("selected");
+        let default = temp.path().join("default");
+        let missing = temp.path().join("absent");
+        for root in [&selected, &default] {
+            directory(root);
+            directory(&root.join("spill"));
+            file(&root.join("spill/output.txt"), b"SPILL_METADATA_CANARY");
+        }
+        let cancelled = AtomicBool::new(false);
+        let report = collect(
+            &workspace,
+            &selected,
+            &default,
+            &missing,
+            &cancelled,
+            MAX_ENTRIES,
+            DEADLINE,
+        )
+        .expect("distinct spill rows");
+        assert!(report.complete());
+        assert_eq!(report.subtotal.files, 2);
+        assert_eq!(report.subtotal.directories, 4);
+        assert_eq!(
+            report
+                .categories
+                .iter()
+                .filter(|row| row.name == "Output spill")
+                .count(),
+            2
+        );
+        for row in report
+            .categories
+            .iter()
+            .filter(|row| row.name != "Output spill")
+        {
+            assert_eq!(row.usage.files, 0);
+        }
+        let limited = collect(
+            &workspace, &selected, &default, &missing, &cancelled, 2, DEADLINE,
+        )
+        .expect("shared entry bound");
+        assert!(!limited.complete());
+        let spill = limited
+            .categories
+            .iter()
+            .find(|row| row.name == "Output spill")
+            .expect("partial spill row");
+        assert_eq!(spill.status, StorageStatus::Partial);
+        assert_eq!(spill.reason, Some(StorageReason::EntryLimit));
+        assert_eq!(spill.usage.files, 0);
+        assert_eq!(spill.usage.directories, 1);
+        assert_eq!(
+            std::fs::read(selected.join("spill/output.txt")).expect("retained spill"),
+            b"SPILL_METADATA_CANARY"
+        );
     }
 
     #[test]
@@ -831,7 +989,11 @@ mod tests {
             } else if reason == StorageReason::CountOverflow {
                 row.usage.files = u64::MAX;
             }
-            let mut cache = StorageCategory::new("Private build cache");
+            let mut rows = [
+                row,
+                StorageCategory::new("Private build cache"),
+                StorageCategory::new("Output spill"),
+            ];
             let cancelled = AtomicBool::new(false);
             let mut scan = Scan {
                 cancelled: &cancelled,
@@ -843,11 +1005,22 @@ mod tests {
                 workspace: (0, 0),
             };
             assert_eq!(
-                scan.walk(&admitted.dir, &mut row, &mut cache, depth, 0, false),
+                scan.walk(
+                    &admitted.dir,
+                    &mut rows,
+                    Walk {
+                        category: Category::Records,
+                        depth,
+                        path_bytes: 0
+                    }
+                ),
                 Err(reason)
             );
-            assert_eq!(row.status, StorageStatus::Partial);
-            assert_eq!(row.reason, Some(reason));
+            assert_eq!(
+                rows[Category::Records as usize].status,
+                StorageStatus::Partial
+            );
+            assert_eq!(rows[Category::Records as usize].reason, Some(reason));
             assert_eq!(
                 std::fs::read_dir(&state).expect("retained record").count(),
                 1
@@ -886,6 +1059,27 @@ mod tests {
         let outside = temp.path().join("outside");
         file(&outside, b"SECRET_TARGET_CANARY");
         let cancelled = AtomicBool::new(false);
+        let without_spill = collect(
+            &workspace,
+            &state,
+            &state,
+            &missing,
+            &cancelled,
+            MAX_ENTRIES,
+            DEADLINE,
+        )
+        .expect("missing spill inventory");
+        assert!(
+            without_spill
+                .categories
+                .iter()
+                .all(|row| row.name != "Output spill")
+        );
+        assert!(!state.join("spill").exists());
+        let spill = state.join("spill");
+        directory(&spill);
+        file(&spill.join("retained.txt"), b"SPILL_RETAINED_CANARY");
+        symlink(&outside, spill.join("linked-output")).expect("unsafe spill link");
         for name in ["secret\u{1b}]52;untrusted\u{7}", "plain"] {
             file(&state.join(name), b"metadata only");
         }
@@ -908,10 +1102,18 @@ mod tests {
         .expect("partial metadata report");
         assert!(!report.complete());
         assert_eq!(
-            report.subtotal.files, 2,
+            report.subtotal.files, 3,
             "categories: {:?}",
             report.categories
         );
+        let spill_row = report
+            .categories
+            .iter()
+            .find(|row| row.name == "Output spill")
+            .expect("partial spill category");
+        assert_eq!(spill_row.status, StorageStatus::Partial);
+        assert_eq!(spill_row.usage.files, 1);
+        assert!(spill_row.reason.is_some());
         assert!(
             report
                 .categories
@@ -922,7 +1124,7 @@ mod tests {
             std::fs::read_dir(&state)
                 .expect("unchanged entries")
                 .count(),
-            5
+            6
         );
         assert_eq!(
             std::fs::read(&outside).expect("unchanged target"),
@@ -985,7 +1187,7 @@ mod tests {
             std::fs::read_dir(&state)
                 .expect("unchanged cancellation entries")
                 .count(),
-            5
+            6
         );
         cancelled.store(false, Ordering::Release);
         let absent = collect(
@@ -1001,6 +1203,12 @@ mod tests {
         assert!(absent.complete());
         assert_eq!(absent.subtotal, StorageUsage::default());
         assert!(!missing.exists());
+        assert!(
+            absent
+                .categories
+                .iter()
+                .all(|row| row.name != "Output spill")
+        );
         let _held = INVENTORY.lock().expect("exclusive inventory fixture");
         assert_eq!(
             collect_storage(&workspace, &state, &state, &missing, &cancelled).err(),

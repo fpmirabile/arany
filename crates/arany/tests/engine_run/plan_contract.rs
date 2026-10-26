@@ -1,7 +1,8 @@
 use super::goals::{
-    AUTONOMOUS_OBJECTIVE, autonomous_input, child_tool_starts, facts_digest, facts_engine,
-    facts_plan, facts_read, interrupted_autonomous_goal,
+    AUTONOMOUS_OBJECTIVE, autonomous_input, facts_digest, facts_engine, facts_plan, facts_read,
 };
+use super::recovery::interrupted_autonomous_goal;
+use super::team::child_tool_starts;
 use super::*;
 use arany::test_support::goals::*;
 

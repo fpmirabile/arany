@@ -210,3 +210,6 @@ pub(super) fn finished(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
