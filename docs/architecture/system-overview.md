@@ -348,7 +348,7 @@ The sole connection opens in a private owner-verified local state directory with
 
 `presentation.rs` maps committed SessionView/RunView facts to bounded semantic rows and append-only lines. Tool summaries and approval actions dispatch over the library's closed Tool family and execution site; the CLI owns their per-family rendering, escaping and host disclosures. This is a presentation boundary only: operation facts and authority do not cross into presentation, and the journaled report formatter remains separate. The private terminal module owns the primary-screen viewport, Composer, history index, raw/canonical readers, keys, focus, mouse and one RAII lifecycle owner. Its `Panels` groups selection, copy, cue, picker geometry and help state. None of these presentation types enters the Engine.
 
-The attached Run's private `Drafts` owns offered steering text, linear offers and the held draft, shared by Run input and settlement. Composer owns editing and capacity; Server controls own steering delivery and withdrawal.
+The attached Run's private `Drafts` owns offered steering text, linear offers and the held draft, shared by Run input and settlement. Composer owns editing and capacity; the Server owns steering delivery and withdrawal.
 
 The presentation layer owns the committed budget-refusal lookup and Run feedback projection. `exec` retains its looser admission-refusal fallback, while committed receipts render the exact Run being reported.
 
