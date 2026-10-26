@@ -191,6 +191,12 @@ pub(crate) enum CredentialError {
     SetupChanged,
 }
 
+impl CredentialError {
+    pub(crate) fn outcome_unknown(&self) -> bool {
+        matches!(self, Self::WriteOutcomeUnknown | Self::DeleteOutcomeUnknown)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum SetupData {
     Native,

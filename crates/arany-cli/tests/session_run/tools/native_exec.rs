@@ -1303,7 +1303,7 @@ async fn offline_cargo_helper() {
         .iter()
         .find(|choice| choice.group == "Rust")
         .expect("one explicit private Rust toolchain");
-    assert!(!rust.selected);
+    assert!(rust.selected);
     permissions
         .remember_profiles(
             true,
@@ -1317,4 +1317,221 @@ async fn offline_cargo_helper() {
         Path::new(env!("CARGO_BIN_EXE_arany")),
     )
     .await;
+}
+struct SpillFixture {
+    _temp: tempfile::TempDir,
+    workspace: PathBuf,
+    state: PathBuf,
+    engine: arany::Engine,
+    command: ToolCall,
+}
+
+impl SpillFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        private_file(&workspace.join("src/current.txt"), b"current");
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).unwrap();
+        let shell = std::fs::canonicalize("/usr/bin/bash").unwrap();
+        private_file(&state_path.join("tools.json"), &serde_json::to_vec(&json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[{"name":"bash","executable":shell,"sha256":hash(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap());
+        let engine = arany::test_support::engine::open(
+            state,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let command = ToolCall::Command {
+            program: "bash".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%1572864s' ''; printf '\nPRIVATE_SPILL_CANARY\n'; printf '%1572864s' ''"
+                    .into(),
+            ],
+            cwd: "".into(),
+        };
+        Self {
+            _temp: temp,
+            workspace,
+            state: state_path,
+            engine,
+            command,
+        }
+    }
+}
+
+const SPILL_JOURNEY_WAIT: Duration = Duration::from_secs(120);
+const SPILL_SETTLE_WAIT: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug)]
+enum StallEnd {
+    Cancel,
+    Deadline,
+}
+
+impl StallEnd {
+    fn expected_outcome(self) -> (RunStatus, usize) {
+        match self {
+            Self::Cancel => (RunStatus::Cancelled, 2),
+            Self::Deadline => (RunStatus::Finished, 4),
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux spill persistence cancellation and deadline"
+)]
+fn spill_persistence_stall_preserves_completed_effects_and_reopens() {
+    if !crate::isolation::enter_native_account_isolated_test() {
+        return;
+    }
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _deadline = arany::test_support::engine::deadline("spill persistence", SPILL_JOURNEY_WAIT);
+    let reactor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for end in [StallEnd::Cancel, StallEnd::Deadline] {
+        reactor.block_on(spill_persistence_stall(end));
+    }
+}
+
+async fn spill_persistence_stall(end: StallEnd) {
+    let SpillFixture {
+        _temp,
+        workspace,
+        state,
+        engine,
+        command,
+    } = SpillFixture::new();
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(proposal_plan_contract(&command).unwrap()),
+        crate::tool_outcome(command),
+        crate::tool_outcome(ToolCall::Read {
+            path: "src/current.txt".into(),
+            offset: None,
+            limit: None,
+        }),
+        ProviderOutcome::Answer(Answer {
+            text: "Completed without spill".into(),
+        }),
+    ]));
+    let (mut entered, release, finished) = arany::FaultPlan::gate_spill_write(state.clone());
+    let cancellation = arany::RunCancellation::new();
+    let outcome = {
+        let run = run_with(
+            &engine,
+            &provider,
+            proposal_request(&workspace),
+            RunControls {
+                tools: ToolGrant::Configured,
+                cancellation: cancellation.clone(),
+                ..Default::default()
+            },
+        );
+        tokio::pin!(run);
+        tokio::select! {
+            entered = tokio::time::timeout(SPILL_JOURNEY_WAIT, &mut entered) => entered.unwrap().unwrap(),
+            outcome = &mut run => panic!("Run settled before spill persistence gate: {:?}", outcome.map(|result| result.run.status)),
+        }
+        match end {
+            StallEnd::Cancel => {
+                cancellation.cancel();
+            }
+            StallEnd::Deadline => {
+                let timeout = arany::limits::LIMITS
+                    .rows
+                    .iter()
+                    .find(|limit| limit.name == "SPILL_PERSIST_TIMEOUT_MS")
+                    .unwrap()
+                    .value;
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_millis(timeout)).await;
+                tokio::time::resume();
+            }
+        }
+        tokio::time::timeout(SPILL_SETTLE_WAIT, &mut run)
+            .await
+            .expect("spill persistence cannot hold the Run")
+            .unwrap()
+    };
+    let (expected_status, expected_requests) = end.expected_outcome();
+    assert_eq!(outcome.run.status, expected_status, "{end:?}");
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        expected_requests,
+        "{end:?}"
+    );
+    assert_excerpt_only_success(&outcome.run);
+    engine.close().await.unwrap();
+    assert_spill_recovery(&state, &outcome, release, finished).await;
+}
+
+async fn assert_spill_recovery(
+    state: &Path,
+    outcome: &arany::RunOutcome,
+    release: std::sync::mpsc::SyncSender<()>,
+    finished: tokio::sync::oneshot::Receiver<()>,
+) {
+    let digest = Sha256::digest(serde_json::to_vec(&outcome.run.tools[0].intent).unwrap());
+    let reference = hash(&digest);
+    let path = state
+        .join("spill")
+        .join(outcome.run.id.to_string())
+        .join(format!("{reference}.txt"));
+    assert!(
+        path.exists(),
+        "stalled spill must exist before reopening the Store"
+    );
+    let store = Store::open(StateRoot::open_existing(state).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs[0], outcome.run);
+    assert!(
+        path.exists(),
+        "open must skip a writer that still owns its lock"
+    );
+    store.close().await.unwrap();
+    release.send(()).unwrap();
+    tokio::time::timeout(SPILL_SETTLE_WAIT, finished)
+        .await
+        .unwrap()
+        .unwrap();
+    let store = Store::open(StateRoot::open_existing(state).unwrap()).unwrap();
+    assert!(
+        !path.exists(),
+        "late persistence cannot publish an uncommitted spill"
+    );
+    let replay = store.load_view(outcome.session_id).await.unwrap().unwrap();
+    assert_eq!(replay.runs[0], outcome.run);
+    assert_excerpt_only_success(&replay.runs[0]);
+    store.close().await.unwrap();
+}
+
+fn assert_excerpt_only_success(run: &arany::RunView) {
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+    assert!(observation.spill.is_none());
+    let result: Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(result["exit_code"], 0);
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains(" lines omitted; ")
+    );
+    assert!(result["stdout_total"]["bytes"].as_u64().unwrap() > observation.output.len() as u64);
 }

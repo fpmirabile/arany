@@ -72,7 +72,8 @@ Tools owns the `ToolGrant` value supplied for a submission; the Engine consumes
 it during admission, so the source dependency points from Engine to Tools.
 Engine permission selection, host session reuse and remembering eligibility live
 in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
-shared ask and dispatch flow.
+shared ask and dispatch flow. Focused definition-mode and typed-prefix approval
+tests live with that permission policy.
 The Engine composes per-dispatch queue progress, active-action and checkpoint
 senders through consuming ToolRuntime builders; Guard dispatch makes one owned
 copy from its borrowed runtime before consuming that chain.
@@ -230,6 +231,8 @@ The attached composer, slash handlers and quick selector share the compiled loca
 
 Attached setup keeps entry routing and setup-journal coordination in `cli/attached/setup.rs`. Its private `setup/error.rs` owns setup error classifications and conversions, including operation-specific native save/removal, ChatGPT removal/authorization/keyring and custom-write mappings and diagnostic recording. The error type is re-exported through the existing setup module path. Journal disposition and settlement remain with the flows; safe custom-check status vocabulary stays with its display owner. Native account presence lookup, inspection, saved-access resolution and selection live in its private `setup/native.rs` flow; credential storage and key access remain owned by `accounts/credentials/`.
 
+Native removal, its journal settlement and checked saved-setup reset also live in `setup/native.rs`; setup retains mixed-route removal dispatch and the shared uncertainty test bridge. The flow borrows the existing journal and terminal without changing account authority or publication ordering.
+
 Explicit `--tools` reaches the same private Engine/Policy/Guard admission from attached and headless composition. The CLI supplies the shipped executable identity and private configuration root, not an alternative Tool runtime or per-effect approval service.
 
 ## 5. Session, Run, and collaboration lifecycle
@@ -356,7 +359,7 @@ The sole connection opens in a private owner-verified local state directory with
 
 The attached Run's private `Drafts` owns offered steering text, linear offers and the held draft, shared by Run input and settlement. Composer owns editing and capacity; the Server owns steering delivery and withdrawal.
 
-Attached Run budget, Escape and approval-reply tests live in [run/tests.rs](../../crates/arany-cli/src/cli/attached/run/tests.rs); process and macOS tests retain their separate inline owner in [run.rs](../../crates/arany-cli/src/cli/attached/run.rs).
+Attached Run budget, Escape, approval-reply and current-Run exit-settlement tests live in [run/tests.rs](../../crates/arany-cli/src/cli/attached/run/tests.rs); process and macOS tests retain their separate inline owner in [run.rs](../../crates/arany-cli/src/cli/attached/run.rs).
 
 The presentation layer owns the committed budget-refusal lookup and Run feedback projection. `exec` retains its looser admission-refusal fallback, while committed receipts render the exact Run being reported.
 

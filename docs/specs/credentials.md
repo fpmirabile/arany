@@ -4,6 +4,8 @@
 
 This contract owns saved-account scope, protected storage, selected-item startup authorization, replacement and recovery. Behavior is shared across OSes; native storage mechanisms and support evidence can differ. Provider admission belongs to the [Provider contract](./provider.md); OAuth, verified identity, consent and token renewal to the [ChatGPT contract](./chatgpt.md). [The terminal contract](./terminal.md#setup-and-account-choices) owns folder-consent ordering, account choices and interactive cancellation. Editing constraints: [security rules](../../agents/security.md).
 
+Session State retains Tool output outside the Workspace in private directories (`0700`); output files and the fixed per-Run `writer.lock` are `0600`. The [Output spill contract](./tools.md#limits-and-failure-behavior) owns layout and retention.
+
 ## Account scope and identity
 
 A saved Provider Account belongs to one effective OS user across that user's Sessions and StateRoots, never the whole machine. On Linux and macOS, account metadata and its replacement lock use the effective user's passwd home, independently of `HOME`, XDG variables and Session `--state-dir`. The native roots are `.local/state/arany` on Linux and `Library/Application Support/dev.Arany.arany` on macOS. Keyring items remain in that user's OS credential store. Session-root configuration retains its separate contract.
@@ -103,6 +105,8 @@ After an OS-store write or deletion helper is dispatched, disappearance, wait or
 The account-replacement lock is held in the same blocking task as the OS credential-store write, so cancelling the awaiting interface cannot release it early.
 
 Explicit saved native-account removal snapshots the valid account record, model preferences and selected keyring credential identity together under the account lock before confirmation, then rechecks all three under the lock. It removes the account marker and model preferences before deleting only the unchanged pinned keyring slot, so uncertain deletion leaves the credential unconfigured; stale snapshots refuse. A crash may leave an orphaned keyring item, which is never loaded without its marker. Malformed records use the separate checked reset path, which never decodes them or deletes a credential based on an untrusted record. Setup's ChatGPT removal binds the selected account identity and exact account-index snapshot to local cleanup; it sends no remote revocation request. Explicit `provider logout chatgpt` remains the separate remote sign-out action.
+
+The attached [native setup flow](../../crates/arany-cli/src/cli/attached/setup/native.rs) coordinates native removal and saved-setup reset, retaining confirmation → journal start → publication → settlement ordering. Snapshot admission, account locking and key access remain in the [credential owner](../../crates/arany-cli/src/accounts/credentials.rs), whose removal/reset and publication/reopen scenarios retain the existing setup uncertainty bridge.
 
 ## Limits and record admission
 

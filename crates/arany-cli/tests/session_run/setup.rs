@@ -2356,6 +2356,24 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
         "save result exercises complete paged acknowledgment"
     );
     let before_edit = std::fs::read(state.join("provider-profiles.json")).unwrap();
+    let route_at = pty.transcript.len();
+    pty.input
+        .write_all(b"1\r")
+        .expect("select saved Chat route");
+    wait_setup_choices(&mut pty, route_at);
+    let inspect_at = pty.transcript.len();
+    pty.input
+        .write_all(b"1\r")
+        .expect("inspect saved Chat route");
+    acknowledge_linear_pages(
+        &mut pty.output,
+        &mut pty.input,
+        &mut pty.transcript,
+        &mut pty.answered,
+        (inspect_at, b"empty Enter selects 1. first-route"),
+    );
+    let details = reviewed_setup_text(&String::from_utf8_lossy(&pty.transcript[inspect_at..]));
+    assert!(details.contains("Protocol: OpenAI Chat Completions"));
     edit_custom_chat_route_unchanged(&mut pty);
     assert_changed_protocol_requires_destination(&mut pty);
     pty.input.write_all(b"3\r").expect("leave custom routes");

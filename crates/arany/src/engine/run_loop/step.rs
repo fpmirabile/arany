@@ -1594,69 +1594,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn agent_definition_modes_never_resolve_parent_asks_and_dont_ask_denies_them() {
-        use crate::tools::permissions::PermissionMode;
-        let read = ToolCall::Read {
-            path: "file".into(),
-            offset: None,
-            limit: Some(1),
-        };
-        let mut definition = crate::tools::definitions::AgentDefinition {
-            version: 1,
-            name: "reader".into(),
-            description: "Read".into(),
-            tools: None,
-            disallowed_tools: Vec::new(),
-            model: None,
-            permission_mode: None,
-            max_turns: crate::session::MAX_CHILD_TURNS,
-            isolation: None,
-            background: false,
-            body: String::new(),
-        };
-        for mode in [
-            PermissionMode::Default,
-            PermissionMode::AcceptEdits,
-            PermissionMode::Plan,
-            PermissionMode::Auto,
-            PermissionMode::DontAsk,
-        ] {
-            definition.permission_mode = Some(mode);
-            for decision in [Decision::Allow, Decision::Ask, Decision::Deny] {
-                let permission = Permission {
-                    decision,
-                    basis: PermissionSource::Rule,
-                    approval: (decision == Decision::Ask).then_some(ApprovalMode::Request),
-                }
-                .narrow_definition(&definition, &read);
-                let expected = if mode == PermissionMode::DontAsk && decision == Decision::Ask {
-                    Decision::Deny
-                } else {
-                    decision
-                };
-                assert_eq!(permission.decision, expected);
-                assert_eq!(
-                    permission.approval,
-                    (expected == Decision::Ask).then_some(ApprovalMode::Request)
-                );
-            }
-        }
-        definition.permission_mode = Some(PermissionMode::Auto);
-        let catalog = ToolCall::McpList {
-            server: "server".into(),
-        };
-        let restriction = Permission {
-            decision: Decision::Allow,
-            basis: PermissionSource::Rule,
-            approval: None,
-        }
-        .narrow_definition(&definition, &catalog);
-        assert_eq!(restriction.decision, Decision::Ask);
-        assert_eq!(restriction.basis, PermissionSource::Mode);
-        assert_eq!(restriction.approval, Some(ApprovalMode::Auto));
-    }
-
     #[tokio::test]
     async fn cancellation_refuses_buffered_and_late_active_window_requests() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -1726,62 +1663,6 @@ mod tests {
             for clock in ["now_ms(", "SystemTime", "expires_at_ms"] {
                 assert!(!body.contains(clock), "{start} reintroduced {clock}");
             }
-        }
-    }
-
-    #[test]
-    fn typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review() {
-        let commit = ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec!["src/lib.rs".into()],
-            staged: false,
-        };
-        let typed = allow(PermissionSource::TypedPrefixRule);
-        for (mode, asks) in [
-            (ApprovalMode::Request, false),
-            (ApprovalMode::AutoEdits, false),
-            (ApprovalMode::Auto, true),
-        ] {
-            let narrowed = typed.narrow_terminal(Some(mode), &commit);
-            assert_eq!(narrowed.decision == Decision::Ask, asks, "{mode:?}");
-            if asks {
-                assert_eq!(narrowed.approval, Some(ApprovalMode::Auto));
-                assert_eq!(narrowed.basis, PermissionSource::Mode);
-            } else {
-                assert_eq!(narrowed.basis, PermissionSource::TypedPrefixRule);
-            }
-        }
-        let ordinary =
-            allow(PermissionSource::Rule).narrow_terminal(Some(ApprovalMode::Request), &commit);
-        assert_eq!(ordinary.decision, Decision::Ask);
-        let ask = Permission {
-            decision: Decision::Ask,
-            basis: PermissionSource::TypedPrefixRule,
-            approval: Some(ApprovalMode::Request),
-        }
-        .narrow_terminal(Some(ApprovalMode::AutoEdits), &commit);
-        assert_eq!(
-            (ask.decision, ask.approval),
-            (Decision::Ask, Some(ApprovalMode::Request))
-        );
-        let deny = deny(PermissionSource::TypedPrefixRule)
-            .narrow_terminal(Some(ApprovalMode::Request), &commit);
-        assert_eq!(deny.decision, Decision::Deny);
-    }
-
-    fn allow(basis: PermissionSource) -> Permission {
-        Permission {
-            decision: Decision::Allow,
-            basis,
-            approval: None,
-        }
-    }
-
-    fn deny(basis: PermissionSource) -> Permission {
-        Permission {
-            decision: Decision::Deny,
-            basis,
-            approval: None,
         }
     }
 }
