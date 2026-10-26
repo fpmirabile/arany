@@ -123,7 +123,7 @@ fn synthetic_server(
     workspace_path: std::path::PathBuf,
 ) {
     listener.set_nonblocking(true).expect("bounded accept");
-    let request_count = 8;
+    let request_count = 6;
     for index in 0..request_count {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
@@ -149,8 +149,8 @@ fn synthetic_server(
         assert_eq!(wire["model"], "model-1");
         assert!(wire.get("text").is_none());
         if index == 2
-            || index == 6
-            || (index == 7 && matches!(case, CompactionCase::ProviderFailure))
+            || index == 4
+            || (index == 5 && matches!(case, CompactionCase::ProviderFailure))
         {
             crate::loopback::assert_compaction_request(&wire);
         }
@@ -159,7 +159,6 @@ fn synthetic_server(
             match index {
                 0 | 3 | 4 | 5 => 4096,
                 1 | 2 => 128,
-                6 | 7 => 4096,
                 _ => unreachable!("bounded synthetic request index"),
             }
         );
@@ -173,21 +172,7 @@ fn synthetic_server(
                 );
             }
             2 => {}
-            3 | 4 => {
-                assert_eq!(
-                    input["objective"].as_str().unwrap().len(),
-                    INITIAL_OBJECTIVE_BYTES
-                );
-                assert_eq!(
-                    input["workspace_guidance"][0]["text"]
-                        .as_str()
-                        .unwrap()
-                        .len(),
-                    GUIDANCE_BYTES
-                );
-                assert!(input["includes"].as_array().is_none_or(Vec::is_empty));
-            }
-            5 => {
+            3 => {
                 assert_eq!(input["objective"], "second");
                 assert_large_workspace_inputs(&input);
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -229,10 +214,10 @@ fn synthetic_server(
                 );
                 assert_eq!(input["history"][0]["assistant"], expected_history);
             }
-            6 => {
+            4 => {
                 assert_eq!(input["items"].as_array().unwrap().len(), 2);
             }
-            7 if matches!(case, CompactionCase::Success) => {
+            5 if matches!(case, CompactionCase::Success) => {
                 assert_eq!(input["objective"], "third");
                 assert_large_workspace_inputs(&input);
                 use sha2::{Digest, Sha256};
@@ -254,10 +239,10 @@ fn synthetic_server(
                 assert_eq!(input["items"].as_array().unwrap().len(), 2);
             }
         }
-        if index == 5 && matches!(case, CompactionCase::Success) {
+        if index == 3 && matches!(case, CompactionCase::Success) {
             std::fs::write(&roster_path, b"changed preset after Run admission").unwrap();
         }
-        if index == 6 {
+        if index == 4 {
             compaction_started
                 .send(())
                 .expect("compaction request gate");
@@ -286,7 +271,7 @@ fn synthetic_server(
                 }
             }
         }
-        if index == 7 && matches!(case, CompactionCase::ProviderFailure) {
+        if index == 5 && matches!(case, CompactionCase::ProviderFailure) {
             assert!(matches!(case, CompactionCase::ProviderFailure));
             compaction_started.send(()).expect("manual request gate");
             compaction_release
@@ -299,49 +284,13 @@ fn synthetic_server(
             .expect("manual compaction rejection");
             continue;
         }
-        if index == 3 {
-            let response = serde_json::json!({
-                "id":"resp_recent_write",
-                "status":"completed",
-                "model":"model-1",
-                "output":[{
-                    "type":"function_call",
-                    "id":"fc_recent_write",
-                    "call_id":"call_recent_write",
-                    "status":"completed",
-                    "name":"arany_write",
-                    "arguments":serde_json::json!({
-                        "path":"src/recent.txt",
-                        "expected_digest":null,
-                        "content":"committed before compaction"
-                    }).to_string()
-                }],
-                "usage":{"input_tokens":20,"output_tokens":10}
-            });
-            let (content_type, response) = if wire["stream"] == true {
-                (
-                    "text/event-stream",
-                    crate::loopback::responses_stream(response),
-                )
-            } else {
-                ("application/json", response.to_string())
-            };
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
-                response.len()
-            )
-            .expect("Write function-call response");
-            continue;
-        }
         let text = match index {
             0 => serde_json::json!("ok"),
             1 => {
                 serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
             }
             2 => serde_json::json!(r#"synthetic summary"#),
-            4 => serde_json::json!("A".repeat(INITIAL_ANSWER_BYTES)),
-            5 => {
+            3 => {
                 let result = if matches!(case, CompactionCase::Success) {
                     format!(
                         "second answer{}",
@@ -352,12 +301,12 @@ fn synthetic_server(
                 };
                 serde_json::json!(result)
             }
-            7 if matches!(case, CompactionCase::Success) => serde_json::json!("third answer"),
+            5 if matches!(case, CompactionCase::Success) => serde_json::json!("third answer"),
             _ => serde_json::json!(compaction_summary()),
         };
         if index == 2
-            || index == 6
-            || (index == 7 && matches!(case, CompactionCase::ProviderFailure))
+            || index == 4
+            || (index == 5 && matches!(case, CompactionCase::ProviderFailure))
         {
             if index == 2 {
                 assert_eq!(text, "synthetic summary", "plain-text compaction reply");
@@ -384,50 +333,67 @@ fn receive_stage(receiver: &mpsc::Receiver<&'static str>, expected: &str) {
     );
 }
 
-fn commit_initial_write(
-    workspace: &std::path::Path,
-    state: &std::path::Path,
-    case: CompactionCase,
-) -> SessionId {
-    let mut initial = Command::new(env!("CARGO_BIN_EXE_arany"));
-    initial
-        .current_dir(workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .args(["exec", "--tools", "--state-dir"])
-        .arg(state)
-        .arg("--workspace")
-        .arg(workspace)
-        .args(["--provider", "custom:local", "--model", "model-1"]);
-    if matches!(case, CompactionCase::Success) {
-        initial.args(["--profile", "coding"]);
-    }
-    let initial = initial
-        .arg("Q".repeat(INITIAL_OBJECTIVE_BYTES))
-        .bounded_output_for(Duration::from_secs(30), 256 * 1024)
-        .expect("initial Write Run");
-    assert!(initial.status.success(), "initial Write Run succeeds");
-    let expected_stderr = if matches!(case, CompactionCase::Success) {
-        "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main\n  main[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n"
-    } else {
-        ""
-    };
-    assert_eq!(initial.stderr, expected_stderr.as_bytes());
-    assert_eq!(
-        std::fs::read(workspace.join("src/recent.txt")).expect("published file"),
-        b"committed before compaction"
-    );
+fn commit_initial_write(workspace: &std::path::Path, state: &std::path::Path) -> SessionId {
+    use arany::test_support::{engine::run_with, scenario::ScriptedProvider};
+    let _deadline =
+        arany::test_support::engine::deadline("initial guarded Write Run", Duration::from_secs(30));
     let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
         .expect("initial Session runtime");
     runtime.block_on(async {
-        let sessions = arany::list_sessions(
+        let provider = std::sync::Arc::new(
+            ScriptedProvider::new(vec![
+                tool_outcome(arany::ToolCall::Write {
+                    path: "src/recent.txt".into(),
+                    expected_digest: None,
+                    content: "committed before compaction".into(),
+                }),
+                arany::ProviderOutcome::Answer(arany::Answer {
+                    text: "A".repeat(INITIAL_ANSWER_BYTES),
+                }),
+            ])
+            .with_profile("openai", "gpt-5.4"),
+        );
+        let engine = arany::Engine::open(
             StateRoot::open_existing(state).expect("State reopen"),
-            workspace.to_path_buf(),
+            arany::EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .expect("initial Write Engine");
+        let mut request = arany::test_support::routing::input(workspace);
+        request.objective = "Q".repeat(INITIAL_OBJECTIVE_BYTES);
+        request.policy = CollaborationPolicy::default();
+        let result = run_with(
+            &engine,
+            &provider,
+            request,
+            arany::RunControls {
+                tools: arany::ToolGrant::Configured,
+                ..Default::default()
+            },
         )
         .await
-        .expect("initial Session");
-        assert_eq!(sessions.len(), 1);
-        sessions[0].id
+        .expect("initial Write Run");
+        engine.close().await.expect("close initial Engine");
+        assert_eq!(result.run.status, arany::RunStatus::Finished);
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        assert_eq!(result.run.tools.len(), 1);
+        assert_eq!(
+            result.run.tools[0]
+                .observation
+                .as_ref()
+                .unwrap()
+                .disposition,
+            arany::ToolDisposition::Succeeded
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("src/recent.txt")).expect("published file"),
+            b"committed before compaction"
+        );
+        result.session_id
     })
 }
 
@@ -451,6 +417,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         &state.join("permissions.json"),
         br#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
     );
+    let session_id = commit_initial_write(&workspace, &state);
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     let profile = serde_json::json!({
@@ -510,8 +477,6 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         b"Provider: local\nStatus: custom verified\n"
     );
     assert_eq!(checked.stderr, b"");
-
-    let session_id = commit_initial_write(&workspace, &state, case);
 
     let shell = if matches!(case, CompactionCase::Interrupted) {
         "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
@@ -769,7 +734,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 .expect("Session");
             assert_eq!(changed.defaults.account_id, Some(future_account));
             assert_eq!(changed.defaults.provider.as_deref(), Some("openai"));
-            assert!(changed.runs.iter().all(|run| {
+            assert!(changed.runs.iter().skip(1).all(|run| {
                 run.config
                     .as_ref()
                     .is_some_and(|config| config.provider.profile() == "custom:local")
@@ -1009,7 +974,10 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     if matches!(case, CompactionCase::Success) {
         assert_eq!(view.defaults.account_id, None);
         assert_eq!(view.defaults.provider.as_deref(), Some("custom:local"));
-        for run in &view.runs {
+        let initial_config = view.runs[0].config.as_ref().expect("seed Run config");
+        assert_eq!(initial_config.provider.profile(), "openai");
+        assert!(initial_config.roster.is_none());
+        for run in view.runs.iter().skip(1) {
             let config = run.config.as_ref().expect("pinned config");
             assert_eq!(config.provider.profile(), "custom:local");
             assert_eq!(config.saved_api_account_id, None);
