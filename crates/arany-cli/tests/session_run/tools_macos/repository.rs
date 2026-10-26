@@ -1,6 +1,12 @@
 use super::*;
 use arany::test_support::scenario::request;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryPhase {
+    Cold,
+    Warm,
+}
+
 pub(super) async fn run(root: &Path) {
     let registry = Path::new(&std::env::var_os("ARANY_TEST_CARGO_REGISTRY").unwrap()).to_owned();
     let destination = root.join("home/.cargo/registry");
@@ -30,19 +36,20 @@ pub(super) async fn run(root: &Path) {
     permissions
         .remember_profiles(true, arany::ApprovalMode::Request, &tokens)
         .unwrap();
-    for phase in ["cold", "warm"] {
+    for phase in [RepositoryPhase::Cold, RepositoryPhase::Warm] {
         run_case(root, &workspace, phase).await;
     }
 }
 
-async fn run_case(root: &Path, workspace: &Path, phase: &str) {
+async fn run_case(root: &Path, workspace: &Path, phase: RepositoryPhase) {
     let state = root.join("repository-state");
     let script = format!(
         "set -eu; {}printf retained > \"$CARGO_TARGET_DIR/repository-progress\"; cargo test --locked --offline -p arany --lib",
-        if phase == "warm" {
-            "test \"$(cat \"$CARGO_TARGET_DIR/repository-progress\")\" = retained; "
-        } else {
-            ""
+        match phase {
+            RepositoryPhase::Cold => "",
+            RepositoryPhase::Warm => {
+                "test \"$(cat \"$CARGO_TARGET_DIR/repository-progress\")\" = retained; "
+            }
         }
     );
     let call = ToolCall::Command {
@@ -76,7 +83,11 @@ async fn run_case(root: &Path, workspace: &Path, phase: &str) {
     report(&outcome, phase, started.elapsed());
 }
 
-fn report(outcome: &arany::RunOutcome, phase: &str, elapsed: Duration) {
+fn report(outcome: &arany::RunOutcome, phase: RepositoryPhase, elapsed: Duration) {
+    let phase_name = match phase {
+        RepositoryPhase::Cold => "cold",
+        RepositoryPhase::Warm => "warm",
+    };
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
     let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
     let receipt = observation
@@ -89,9 +100,13 @@ fn report(outcome: &arany::RunOutcome, phase: &str, elapsed: Duration) {
     assert_eq!(result["changeset"]["files"], json!([]));
     if observation.disposition == ToolDisposition::Limit {
         assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
-        assert_eq!(phase, "cold", "warm repository tests did not complete");
+        assert_eq!(
+            phase,
+            RepositoryPhase::Cold,
+            "warm repository tests did not complete"
+        );
         println!(
-            "repository {phase}: timeout; elapsed={elapsed:?}; jobs={}",
+            "repository {phase_name}: timeout; elapsed={elapsed:?}; jobs={}",
             receipt.limits.build_jobs
         );
     } else {
@@ -110,7 +125,7 @@ fn report(outcome: &arany::RunOutcome, phase: &str, elapsed: Duration) {
         assert_eq!(fields[5], "0");
         assert!(fields[7].parse::<usize>().unwrap() > 0);
         println!(
-            "repository {phase}: {summary}; elapsed={elapsed:?}; jobs={}",
+            "repository {phase_name}: {summary}; elapsed={elapsed:?}; jobs={}",
             receipt.limits.build_jobs
         );
     }

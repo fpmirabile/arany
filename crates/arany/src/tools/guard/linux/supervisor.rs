@@ -13,6 +13,8 @@ mod tests;
 const MOUNT_DIRECTORY: &str = "namespace";
 const PROBE_NAME: &str = "user.arany_probe";
 const PROBE_VALUE: &[u8] = b"arany";
+const MAX_SUPERVISOR_ARGUMENTS: usize = 4096;
+const MAX_PIN_BYTES: usize = 4096;
 pub(super) const TMPFS_INODES: u64 = (crate::tools::types::COMMAND_SCAN_ENTRIES
     + crate::tools::config::MAX_WORKSPACE_PATHS * 2
     + 2) as u64;
@@ -181,7 +183,7 @@ impl ProjectProbe {
 
 pub(in crate::tools::guard) fn verify_helper() -> Result<(), ToolError> {
     let encoded = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
-    if encoded.len() > MAX_PATH_BYTES {
+    if encoded.len() > MAX_PIN_BYTES {
         return Err(ToolError::Limit);
     }
     let pin: Pin = serde_json::from_str(encoded.to_str().ok_or(ToolError::Configuration)?)
@@ -216,7 +218,7 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
     let mut bytes = 0usize;
     for argument in std::env::args_os().skip(3) {
         bytes = bytes.checked_add(argument.len()).ok_or(ToolError::Limit)?;
-        if bytes > super::super::TASK_BYTES_CAP || arguments.len() >= MOUNTINFO_ENTRIES_CAP {
+        if bytes > super::super::TASK_BYTES_CAP || arguments.len() >= MAX_SUPERVISOR_ARGUMENTS {
             return Err(ToolError::Limit);
         }
         arguments.push(argument);
@@ -412,7 +414,10 @@ fn wait_bwrap(arguments: &[std::ffi::OsString]) -> Result<(), ToolError> {
         .spawn()
         .map_err(|_| ToolError::ProtectionUnavailable)?;
     let result = (|| {
-        let pid = Pid::from_raw(child.id() as i32).ok_or(ToolError::ProtectionUnavailable)?;
+        let pid = i32::try_from(child.id())
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or(ToolError::ProtectionUnavailable)?;
         let pidfd =
             pidfd_open(pid, PidfdFlags::empty()).map_err(|_| ToolError::ProtectionUnavailable)?;
         loop {
