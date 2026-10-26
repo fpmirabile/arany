@@ -5698,6 +5698,7 @@ mod goal_replay_tests {
                         run_id: run,
                         agent_run_id: child,
                         active_ceiling_ms: 0,
+                        verdict: None,
                         intent: child_intent(
                             run,
                             child,
