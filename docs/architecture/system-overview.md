@@ -50,7 +50,7 @@ Session and ancestor locks remain scoped to a Run, while the Store thread lives
 until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns Engine lifetime and admission.
 The binary's `serve` Server owns a bounded submission/response channel loop over
-that Engine. Its stdio adapter, ACP translator and in-process conformance
+that Engine. Its stdio adapter, ACP translator, attached terminal and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
 vocabulary at the binary edge; its translator owns the exhaustive typed Tool
 projection and preserves serve's Move FileChange path while giving GhPrList an
@@ -356,7 +356,7 @@ The private attached model owner persists token-free `model-preferences.json` un
 
 The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed version 4, 1 KiB record holds slash completion, chat view, Goal usage limits, Build/command resource settings, mouse and copy-on-select; defaults use tabs and fullscreen, and an unsupported or invalid record leaves attached chat, task submission and `/settings` on those defaults until `/settings` replaces it (`exec` and `serve` refuse it). Attached startup reads it read-only before terminal acquisition without creating State; `--classic` pins Classic for that process without changing the record. Engine snapshots only the selected execution values into a Goal before Workspace disclosure; they do not widen Tool grants. The saved record itself never enters Events, account authority or Provider context. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner.
 
-The Engine publishes provisional display and capacity waits through a hints handle; committed facts come from the Engine's Event stream, reduced into the attached terminal's local SessionView. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
+The channel Server forwards provisional display and capacity waits from the Engine hints handle and committed Events from its Run subscription to the attached terminal over bounded in-process channels. The terminal reduces those canonical Events into its local SessionView and reconciles gaps through a Server snapshot request. The Server owns Run submission, approvals, steering, cancellation and settlement; idle Session operations retain their existing direct Engine calls. The Session shares its Engine with each connection and closes it only after the connection has settled and released its tasks. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
 
 Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
 against the committed pending Tool before display. It cannot enter history or
