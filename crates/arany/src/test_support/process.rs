@@ -109,6 +109,7 @@ pub fn relay_native_panic_location(stderr: &[u8], expected_case: &str) -> bool {
     if !matches!(
         expected_case,
         "shipped_exec"
+            | "auto_compaction"
             | "goal_token_cap"
             | "workspace_lease"
             | "tool_group"

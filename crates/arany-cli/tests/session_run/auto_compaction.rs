@@ -406,7 +406,12 @@ fn commit_initial_write(
         .bounded_output_for(Duration::from_secs(30), 256 * 1024)
         .expect("initial Write Run");
     assert!(initial.status.success(), "initial Write Run succeeds");
-    assert!(initial.stderr.is_empty());
+    let expected_stderr = if matches!(case, CompactionCase::Success) {
+        "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main\n  main[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n"
+    } else {
+        ""
+    };
+    assert_eq!(initial.stderr, expected_stderr.as_bytes());
     assert_eq!(
         std::fs::read(workspace.join("src/recent.txt")).expect("published file"),
         b"committed before compaction"
@@ -469,7 +474,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let (request_sender, request_ready) = mpsc::channel();
     let (release_compaction, compaction_release) = mpsc::sync_channel(1);
     let roster_path = state.join("provider-roster.json");
-    let roster_bytes = serde_json::to_vec(&serde_json::json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
+    let roster_bytes = serde_json::to_vec(&serde_json::json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
     if matches!(case, CompactionCase::Success) {
         private_file(&roster_path, &roster_bytes);
     }
