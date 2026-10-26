@@ -527,3 +527,6 @@ pub(super) fn started(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
