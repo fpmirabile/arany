@@ -819,7 +819,7 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
         .unwrap()
         .prepare_profile_selection();
     let choices = permissions.runtime_profile_choices();
-    let mut tokens: Vec<_> = choices
+    let tokens: Vec<_> = choices
         .iter()
         .filter(|choice| choice.selected)
         .map(|choice| choice.token.clone())
@@ -833,8 +833,7 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
             .iter()
             .find(|choice| choice.group == group)
             .expect("private registry candidate");
-        assert!(!choice.selected);
-        tokens.push(choice.token.clone());
+        assert!(choice.selected);
     }
     permissions
         .remember_profiles(true, ApprovalMode::Request, &tokens)
