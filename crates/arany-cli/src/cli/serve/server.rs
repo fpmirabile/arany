@@ -94,14 +94,14 @@ impl Fault {
 }
 
 struct ActiveTurn {
-    thread_id: SessionId,
+    thread_id: Option<SessionId>,
     result: tokio::task::AbortHandle,
     events: arany::Subscription,
     display: Option<DisplayFollower>,
     cancel: RunCancellation,
     approvals: Arc<super::approvals::Approvals>,
-    approval_mode: ToolApprovals,
-    steering: RunSteering,
+    approval_mode: Option<ToolApprovals>,
+    steering: Option<RunSteering>,
     pending_start: Option<RequestId>,
     result_done: bool,
     pending_close: Option<RequestId>,
@@ -149,7 +149,7 @@ impl Drop for ActiveTurn {
 
 #[derive(Clone)]
 struct OutputControl {
-    thread_id: SessionId,
+    thread_id: Option<SessionId>,
     run_id: Option<arany::RunId>,
     pending_completion: bool,
     result: tokio::task::AbortHandle,
@@ -175,14 +175,14 @@ impl OutputControl {
         match request.method.as_str() {
             "turn/interrupt" => {
                 params::<TurnInterruptParams>(request.params.clone()).is_ok_and(|p| {
-                    p.thread_id == self.thread_id
+                    Some(p.thread_id) == self.thread_id
                         && Some(p.turn_id) == self.run_id
                         && !self.pending_completion
                         && !self.result.is_finished()
                 })
             }
             "thread/unsubscribe" => params::<ThreadUnsubscribeParams>(request.params.clone())
-                .is_ok_and(|p| p.thread_id == self.thread_id),
+                .is_ok_and(|p| Some(p.thread_id) == self.thread_id),
             _ => false,
         }
     }
@@ -326,8 +326,9 @@ async fn observe(
     outbound: &mpsc::Sender<Message>,
     opt_out: &[String],
 ) -> Result<(), String> {
+    let thread_id = turn.thread_id.ok_or("Session identity unavailable")?;
     if let Tapped::Committed(envelope) = &tapped {
-        if envelope.session_id != turn.thread_id {
+        if envelope.session_id != thread_id {
             return Ok(());
         }
         if turn.state.pending_completion && matches!(envelope.event, Event::MessageAccepted { .. })
@@ -337,7 +338,7 @@ async fn observe(
         if let Event::MessageAccepted { run_id, .. } = envelope.event
             && turn.state.goal_id.is_none()
         {
-            let view = threads::load_view(state, turn.thread_id)
+            let view = threads::load_view(state, thread_id)
                 .await
                 .map_err(|e| e.message)?;
             turn.state.goal_id = Some(
@@ -349,7 +350,7 @@ async fn observe(
             );
         }
     }
-    let notes = items::project(&tapped, turn.thread_id, &mut turn.state);
+    let notes = items::project(&tapped, thread_id, &mut turn.state);
     if let Tapped::Committed(envelope) = tapped
         && let Event::MessageAccepted { run_id, .. } = envelope.event
         && let Some(id) = turn.pending_start.take()
@@ -412,7 +413,8 @@ async fn complete(
         Completion::Progress => (false, false, None),
         Completion::Final { settled, refused } => (true, *settled, refused.as_ref()),
     };
-    let view = threads::load_view(state, turn.thread_id)
+    let thread_id = turn.thread_id.ok_or("Session identity unavailable")?;
+    let view = threads::load_view(state, thread_id)
         .await
         .map_err(|e| e.message)?;
     if finalizing && let Some(id) = turn.pending_start.take() {
@@ -496,7 +498,7 @@ async fn complete(
             notification(
                 "turn/completed",
                 TurnNotification {
-                    thread_id: turn.thread_id,
+                    thread_id,
                     turn: summary,
                 },
             ),
@@ -713,14 +715,14 @@ mod tests {
         let result = result.await.unwrap();
         let worker = tokio::spawn(async {});
         let mut turn = ActiveTurn {
-            thread_id: session,
+            thread_id: Some(session),
             result: worker.abort_handle(),
             events,
             display: None,
             cancel,
-            approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
-            approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
-            steering: RunSteering::new(),
+            approvals: Arc::new(super::super::approvals::Approvals::closed()),
+            approval_mode: Some(ToolApprovals::new(arany::ApprovalMode::Request).0),
+            steering: Some(RunSteering::new()),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,
             pending_close: None,
@@ -813,14 +815,14 @@ mod tests {
         .unwrap();
         let worker = tokio::spawn(async {});
         let mut turn = ActiveTurn {
-            thread_id: session,
+            thread_id: Some(session),
             result: worker.abort_handle(),
             events: engine.subscribe(),
             display: None,
             cancel: RunCancellation::new(),
-            approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
-            approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
-            steering: RunSteering::new(),
+            approvals: Arc::new(super::super::approvals::Approvals::closed()),
+            approval_mode: Some(ToolApprovals::new(arany::ApprovalMode::Request).0),
+            steering: Some(RunSteering::new()),
             pending_start: None,
             result_done: true,
             pending_close: None,

@@ -91,7 +91,8 @@ fn running(
 ) -> Result<&ActiveTurn, Fault> {
     active
         .filter(|turn| {
-            turn.thread_id == thread_id
+            turn.thread_id == Some(thread_id)
+                && turn.steering.is_some()
                 && turn.state.run_id.is_some()
                 && turn_id.is_none_or(|id| turn.state.run_id == Some(id))
                 && !turn.result.is_finished()
@@ -104,7 +105,11 @@ pub(super) fn steer(active: Option<&ActiveTurn>, value: Option<Value>) -> Result
     let turn = running(active, input.thread_id, Some(input.turn_id))?;
     let note =
         text(input.input.into_iter().map(UserInput::from).collect()).ok_or_else(Fault::params)?;
-    turn.steering.offer_note(note).map_err(refusal)?;
+    turn.steering
+        .as_ref()
+        .expect("active steering")
+        .offer_note(note)
+        .map_err(refusal)?;
     Ok(json!(TurnSteerResult {
         turn_id: input.turn_id
     }))
@@ -116,7 +121,7 @@ pub(super) fn pause(active: Option<&ActiveTurn>, value: Option<Value>) -> Result
     if turn.state.goal_id != Some(input.goal_id) {
         return Err(Fault::engine(EngineError::GoalUnavailable));
     }
-    turn.steering.pause();
+    turn.steering.as_ref().expect("active steering").pause();
     Ok(json!({}))
 }
 
@@ -146,16 +151,14 @@ mod tests {
         let (run_id, goal_id) = (RunId::new(), GoalId::new());
         let worker = tokio::spawn(std::future::pending::<()>());
         let turn = ActiveTurn {
-            thread_id,
+            thread_id: Some(thread_id),
             result: worker.abort_handle(),
             events: engine.subscribe(),
             display: None,
             cancel: arany::RunCancellation::new(),
-            approvals: std::sync::Arc::new(
-                crate::cli::serve::approvals::Approvals::empty_for_test(),
-            ),
-            approval_mode: arany::ToolApprovals::new(arany::ApprovalMode::Request).0,
-            steering: arany::RunSteering::new(),
+            approvals: std::sync::Arc::new(crate::cli::serve::approvals::Approvals::closed()),
+            approval_mode: Some(arany::ToolApprovals::new(arany::ApprovalMode::Request).0),
+            steering: Some(arany::RunSteering::new()),
             pending_start: None,
             result_done: false,
             pending_close: None,
@@ -168,13 +171,19 @@ mod tests {
         };
         let ids = json!({"threadId":thread_id,"goalId":goal_id});
         assert_eq!(pause(Some(&turn), Some(ids)).ok().unwrap(), json!({}));
-        assert!(!turn.steering.pause(), "the pause is already requested");
+        assert!(
+            !turn.steering.as_ref().unwrap().pause(),
+            "the pause is already requested"
+        );
         let note = json!({"threadId":thread_id,"turnId":run_id,"input":[{"type":"text","text":"next Run"}]});
         assert_eq!(
             steer(Some(&turn), Some(note)).ok().unwrap(),
             json!({"turnId":run_id})
         );
-        assert_eq!(turn.steering.withdraw_note().as_deref(), Some("next Run"));
+        assert_eq!(
+            turn.steering.as_ref().unwrap().withdraw_note().as_deref(),
+            Some("next Run")
+        );
         let mut control = crate::cli::serve::server::OutputControl::from(&turn);
         control.pending_completion = false;
         for (method, params, expected) in [

@@ -183,10 +183,12 @@ impl Approvals {
         self.changed.notify_one();
     }
 
-    #[cfg(test)]
-    pub fn empty_for_test() -> Self {
+    pub fn closed() -> Self {
         Self {
-            state: Default::default(),
+            state: Arc::new(Mutex::new(State {
+                pending: None,
+                closed: true,
+            })),
             changed: Default::default(),
             cancel: RunCancellation::new(),
             worker: None,
