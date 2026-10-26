@@ -39,6 +39,8 @@ fn read(path: &str) -> ToolCall {
 
 fn step(id: &str, path: &str) -> ToolStep {
     ToolStep {
+        narrowed_observations: Default::default(),
+        refusal_index: None,
         refusal: None,
         plan: None,
         turn: ProviderTurn::scripted(),
@@ -760,6 +762,8 @@ fn command_git_hint_respects_the_complete_model_result_ceiling() {
 #[test]
 fn delegate_step_carries_child_results_once() {
     let mut delegated = request(vec![ToolStep {
+        narrowed_observations: Default::default(),
+        refusal_index: None,
         refusal: None,
         plan: None,
         turn: ProviderTurn::scripted(),
@@ -849,6 +853,8 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 intent: observed.intent.clone(),
                 observation: Some(observed),
                 review_call_index: None,
+                active_time_reserved: false,
+                narrowing_source: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
                 hook_sequence: None,
@@ -868,6 +874,8 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 .intent,
                 observation: None,
                 review_call_index: None,
+                active_time_reserved: false,
+                narrowing_source: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
                 hook_sequence: None,
@@ -1011,6 +1019,8 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
             intent: observed.intent.clone(),
             observation: Some(observed),
             review_call_index: None,
+            active_time_reserved: false,
+            narrowing_source: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1094,6 +1104,7 @@ fn a_hook_narrowed_denial_renders_as_data_beside_the_one_tool_result() {
     let mut denied = observation(read("src/lib.rs"), "Hook narrowed this Tool to: Read");
     denied.disposition = ToolDisposition::Denied;
     narrowed.observations.insert(0, denied);
+    narrowed.narrowed_observations.insert(0);
     let blocks = step_results(&narrowed, &request(vec![narrowed.clone()])).unwrap();
     let results: Vec<_> = blocks
         .iter()
@@ -1464,5 +1475,71 @@ fn child_notes_preserve_the_shared_renderer_prefix_and_remain_user_data() {
             .push(step("second", "src/main.rs"));
         let continued = conversation(&request).unwrap();
         assert_eq!(noted.messages, continued.messages[..noted.messages.len()]);
+    }
+}
+
+#[test]
+fn multi_call_replay_pairs_every_result_on_api_routes() {
+    use crate::provider::{Effort, anthropic, openai, test_support};
+    for adapter in ["openai", "anthropic"] {
+        let mut request = test_support::primary_request("render-model");
+        let mut step = test_support::four_read_step(adapter);
+        step.observations[0].disposition = ToolDisposition::Denied;
+        step.observations[0].attestation = None;
+        for refused in [false, true] {
+            if refused {
+                step.refusal = Some(crate::session::ProposalRefusal {
+                    operation: "arany_read".into(),
+                    cause: crate::session::ProposalRefusalCause::InvalidArguments,
+                });
+                step.refusal_index = Some(2);
+                step.observations.clear();
+            }
+            request.input.tools.as_mut().unwrap().steps = vec![step.clone()];
+            let conversation = conversation(&request).unwrap();
+            let body = if adapter == "openai" {
+                openai::wire::run_body(&request, &conversation).unwrap()
+            } else {
+                anthropic::wire::run_body(&request, &conversation, Effort::Low).unwrap()
+            };
+            let results = crate::provider::render::semantic::tool_results(&body);
+            assert_eq!(results.len(), 4);
+            let paired: Vec<_> = if adapter == "openai" {
+                body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect()
+            } else {
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "tool_result")
+                    .collect()
+            };
+            assert_eq!(paired.len(), results.len());
+            for (index, (item, result)) in paired.iter().zip(&results).enumerate() {
+                assert_eq!(
+                    item[if adapter == "openai" {
+                        "call_id"
+                    } else {
+                        "tool_use_id"
+                    }],
+                    format!("call_{index}")
+                );
+                if refused {
+                    assert_eq!(result["error"]["offending_index"], 2);
+                    assert!(result["error"].get("max_calls").is_none());
+                    assert!(
+                        result["error"]["remediation"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Send exactly 1 Tool call")
+                    );
+                }
+            }
+        }
     }
 }

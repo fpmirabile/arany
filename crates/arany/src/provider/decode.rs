@@ -136,7 +136,7 @@ pub(crate) fn tool_request(
     Ok(ToolRequest { id, call })
 }
 
-const STEP_TOOL_CALLS: usize = 1;
+pub(super) const STEP_TOOL_CALLS: usize = 1;
 const _: () = assert!(STEP_TOOL_CALLS <= crate::session::MAX_STEP_TOOL_CALLS as usize);
 
 pub(crate) fn tools_outcome(requests: Vec<ToolRequest>) -> Result<ProviderOutcome, ProviderError> {
