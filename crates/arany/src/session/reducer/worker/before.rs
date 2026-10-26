@@ -442,24 +442,15 @@ pub(super) fn check(
     if unrecorded_integration(run) && starts_team_work(event) {
         return Err(ReplayError::InvalidTransition);
     }
-    let workspace_stopped = run
+    let stop_sequence = run
         .tools
         .iter()
-        .any(|t| t.observation.as_ref().is_some_and(|o| o.stops_run()));
-    if (run.workers.stop.is_some() || workspace_stopped)
-        && matches!(
-            event,
-            Event::AgentSpawned { .. }
-                | Event::ToolProposed { .. }
-                | Event::ToolStarted { .. }
-                | Event::GoalProviderCallReserved { .. }
-                | Event::ProviderFallbackUsed { .. }
-                | Event::ProviderRetryScheduled { .. }
-                | Event::WorkerHandoverRecorded { .. }
-                | Event::WorkerVerificationRecorded { .. }
-        )
-    {
-        return Err(ReplayError::InvalidTransition);
+        .filter(|tool| tool.observation.as_ref().is_some_and(|o| o.stops_run()))
+        .filter_map(|tool| tool.finished_sequence)
+        .chain(run.workers.stop.as_ref().map(|(sequence, _)| *sequence))
+        .min();
+    if let Some(sequence) = stop_sequence {
+        check_after_stop(run, event, sequence)?;
     }
     if let Some(id) = actor
         && let Ok(w) = worker(run, id)
@@ -498,6 +489,65 @@ pub(super) fn check(
         {
             return Err(ReplayError::InvalidTransition);
         }
+    }
+    Ok(())
+}
+
+fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), ReplayError> {
+    let tools = || {
+        run.tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+    };
+    match event {
+        Event::ToolStarted {
+            agent_run_id,
+            intent,
+            verdict,
+            ..
+        } => {
+            if verdict.as_ref().is_some_and(|verdict| verdict.approved)
+                || !tools().any(|tool| {
+                    tool.intent.id == intent.id
+                        && tool.intent.agent_run_id == *agent_run_id
+                        && tool.started_sequence.is_none()
+                        && tool.observation.is_none()
+                })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::ToolFinished {
+            observation,
+            checkpoint,
+            ..
+        } => {
+            let started_after_stop = tools().any(|tool| {
+                tool.intent.id == observation.intent.id
+                    && tool
+                        .started_sequence
+                        .is_some_and(|started| started > sequence)
+            });
+            if started_after_stop
+                && (!matches!(
+                    observation.disposition,
+                    ToolDisposition::Denied | ToolDisposition::Limit
+                ) || observation.attestation.is_some()
+                    || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
+                    || checkpoint.is_some())
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::AgentSpawned { .. }
+        | Event::ToolProposed { .. }
+        | Event::ToolActiveTimeReserved { .. }
+        | Event::GoalProviderCallReserved { .. }
+        | Event::ProviderFallbackUsed { .. }
+        | Event::ProviderRetryScheduled { .. }
+        | Event::WorkerHandoverRecorded { .. }
+        | Event::WorkerVerificationRecorded { .. } => return Err(ReplayError::InvalidTransition),
+        _ => {}
     }
     Ok(())
 }

@@ -8902,6 +8902,112 @@ mod goal_replay_tests {
         );
     }
 
+    fn batch_start(
+        intent: &EffectIntent,
+        mode: Option<crate::tools::permissions::PermissionMode>,
+        approved: bool,
+    ) -> Event {
+        use crate::tools::permissions::{Decision, PermissionSource};
+        if mode.is_some() {
+            verdict_event(
+                intent,
+                mode,
+                Decision::Allow,
+                PermissionSource::Mode,
+                PermissionSource::Mode,
+                approved,
+            )
+        } else {
+            tool_started(intent.run_id, intent.agent_run_id, intent)
+        }
+    }
+
+    fn stopped_batch(
+        mode: Option<crate::tools::permissions::PermissionMode>,
+        disposition: ToolDisposition,
+    ) -> (SessionView, EffectIntent) {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = mode.map(|_| [3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        let first = read_intent(run, agent, "src/lib.rs");
+        let second = read_intent(run, agent, "src/main.rs");
+        for intent in [&first, &second] {
+            apply(&mut view, tool_proposed(run, agent, intent)).unwrap();
+        }
+        apply(&mut view, batch_start(&first, mode, true)).unwrap();
+        let mut stopped = tool_finished(run, agent, &first, b"stopped");
+        if let Event::ToolFinished { observation, .. } = &mut stopped {
+            observation.disposition = disposition;
+            observation.attestation = None;
+        }
+        apply(&mut view, stopped).unwrap();
+        (view, second)
+    }
+
+    #[test]
+    fn stopped_batches_settle_proposals_without_authorizing_execution() {
+        use crate::tools::permissions::PermissionMode;
+        const ACTIVE_CEILING_MS: u64 = 1000;
+        for mode in [None, Some(PermissionMode::Default)] {
+            for disposition in [ToolDisposition::Failed, ToolDisposition::Uncertain] {
+                let (mut view, second) = stopped_batch(mode, disposition);
+                let (run, agent) = (second.run_id, second.agent_run_id);
+                let goal = view.goals[0].id;
+                assert!(rejected(&view, reserve_child_call(goal, run, agent)));
+                let third = read_intent(run, agent, "README.md");
+                assert!(rejected(&view, tool_proposed(run, agent, &third)));
+                assert!(rejected(&view, batch_start(&third, mode, false)));
+                assert!(rejected(
+                    &view,
+                    Event::ToolActiveTimeReserved {
+                        run_id: run,
+                        agent_run_id: agent,
+                        intent_digest: second.digest(),
+                        active_ceiling_ms: ACTIVE_CEILING_MS,
+                    }
+                ));
+                if mode.is_some() {
+                    assert!(rejected(&view, batch_start(&second, mode, true)));
+                }
+                apply(&mut view, batch_start(&second, mode, false))
+                    .expect("folded non-dispatch settlement");
+                assert!(rejected(
+                    &view,
+                    tool_finished(run, agent, &second, b"executed")
+                ));
+                let mut denied = tool_finished(run, agent, &second, b"not dispatched");
+                if let Event::ToolFinished { observation, .. } = &mut denied {
+                    observation.disposition = ToolDisposition::Denied;
+                    observation.attestation = None;
+                    observation.output = crate::tools::types::UNDISPATCHED_STEP_OUTPUT.into();
+                }
+                apply(&mut view, denied).unwrap();
+                assert!(
+                    view.runs[0]
+                        .tools
+                        .iter()
+                        .all(|tool| tool.observation.is_some())
+                );
+                assert_eq!(
+                    view.runs[0].tools[0]
+                        .observation
+                        .as_ref()
+                        .unwrap()
+                        .disposition,
+                    disposition
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_in_process_attestation_cannot_finish_a_write() {
         let (mut view, goal, run, agent) = primary_tool_session(true);
