@@ -664,8 +664,8 @@ pub(in crate::tools) fn materialize(image: &Image, root: &Dir) -> Result<(), Too
     Ok(())
 }
 
-fn encode_frame(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
-    if bytes.is_empty() || bytes.len() > WORKER_DATA_BYTES {
+fn encode_frame(bytes: &[u8], max_bytes: usize) -> Result<Vec<u8>, ToolError> {
+    if bytes.is_empty() || bytes.len() > max_bytes {
         return Err(ToolError::Limit);
     }
     let mut frame =
@@ -691,19 +691,23 @@ fn encode_frame(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
 pub(in crate::tools) fn write_frame(
     writer: &mut impl std::io::Write,
     bytes: &[u8],
+    max_bytes: usize,
 ) -> Result<(), ToolError> {
     writer
-        .write_all(&encode_frame(bytes)?)
+        .write_all(&encode_frame(bytes, max_bytes)?)
         .map_err(|_| ToolError::Operation)
 }
 
-pub(in crate::tools) fn read_frame(reader: &mut impl std::io::Read) -> Result<Vec<u8>, ToolError> {
+pub(in crate::tools) fn read_frame(
+    reader: &mut impl std::io::Read,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ToolError> {
     let mut size = [0; 4];
     reader
         .read_exact(&mut size)
         .map_err(|_| ToolError::Operation)?;
     let size = u32::from_le_bytes(size) as usize;
-    if size == 0 || size > WORKER_DATA_BYTES {
+    if size == 0 || size > max_bytes {
         return Err(ToolError::Limit);
     }
     let mut hash = [0; 32];
@@ -741,7 +745,7 @@ pub(in crate::tools) async fn send_frame(
     bytes: &[u8],
 ) -> Result<(), ToolError> {
     writer
-        .write_all(&encode_frame(bytes)?)
+        .write_all(&encode_frame(bytes, WORKER_DATA_BYTES)?)
         .await
         .map_err(|_| ToolError::Operation)
 }

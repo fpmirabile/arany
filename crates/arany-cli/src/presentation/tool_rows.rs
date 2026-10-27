@@ -254,16 +254,28 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
                 if count == 1 { singular } else { plural }
             )
         };
-        if counts.iter().any(|count| *count > 0) {
-            format!(
-                " · {} ({}), {}, {}",
-                noun(counts[0], "ignored entry", "ignored entries"),
-                noun(counts[1], "pruned root", "pruned roots"),
-                noun(counts[2], "oversized input", "oversized inputs"),
-                noun(counts[3], "discarded output", "discarded outputs")
-            )
-        } else {
+        let [ignored, pruned, oversized, discarded] = counts;
+        let mut parts = Vec::new();
+        match (ignored, pruned) {
+            (0, 0) => {}
+            (0, _) => parts.push(noun(pruned, "pruned root", "pruned roots")),
+            (_, 0) => parts.push(noun(ignored, "ignored entry", "ignored entries")),
+            _ => parts.push(format!(
+                "{} ({})",
+                noun(ignored, "ignored entry", "ignored entries"),
+                noun(pruned, "pruned root", "pruned roots")
+            )),
+        }
+        if oversized > 0 {
+            parts.push(noun(oversized, "oversized input", "oversized inputs"));
+        }
+        if discarded > 0 {
+            parts.push(noun(discarded, "discarded output", "discarded outputs"));
+        }
+        if parts.is_empty() {
             String::new()
+        } else {
+            format!(" · {}", parts.join(", "))
         }
     };
     let diagnostic = if observation.disposition == arany::ToolDisposition::Failed
