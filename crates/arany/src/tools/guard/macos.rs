@@ -1804,6 +1804,29 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        struct DetachOnUnwind<'a> {
+            root: &'a Path,
+            armed: bool,
+        }
+
+        impl Drop for DetachOnUnwind<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    // Volume handles drop first, so the image detaches even while unwinding.
+                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        let _ = runtime.block_on(storage::cleanup_storage(self.root));
+                    }
+                }
+            }
+        }
+
+        let mut detach = DetachOnUnwind {
+            root: root.path(),
+            armed: true,
+        };
         let volume = reactor
             .block_on(storage::prepare_git_storage(root.path()))
             .unwrap();
@@ -1844,17 +1867,13 @@ mod tests {
         let before = control_root();
         let refused = run("bare", bare.path());
         let read = run("read", root.path());
-        let mut fill =
-            std::fs::File::create(root.path().join(storage::GIT_VOLUME).join("fill")).unwrap();
-        let chunk = [0_u8; 1 << 20];
-        let filled = (0..=crate::tools::types::SCRATCH_BYTES / chunk.len() as u64)
-            .find_map(|_| std::io::Write::write_all(&mut fill, &chunk).err())
-            .expect("the view volume must be bounded");
-        drop(fill);
+        storage::exhaust_git_storage(&volume[0])
+            .expect("the Git view volume must be exhausted before the full-volume run");
         let exhausted = run("full", root.path());
         let after = control_root();
         drop(volume);
         let detached = reactor.block_on(storage::cleanup_storage(root.path()));
+        detach.armed = false;
         let mounted = storage::storage_mounted(root.path());
         for (phase, output) in [("bare", &refused), ("read", &read), ("full", &exhausted)] {
             assert!(
@@ -1867,7 +1886,6 @@ mod tests {
             crate::test_process::assert_single_test_completed(&output.stdout, "native git profile");
             assert!(output.stderr.is_empty());
         }
-        assert_eq!(filled.raw_os_error(), Some(nix::libc::ENOSPC));
         assert_eq!(before, after, "the control root must stay unchanged");
         detached.unwrap();
         assert!(!mounted.unwrap());
