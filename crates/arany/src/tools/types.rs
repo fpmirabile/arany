@@ -813,6 +813,8 @@ pub struct ToolLimits {
     pub max_processes: u32,
     #[serde(default = "one_job", skip_serializing_if = "is_one_job")]
     pub build_jobs: u32,
+    #[serde(default = "one_job", skip_serializing_if = "is_one_job")]
+    pub build_cpu_cores: u32,
     pub scratch_bytes: u64,
     pub project_bytes: u64,
     pub cache_requested_bytes: u64,
@@ -841,6 +843,8 @@ pub struct ToolResourceSettings {
     pub build_processes: u32,
     #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
     pub build_jobs: Option<u32>,
+    #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
+    pub build_cpu_cores: Option<u32>,
     pub build_project_bytes: u64,
     pub build_cache_bytes: u64,
 }
@@ -853,6 +857,7 @@ impl Default for ToolResourceSettings {
             build_memory_bytes: MAX_BUILD_MEMORY_BYTES,
             build_processes: MAX_BUILD_PROCESSES_OR_THREADS,
             build_jobs: one_setting(),
+            build_cpu_cores: one_setting(),
             build_project_bytes: MAX_BUILD_PROJECT_BYTES,
             build_cache_bytes: MAX_BUILD_CACHE_BYTES,
         }
@@ -866,6 +871,7 @@ impl ToolResourceSettings {
             && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
             && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
             && self.build_jobs != Some(0)
+            && self.build_cpu_cores != Some(0)
             && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
             && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
             && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
@@ -909,6 +915,7 @@ impl Default for ToolLimits {
             memory_bytes: MEMORY_BYTES,
             max_processes: MAX_PROCESSES_OR_THREADS,
             build_jobs: one_job(),
+            build_cpu_cores: one_job(),
             scratch_bytes: SCRATCH_BYTES,
             project_bytes: SCRATCH_BYTES,
             cache_requested_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
@@ -930,7 +937,9 @@ impl ToolLimits {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
             && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
             && (1..=self.max_processes).contains(&self.build_jobs)
-            && (self.resource_class == ToolResourceClass::Build || self.build_jobs == one_job())
+            && self.build_cpu_cores > 0
+            && (self.resource_class == ToolResourceClass::Build
+                || self.build_jobs == one_job() && self.build_cpu_cores == one_job())
             && self.scratch_bytes == SCRATCH_BYTES
             && match self.resource_class {
                 ToolResourceClass::Default => {
