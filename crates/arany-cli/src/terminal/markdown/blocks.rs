@@ -1,5 +1,5 @@
 use super::*;
-use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 pub(super) const TAB_CELLS: usize = 4;
 
 pub(super) struct BlockLine {
@@ -9,6 +9,7 @@ pub(super) struct BlockLine {
     pub(super) padding: usize,
     pub(super) style: Modifier,
     pub(super) hidden: bool,
+    pub(super) table: Option<super::tables::Table>,
 }
 
 pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
@@ -29,23 +30,33 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
             padding: 0,
             style: Modifier::empty(),
             hidden: false,
+            table: None,
         });
         start = end + 1;
     }
     if source.split("\r\n").any(|part| part.contains('\r')) {
         return Ok(lines);
     }
-    let (mut depth, mut code) = (0, None);
-    for (index, (event, range)) in Parser::new(source).into_offset_iter().enumerate() {
+    let (mut depth, mut code, mut table) = (0, None, None::<super::tables::Table>);
+    for (index, (event, range)) in Parser::new_ext(source, Options::ENABLE_TABLES)
+        .into_offset_iter()
+        .enumerate()
+    {
         if index >= MAX_MARKDOWN_EVENTS {
             return Err(());
         }
+        if matches!(event, Event::Start(_)) && depth == MAX_MARKDOWN_DEPTH {
+            return Err(());
+        }
+        if let Some(table) = &mut table {
+            table.event(source, &event, range.clone())?;
+        }
         match event {
             Event::Start(tag) => {
-                if depth == MAX_MARKDOWN_DEPTH {
-                    return Err(());
-                }
                 match tag {
+                    Tag::Table(columns) if depth == 0 => {
+                        table = Some(super::tables::Table::new(range, columns.len())?);
+                    }
                     Tag::CodeBlock(kind) if depth == 0 => {
                         code_block(source, &mut lines, range.clone(), kind);
                         code = Some(range);
@@ -62,6 +73,11 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
                 {
                     finish_code(&mut lines, range);
                 }
+                if tag == TagEnd::Table
+                    && let Some(table) = table.take()
+                {
+                    finish_table(&mut lines, table);
+                }
             }
             Event::Text(text) if code.is_some() => {
                 code_text(source, &mut lines, range, &text);
@@ -70,6 +86,17 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
         }
     }
     Ok(lines)
+}
+
+fn finish_table(lines: &mut [BlockLine], mut table: super::tables::Table) {
+    let lines = covered(lines, table.range.clone());
+    table.range.start = lines[0].original.start;
+    table.finish();
+    for line in lines.iter_mut() {
+        line.hidden = true;
+    }
+    lines[0].hidden = false;
+    lines[0].table = Some(table);
 }
 
 fn covered(lines: &mut [BlockLine], range: Range<usize>) -> &mut [BlockLine] {

@@ -395,8 +395,7 @@ impl RunLoop<'_> {
                 intent.id,
                 serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
                 0,
-            )
-            .and_then(|input| self.integration_hook_input(input, &intent.call)) else {
+            ) else {
                 return Ok(HookFold::deny("hook input exceeds its limit", 0));
             };
             if !self.task_fits_all(
@@ -411,7 +410,6 @@ impl RunLoop<'_> {
             return Ok(HookFold::none());
         }
         let Ok(input) = pre_tool_use_input(self.session_id, config.mode(), &intent.call, intent.id)
-            .and_then(|input| self.integration_hook_input(input, &intent.call))
         else {
             return Ok(HookFold::deny("hook input exceeds its limit", 0));
         };
@@ -607,8 +605,7 @@ impl RunLoop<'_> {
                 observation.intent.id,
                 response.clone(),
                 budget,
-            )
-            .and_then(|input| self.integration_hook_input(input, call));
+            );
             let Ok(input) = input else {
                 if budget == 0 {
                     return Err(EngineError::InvalidRequest);
@@ -898,11 +895,17 @@ impl RunLoop<'_> {
     fn lifecycle_tail(&self, agent: AgentRunId, event: HookEvent) -> usize {
         let tail = if event == HookEvent::SubagentStop
             && self
-                .worker_requests
-                .lock()
-                .is_ok_and(|r| r.contains_key(&agent))
+                .ledger()
+                .view(|v| {
+                    v.runs.last().is_some_and(|r| {
+                        r.agents
+                            .iter()
+                            .any(|a| a.id == agent && a.assignment.is_some())
+                    })
+                })
+                .unwrap_or(false)
         {
-            Action::Worker { chunks: 0 }
+            Action::Worker
         } else if event == HookEvent::SubagentStop {
             Action::Child {
                 in_flight: self.ledger().in_flight_children(),
@@ -999,51 +1002,6 @@ impl RunLoop<'_> {
         Ok(reason.into())
     }
 
-    fn integration_hook_input(
-        &self,
-        input: String,
-        call: &ToolCall,
-    ) -> Result<String, ConfigError> {
-        let ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { data, .. },
-        } = call
-        else {
-            return Ok(input);
-        };
-        let paths = self
-            .ledger()
-            .view(|view| {
-                view.runs
-                    .last()
-                    .and_then(|run| {
-                        run.workers
-                            .data
-                            .iter()
-                            .find(|sealed| &sealed.reference == data)
-                    })
-                    .and_then(|sealed| match &sealed.facts {
-                        crate::session::worker::WorkerDataFacts::Changes(files) => Some(
-                            files
-                                .iter()
-                                .map(|file| file.path.clone())
-                                .collect::<Vec<_>>(),
-                        ),
-                        _ => None,
-                    })
-            })
-            .ok()
-            .flatten()
-            .ok_or(ConfigError::Limit("sealed hook files"))?;
-        let mut input: serde_json::Value =
-            serde_json::from_str(&input).map_err(|_| ConfigError::Limit("hook input"))?;
-        input["tool_input"]["files"] = serde_json::json!(paths);
-        let input = input.to_string();
-        if input.len() > MAX_HOOK_INPUT_BYTES {
-            return Err(ConfigError::Limit("32 KiB hook input"));
-        }
-        Ok(input)
-    }
-
     fn task_fits_all(
         &self,
         runtime: &ToolRuntime,
@@ -1072,8 +1030,13 @@ impl RunLoop<'_> {
     > {
         Ok(match clock {
             HookClock::Pause(pause) => {
-                let (observation, segment, exhausted, _) =
-                    Box::pin(self.dispatch_effect(runtime, hook_intent, Some(pause))).await?;
+                let (observation, segment, exhausted, _) = Box::pin(self.dispatch_effect(
+                    runtime,
+                    hook_intent,
+                    Some(pause),
+                    &self.controls.cancellation,
+                ))
+                .await?;
                 (observation, segment, exhausted)
             }
             HookClock::Deadline(deadline) => {

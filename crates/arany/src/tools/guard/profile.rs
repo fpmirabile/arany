@@ -21,6 +21,9 @@ pub(super) struct Namespaces {
 }
 
 impl Namespaces {
+    pub(super) fn supervisor_isolated_from(&self, parent: &Self) -> bool {
+        self.mnt != parent.mnt && self.user != parent.user
+    }
     pub(super) fn read() -> Result<Self, ToolError> {
         let inode = |name| {
             std::fs::metadata(format!("/proc/self/ns/{name}"))

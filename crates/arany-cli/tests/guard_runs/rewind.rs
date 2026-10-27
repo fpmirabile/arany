@@ -834,3 +834,73 @@ async fn conversation_rewind_orders_code_and_preserves_partial_and_crash_outcome
         );
     }
 }
+
+#[tokio::test]
+async fn editor_workspace_edits_restore_from_checkpoints_after_reopen() {
+    let observed = arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "primary_after",
+    )
+    .await;
+    let state = observed.directory.path().join("state");
+    let workspace = observed.directory.path().join("workspace");
+    let engine = engine_support::open(
+        StateRoot::open_existing(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let preview = engine
+        .rewind_preview(RewindRequest {
+            session_id: observed.session,
+            workspace: workspace.clone(),
+            target: observed.view.rewinds.checkpoints[0].clone(),
+            tools: ToolGrant::Configured,
+            kept: Vec::new(),
+            overwrite: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.files().len(), 2);
+    let chained = preview
+        .plan()
+        .files
+        .iter()
+        .find(|file| file.path == "notes/1")
+        .unwrap();
+    assert_eq!(
+        chained.expected_current.as_ref().unwrap().sha256,
+        hash(b"primary 1")
+    );
+    assert_eq!(
+        chained.restore_to.as_ref().unwrap().sha256,
+        hash(b"original 1")
+    );
+    let finished = engine
+        .rewind(preview, RunCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(finished.outcome, RewindOutcome::Restored);
+    for index in 0..2 {
+        assert_eq!(
+            std::fs::read(workspace.join(format!("notes/{index}"))).unwrap(),
+            format!("original {index}").as_bytes()
+        );
+    }
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state, observed.session).await;
+    assert_eq!(&events[..observed.events.len()], observed.events.as_slice());
+    assert_eq!(
+        view.rewinds
+            .operations
+            .last()
+            .unwrap()
+            .finished
+            .as_ref()
+            .unwrap()
+            .outcome,
+        RewindOutcome::Restored
+    );
+}

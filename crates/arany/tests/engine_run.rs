@@ -35,6 +35,9 @@ mod tool_steps;
 #[path = "engine_run/performance.rs"]
 mod performance;
 
+#[path = "engine_run/shared_editors.rs"]
+mod shared_editors;
+
 #[path = "engine_run/goals.rs"]
 mod goals;
 

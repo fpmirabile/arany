@@ -4,8 +4,8 @@ use super::dispatch::Verdict;
 use super::dispatch::{NotDispatched, not_dispatched};
 use super::permission::{Permission, effective_permission_mode};
 use super::{
-    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD, StepEnd,
-    TOOL_CLEANUP_OVERHEAD, completion_deadline, timeout_limit_cause,
+    ActiveSegment, Answer, BoxedStep, Grant, IntentResult, RunLoop, STORE_ACTION_OVERHEAD,
+    TOOL_CLEANUP_OVERHEAD,
 };
 use crate::engine::ledger::{
     Action, ActiveDeadlineCause, Admission, NARROWING_EVENTS, duration_ms,
@@ -16,16 +16,13 @@ use crate::store::AdmissionKind;
 use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
 use crate::tools::types::{CommandChangeset, MAX_TOOL_RESULT_BYTES};
 use crate::tools::{
-    ActiveActionRequest, ActiveToolWindow, EffectIntent, ToolCall, ToolDisposition, ToolError,
-    ToolObservation, ToolResourceClass, ToolRuntime, ToolStep,
+    ActiveActionRequest, ActiveToolWindow, EffectIntent, ToolCall, ToolError, ToolObservation,
+    ToolResourceClass, ToolRuntime, ToolStep,
 };
 use std::time::Duration;
 use tokio::time::Instant;
 
-const EDITOR_RUNTIME_DIVISOR: u64 = 4;
 pub(super) const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
-// Cache restoration and publication need additional time within the delegation allowance.
-const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
 
 #[must_use]
 pub(super) enum AdmissionRefusal {
@@ -133,13 +130,7 @@ impl RunLoop<'_> {
         } else {
             intent.limits.runtime_ms
         };
-        let transfer_multiplier = if command && intent.limits.cache_bytes > 0
-            || matches!(
-                intent.call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            ) {
+        let transfer_multiplier = if command && intent.limits.cache_bytes > 0 {
             3
         } else {
             1
@@ -175,11 +166,7 @@ impl RunLoop<'_> {
         deadline: Instant,
     ) -> Option<EffectIntent> {
         let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        let overhead = if child.kind.is_editor() {
-            runtime.worker_reservation_overhead(&intent.call)
-        } else {
-            runtime.reservation_overhead(&intent.call)
-        };
+        let overhead = runtime.reservation_overhead(&intent.call);
         let available = deadline
             .saturating_duration_since(Instant::now())
             .saturating_sub(overhead + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD);
@@ -205,16 +192,7 @@ impl RunLoop<'_> {
         hook_events: usize,
         narrowable: bool,
     ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
-        let worker = matches!(
-            intent.target,
-            crate::session::worker::EffectTarget::WorkerView { .. }
-        ) || matches!(
-            intent.call,
-            ToolCall::PrepareWorker { .. }
-                | ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-        );
+        let worker = matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor());
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
                 // The primary keeps one Provider call for its next turn and one for a review.
@@ -260,23 +238,14 @@ impl RunLoop<'_> {
         };
         // Proposal and start each carry the complete intent and can exceed the ordinary Event bound.
         let observations = observations.saturating_add(MAX_INTENT_RECORDS_PER_TOOL);
-        let mut kind = AdmissionKind::Operation;
-        let tail = if worker {
-            let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;
-            kind = AdmissionKind::for_chunks(chunks);
-            let action = Action::Worker { chunks };
-            tail.max(
-                action
-                    .max_events_for_admitted(&self.routing.providers)
-                    .saturating_add(self.ledger().verdicts(action))
-                    .saturating_add(2 * hook_events),
-            )
-        } else {
-            tail
-        };
         let admitted = self
             .journal
-            .admit_as(self.session_id, tail, observations, kind)
+            .admit_as(
+                self.session_id,
+                tail,
+                observations,
+                AdmissionKind::Operation,
+            )
             .await;
         match admitted {
             Ok(()) => Ok(Ok(())),
@@ -411,17 +380,9 @@ impl RunLoop<'_> {
                         .map(|deadline| deadline.cause),
                 );
                 let deadline = grant.deadline().unwrap_or(*deadline);
-                let Some(mut intent) = self.researcher_intent(runtime, child, call, deadline)
-                else {
+                let Some(intent) = self.researcher_intent(runtime, child, call, deadline) else {
                     return Ok(Err(deadline_refusal));
                 };
-                if child.kind.is_editor() {
-                    self.shape_worker_intent(&mut intent, child.agent_run_id)?;
-                    self.size_editor_runtime(runtime, &mut intent, deadline);
-                    if intent.limits.runtime_ms < 1_000 {
-                        return Ok(Err(deadline_refusal));
-                    }
-                }
                 Some(intent)
             }
         };
@@ -465,36 +426,6 @@ impl RunLoop<'_> {
         Ok(Ok(intent))
     }
 
-    fn size_editor_runtime(
-        &self,
-        runtime: &ToolRuntime,
-        intent: &mut EffectIntent,
-        deadline: Instant,
-    ) {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .saturating_sub(
-                runtime.intent_reservation_overhead(intent)
-                    + TOOL_CLEANUP_OVERHEAD
-                    + STORE_ACTION_OVERHEAD,
-            );
-        let remaining = remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
-        let runtime_divisor = if intent.limits.cache_bytes > 0 {
-            EDITOR_RUNTIME_WITH_CACHE_DIVISOR
-        } else {
-            EDITOR_RUNTIME_DIVISOR
-        };
-        intent.limits.runtime_ms = intent
-            .limits
-            .runtime_ms
-            .min(u32::try_from(duration_ms(remaining) / runtime_divisor).unwrap_or(u32::MAX));
-        intent.limits.cache_transfer_ms = if intent.limits.cache_bytes > 0 {
-            intent.limits.runtime_ms
-        } else {
-            0
-        };
-    }
-
     pub(super) async fn propose_tool(&self, intent: &EffectIntent) -> Result<(), EngineError> {
         let proposed = self.ledger().view(|view| {
             view.runs.last().is_some_and(|run| {
@@ -513,17 +444,6 @@ impl RunLoop<'_> {
                 active_ceiling_ms: self.tool_ceiling(runtime, intent)?,
             })
             .await?;
-            if matches!(
-                intent.target,
-                crate::session::worker::EffectTarget::WorkerView { .. }
-            ) {
-                self.worker
-                    .lock()
-                    .await
-                    .get_mut(&intent.agent_run_id)
-                    .ok_or(EngineError::CoordinatorFailed)?
-                    .note_intent(intent);
-            }
         }
         Ok(())
     }
@@ -557,7 +477,14 @@ impl RunLoop<'_> {
             &intent.call,
             post_call.as_ref().unwrap_or(&intent.call),
         );
-        let action_ms = if intent.agent_run_id == self.primary_id {
+        let editor = self.ledger().view(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.agents
+                    .iter()
+                    .any(|agent| agent.id == intent.agent_run_id && agent.assignment.is_some())
+            })
+        })?;
+        let action_ms = if intent.agent_run_id == self.primary_id || editor {
             tool_action_ms(runtime, intent)
                 .saturating_add(pre_ms)
                 .saturating_add(post_ms)
@@ -578,10 +505,7 @@ impl RunLoop<'_> {
         };
         let mut intents = Vec::with_capacity(calls.len());
         for call in calls {
-            let mut intent = runtime.intent(self.run_id, child.agent_run_id, call.clone());
-            if child.kind.is_editor() {
-                self.shape_worker_intent(&mut intent, child.agent_run_id)?;
-            }
+            let intent = runtime.intent(self.run_id, child.agent_run_id, call.clone());
             let permission = self
                 .permission(grant, runtime, &intent.call)
                 .narrow_terminal(self.terminal_mode(), &intent.call);
@@ -612,10 +536,10 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
     ) -> Result<(), EngineError> {
+        let agent_run_id = intent.agent_run_id;
         let permission = self
             .permission(grant, runtime, &intent.call)
             .narrow_terminal(self.terminal_mode(), &intent.call);
-        let agent_run_id = intent.agent_run_id;
         let verdict =
             effective_permission_mode(runtime.permissions(), grant).map(|mode| PermissionVerdict {
                 host: None,
@@ -641,14 +565,6 @@ impl RunLoop<'_> {
             verdict,
         })
         .await?;
-        if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(&intent);
-        }
         self.append(Event::ToolFinished {
             run_id: self.run_id,
             agent_run_id,
@@ -727,10 +643,8 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
-        let agent_run_id = intent.agent_run_id;
         let permission = self.permission(grant, runtime, &intent.call);
         let mut narrowed = None;
-        let mut candidate = None;
         let verdict = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable, None)
             .await?
@@ -743,19 +657,6 @@ impl RunLoop<'_> {
                 return Ok(Err(StopCause::ToolRefused(cause)));
             }
         };
-        if matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor()) {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .note_intent(match &verdict {
-                    Verdict::Dispatch { intent, .. } => intent,
-                    Verdict::Deny(answer) | Verdict::Narrow(answer, _) => {
-                        &answer.observation.intent
-                    }
-                });
-        }
         let mut answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
@@ -769,62 +670,9 @@ impl RunLoop<'_> {
                 Grant::Primary { .. } => {
                     self.dispatch_primary(runtime, intent, queue_pause).await?
                 }
-                Grant::Researcher {
-                    child, deadline, ..
-                } => {
-                    let deadline = grant.deadline().unwrap_or(*deadline);
-                    let active_deadline = match grant {
-                        Grant::Researcher {
-                            active_deadline, ..
-                        } => active_deadline.as_ref(),
-                        Grant::Primary { .. } => None,
-                    };
-                    let cancellation = RunCancellation::new();
-                    let mut parent = self.controls.cancellation.clone();
-                    let mut timed_out = false;
-                    let execution = async {
-                        let _active_work = self.ledger().active_work();
-                        if child.kind.is_editor() {
-                            let (observation, pending) = self
-                                .dispatch_worker(runtime, intent, cancellation.clone())
-                                .await?;
-                            candidate = pending;
-                            Ok::<_, EngineError>(observation)
-                        } else {
-                            Ok(runtime.execute(intent, cancellation.clone()).await)
-                        }
-                    };
-                    tokio::pin!(execution);
-                    let mut observation = tokio::select! {
-                        biased;
-                        result = &mut execution => result?,
-                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
-                        () = async {
-                            match active_deadline {
-                                Some(deadline) => deadline.elapsed().await,
-                                None => tokio::time::sleep_until(deadline).await,
-                            }
-                        } => { timed_out = true; cancellation.cancel(); execution.await? },
-                    };
-                    let stop = match completion_deadline(
-                        observation.disposition,
-                        timed_out,
-                        active_deadline.map(|deadline| deadline.cause),
-                    ) {
-                        StepEnd::Continue => None,
-                        StepEnd::Stopped(cause) => {
-                            observation.disposition = ToolDisposition::Limit;
-                            observation.limit_cause =
-                                timeout_limit_cause(active_deadline.map(|deadline| deadline.cause));
-                            Some(cause)
-                        }
-                    };
-                    Answer {
-                        checkpoint: None,
-                        observation,
-                        stop,
-                        active_time: None,
-                    }
+                Grant::Researcher { .. } => {
+                    self.dispatch_child(grant, runtime, intent, queue_pause)
+                        .await?
                 }
             },
         };
@@ -833,14 +681,6 @@ impl RunLoop<'_> {
             .await;
         self.finish_answer(&answer).await?;
         runtime.retain_spill(&answer.observation);
-        if let Some((candidate, data)) = candidate {
-            self.worker
-                .lock()
-                .await
-                .get_mut(&agent_run_id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .acknowledge(candidate, data)?;
-        }
         if let Some(active_time) = answer.active_time {
             if let Some(segment) = active_time.segment {
                 self.settle_active_segment(segment)?;

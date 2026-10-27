@@ -72,7 +72,7 @@ pub(super) fn goal_report(
         .collect();
     workers.sort_by_key(|w| {
         use crate::worker::WorkerPublication;
-        if w.publication == WorkerPublication::Unknown || w.private_outcome_unknown {
+        if w.publication == WorkerPublication::Unknown {
             0
         } else if w.publication == WorkerPublication::Confirmed && !w.verified {
             1
@@ -82,9 +82,9 @@ pub(super) fn goal_report(
             3
         }
     });
-    let (critical, workers): (Vec<_>, Vec<_>) = workers.into_iter().partition(|w| {
-        w.publication == crate::worker::WorkerPublication::Unknown || w.private_outcome_unknown
-    });
+    let (critical, workers): (Vec<_>, Vec<_>) = workers
+        .into_iter()
+        .partition(|w| w.publication == crate::worker::WorkerPublication::Unknown);
     for worker in &critical {
         push_goal_report_item(
             &mut report,
@@ -448,7 +448,11 @@ fn push_cache_facts(
         .iter()
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
-        for tool in &task_run.tools {
+        for tool in task_run
+            .tools
+            .iter()
+            .chain(task_run.agents.iter().flat_map(|a| &a.tools))
+        {
             if let Some(observation) = tool.observation.as_ref() {
                 match observation.cache_update {
                     crate::tools::CacheUpdate::Rejected => cache_rejected = true,
@@ -579,7 +583,11 @@ fn push_unresolved_tool_facts(
         .iter()
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
-        for tool in &task_run.tools {
+        for tool in task_run
+            .tools
+            .iter()
+            .chain(task_run.agents.iter().flat_map(|a| &a.tools))
+        {
             let call = &tool.intent.call;
             let label = goal_report_call_label(call);
             let Some(observation) = tool.observation.as_ref() else {
@@ -679,7 +687,11 @@ fn push_success_facts(
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
         push_definition_diagnostics(report, task_run, omitted_facts);
-        for tool in &task_run.tools {
+        for tool in task_run
+            .tools
+            .iter()
+            .chain(task_run.agents.iter().flat_map(|a| &a.tools))
+        {
             let Some(observation) = tool.observation.as_ref() else {
                 continue;
             };
