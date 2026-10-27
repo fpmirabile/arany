@@ -229,6 +229,36 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         receipt.limits.build_jobs += 1;
         assert!(!receipt.valid_for(&build));
     }
+    for cores in [0, 1, 8, u32::MAX] {
+        let mut build = intent.clone();
+        build.call = ToolCall::Command {
+            program: "cargo".into(),
+            args: vec!["build".into()],
+            cwd: String::new(),
+        };
+        build.limits.resource_class = ToolResourceClass::Build;
+        build.limits.cache_bytes = 0;
+        build.limits.cache_candidate_bytes = 0;
+        let historical = build.digest();
+        build.limits.build_cpu_cores = cores;
+        assert_eq!(build.digest() == historical, cores == 1);
+        assert_eq!(build.valid(), cores > 0);
+        let decoded: EffectIntent =
+            serde_json::from_slice(&serde_json::to_vec(&build).unwrap()).unwrap();
+        assert_eq!(decoded, build);
+        let receipt = GuardReceipt {
+            contract_version: 1,
+            intent_digest: build.digest(),
+            enforcement_digest: build.enforcement_digest,
+            limits: build.limits.clone(),
+        };
+        assert!(receipt.valid_for(&build));
+        build.limits.build_cpu_cores = if cores == 1 { 2 } else { 1 };
+        assert!(!receipt.valid_for(&build));
+    }
+    let mut invalid_default = intent.clone();
+    invalid_default.limits.build_cpu_cores = 2;
+    assert!(!invalid_default.valid());
     let mut profile_mismatch = observation.clone();
     let Some(Attestation::Guard(receipt)) = &mut profile_mismatch.attestation else {
         unreachable!()

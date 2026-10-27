@@ -269,12 +269,14 @@ fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
     };
     let started_payload = started.payload().expect("payload");
     assert!(!started_payload.contains("build_jobs"));
+    assert!(!started_payload.contains("build_cpu_cores"));
     let mut parallel = started.clone();
     if let Event::GoalStarted {
         resource_settings, ..
     } = &mut parallel
     {
         resource_settings.build_jobs = Some(2);
+        resource_settings.build_cpu_cores = Some(8);
     }
     let bytes = parallel.payload().unwrap();
     assert_eq!(
