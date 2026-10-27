@@ -32,14 +32,12 @@ The [release-policy workflow](../../.github/workflows/release-policy.yml) runs o
 - A Bubblewrap fixture binding only `/etc/passwd` must make the generated `/etc` traversable before the UID switch, and must give the second UID an accessible synthetic `XDG_STATE_HOME`.
 - Offline setup fixtures can serve compiled HTTPS endpoints from a private network namespace with hosts-only resolution and a test CA under ordinary TLS validation. Use `s_server -quiet` with a bounded parser and static reply; `-HTTP` did not answer the Responses POST. This proves synthetic flow, not live models.
 - The offline ChatGPT journeys own first sign-in and checked-turn coverage; a matching mock URL or unsigned token is not OAuth evidence.
-- Run Unix state-owner tests with `rtk proxy cargo test`; the `rtk cargo test` shortcut denies loopback binds and remaps `/tmp` ownership, which causes false failures.
-- On macOS, run private-state fixtures under an admitted physical root: `rtk proxy env TMPDIR=/private/tmp cargo test --locked --offline --workspace`. Do not weaken the `/tmp` and `/var` rejection for fixtures.
+- On macOS, run private-state fixtures under an admitted physical root: `env TMPDIR=/private/tmp cargo test --locked --offline --workspace`. Do not weaken the `/tmp` and `/var` rejection for fixtures.
 - Run macOS liveness-lock and drop corpora in an isolated, exactly-one-test helper. A concurrent fork can hold the same `flock` until exec, so parent drop is not immediate unlock evidence.
 - Linux tests that enable write-capable Engine Tools or the account-wide Workspace lock must use the private passwd-home account fixture, following [account-root identity](../../docs/specs/credentials.md#account-scope-and-identity); a `HOME` override alone is insufficient isolation.
 - Native macOS Keychain evidence uses the [admitted debug fixture](../../docs/specs/credentials.md#account-scope-and-identity) with a privately named synthetic Keychain, never `login.keychain` and never a search-list change.
 - Reset an accepted socket to blocking mode before timeout-bounded reads when its listener is nonblocking; macOS keeps the nonblocking mode on accepted streams.
 - Keep a fixture's initial socket peer alive until the helper acknowledges the next stage; Darwin returns `EINVAL` for `SO_RCVTIMEO` on a disconnected Unix socket.
-- Run `cargo deny check` through `rtk proxy`; the direct wrapper can map the advisory lock read-only and report a false policy failure.
 - For local PTY probes use `script`, not a `python3` child: the latter reports root-owned ancestors as UID 65534 and fails private-state admission.
 - With GNU `timeout` supervising an interactive `script`, use `--foreground`, and keep a separate bounded parent wait with descendant cleanup.
 - A full first-run setup PTY must not write the fixed default OS credential slot of a live Secret Service or Keychain. Isolate the native service and account, since a private State directory alone does not.
