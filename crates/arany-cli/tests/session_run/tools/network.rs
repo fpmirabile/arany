@@ -377,6 +377,8 @@ const PAGE_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[path = "network/web_journeys.rs"]
 mod web_journeys;
+#[path = "network/mcp_journeys.rs"]
+mod mcp_journeys;
 
 struct PageServer {
     port: u16,

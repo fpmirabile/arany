@@ -748,7 +748,7 @@ fn unit_command(
             .arg(socket)
             .arg(crate::tools::network::PROXY_SOCKET_TARGET);
     }
-    if intent.call.is_web()
+    if (intent.call.is_web() || intent.call.is_mcp() && proxy_socket.is_some())
         && let Some(bundle) = super::super::web::ca_bundle()
     {
         command
@@ -776,13 +776,18 @@ async fn settle_launch(
         bool,
     ),
 ) -> Result<ToolObservation, ToolError> {
-    let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
+    let cleanup_deadline = tokio::time::Instant::now() + super::TEARDOWN_WAIT;
+    let cleanup = tokio::time::timeout_at(cleanup_deadline, unit.stop()).await;
     if !matches!(cleanup, Ok(Ok(()))) {
         unit.kill_group();
     }
     let _ = child.start_kill();
-    let reaped = tokio::time::timeout_at(deadline, child.wait()).await;
-    let drained = match tokio::time::timeout_at(deadline, drain_stderr(stderr_task, deadline)).await
+    let reaped = tokio::time::timeout_at(cleanup_deadline, child.wait()).await;
+    let drained = match tokio::time::timeout_at(
+        cleanup_deadline,
+        drain_stderr(stderr_task, cleanup_deadline),
+    )
+    .await
     {
         Ok(drained) => drained,
         Err(_) => {
@@ -791,11 +796,11 @@ async fn settle_launch(
             None
         }
     };
-    if matches!(cleanup, Ok(Ok(()))) {
+    if matches!(cleanup, Ok(Ok(()))) && matches!(reaped, Ok(Ok(_))) {
         permit
             .terminated()
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
-        tokio::time::timeout_at(deadline, permit.cleanup())
+        tokio::time::timeout_at(cleanup_deadline, permit.cleanup())
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
@@ -988,9 +993,36 @@ async fn read_effect_observation<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+// The search key or MCP token reaches the Guard over the private task pipe only; it is never part of an intent, Event or digest.
+// `renewing` is set while a token renewal may be consuming the refresh token, so a stop in that window is an unknown outcome.
+async fn secret_for(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    renewing: &mut bool,
+) -> Result<Option<String>, ToolError> {
+    match runtime.config.remote_server(&intent.call) {
+        Some(server)
+            if server.auth.is_some()
+                && intent.limits.network == crate::tools::types::NetworkGrant::Proxy =>
+        {
+            use crate::tools::mcp::oauth::Access;
+            let access =
+                crate::tools::mcp::oauth::access_token(server, &runtime.workspace, renewing).await;
+            Ok(match access {
+                Access::Token(token) => Some(token),
+                Access::Unauthorized => None,
+                Access::Unconfirmed => Some(crate::tools::mcp::RENEWAL_UNCONFIRMED.to_owned()),
+            })
+        }
+        Some(_) => Ok(None),
+        None => super::super::web::secret(&runtime.config, &intent.call),
+    }
+}
+
 fn task_bytes(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
+    secret: Option<String>,
     cache: Option<super::BuildCacheTransfer>,
     parent_namespaces: profile::Namespaces,
 ) -> Result<Vec<u8>, ToolError> {
@@ -1005,7 +1037,7 @@ fn task_bytes(
         intent: intent.clone(),
         cache,
         hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
-        secret: super::super::web::secret(&runtime.config, &intent.call)?,
+        secret,
         hidden: runtime.hidden_paths(&intent.call),
         parent_namespaces,
     })
@@ -1085,7 +1117,18 @@ pub(super) async fn execute_inner(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let go_cancellation = cancellation.clone();
-    let execution = Box::pin(async {
+    let mut execution = Box::pin(async {
+        let secret = {
+            let renewal = secret_for(runtime, intent, &mut *dispatched);
+            tokio::pin!(renewal);
+            tokio::select! {
+                secret = &mut renewal => secret?,
+                () = crate::fault::launcher_kill(&intent.call) => {
+                    let _ = child.start_kill();
+                    renewal.await?
+                }
+            }
+        };
         let ready_bytes = prepare_ready(
             runtime,
             intent,
@@ -1094,6 +1137,7 @@ pub(super) async fn execute_inner(
             (&mut stdin, &mut stdout),
             (preparation_deadline, go_deadline),
             parent_namespaces.clone(),
+            secret,
         )
         .await?;
         admit_ready(&mut unit, &ready_bytes, intent, &parent_namespaces).await?;
@@ -1151,6 +1195,16 @@ pub(super) async fn execute_inner(
         });
         super::discovery_work(intent, capture).await
     });
+    let execution = async move {
+        tokio::select! {
+            result = &mut execution => result,
+            capped_deadline = crate::fault::action_deadline_cap(&intent.call, deadline) => {
+                tokio::time::timeout_at(capped_deadline, &mut execution)
+                    .await
+                    .unwrap_or(Err(ToolError::Limit))
+            }
+        }
+    };
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Operation),
@@ -1182,7 +1236,7 @@ async fn finish_proxy(
     };
     let refusals = proxy.finish().await;
     settled.and_then(|mut observation| {
-        if !observation.intent.call.is_web() {
+        if matches!(observation.intent.call, ToolCall::Command { .. }) {
             crate::tools::network::annotate(&mut observation, refusals)?;
         }
         Ok(observation)
@@ -1199,6 +1253,11 @@ fn proxy_for(
     }
     let grant = if intent.call.is_web() {
         super::super::web::grant(&runtime.config, &intent.call)?
+    } else if let Some(server) = runtime.config.remote_server(&intent.call) {
+        crate::tools::network::Network {
+            allow: vec![server.host().ok_or(ToolError::Configuration)?],
+            deny: Vec::new(),
+        }
     } else {
         runtime
             .config
@@ -1779,9 +1838,10 @@ async fn prepare_ready(
     ),
     (preparation_deadline, go_deadline): (tokio::time::Instant, tokio::time::Instant),
     parent_namespaces: profile::Namespaces,
+    secret: Option<String>,
 ) -> Result<Vec<u8>, ToolError> {
     let cache_transfer = cache.map(|session| session.transfer.clone());
-    let task = task_bytes(runtime, intent, cache_transfer, parent_namespaces)?;
+    let task = task_bytes(runtime, intent, secret, cache_transfer, parent_namespaces)?;
     let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {
         stdin
             .write_all(&task)

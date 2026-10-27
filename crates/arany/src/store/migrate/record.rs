@@ -24,11 +24,12 @@ pub struct RecordFormat {
 }
 
 // Formats of the records the library owns; the CLI owns the others.
-pub const RECORD_FORMATS: [&RecordFormat; 4] = [
+pub const RECORD_FORMATS: [&RecordFormat; 5] = [
     &crate::tools::config::TOOLS_CONFIG,
     &crate::tools::WORKSPACE_PERMISSIONS,
     &crate::tools::unguarded_rules::UNGUARDED_COMMANDS,
     &crate::provider::PROVIDER_PROFILES,
+    &crate::tools::MCP_OAUTH,
 ];
 
 impl RecordFormat {

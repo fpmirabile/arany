@@ -31,7 +31,7 @@ const CA_BUNDLES: [&str; 4] = [
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
-        ToolCall::WebFetch { url } => url.len() <= MAX_URL_BYTES && target(url).is_some(),
+        ToolCall::WebFetch { url } => valid_endpoint(url),
         ToolCall::WebSearch { query } => {
             !query.trim().is_empty()
                 && query.len() <= MAX_QUERY_BYTES
@@ -78,11 +78,17 @@ pub(super) fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+pub(super) fn valid_endpoint(url: &str) -> bool {
+    url.len() <= MAX_URL_BYTES && target(url).is_some()
+}
+
+pub(super) fn endpoint_host(url: &str) -> Option<String> {
+    Some(target(url)?.host_str()?.trim_matches(['[', ']']).to_owned())
+}
+
 pub(super) fn host(call: &ToolCall) -> Option<String> {
     match call {
-        ToolCall::WebFetch { url } => {
-            Some(target(url)?.host_str()?.trim_matches(['[', ']']).to_owned())
-        }
+        ToolCall::WebFetch { url } => endpoint_host(url),
         _ => None,
     }
 }
@@ -92,15 +98,27 @@ impl super::ToolRuntime {
         self.guard_available && self.config.allows_research_web(call)
     }
 
+    // Remote MCP carries credentials and the proxy class, which only the primary holds.
+    pub(crate) fn is_remote_mcp(&self, call: &ToolCall) -> bool {
+        self.config.remote_server(call).is_some()
+    }
+
     pub(crate) fn lists_web_host(&self, call: &ToolCall) -> bool {
         self.config.lists_web_host(call)
     }
 
     // Web calls carry the proxy class like commands; their digest binds it without any process profile.
-    pub(crate) fn bind_web_network(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
-        if self.worker.is_none() && self.config.admits_web(&intent.call) {
+    // A remote MCP call keeps its process-class digest, since it runs as an MCP effect.
+    pub(crate) fn bind_egress(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
+        if self.worker.is_some() {
+            return Ok(());
+        }
+        if self.config.admits_web(&intent.call) {
             intent.limits.network = NetworkGrant::Proxy;
             intent.enforcement_digest = self.web_digest(intent)?;
+        } else if self.config.remote_server(&intent.call).is_some() {
+            intent.limits.network = NetworkGrant::Proxy;
+            intent.enforcement_digest = self.build_jobs_digest(intent)?;
         }
         Ok(())
     }
@@ -257,7 +275,7 @@ fn failure(message: &str) -> Result<String, ToolError> {
     Ok(json!({ "error": message }).to_string())
 }
 
-fn client(https: bool, timeout: Duration) -> Result<reqwest::Client, ToolError> {
+pub(super) fn client(https: bool, timeout: Duration) -> Result<reqwest::Client, ToolError> {
     let mut builder = crate::provider::http_client(timeout)
         .proxy(reqwest::Proxy::all(PROXY_ENDPOINT).map_err(|_| ToolError::Configuration)?);
     if https {

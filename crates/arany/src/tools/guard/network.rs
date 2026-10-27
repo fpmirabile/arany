@@ -2,11 +2,16 @@ use super::{Task, ToolError};
 use crate::tools::types::{NetworkGrant, ToolLimits};
 
 pub(super) fn validate(task: &Task) -> Result<(), ToolError> {
+    let call = &task.intent.call;
+    let admitted = if call.is_web() {
+        task.config.admits_web(call)
+    } else if call.is_mcp() {
+        task.config.remote_server(call).is_some()
+    } else {
+        task.config.network.is_some()
+    };
     if task.intent.limits.network == NetworkGrant::Proxy
-        && (!(task.intent.call.is_web() || task.config.network.is_some())
-            || task.intent.call.is_web() && !task.config.admits_web(&task.intent.call)
-            || task.worker.is_some()
-            || cfg!(not(target_os = "linux")))
+        && (!admitted || task.worker.is_some() || cfg!(not(target_os = "linux")))
     {
         return Err(ToolError::Configuration);
     }

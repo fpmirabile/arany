@@ -590,7 +590,9 @@ impl RunLoop<'_> {
             decision = Decision::Ask;
             approval = Some(ApprovalMode::Request);
         }
-        if researcher && call.is_web() && !runtime.allows_research_web(call) {
+        if researcher
+            && (call.is_web() && !runtime.allows_research_web(call) || runtime.is_remote_mcp(call))
+        {
             decision = Decision::Deny;
             basis = PermissionSource::PinnedGrant;
             approval = None;

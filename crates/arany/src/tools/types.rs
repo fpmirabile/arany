@@ -590,6 +590,10 @@ impl ToolCall {
         self.facts().family == Family::Web
     }
 
+    pub(crate) fn is_mcp(&self) -> bool {
+        self.facts().family == Family::Mcp
+    }
+
     pub(crate) fn is_git(&self) -> bool {
         self.facts().family == Family::Git
     }
@@ -845,6 +849,8 @@ impl EffectIntent {
                     ToolCall::Command { .. }
                         | ToolCall::WebFetch { .. }
                         | ToolCall::WebSearch { .. }
+                        | ToolCall::McpList { .. }
+                        | ToolCall::McpCall { .. }
                 ) && self.target == EffectTarget::Workspace)
             && self
                 .host

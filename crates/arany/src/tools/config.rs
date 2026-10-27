@@ -6,6 +6,7 @@ use crate::store::{RecordFormat, RecordKind, StateRoot};
 use crate::tools::process::MAX_ARGUMENT_BYTES;
 use crate::validate::{digest, hex_digest, valid_digest, valid_name, valid_relative};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const MAX_WORKSPACE_PATHS: usize = 32;
@@ -134,9 +135,54 @@ pub(crate) struct Skill {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Server {
     pub name: String,
-    pub program: Program,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<Program>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpAuth>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum McpAuth {
+    Oauth,
+}
+
+impl Server {
+    // Local servers run a pinned program; remote ones speak streamable HTTP through the egress proxy, which is Linux-only.
+    fn valid_transport(&self) -> bool {
+        match (&self.program, &self.url) {
+            (Some(_), None) => self.auth.is_none(),
+            (None, Some(url)) => {
+                cfg!(target_os = "linux")
+                    && self.args.is_empty()
+                    && super::web::valid_endpoint(url)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn host(&self) -> Option<String> {
+        super::web::endpoint_host(self.url.as_deref()?)
+    }
+
+    pub(super) fn catalog_row(&self, protocol: &str) -> Value {
+        let remote = self.url.is_some();
+        let protocol = if remote {
+            super::catalog::REMOTE_MCP_PROTOCOL
+        } else {
+            protocol
+        };
+        let mut row = serde_json::json!({"name":self.name,"tools":self.tools,"protocol":protocol});
+        if remote {
+            row["transport"] = "https".into();
+        }
+        row
+    }
 }
 
 pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
@@ -171,6 +217,15 @@ impl Config {
             return Err(ToolError::Configuration);
         }
         Ok(config)
+    }
+
+    pub(crate) fn remote_server(&self, call: &ToolCall) -> Option<&Server> {
+        let (ToolCall::McpList { server } | ToolCall::McpCall { server, .. }) = call else {
+            return None;
+        };
+        self.mcp
+            .iter()
+            .find(|candidate| &candidate.name == server && candidate.url.is_some())
     }
 
     pub(crate) fn validate(&self) -> Result<(), ToolError> {
@@ -225,7 +280,7 @@ impl Config {
         for program in self
             .commands
             .iter()
-            .chain(self.mcp.iter().map(|server| &server.program))
+            .chain(self.mcp.iter().filter_map(|server| server.program.as_ref()))
         {
             program.validate()?;
         }
@@ -247,6 +302,7 @@ impl Config {
                 || server.tools.iter().any(|tool| {
                     tool.is_empty() || tool.len() > 128 || tool.chars().any(char::is_control)
                 })
+                || !server.valid_transport()
                 || server.args.len() > 64
                 || server
                     .args
@@ -274,7 +330,7 @@ impl Config {
         for names in [
             self.commands
                 .iter()
-                .chain(self.mcp.iter().map(|server| &server.program))
+                .chain(self.mcp.iter().filter_map(|server| server.program.as_ref()))
                 .map(|item| &item.name)
                 .collect::<Vec<_>>(),
             self.skills.iter().map(|item| &item.name).collect(),
@@ -290,7 +346,7 @@ impl Config {
     pub(super) fn resource_paths(&self) -> impl Iterator<Item = &str> {
         self.commands
             .iter()
-            .chain(self.mcp.iter().map(|server| &server.program))
+            .chain(self.mcp.iter().filter_map(|server| server.program.as_ref()))
             .chain(self.git.iter())
             .flat_map(|program| {
                 std::iter::once(program.executable.as_str())

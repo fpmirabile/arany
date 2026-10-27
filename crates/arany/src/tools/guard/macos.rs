@@ -585,7 +585,7 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
         .config
         .commands
         .iter()
-        .chain(task.config.mcp.iter().map(|server| &server.program))
+        .chain(task.config.mcp.iter().filter_map(|server| server.program.as_ref()))
     {
         program.verify()?;
         if system_program(&program.executable)? {

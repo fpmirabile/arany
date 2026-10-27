@@ -246,8 +246,68 @@ fn researchers_need_an_explicit_grant_and_cannot_widen_parent_domains() {
     }
     let before = runtime.config.digest();
     let mut intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), listed);
-    runtime.bind_web_network(&mut intent).unwrap();
+    runtime.bind_egress(&mut intent).unwrap();
     assert_eq!(intent.limits.network, crate::tools::NetworkGrant::Proxy);
     assert_eq!(before, runtime.config.digest());
     assert!(!runtime.config.lists_web_host(&fetch("https://elsewhere.example/")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn remote_mcp_servers_need_exactly_one_transport_and_bind_the_proxy() {
+    let parse = |mcp: serde_json::Value| {
+        Config::parse(
+            &serde_json::to_vec(&json!({
+                "version": 1, "workspace_paths": ["."], "write": false,
+                "commands": [], "skills": [], "mcp": mcp,
+            }))
+            .unwrap(),
+        )
+    };
+    let remote = |url: &str| json!({"name": "remote", "tools": ["echo"], "url": url, "auth": "oauth"});
+    let config = parse(json!([remote("https://mcp.example.com/mcp")])).unwrap();
+    let call = ToolCall::McpList {
+        server: "remote".into(),
+    };
+    assert_eq!(
+        config.remote_server(&call).and_then(|server| server.host()),
+        Some("mcp.example.com".to_owned())
+    );
+    assert!(
+        config
+            .remote_server(&ToolCall::McpList {
+                server: "other".into()
+            })
+            .is_none()
+    );
+    assert!(parse(json!([remote("http://127.0.0.1:9/mcp")])).is_ok());
+    for rejected in [
+        remote("http://mcp.example.com/mcp"),
+        remote("https://mcp.example.com:8443/mcp"),
+        remote("https://10.0.0.1/mcp"),
+        json!({"name": "remote", "tools": ["echo"]}),
+        json!({"name": "remote", "tools": ["echo"], "url": "https://mcp.example.com/",
+            "args": ["--flag"]}),
+        json!({"name": "remote", "tools": ["echo"], "url": "https://mcp.example.com/",
+            "auth": "basic"}),
+    ] {
+        assert!(parse(json!([rejected])).is_err());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn remote_mcp_is_identified_so_children_can_be_denied() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = crate::tools::tests::config_value();
+    config["mcp"] = json!([{"name": "remote", "tools": ["echo"],
+        "url": "https://mcp.example.com/mcp", "auth": "oauth"}]);
+    let runtime = crate::tools::tests::in_process_runtime(temp.path(), config);
+    let list = ToolCall::McpList {
+        server: "remote".into(),
+    };
+    assert!(runtime.is_remote_mcp(&list));
+    assert!(!runtime.is_remote_mcp(&ToolCall::McpList {
+        server: "other".into()
+    }));
 }
