@@ -82,7 +82,7 @@ async fn reader_failure_notifies_the_server_of_eof() {
     assert!(matches!(inbound.try_recv(), Ok(ClientMessage::Eof)));
 }
 #[tokio::test]
-async fn bounded_reader_backpressures_after_64_pending_requests() {
+async fn bounded_reader_backpressures_after_inbound_capacity_pending_requests() {
     let _deadline = deadline();
     use std::{future::Future, task::Poll};
     let (input, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
@@ -91,12 +91,12 @@ async fn bounded_reader_backpressures_after_64_pending_requests() {
     let mut reader = std::pin::pin!(read_messages(bytes.as_slice(), input, outbound));
     let ready = std::future::poll_fn(|cx| Poll::Ready(reader.as_mut().poll(cx).is_ready())).await;
     assert!(!ready);
-    assert_eq!(inbound.len(), 64);
+    assert_eq!(inbound.len(), INBOUND_CAPACITY);
     inbound.recv().await.unwrap();
     let ready = std::future::poll_fn(|cx| Poll::Ready(reader.as_mut().poll(cx).is_ready())).await;
     assert!(!ready, "EOF also waits behind admitted requests");
-    assert_eq!(inbound.len(), 64);
-    for _ in 0..64 {
+    assert_eq!(inbound.len(), INBOUND_CAPACITY);
+    for _ in 0..INBOUND_CAPACITY {
         inbound.recv().await.unwrap();
     }
     reader.await.unwrap();
@@ -104,7 +104,7 @@ async fn bounded_reader_backpressures_after_64_pending_requests() {
 }
 
 #[tokio::test]
-async fn bounded_writer_preserves_messages_and_backpressures_at_256() {
+async fn bounded_writer_preserves_messages_and_backpressures_at_outbound_capacity() {
     let _deadline = deadline();
     use std::{future::Future, task::Poll};
     let (outbound, writer) = mpsc::channel(OUTBOUND_CAPACITY);

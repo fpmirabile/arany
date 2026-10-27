@@ -100,6 +100,11 @@ async fn eof_during_a_turn_cancels_and_closes_the_engine() {
 async fn reader_failure_during_a_turn_cancels_and_closes_the_engine() {
     let _deadline = deadline();
     waiting_turn(TurnStop::ReaderFailure).await;
+}
+
+#[tokio::test]
+async fn unsubscribe_during_a_turn_cancels_and_closes_the_engine() {
+    let _deadline = deadline();
     waiting_turn(TurnStop::Close).await;
 }
 
@@ -367,7 +372,7 @@ fn thread_capacity_refuses_new_threads_and_preserves_loaded_threads() {
         "threadLimit"
     );
     assert!(threads.check_capacity(first).is_ok());
-    assert_eq!(threads.map.len(), 64);
+    assert_eq!(threads.map.len(), threads::MAX_THREADS);
 }
 
 #[tokio::test]
@@ -773,7 +778,7 @@ async fn session_lifecycle_releases_capacity_and_pages_only_workspace_metadata()
             );
         }
         let mut ids = Vec::new();
-        for _ in 0..64 {
+        for _ in 0..threads::MAX_THREADS {
             input.send(thread_start(&workspace)).await.unwrap();
             ids.push(next(&mut output).await["result"]["thread"]["id"].clone());
             next(&mut output).await;
@@ -827,7 +832,10 @@ async fn session_lifecycle_releases_capacity_and_pages_only_workspace_metadata()
             .await
             .unwrap();
         let second = next(&mut output).await;
-        assert_eq!(second["result"]["data"].as_array().unwrap().len(), 63);
+        assert_eq!(
+            second["result"]["data"].as_array().unwrap().len(),
+            threads::MAX_THREADS + 1 - 2
+        );
         assert!(second["result"]["nextCursor"].is_null());
         let mut listed = std::collections::BTreeSet::new();
         for entry in page["data"]
