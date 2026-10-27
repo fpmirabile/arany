@@ -1043,3 +1043,10 @@ impl DisplayChunk {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod compaction_tests;
+#[cfg(test)]
+mod defaults_tests;
+#[cfg(test)]
+mod provider_call_tests;
