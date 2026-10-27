@@ -3504,7 +3504,11 @@ async fn next_permission_update(
         .unwrap()
         .unwrap();
     if count == 0 {
-        let transport = tokio::time::timeout(RPC_WAIT, task).await;
+        assert!(
+            task.is_finished(),
+            "{case:?}: unexpected ACP EOF; transport still pending"
+        );
+        let transport = task.await;
         panic!("{case:?}: unexpected ACP EOF; transport={transport:?}");
     }
     let value = serde_json::from_str(&line).unwrap();
