@@ -1131,7 +1131,6 @@ struct GoGate {
 
 async fn read_command_windows(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
-    runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<Option<crate::tools::output::CommandWindows>, ToolError> {
     if matches!(intent.call, ToolCall::Command { .. })
@@ -1160,7 +1159,6 @@ async fn read_command_windows(
 async fn worker_receipt(
     mut stdin: tokio::process::ChildStdin,
     stdout: &mut BufReader<tokio::process::ChildStdout>,
-    runtime: &ToolRuntime,
     intent: &EffectIntent,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     git_stage: Option<super::GitStage>,
@@ -1171,7 +1169,7 @@ async fn worker_receipt(
         .await
         .map_err(|_| ToolError::Operation)?;
     drop(stdin);
-    let windows = read_command_windows(stdout, runtime, intent).await?;
+    let windows = read_command_windows(stdout, intent).await?;
     let mut frame = None;
     let observation = if git_stage == Some(super::GitStage::Plan) {
         let (observation, framed) = super::read_plan_report(stdout, intent).await?;
@@ -1285,7 +1283,7 @@ async fn execute_worker(
             );
             tokio::time::timeout_at(
                 payload_deadline,
-                worker_receipt(stdin, &mut stdout, runtime, intent, control, git_stage),
+                worker_receipt(stdin, &mut stdout, intent, control, git_stage),
             )
             .await
             .map_err(|_| ToolError::Limit)?
