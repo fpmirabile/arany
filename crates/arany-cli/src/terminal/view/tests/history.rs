@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn container_projection_matches_fullscreen_and_pager_frames_without_color() {
+    let source = "> - alpha beta gamma delta\n>\n>   ~~~rust\n>   code\n>   ~~~\n\n-";
+    for width in [16, 40, 50, 80, 120] {
+        for kind in [
+            MessageKind::Assistant,
+            MessageKind::Preview,
+            MessageKind::Incomplete,
+        ] {
+            let rows = crate::terminal::history::display_rows(kind, source, width, None);
+            for pager in [false, true] {
+                let mut terminal = Terminal::new(TestBackend::new(width as u16, 24)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let palette = Palette { color: false };
+                        if pager {
+                            draw_pager_frame(frame, &rows, "History", palette);
+                        } else {
+                            draw_history_rows(frame, frame.area(), &rows, palette);
+                        }
+                    })
+                    .unwrap();
+                for (index, row) in rows.iter().enumerate() {
+                    assert_eq!(
+                        buffer_row(terminal.backend().buffer(), index as u16).trim_end(),
+                        row.text.trim_end()
+                    );
+                }
+                let screen = (0..23)
+                    .map(|row| buffer_row(terminal.backend().buffer(), row))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(screen.contains("│ • alpha"));
+                assert!(!screen.contains("~~~"));
+            }
+        }
+    }
+}
+
+#[test]
 fn narrow_classic_history_cue_keeps_export_action_visible() {
     let width = 20;
     let status = crate::terminal::classic_history_status(width, true, false);

@@ -186,6 +186,7 @@ fn syntax_controls_limits_and_nonretaining_counts_agree() {
                     && !source.starts_with("    ")
                     && !source.contains("**")
                     && !source.contains("===")
+                    && !source.starts_with(['-', '7', '>'])
                 {
                     let expected: Vec<_> = source
                         .split('\n')
@@ -530,6 +531,8 @@ fn streaming_snapshots_replace_partial_markdown_and_keep_source_on_resize() {
         "# Result\n\n[label](https://example.test)",
         "# Result\n\n```rust&amp;lang\n  中 e\u{301} value\n```",
         "# Result\n\n| Name | Value |\n| --- | --- |\n| **first** | second |",
+        "# Result\n\n- **first**\n-\n- second\n  continued",
+        "# Result\n\n> - ~~~rust&amp;lang\n>   code\n>   ~~~",
     ] {
         for width in [16, 40, 50, 80, 120] {
             for agent in [false, true] {
@@ -642,7 +645,7 @@ fn replace_prefixes(
 fn incomplete_checkpoints_format_with_exact_classic_costs_and_withdraw_on_rejection() {
     use arany::ProviderCallDisposition;
     let source =
-        "# Result\n\n[retained](https://example.test/body)\n\n```rust&amp;lang\n  retained body";
+        "# Result\n\n[retained](https://example.test/body)\n\n> - retained **item**\n>\n>   ~~~rust&amp;lang\n>   retained body";
     let view = checkpoint_view(source);
     for width in [16, 40, 50, 80, 120] {
         let mut history = History::default();

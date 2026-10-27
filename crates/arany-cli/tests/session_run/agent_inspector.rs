@@ -643,7 +643,7 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})
                 }
                 (_, Some("child_work")) => serde_json::json!(format!(
-                    "result of {}",
+                    "result of {}\n\n> - nested **result**\n>\n>   ~~~\n>   nested code\n>   ~~~",
                     input["objective"].as_str().expect("child objective")
                 )),
                 _ => serde_json::json!("team answer"),
@@ -800,6 +800,8 @@ fn agent_chat_journey(
             "Assignment:",
             "first child task",
             "result of first child task",
+            "│ • nested result",
+            "│   nested code",
         ],
         &[primary],
     );
@@ -1079,6 +1081,8 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
         text.contains("Agent result:\r\n  result of first child task"),
         "{text}"
     );
+    assert!(text.contains("  > - nested **result**\r\n"), "{text}");
+    assert!(text.contains("  >   nested code\r\n"), "{text}");
     assert!(
         text.contains("Viewing primary; its conversation is above"),
         "{text}"

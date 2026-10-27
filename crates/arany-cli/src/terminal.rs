@@ -5283,6 +5283,36 @@ mod insert_rows_tests {
     }
 
     #[test]
+    fn classic_inserts_container_rows_once_with_the_shared_layout() {
+        use super::history::{MessageKind, display_rows};
+        use super::view::{Palette, native_line};
+        let source = "> - alpha beta gamma delta\n>\n>   ~~~\n>   code\n>   ~~~\n\n-";
+        for width in [16, 40, 50, 80, 120] {
+            let rows = display_rows(MessageKind::Assistant, source, usize::from(width), None);
+            let mut terminal = Terminal::with_options(
+                TestBackend::new(width, 8),
+                TerminalOptions {
+                    viewport: Viewport::Inline(8),
+                },
+            )
+            .unwrap();
+            let lines = rows
+                .iter()
+                .map(|row| native_line(row, width, Palette { color: false }));
+            insert_rows_scrolling_screen(&mut terminal, 8, lines).unwrap();
+            assert_eq!(
+                text_rows(terminal.backend().scrollback()),
+                rows.iter()
+                    .map(|row| row.text.trim_end().to_owned())
+                    .collect::<Vec<_>>()
+            );
+            let scrollback = text_rows(terminal.backend().scrollback()).join("\n");
+            assert_eq!(scrollback.matches("│ • alpha").count(), 1);
+            assert_eq!(scrollback.matches("code").count(), 1);
+        }
+    }
+
+    #[test]
     fn short_pane_below_row_zero_inserts_above_viewport_and_erases_it() {
         let mut backend = TestBackend::new(12, 9);
         backend.set_cursor_position((0, 1)).expect("cursor");
