@@ -478,11 +478,15 @@ fn native_journey_with_rust_sysroot(
             println!("{line}");
         }
     }
+    // The offline Cargo journey reports its own timing lines on stderr; anything else is a failure.
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.stderr.is_empty(),
-        "native journey stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.lines().all(|line| line.starts_with("offline Cargo ")),
+        "native journey stderr: {stderr:?}"
     );
+    for line in stderr.lines() {
+        eprintln!("{line}");
+    }
 }
 
 fn validate_rust_sysroot(path: &Path) -> std::path::PathBuf {
