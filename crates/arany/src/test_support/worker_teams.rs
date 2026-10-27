@@ -436,6 +436,7 @@ async fn run_case_inner(
     if commands::is_case(case) {
         commands::configure(&state, case);
     }
+    commands::overlay::configure(&workspace, case);
     run_live(directory, root, guard, case, LiveStart::New { padding }).await
 }
 
@@ -514,6 +515,7 @@ async fn run_live(
     } else {
         ApprovalMode::Request
     });
+    let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -532,10 +534,21 @@ async fn run_live(
         tokio::select! {
             result = &mut running => break result,
             Some(()) = clock_gate.recv() => bounds::exhaust(case).await,
+            dispatched = async {
+                match &mut overlay_dispatch {
+                    Some(dispatch) => dispatch.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                dispatched.expect("editor command reached GO");
+                commands::overlay::dispatched(&state, &workspace, case);
+                overlay_dispatch = None;
+            }
             Some(approval) = inbox.next() => {
+                commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
                     let identity = crate::store::BuildCacheIdentity::new(&workspace, approval.intent.workspace_device, approval.intent.workspace_inode).unwrap();
-                    FaultPlan::fail_commit_marker(&identity);
+                    commands::fail_cache_publication(&state, &identity);
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);
@@ -557,12 +570,22 @@ async fn run_live(
             "uncertain command cache must stop the Run with Tool(Uncertain)"
         );
     }
-    let result = if matches!(case, "uncertain" | "capacity" | "command_cache_unknown") {
+    if case == "command_overlay_uncertain" {
+        assert!(matches!(
+            &result,
+            Err(EngineError::Tool(ToolError::Uncertain))
+        ));
+    }
+    let result = if matches!(
+        case,
+        "uncertain" | "capacity" | "command_cache_unknown" | "command_overlay_uncertain"
+    ) {
         result.ok()
     } else {
         Some(result.unwrap())
     };
     engine.close().await.unwrap();
+    commands::overlay::assert_cache_reusable(case, &state, &workspace);
     let (events, view) = replayed(&state, session).await;
     let run = view.runs.last().unwrap();
     if let Some(result) = result {

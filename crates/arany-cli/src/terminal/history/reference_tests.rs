@@ -191,10 +191,10 @@ fn aliases_preserve_table_code_and_heading_source_selection() {
     for width in [16, 40, 50, 80, 120] {
         history.sync(&view, width, 100);
         let rows = message_rows(MessageKind::Assistant, source, width);
-        for (word, expected) in [("Heading", "# Heading\n"), ("code", "~~~\ncode\n~~~\n")] {
+        for word in ["Heading", "code"] {
             let row = rows.iter().position(|row| row.text.contains(word)).unwrap();
             select(&mut history, &view, row, 2, 2);
-            assert_eq!(copied(&history, &view), expected);
+            assert_eq!(copied(&history, &view), word);
         }
         let site = source.find("[x][r]").unwrap();
         let (row, column, _) = destination(&rows, site, 2);
@@ -235,9 +235,16 @@ fn hostile_reference_and_decoded_destinations_are_escaped_after_decoding() {
 #[test]
 fn repeated_destinations_enforce_the_output_boundary_and_whole_message_fallback() {
     let uses = 128;
-    let destination = "a".repeat(markdown::MAX_MARKDOWN_OUTPUT_BYTES / uses - 7);
+    let destination_bytes = markdown::MAX_MARKDOWN_OUTPUT_BYTES / uses - 7;
+    // Escaping reaches the renderer's byte cap before the parser's reference fuel runs out.
+    let control_bytes = escaped_terminal_bytes("\u{1b}");
+    let destination = format!(
+        "{}{}",
+        "&#27;".repeat(destination_bytes / control_bytes),
+        "a".repeat(destination_bytes % control_bytes)
+    );
     let padding =
-        markdown::MAX_MARKDOWN_OUTPUT_BYTES - uses * (destination.len() + 4) - (uses + 2) * 2;
+        markdown::MAX_MARKDOWN_OUTPUT_BYTES - uses * (destination_bytes + 4) - (uses + 2) * 2;
     for extra in [0, 1] {
         let source = format!(
             "{} {}\n\n[r]: {destination}",
@@ -257,6 +264,16 @@ fn repeated_destinations_enforce_the_output_boundary_and_whole_message_fallback(
                 assert_eq!((bytes, rows), (literal_bytes, literal_rows));
             }
         }
+    }
+    let source = format!(
+        "{}\n\n[r]: {destination}",
+        "[x][r]\n".repeat(uses + 1).trim_end()
+    );
+    for capture in [false, true] {
+        let ((_, bytes, rows), cue) = markdown::project(&source, MAX_ROW_CELLS, capture);
+        assert_eq!(cue, Some(markdown::LIMIT_CUE));
+        let (_, literal_bytes, literal_rows) = markdown::literal(&source, MAX_ROW_CELLS, false);
+        assert_eq!((bytes, rows), (literal_bytes, literal_rows));
     }
     let uses = 4;
     let destination = "a".repeat(markdown::MAX_MARKDOWN_ROWS / uses - 5);

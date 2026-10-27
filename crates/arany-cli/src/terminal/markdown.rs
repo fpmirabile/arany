@@ -234,7 +234,7 @@ pub(super) fn visible_line(
             line.flow
                 .as_ref()
                 .and_then(|flow| flow.line_at(coordinate))
-                .or_else(|| line.table.as_ref()?.line_at(coordinate))
+                .or_else(|| line.table.as_ref()?.link_line_at(coordinate))
         })
         .map(<[Cell]>::to_vec)
 }

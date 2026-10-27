@@ -10,13 +10,11 @@ pub(super) fn with_default(mut record: Value) -> Option<Value> {
         return None;
     }
     resources.insert("build_jobs".into(), Value::Null);
-    record
-        .as_object_mut()?
-        .insert("version".into(), super::UI_PREFERENCES_VERSION.into());
+    record.as_object_mut()?.insert("version".into(), 7.into());
     Some(record)
 }
 
-fn cores() -> Option<u32> {
+pub(super) fn cores() -> Option<u32> {
     std::thread::available_parallelism()
         .ok()?
         .get()

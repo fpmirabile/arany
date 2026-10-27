@@ -69,7 +69,8 @@ impl Flow {
                 let (_, range, start) = self.styles.pop().ok_or(())?;
                 self.enclose(start, range);
             }
-            Event::Start(Tag::Image { .. }) => {
+            Event::Start(Tag::Image { link_type, .. }) => {
+                let range = super::links::literal_range(source, range, *link_type);
                 self.source_end = range.end;
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);
@@ -148,10 +149,14 @@ impl Flow {
         match event {
             Event::Start(Tag::Link {
                 link_type:
-                    LinkType::Inline | LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut,
+                    link_type @ (LinkType::Inline
+                    | LinkType::Reference
+                    | LinkType::Collapsed
+                    | LinkType::Shortcut),
                 dest_url,
                 ..
             }) => {
+                let range = super::links::literal_range(source, range, *link_type);
                 self.link = Some(super::links::Link {
                     range,
                     start: self.cells.len(),
@@ -175,7 +180,8 @@ impl Flow {
                 )?;
                 self.literal = Some(range);
             }
-            Event::Start(_) => {
+            Event::Start(Tag::Link { link_type, .. }) => {
+                let range = super::links::literal_range(source, range, *link_type);
                 self.source_end = range.end;
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);

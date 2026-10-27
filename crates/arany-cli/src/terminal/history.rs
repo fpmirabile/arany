@@ -918,7 +918,17 @@ impl History {
             },
             |(_, end)| end,
         );
-        for index in low.0..=high.0 {
+        // Raw word endpoints already identify the exact source span.
+        if low.1.mapped.is_none() && high.1.mapped.is_none() && !low.1.boundary && !high.1.boundary
+        {
+            return Some(((low.0, start), (high.0, end)));
+        }
+        let endpoints: &[usize] = if low.0 == high.0 {
+            &[low.0]
+        } else {
+            &[low.0, high.0]
+        };
+        for &index in endpoints {
             let message = &self.messages[index];
             let text = message_text(view, message, &self.notices);
             let rows = message_rows(message.kind, &text, self.width);

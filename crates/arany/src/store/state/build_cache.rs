@@ -448,6 +448,7 @@ impl StateRoot {
             Err(error) => return Err(StoreError::Io(io::Error::from(error))),
         }
         let identity_lock = FlockGuard(file);
+        // The shared lease never recovers, reserves, collects or publishes an archive.
         #[cfg(target_os = "linux")]
         {
             directory::guard::admit(&dir, &token)?;
@@ -479,7 +480,7 @@ impl StateRoot {
             shared: true,
         })
     }
-    #[cfg(test)]
+    #[cfg(any(test, all(target_os = "linux", feature = "test-support")))]
     pub(crate) fn begin_build_cache(
         &self,
         identity: BuildCacheIdentity,

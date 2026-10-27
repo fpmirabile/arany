@@ -178,6 +178,7 @@ fn status_failure(captured: &Captured, max_bytes: usize, hidden: &HiddenPaths) -
     failure(&message, detail, max_bytes, hidden)
 }
 
+#[cfg(target_os = "linux")]
 pub(super) async fn execute(
     workspace: &Path,
     scratch: &Path,
@@ -187,16 +188,43 @@ pub(super) async fn execute(
     hidden: &HiddenPaths,
     runtime: Duration,
 ) -> Result<String, ToolError> {
-    let (plan, mut result) =
-        match plan::plan(workspace, scratch, git, identity, intent, hidden, runtime).await? {
+    let (bytes, result) =
+        match plan_frame(workspace, scratch, git, identity, intent, hidden, runtime).await? {
             Ok(planned) => planned,
             Err(failure) => return Ok(failure),
         };
+    publish_frame(workspace, &bytes, result, intent, hidden)
+}
+
+pub(super) const FRAME_BYTES: usize = frame::MAX_FRAME_BYTES;
+
+pub(super) async fn plan_frame(
+    workspace: &Path,
+    scratch: &Path,
+    git: &Program,
+    identity: &GitIdentity,
+    intent: &EffectIntent,
+    hidden: &HiddenPaths,
+    runtime: Duration,
+) -> Result<Result<(Vec<u8>, Value), String>, ToolError> {
+    let (plan, result) =
+        match plan::plan(workspace, scratch, git, identity, intent, hidden, runtime).await? {
+            Ok(planned) => planned,
+            Err(failure) => return Ok(Err(failure)),
+        };
     let mut bytes = Vec::new();
     frame::write(&mut bytes, &plan)?;
-    drop(plan);
-    let plan = frame::read(&mut bytes.as_slice())?;
-    drop(bytes);
+    Ok(Ok((bytes, result)))
+}
+
+pub(super) fn publish_frame(
+    workspace: &Path,
+    bytes: &[u8],
+    mut result: Value,
+    intent: &EffectIntent,
+    hidden: &HiddenPaths,
+) -> Result<String, ToolError> {
+    let plan = frame::read(&mut &*bytes)?;
     #[cfg(all(test, target_os = "linux"))]
     tests::race(workspace, tests::Stage::Planned);
     let max_bytes = intent.limits.result_bytes as usize;

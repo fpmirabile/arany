@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) mod overlay;
+
 pub(super) fn is_case(case: &str) -> bool {
     case.starts_with("command")
 }
@@ -34,6 +36,19 @@ pub(super) fn configure(state: &Path, case: &str) {
     })).unwrap());
 }
 
+pub(super) fn fail_cache_publication(_state: &Path, identity: &crate::store::BuildCacheIdentity) {
+    #[cfg(target_os = "linux")]
+    {
+        let state = StateRoot::open_existing(_state).unwrap();
+        let mut lease = state.begin_build_cache(identity.clone()).unwrap();
+        // Initialize the directory so the sync fault reaches publication, not preparation.
+        drop(lease.prepare_directory().unwrap());
+        FaultPlan::fail_record_sync(identity.token().into(), "");
+    }
+    #[cfg(not(target_os = "linux"))]
+    FaultPlan::fail_commit_marker(identity);
+}
+
 impl LiveProvider {
     pub(super) fn command_outcome(
         &self,
@@ -46,8 +61,15 @@ impl LiveProvider {
         match (request.phase, step) {
             (AgentPhase::RootPlan, 0) => super::super::scenario::plan_outcome(self.plan()),
             (AgentPhase::RootPlan, 1) => self.delegate(request),
-            (AgentPhase::ChildWork, 0) => tool_outcome(call(self.case == "command_outside")),
-            (AgentPhase::ChildWork, 1) if self.case == "command_cancel" => {
+            (AgentPhase::ChildWork, 0) => tool_outcome(
+                overlay::call(self.case).unwrap_or_else(|| call(self.case == "command_outside")),
+            ),
+            (AgentPhase::ChildWork, _) if self.case == "command_overlay_conflict" => {
+                finish_with("The lower changed during execution")
+            }
+            (AgentPhase::ChildWork, 1)
+                if matches!(self.case, "command_cancel" | "command_overlay_cancel") =>
+            {
                 self.cancellation.cancel();
                 finish_with("Cancelled after command publication")
             }
@@ -65,7 +87,9 @@ impl LiveProvider {
             (AgentPhase::RootSynthesis, _) if request.input.child_results.is_empty() => {
                 finish_with("Wait for editor command")
             }
-            (AgentPhase::RootSynthesis, _) if self.case == "command_outside" => {
+            (AgentPhase::RootSynthesis, _)
+                if matches!(self.case, "command_outside" | "command_overlay_conflict") =>
+            {
                 finish_with("The entire out-of-lease command changeset was refused")
             }
             (AgentPhase::RootSynthesis, _) => {
@@ -148,6 +172,9 @@ pub(super) fn assert_commands(
     let command = &editor.tools[0];
     assert!(matches!(command.intent.call, ToolCall::Command { .. }));
     assert_eq!(command.intent.target, EffectTarget::Workspace);
+    if overlay::assert_stopped(case, workspace, view) {
+        return;
+    }
     let observation = command.observation.as_ref().unwrap();
     assert_eq!(observation.disposition, ToolDisposition::Succeeded);
     assert!(matches!(
@@ -155,6 +182,7 @@ pub(super) fn assert_commands(
         Some(Attestation::Guard(_))
     ));
     assert!(command.intent.limits.cache_bytes > 0);
+    overlay::assert_published(case, workspace, editor);
     if case == "command_cache_unknown" {
         assert_eq!(observation.cache_update, CacheUpdate::Uncertain);
         assert_eq!(editor.tools.len(), 1);
@@ -224,7 +252,10 @@ pub(super) fn assert_commands(
             .contains(&crate::validate::hex_digest(b"edited 0"))
     );
     assert!(history.lease_released);
-    if matches!(case, "command_cancel" | "command_pause") {
+    if matches!(
+        case,
+        "command_cancel" | "command_pause" | "command_overlay_cancel"
+    ) {
         assert!(!history.verified);
         assert_ne!(run.status, RunStatus::Finished);
         assert!(history.changed_paths.contains("notes/0"));

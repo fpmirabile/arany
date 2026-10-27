@@ -288,6 +288,13 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         ),
         None => "automatic; Build unavailable".into(),
     };
+    let build_cpu = match std::thread::available_parallelism()
+        .ok()
+        .and_then(|cores| u32::try_from(cores.get()).ok())
+    {
+        Some(cores) => format!("automatic; {cores} effective (1..{cores})"),
+        None => "automatic; Build unavailable".into(),
+    };
     let settings_at = transcript.len();
     input
         .write_all(b"/settings\r")
@@ -313,6 +320,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 12: Copy on select: on (on|off)\r\n\
           Choice 13: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
           Choice 14: Build jobs: {build_jobs} (automatic or 1..cores)\r\n\
+          Choice 15: Build CPU cores: {build_cpu} (automatic or 1..cores; Linux quota)\r\n\
           Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
           Input:\r\n").as_bytes(),
     );

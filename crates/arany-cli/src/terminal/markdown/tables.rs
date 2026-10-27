@@ -67,11 +67,16 @@ impl Table {
             .and_then(|row| row.cells.last_mut())
             .ok_or(())
     }
-    pub(super) fn line_at(&self, coordinate: Coordinate) -> Option<&[Cell]> {
+    pub(super) fn link_line_at(&self, coordinate: Coordinate) -> Option<&[Cell]> {
         self.rows
             .iter()
             .flat_map(|row| &row.cells)
-            .find(|cells| cells.iter().any(|cell| cell.coordinate == coordinate))
+            .find(|cells| {
+                cells.iter().any(|cell| {
+                    cell.coordinate == coordinate
+                        && (coordinate.fragment != Fragment::Label || coordinate.site != cell.byte)
+                })
+            })
             .map(Vec::as_slice)
     }
     pub(super) fn finish(&mut self) {
