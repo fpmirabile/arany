@@ -1524,7 +1524,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     assert!(!HookResult::Passed.valid_for(&observation));
     assert!(!allow.valid_for(&observation));
     let result = |exit: i32, stdout: &str| {
-        serde_json::to_string(&json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": exit, "stdout": stdout, "stderr": "no", "stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":2,"lines":1},"changeset": {"files": []}}))
+        serde_json::to_string(&json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": exit, "stdout": stdout, "stderr": "no", "stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":2,"lines":1},"changeset": {"files": []}}))
             .unwrap()
     };
     observation.disposition = crate::tools::ToolDisposition::Failed;

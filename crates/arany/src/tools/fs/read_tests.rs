@@ -54,7 +54,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
             args: vec![],
             cwd: "".into(),
         }),
-        super::guard::RESERVATION_OVERHEAD + super::selection::PHASE_TIME,
+        super::guard::RESERVATION_OVERHEAD,
     );
 
     for pin in ["grant", "enforcement"] {

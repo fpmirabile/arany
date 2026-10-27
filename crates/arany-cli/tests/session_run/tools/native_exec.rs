@@ -1036,7 +1036,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     );
                     assert_eq!(
                         observations[0]["output"],
-                        json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"native command passed","stderr":"","stdout_total":{"bytes":21,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}})
+                        json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"native command passed","stderr":"","stdout_total":{"bytes":21,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}})
                     );
                 }
                 assert_eq!(context["tools"]["catalog"]["write"], true);

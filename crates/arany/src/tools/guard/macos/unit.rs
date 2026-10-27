@@ -856,13 +856,15 @@ fn action_deadlines(
     tokio::time::Instant,
     tokio::time::Instant,
 ) {
-    let selection_time = if primary_command(intent) {
-        crate::tools::selection::PHASE_TIME
-    } else {
-        Duration::ZERO
-    };
     let preparation_deadline = active_window.map_or(
-        fallback_started + CONNECT_DEADLINE + PREPARATION_DEADLINE + selection_time,
+        fallback_started
+            + CONNECT_DEADLINE
+            + PREPARATION_DEADLINE
+            + if primary_command(intent) {
+                Duration::from_millis(u64::from(intent.limits.runtime_ms))
+            } else {
+                Duration::ZERO
+            },
         |window| window.preparation_deadline,
     );
     let go_deadline = active_window.map_or(
@@ -881,7 +883,6 @@ fn action_deadlines(
             fallback_started
                 + CONNECT_DEADLINE
                 + PREPARATION_DEADLINE
-                + selection_time
                 + Duration::from_millis(
                     u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
                 )
@@ -912,6 +913,11 @@ pub(super) async fn execute(
     if let Some(private) = &runtime.worker {
         private.contained.store(false, Ordering::Release);
     }
+    let active_window = super::super::selection_phase::command_window(intent, active_window);
+    let command_deadline = super::super::selection_phase::command_deadline(intent);
+    let command_frame = command_deadline
+        .map(super::super::selection_phase::encode_deadline)
+        .transpose()?;
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
     let go_cancellation = cancellation.clone();
@@ -934,7 +940,9 @@ pub(super) async fn execute(
                 .coalition,
         )?);
         let phases = async {
-            let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer)?)?;
+            let mut task = Task::new(runtime, intent, cache_transfer)?;
+            task.command_deadline = command_frame;
+            let task = super::super::encode_task(&task)?;
             let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
                 stream
                     .get_mut()
@@ -952,11 +960,12 @@ pub(super) async fn execute(
                     .write_all(b"SELECT\n")
                     .await
                     .map_err(|_| ToolError::Operation)?;
-                let deadline = preparation_deadline
-                    .min(tokio::time::Instant::now() + crate::tools::selection::PHASE_TIME);
+                let deadline = command_deadline
+                    .ok_or(ToolError::Configuration)?
+                    .min(preparation_deadline);
                 stream
                     .get_mut()
-                    .write_all(&super::super::selection_phase::encode_deadline(deadline)?)
+                    .write_all(&command_frame.ok_or(ToolError::Configuration)?)
                     .await
                     .map_err(|_| ToolError::Operation)?;
                 let mut selection_cancel = go_cancellation.clone();
@@ -1029,9 +1038,14 @@ pub(super) async fn execute(
                 .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
             capture.complete();
             let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
-            runtime
-                .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
-                .await?;
+            super::super::selection_phase::before_dispatch(
+                runtime,
+                intent,
+                active_window,
+                command_deadline,
+                &go_cancellation,
+            )
+            .await?;
             payload_phase.store(true, Ordering::Release);
             dispatched.store(true, Ordering::Release);
             let observation = async {
@@ -1308,6 +1322,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         } else {
             None
         };
+        let command_deadline = task.command_deadline;
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
@@ -1375,6 +1390,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .read_exact(&mut frame)
                         .await
                         .map_err(|_| ToolError::Operation)?;
+                    if Some(frame) != command_deadline {
+                        return Err(ToolError::Configuration);
+                    }
                     let deadline = super::super::selection_phase::decode_deadline(frame)?;
                     let source = crate::tools::fs::open_directory(&runtime.workspace)?;
                     let resources =
@@ -1463,7 +1481,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     &mut scope,
                     &mut output,
                     receive_go,
-                    path.parent().ok_or(ToolError::Path)?,
+                    (path.parent().ok_or(ToolError::Path)?, command_deadline),
                 )
                 .await
             }
@@ -1484,7 +1502,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .map_err(|_| ToolError::Operation)?;
                     capture_deadline = Some(
                         tokio::time::timeout(
-                            crate::tools::selection::PHASE_TIME,
+                            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
                             &mut receive_capture,
                         )
                         .await
@@ -1883,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_command_deadlines_reserve_selection_without_widening_active_windows() {
+    fn fallback_command_deadlines_share_runtime_with_selection() {
         let mut intent = EffectIntent {
             host: None,
             host_command: None,
@@ -1911,7 +1929,7 @@ mod tests {
         let old_preparation = start + CONNECT_DEADLINE + PREPARATION_DEADLINE;
         assert_eq!(
             preparation - old_preparation,
-            crate::tools::selection::PHASE_TIME
+            Duration::from_millis(u64::from(intent.limits.runtime_ms))
         );
         assert_eq!(go - preparation, Duration::from_secs(1));
         let window = crate::tools::ActiveToolWindow {
@@ -1935,13 +1953,10 @@ mod tests {
         };
         let (other_preparation, other_go, other_completion) =
             action_deadlines(None, &intent, start);
-        for (command, other) in [
-            (preparation, other_preparation),
-            (go, other_go),
-            (completion, other_completion),
-        ] {
-            assert_eq!(command - other, crate::tools::selection::PHASE_TIME);
-        }
+        let runtime = Duration::from_millis(u64::from(intent.limits.runtime_ms));
+        assert_eq!(preparation - other_preparation, runtime);
+        assert_eq!(go - other_go, runtime);
+        assert_eq!(completion, other_completion);
     }
 
     #[tokio::test]
@@ -3894,6 +3909,7 @@ int main(int argc, char **argv) {
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
+                    command_deadline: None,
                     definition: None,
                     worker: None,
                     handover: None,

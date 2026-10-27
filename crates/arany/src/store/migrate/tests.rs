@@ -8,6 +8,8 @@ use std::path::Path;
 
 #[path = "retired_worker_tests.rs"]
 mod retired_worker;
+#[path = "selection_timing_tests.rs"]
+mod selection_timing;
 #[path = "shared_editors_tests.rs"]
 mod shared_editors;
 
@@ -18,7 +20,19 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 78] = [
+    (
+        "ToolFinished",
+        30,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookFinished",
+        19,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
     (
         "AgentFinished",
         11,

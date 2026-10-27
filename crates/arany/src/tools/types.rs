@@ -164,6 +164,8 @@ pub struct CommandResult {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandSelectionSummary {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub elapsed_ms: Option<u64>,
     pub ignored_entries: u64,
     pub pruned_directories: u64,
     pub oversized_inputs: u64,
@@ -173,7 +175,9 @@ pub struct CommandSelectionSummary {
 impl CommandSelectionSummary {
     pub(crate) fn valid(self) -> bool {
         let scanned = COMMAND_SCAN_ENTRIES as u64;
-        self.pruned_directories <= self.ignored_entries
+        self.elapsed_ms
+            .is_none_or(|elapsed| elapsed <= u64::from(MAX_COMMAND_TIMEOUT_MS))
+            && self.pruned_directories <= self.ignored_entries
             && self
                 .ignored_entries
                 .checked_add(self.oversized_inputs)

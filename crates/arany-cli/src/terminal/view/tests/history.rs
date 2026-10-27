@@ -183,7 +183,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 buffer_row(buffer, 2).trim_end(),
                 "  ⎿ limit: timed out after 2 min; /settings raises it"
             );
-            let output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,
+            let output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,
                 "stdout":"head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
                 "stderr":"", "stdout_total":{"bytes":123408,"lines":12340},
                 "stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
@@ -266,7 +266,7 @@ fn command_row_frames_show_first_script_line_and_nonzero_counters() {
         empty_chat: false,
         agent_switch: false,
     };
-    let output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":2,"oversized_inputs":0,"discarded_outputs":1},"exit_code":0,
+    let output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":2,"oversized_inputs":0,"discarded_outputs":1},"exit_code":0,
         "stdout":"x\n","stderr":"","stdout_total":{"bytes":2,"lines":1},
         "stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}})
     .to_string();

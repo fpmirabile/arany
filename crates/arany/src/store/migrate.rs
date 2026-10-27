@@ -171,6 +171,22 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        EventStep {
+            kind: "ToolFinished",
+            from: 30,
+            transform: |value| crate::session::add_selection_timing("ToolFinished", value),
+            canonical: |payload| {
+                crate::session::pre_selection_timing_payload("ToolFinished", payload)
+            },
+        },
+        EventStep {
+            kind: "HookFinished",
+            from: 19,
+            transform: |value| crate::session::add_selection_timing("HookFinished", value),
+            canonical: |payload| {
+                crate::session::pre_selection_timing_payload("HookFinished", payload)
+            },
+        },
         variant_step!("ToolProposed", 1, crate::session::retired_worker_payload),
         variant_step!("ToolStarted", 23, crate::session::retired_worker_payload),
         variant_step!("ToolFinished", 29, crate::session::retired_worker_payload),

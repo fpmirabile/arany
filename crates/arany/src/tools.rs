@@ -1502,14 +1502,7 @@ impl ToolRuntime {
         }
         match call.facts().site {
             Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
-            Site::Guard => {
-                guard::RESERVATION_OVERHEAD
-                    + if self.worker.is_none() && matches!(call, ToolCall::Command { .. }) {
-                        selection::PHASE_TIME
-                    } else {
-                        Duration::ZERO
-                    }
-            }
+            Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
 

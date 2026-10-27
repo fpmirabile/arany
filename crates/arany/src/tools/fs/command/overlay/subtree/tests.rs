@@ -46,7 +46,7 @@ fn subtree_capture_refuses_links_special_entries_and_file_directory_conversion()
                 baseline.capture(
                     &source,
                     &open_directory(upper.path()).unwrap(),
-                    Instant::now() + crate::tools::selection::PHASE_TIME,
+                    Instant::now() + crate::tools::selection::TEST_RUNTIME,
                 ),
                 Err(ToolError::Path)
             ),
@@ -111,7 +111,7 @@ fn opaque_removal_and_recreation_use_frozen_baseline_file_preconditions() {
             .capture(
                 &source,
                 &open_directory(upper.path()).unwrap(),
-                Instant::now() + crate::tools::selection::PHASE_TIME,
+                Instant::now() + crate::tools::selection::TEST_RUNTIME,
             )
             .unwrap();
         check_recreation(lower.path(), &source, changes, summary, case);
@@ -234,7 +234,7 @@ fn subtree_capture_refuses_lower_drift_masks_incomplete_inventory_and_overflow()
             upper.path().join("tree")
         });
         let target = open_directory(upper.path()).unwrap();
-        let deadline = Instant::now() + crate::tools::selection::PHASE_TIME;
+        let deadline = Instant::now() + crate::tools::selection::TEST_RUNTIME;
         if case == "scan-limit" {
             assert_scan_limit(&baseline, &source, &target, deadline);
         } else {
@@ -292,7 +292,7 @@ fn subtree_directory_open_refuses_replacement_or_removal_after_path_check() {
             lower: &source,
             upper: &open_directory(upper.path()).unwrap(),
             prefix: "",
-            selector: &mut Selector::new(0, Instant::now() + crate::tools::selection::PHASE_TIME),
+            selector: &mut Selector::new(0, Instant::now() + crate::tools::selection::TEST_RUNTIME),
             totals: &mut Totals::default(),
             files: BTreeMap::new(),
             discarded: BTreeSet::new(),

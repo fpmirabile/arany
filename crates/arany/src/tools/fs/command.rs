@@ -155,6 +155,7 @@ pub(in crate::tools) fn prepare_command(
     deadline: Instant,
 ) -> Result<CommandSelection, ToolError> {
     config.validate()?;
+    let started = Instant::now();
     let mut input = Inputs {
         source,
         target,
@@ -195,6 +196,8 @@ pub(in crate::tools) fn prepare_command(
             return Err(ToolError::ChangedInput);
         }
     }
+    input.selection.summary.elapsed_ms =
+        Some(u64::try_from(started.elapsed().as_millis()).map_err(|_| ToolError::Limit)?);
     input.selection.calls = input.selector.calls();
     let bytes = serde_json::to_vec(&input.selection).map_err(|_| ToolError::Operation)?;
     if bytes.len() > SELECTION_BYTES {
@@ -671,6 +674,12 @@ mod tests {
                 serde_json::json!(crate::tools::selection::COMMAND_CALLS + 1),
                 true,
             ),
+            (
+                "summary",
+                serde_json::json!({"elapsed_ms":u64::from(MAX_COMMAND_TIMEOUT_MS) + 1,
+                    "ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0}),
+                false,
+            ),
             ("omitted", serde_json::json!(["../outside"]), false),
             ("omitted", serde_json::json!([""]), false),
             (
@@ -691,7 +700,7 @@ mod tests {
             ),
             (
                 "summary",
-                serde_json::json!({"ignored_entries":0,"pruned_directories":1,"oversized_inputs":0,"discarded_outputs":0}),
+                serde_json::json!({"elapsed_ms":null,"ignored_entries":0,"pruned_directories":1,"oversized_inputs":0,"discarded_outputs":0}),
                 false,
             ),
         ] {

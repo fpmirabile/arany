@@ -243,7 +243,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 const MACOS_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
 
-const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
+const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
@@ -958,6 +958,7 @@ impl Task {
         cache: Option<super::BuildCacheTransfer>,
     ) -> Result<Self, ToolError> {
         Ok(Self {
+            command_deadline: None,
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache,
@@ -1142,10 +1143,12 @@ async fn execute_worker(
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     receive_go: tokio::sync::oneshot::Receiver<()>,
-    root: &Path,
+    (root, command_deadline): (&Path, Option<[u8; 8]>),
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let task = super::encode_task(&Task::new(runtime, intent, None)?)?;
+    let mut task = Task::new(runtime, intent, None)?;
+    task.command_deadline = command_deadline;
+    let task = super::encode_task(&task)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
@@ -1493,6 +1496,7 @@ mod tests {
             "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
+            command_deadline: None,
             definition: None,
             worker: None,
             handover: None,
@@ -1716,6 +1720,7 @@ mod tests {
         .unwrap();
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
+            command_deadline: None,
             definition: None,
             worker: None,
             handover: None,
