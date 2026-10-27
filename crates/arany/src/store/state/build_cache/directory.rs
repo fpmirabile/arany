@@ -17,9 +17,17 @@ impl BuildCacheLease {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
+        let lower_bytes = own_tree_bytes(&self.dir, &self.token)?.max(
+            self.archive
+                .as_ref()
+                .map(|archive| archive.metadata().map(|metadata| metadata.len()))
+                .transpose()?
+                .unwrap_or_default(),
+        );
         let reserved = self
             .archive_limit
             .checked_add(self.candidate_limit)
+            .and_then(|headroom| headroom.checked_add(lower_bytes))
             .ok_or(StoreError::StorageFull)?;
         let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
         let previous = validate_reservation(&reservation, &self.token)?;
