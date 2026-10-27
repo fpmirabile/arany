@@ -1,3 +1,4 @@
+use super::custom::custom_status_label;
 use super::{
     SetupError, SetupJournal, await_operation, await_setup_ack, choose, read_setup_value,
     review_warning,
@@ -440,7 +441,7 @@ async fn select_custom(
                     "{} / {} · {}",
                     escape_terminal(profile.name()),
                     escape_terminal(profile.model()),
-                    super::custom_status_label(&statuses, profile.name())
+                    custom_status_label(&statuses, profile.name())
                 ),
             )
         })
@@ -571,7 +572,7 @@ async fn manifest(
                         "    {} · Credential: {} — not checked by listing · {}\n",
                         escape_terminal(&profile.check_destination()),
                         escape_terminal(profile.credential_env()),
-                        super::custom_status_label(&statuses, name)
+                        custom_status_label(&statuses, name)
                     ));
                 } else {
                     text.push_str("    Declaration unavailable\n");
