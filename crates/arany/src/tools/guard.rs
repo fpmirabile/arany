@@ -3731,6 +3731,8 @@ mod tests {
             args: Vec::new(),
             cwd: ".".into(),
         });
+        command.policy_digest = [1; 32];
+        command.enforcement_digest = [2; 32];
         command.limits.network = crate::NetworkGrant::Proxy;
         assert!(command.valid());
         for call in [
@@ -3741,8 +3743,8 @@ mod tests {
                 cwd: ".".into(),
             },
         ] {
-            let mut other = intent(call);
-            other.limits.network = crate::NetworkGrant::Proxy;
+            let mut other = command.clone();
+            other.call = call;
             assert_eq!(
                 other.valid(),
                 matches!(other.call, ToolCall::Command { .. })
