@@ -36,7 +36,10 @@ pub(super) fn configure(state: &Path, case: &str) {
     })).unwrap());
 }
 
-pub(super) fn prepare_cache_publication(_state: &Path, _identity: &crate::store::BuildCacheIdentity) {
+pub(super) fn prepare_cache_publication(
+    _state: &Path,
+    _identity: &crate::store::BuildCacheIdentity,
+) {
     #[cfg(target_os = "linux")]
     {
         let state = StateRoot::open_existing(_state).unwrap();
