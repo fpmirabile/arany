@@ -135,10 +135,9 @@ fn supervisor_entry_helper() {
         };
         assert_eq!(failure, json!({"stage":expected}));
     }
+    drop(file);
     std::fs::remove_dir(namespace).unwrap();
-    if matches!(mode.as_str(), "replacement" | "mount-flags") {
-        std::fs::remove_file(executable).unwrap();
-    }
+    std::fs::remove_file(executable).unwrap();
     if mode == "mount-flags" {
         let directory = root.join("restricted");
         rustix::mount::unmount(&directory, rustix::mount::UnmountFlags::empty()).unwrap();
@@ -152,13 +151,12 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
     let installed = Path::new(env!("CARGO_BIN_EXE_arany"));
     let executable = if mode == "mount-flags" {
         restricted_executable(root, installed)
-    } else if mode == "replacement" {
+    } else {
         let path = root.join("arany");
         std::fs::copy(installed, &path).unwrap();
         path
-    } else {
-        installed.to_owned()
     };
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut hash = Sha256::new();
     let mut file = std::fs::File::open(&executable).unwrap();
     let metadata = file.metadata().unwrap();
