@@ -9,13 +9,20 @@ pub(super) struct CacheFailure {
 }
 
 impl CacheFailure {
-    pub(super) fn new(workspace: &Path, intent: &EffectIntent) -> Self {
+    pub(super) fn new(_state: &Path, workspace: &Path, intent: &EffectIntent) -> Self {
         let identity = crate::store::BuildCacheIdentity::new(
             workspace,
             intent.workspace_device,
             intent.workspace_inode,
         )
         .unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let state = StateRoot::open_existing(_state).unwrap();
+            let mut lease = state.begin_build_cache(identity.clone()).unwrap();
+            // Initialize the directory before execution, keeping preparation separate from the fault.
+            drop(lease.prepare_directory().unwrap());
+        }
         let (entered, release) = FaultPlan::gate_guard_cache_publication(intent.id);
         Self {
             identity,
@@ -73,19 +80,6 @@ pub(super) fn configure(state: &Path, case: &str) {
         "version":1,"workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
         "commands":[{"name":"build","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}]
     })).unwrap());
-}
-
-pub(super) fn fail_cache_publication(_state: &Path, identity: &crate::store::BuildCacheIdentity) {
-    #[cfg(target_os = "linux")]
-    {
-        let state = StateRoot::open_existing(_state).unwrap();
-        let mut lease = state.begin_build_cache(identity.clone()).unwrap();
-        // Initialize the directory so the sync fault reaches publication, not preparation.
-        drop(lease.prepare_directory().unwrap());
-        FaultPlan::fail_record_sync(identity.token().into(), "");
-    }
-    #[cfg(not(target_os = "linux"))]
-    FaultPlan::fail_commit_marker(identity);
 }
 
 impl LiveProvider {
