@@ -95,7 +95,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 28] = [
+pub(crate) static ALL: [OperationFacts; 27] = [
     read_row(
         "list",
         Family::File,
@@ -208,38 +208,37 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         prelude: true,
         ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
     },
-    facts_row("prepare_worker", Family::Preparation, 16, ""),
     read_row(
         "glob",
         Family::File,
-        17,
+        16,
         "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
     ),
     git_write_row(
         "git_commit",
-        18,
+        17,
         "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
     ),
     git_write_row(
         "git_branch",
-        19,
+        18,
         "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
     ),
     git_write_row(
         "git_switch",
-        20,
+        19,
         "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
     ),
     write_row(
         "multiedit",
-        21,
+        20,
         "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
     ),
     OperationFacts {
         site: Site::Host,
         ..git_write_row(
             "git_push",
-            22,
+            21,
             "Push one local branch to the same remote branch at an explicit HTTPS or SSH URL. Always asks a human for this host operation; no force, deletion or automatic retry.",
         )
     },
@@ -247,18 +246,18 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         site: Site::Host,
         ..git_write_row(
             "gh_pr_create",
-            23,
+            22,
             "Create a GitHub pull request with an explicit repository, base, head and payload. Always asks a human for this host operation; never pushes or forks.",
         )
     },
     write_row(
         "delete",
-        24,
+        23,
         "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
     ),
     write_row(
         "move",
-        25,
+        24,
         "Move one regular Workspace file to a missing destination, guarded by the source SHA-256. Preserves bytes and executable status; creates missing destination parents. Never overwrites an existing destination.",
     ),
     OperationFacts {
@@ -269,7 +268,7 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         ..facts_row(
             "gh_pr_list",
             Family::Git,
-            26,
+            25,
             "List a bounded number of GitHub pull requests from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
         )
     },
@@ -281,7 +280,7 @@ pub(crate) static ALL: [OperationFacts; 28] = [
         ..facts_row(
             "gh_pr_view",
             Family::Git,
-            27,
+            26,
             "Inspect one GitHub pull request's bounded description, discussion, reviews and checks from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
         )
     },
@@ -291,12 +290,7 @@ static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
     mutates: false,
     asks_approval: false,
     prelude: true,
-    ..git_write_row("git_branch", 19, "")
-};
-
-static WORKER_BASE: OperationFacts = OperationFacts {
-    site: Site::InProcess,
-    ..facts_row("prepare_worker", Family::Preparation, 16, "")
+    ..git_write_row("git_branch", 18, "")
 };
 
 impl ToolCall {
@@ -310,15 +304,6 @@ impl ToolCall {
 
     pub(crate) const fn facts(&self) -> &'static OperationFacts {
         match self {
-            Self::PrepareWorker { preparation }
-                if matches!(
-                    preparation.purpose,
-                    crate::session::worker::WorkerDataPurpose::Base
-                ) =>
-            {
-                &WORKER_BASE
-            }
-            Self::PrepareWorker { .. } => &ALL[16],
             Self::ParseAgentDefinition { .. } => &ALL[15],
             Self::List { .. } => &ALL[0],
             Self::Read { .. } => &ALL[1],
@@ -326,9 +311,9 @@ impl ToolCall {
             Self::Mkdir { .. } => &ALL[3],
             Self::Write { .. } => &ALL[4],
             Self::Edit { .. } => &ALL[5],
-            Self::MultiEdit { .. } => &ALL[21],
-            Self::Delete { .. } => &ALL[24],
-            Self::Move { .. } => &ALL[25],
+            Self::MultiEdit { .. } => &ALL[20],
+            Self::Delete { .. } => &ALL[23],
+            Self::Move { .. } => &ALL[24],
             Self::Command { .. } => &ALL[6],
             Self::ApplyChangeset { .. } => &ALL[7],
             Self::CommandUnguarded { .. } => &ALL[14],
@@ -338,15 +323,15 @@ impl ToolCall {
             Self::GitStatus { .. } => &ALL[11],
             Self::GitDiff { .. } => &ALL[12],
             Self::GitLog { .. } => &ALL[13],
-            Self::Glob { .. } => &ALL[17],
-            Self::GitCommit { .. } => &ALL[18],
+            Self::Glob { .. } => &ALL[16],
+            Self::GitCommit { .. } => &ALL[17],
             Self::GitBranch { name: None, .. } => &GIT_BRANCH_LIST,
-            Self::GitBranch { .. } => &ALL[19],
-            Self::GitSwitch { .. } => &ALL[20],
-            Self::GitPush { .. } => &ALL[22],
-            Self::GhPrCreate { .. } => &ALL[23],
-            Self::GhPrList { .. } => &ALL[26],
-            Self::GhPrView { .. } => &ALL[27],
+            Self::GitBranch { .. } => &ALL[18],
+            Self::GitSwitch { .. } => &ALL[19],
+            Self::GitPush { .. } => &ALL[21],
+            Self::GhPrCreate { .. } => &ALL[22],
+            Self::GhPrList { .. } => &ALL[25],
+            Self::GhPrView { .. } => &ALL[26],
         }
     }
 }
@@ -708,14 +693,6 @@ mod tests {
                 index: 0,
                 raw_digest: [1; 32],
             },
-            ToolCall::PrepareWorker {
-                preparation: crate::session::worker::WorkerPreparation {
-                    assignment_id: crate::session::AgentRunId::new(),
-                    purpose: crate::session::worker::WorkerDataPurpose::Handover,
-                    max_bytes: 1,
-                    max_chunks: 1,
-                },
-            },
             ToolCall::Glob {
                 pattern: "**/*.rs".into(),
                 path: path(),
@@ -940,10 +917,7 @@ mod tests {
         assert!(
             ALL.iter()
                 .filter(|facts| facts.schema().is_none())
-                .all(|facts| matches!(
-                    facts.name,
-                    "apply_changeset" | "parse_agent_definition" | "prepare_worker"
-                ))
+                .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
         );
     }
 }

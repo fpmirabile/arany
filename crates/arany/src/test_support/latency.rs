@@ -33,7 +33,6 @@ fn operation(call: &ToolCall) -> Operation {
         | ToolCall::Move { .. }
         | ToolCall::CommandUnguarded { .. }
         | ToolCall::ApplyChangeset { .. }
-        | ToolCall::PrepareWorker { .. }
         | ToolCall::Skill { .. }
         | ToolCall::McpList { .. }
         | ToolCall::McpCall { .. }

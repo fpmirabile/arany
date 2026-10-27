@@ -56,6 +56,15 @@ async fn editor_inspector_retains_observation_derived_paths_and_digests_after_ca
     let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
     assert!(text.contains(row["after_sha256"].as_str().unwrap()));
     assert!(text.contains("Lease released: true; verified: false"));
+    assert!(text.contains("Publication: Confirmed"));
+    for removed in [
+        "integration:",
+        "discarded:",
+        "Private outcome unknown:",
+        "cleanup confirmed:",
+    ] {
+        assert!(!text.contains(removed), "retired worker field: {removed}");
+    }
     let (events, _) = arany::test_support::goals::replayed(&state, observed.session).await;
     assert_eq!(events, before);
 }

@@ -465,7 +465,6 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         .iter()
         .skip(covered)
         .enumerate()
-        .filter(|(_, tool)| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
         .map(|(index, tool)| match &tool.observation {
             Some(observation) if index + (run.tool_compaction_covered_count.max(run.initial_tool_count() as u32) as usize) < run.tool_results_cleared_count as usize => cleared_model_result(observation),
             Some(observation) => crate::tools::types::model_result_with_output(

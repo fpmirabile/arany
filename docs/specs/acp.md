@@ -294,6 +294,8 @@ Session-history recovery behavior. EOF, input/output failure and SIGINT,
 SIGTERM or SIGHUP cancel work and close the Engine within serve's shared grace.
 Clean EOF exits 0; transport/storage errors or grace expiry exit 1.
 
+ACP projects editor Workspace Tools through the ordinary typed file/command mapping. Retired worker preparation and handover operations have no Tool projection. The pinned upstream ACP schema is unchanged; Arany's closed Event vocabulary belongs to [serve](./serve.md#framing-and-envelope).
+
 ### Errors and envelopes
 
 Envelopes require `jsonrpc:"2.0"`, reject batches, unknown envelope fields,

@@ -1,7 +1,9 @@
 mod goal;
 mod records;
 mod shared_editors;
-pub(crate) use shared_editors::{live_editor_payload, pre_shared_editor_payload};
+pub(crate) use shared_editors::{
+    live_editor_payload, pre_shared_editor_payload, retired_worker_payload,
+};
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -138,7 +140,7 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 46] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -147,42 +149,37 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 46] = [
     ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 13),
+    ("GoalPlanContractRecorded", 14),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 16),
+    ("AgentSpawned", 17),
     ("AgentFinished", 12),
-    ("ProviderCallRecorded", 24),
-    ("WorkerDataChunk", 1),
-    ("WorkerDataSealed", 1),
+    ("ProviderCallRecorded", 25),
     ("WorkerStopObserved", 1),
-    ("WorkerIntegrationRecorded", 1),
-    ("WorkerHandoverDiscarded", 1),
     ("WorkerLeaseReleased", 2),
     ("WorkerVerificationRecorded", 1),
-    ("WorkerHandoverRecorded", 2),
     ("ToolResultsCleared", 1),
     ("GoalStarted", 8),
     ("GoalFinished", 8),
-    ("SupervisorVerdictRecorded", 1),
+    ("SupervisorVerdictRecorded", 2),
     ("WorkspaceRewindStarted", 2),
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolProposed", 1),
+    ("ToolProposed", 2),
     ("ToolPreflightRefused", 1),
-    ("HookStarted", 12),
-    ("HookFinished", 18),
-    ("ToolFinished", 29),
+    ("HookStarted", 13),
+    ("HookFinished", 19),
+    ("ToolFinished", 30),
     ("RunStarted", 24),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 23),
+    ("ToolStarted", 24),
     ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
@@ -436,31 +433,6 @@ pub enum Event {
         summary: Option<String>,
         result: Option<String>,
         worker: Option<WorkerOutcome>,
-    },
-    WorkerDataChunk {
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        record: WorkerDataChunk,
-    },
-    WorkerDataSealed {
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        record: WorkerDataSealed,
-    },
-    WorkerHandoverRecorded {
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        record: WorkerHandover,
-    },
-    WorkerIntegrationRecorded {
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        record: WorkerIntegration,
-    },
-    WorkerHandoverDiscarded {
-        run_id: RunId,
-        agent_run_id: AgentRunId,
-        record: WorkerSettlement,
     },
     WorkerLeaseReleased {
         run_id: RunId,
@@ -913,11 +885,6 @@ impl Event {
             Self::HookStarted { .. } => "HookStarted",
             Self::HookFinished { .. } => "HookFinished",
             Self::AgentFinished { .. } => "AgentFinished",
-            Self::WorkerDataChunk { .. } => "WorkerDataChunk",
-            Self::WorkerDataSealed { .. } => "WorkerDataSealed",
-            Self::WorkerHandoverRecorded { .. } => "WorkerHandoverRecorded",
-            Self::WorkerIntegrationRecorded { .. } => "WorkerIntegrationRecorded",
-            Self::WorkerHandoverDiscarded { .. } => "WorkerHandoverDiscarded",
             Self::WorkerLeaseReleased { .. } => "WorkerLeaseReleased",
             Self::WorkerVerificationRecorded { .. } => "WorkerVerificationRecorded",
             Self::WorkerStopObserved { .. } => "WorkerStopObserved",
@@ -951,31 +918,6 @@ impl Event {
             | Self::MessageCommitted { run_id, .. }
             | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
             Self::AgentSteeringNoteRecorded {
-                run_id,
-                agent_run_id,
-                ..
-            }
-            | Self::WorkerDataChunk {
-                run_id,
-                agent_run_id,
-                ..
-            }
-            | Self::WorkerDataSealed {
-                run_id,
-                agent_run_id,
-                ..
-            }
-            | Self::WorkerHandoverRecorded {
-                run_id,
-                agent_run_id,
-                ..
-            }
-            | Self::WorkerIntegrationRecorded {
-                run_id,
-                agent_run_id,
-                ..
-            }
-            | Self::WorkerHandoverDiscarded {
                 run_id,
                 agent_run_id,
                 ..
@@ -1310,11 +1252,6 @@ impl Event {
                 summary: summary.as_deref(),
                 result: result.as_deref(),
             }),
-            Self::WorkerDataChunk { record, .. } => serialize(record),
-            Self::WorkerDataSealed { record, .. } => serialize(record),
-            Self::WorkerHandoverRecorded { record, .. } => serialize(record),
-            Self::WorkerIntegrationRecorded { record, .. } => serialize(record),
-            Self::WorkerHandoverDiscarded { record, .. } => serialize(record),
             Self::WorkerLeaseReleased { record, .. } => serialize(record),
             Self::WorkerVerificationRecorded { record, .. } => serialize(record),
             Self::WorkerStopObserved { record, .. } => serialize(record),
@@ -1365,31 +1302,6 @@ impl Event {
                     record: parse(payload)?,
                 }
             }
-            "WorkerDataChunk" => Self::WorkerDataChunk {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                record: parse(payload)?,
-            },
-            "WorkerDataSealed" => Self::WorkerDataSealed {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                record: parse(payload)?,
-            },
-            "WorkerHandoverRecorded" => Self::WorkerHandoverRecorded {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                record: parse(payload)?,
-            },
-            "WorkerIntegrationRecorded" => Self::WorkerIntegrationRecorded {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                record: parse(payload)?,
-            },
-            "WorkerHandoverDiscarded" => Self::WorkerHandoverDiscarded {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                record: parse(payload)?,
-            },
             "WorkerLeaseReleased" => Self::WorkerLeaseReleased {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,

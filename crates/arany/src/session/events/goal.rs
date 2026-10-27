@@ -583,11 +583,8 @@ impl GoalPlanContract {
                 true
             }
             ToolCall::ParseAgentDefinition { .. }
-            | ToolCall::PrepareWorker { .. }
             | ToolCall::ApplyChangeset {
-                source:
-                    crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                    | crate::session::worker::ChangesetSource::Rewind { .. },
+                source: crate::session::worker::ChangesetSource::Rewind { .. },
             } => false,
             ToolCall::List { path }
             | ToolCall::Read { path, .. }

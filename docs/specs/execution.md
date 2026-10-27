@@ -116,7 +116,7 @@ The editor's answer passes the criterion gate before SubagentStop. An unmet crit
 
 `WorkerStopObserved` retains the first cancellation, pause or budget boundary before further team dispatch. New spawns, calls, Tools and verification reject after it, while in-flight observations and terminal/release facts drain. Cancellation and pause retain landed edits and their checkpoints. Process death leaves Interrupted intents and the last receipted Workspace state. Unknown Workspace effects stop the whole Run without lease release, continuation or retry; replay never executes cleanup or publication.
 
-Private targets, PrepareWorker, worker data and handover Event/Attestation vocabulary remain bounded serialized residue. Current live histories reject all private-target, private-data, handover, integration and discard transitions. They cannot become a compatibility execution path.
+Private targets and the worker-policy data allowance remain bounded serialized residue for native protocol retirement; live histories reject private targets. Worker transfer, preparation, handover, integration and discard Events, calls and attestations are absent from the current vocabulary. Their historical rows follow the [archive and migration contract](#journal-migration), never a compatibility execution path.
 
 Evidence owners: [Engine team corpus](../../crates/arany/tests/engine_run/team.rs), [live replay and hostile transitions](../../crates/arany/src/session/reducer/worker/workspace_tests.rs), [native foreground/reopen journeys](../../crates/arany-cli/tests/guard_runs/worker.rs), [shared team support](../../crates/arany/src/test_support/worker_teams.rs), [migration/archive](../../crates/arany/src/store/migrate/shared_editors_tests.rs), [checkpoint/rewind](../../crates/arany-cli/tests/guard_runs/rewind.rs), and [editor parent authority](../../crates/arany/tests/engine_run/shared_editors.rs).
 
@@ -161,28 +161,29 @@ Event decoding retains owned payload records and strict current-field validation
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 24; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 29 |
-| `ToolStarted` | 23; required nullable `verdict`, with the configured or host permission verdict before dispatch |
+| `ToolFinished` | 30 |
+| `ToolStarted` | 24; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
-| `AgentSpawned` | 16 |
+| `AgentSpawned` | 17 |
 | `AgentFinished` | 12 |
-| `ProviderCallRecorded` | 24; the closed failure reasons include `rate_limited` and `outcome_decode`; editor refusal causes follow [Accepted outcomes](#accepted-outcomes) |
+| `ProviderCallRecorded` | 25; the closed failure reasons include `rate_limited` and `outcome_decode`; editor refusal causes follow [Accepted outcomes](#accepted-outcomes) |
 | `RunFinished` | 9 |
 | `ProviderSetupEditStarted` | 3 |
 | `ProviderSetupEditFinished` | 1 |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
-| `GoalPlanContractRecorded` | 13 |
+| `GoalPlanContractRecorded` | 14 |
 | `GoalStarted` | 8 |
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolProposed`, `ToolPreflightRefused` | 1 |
-| `SupervisorVerdictRecorded`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerVerificationRecorded` | 1 |
+| `ToolProposed` | 2 |
+| `ToolPreflightRefused` | 1 |
+| `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerStopObserved`, `WorkerVerificationRecorded` | 1 |
 | `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
-| `WorkerHandoverRecorded` | 2 |
+| `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
-| `HookStarted` | 12 |
-| `HookFinished` | 18 |
+| `HookStarted` | 13 |
+| `HookFinished` | 19 |
 | All other supported Event kinds | 6 |
 
 `ProviderCallRecorded` wire provenance remains an optional closed enum. `chat_completions_stop_storage_unspecified` records acceptance of a Chat Completions `stop` or `tool_calls` finish with the local non-streaming request; it claims nothing about remote retention. This additive enum value preserves the payload version and existing record bytes. An older reader rejects a record carrying the new value as unsupported history and follows the existing archive path.
@@ -273,7 +274,7 @@ Run and compaction hold the Session lock and every fork ancestor's operation loc
 
 A CLI process opens one Engine: the attached terminal after its Session starts, `exec` after Provider selection. The Engine's Store thread and its shared history lock live until exit, so another process's history reset reports history in use while an attached terminal is open, even when idle; Session, lineage and Workspace locks stay per Run. A normal exit closes the Engine and reports a failed close; an error exit drops it, which still stops the Store thread. The Engine runs one operation at a time: a submission or compaction while another is open is refused with `Busy` before any admission or Provider call. Each submission brings its own [per-role Provider chains](./provider.md#per-role-selection-and-fallback) and controls (Tool grant, approvals, steering, cancellation, display hints), fixed for every Run of its Goal loop, and its handle follows the Engine's committed Event stream from submission on. Invalid chains are refused at submission; a compaction brings the chains whose compaction route it calls. Each attached submission and compaction re-admits the State path and fails closed when it became unavailable or unsafe or no longer names the directory the Engine holds; a Tool grant loads its configuration at submission.
 
-The [Supervisor adapter](./tools.md#supervisor-adapter) owns decision ordering, replay acceptance, interrupted-prefix recovery. A recorded `SupervisorVerdictRecorded` occupies its subject's next sequence, with the same Run and actor. A verdict is transparent to existing hook adjacency and handover correlation, and changes no authority or other transition's legality. A Run pinned with a Supervisor adds verdict slots to each action's [bound](#worker-journal-protocol), at least the [generated verdict payload bound](./limits.md#max_verdict_bytes) per possible evaluation boundary (ordinary Event byte reservations conservatively exceed this): one per Provider call, `in-flight + 1` per child step, two per Tool step (a narrowing replacement is a second outcome), 12 per worker action and one per delegated child or child Tool call. A Run pinned with `supervisor: null` reserves none.
+The [Supervisor adapter](./tools.md#supervisor-adapter) owns decision ordering, replay acceptance, interrupted-prefix recovery. A recorded `SupervisorVerdictRecorded` occupies its subject's next sequence, with the same Run and actor. A verdict is transparent to existing hook adjacency and Tool correlation, and changes no authority or other transition's legality. A Run pinned with a Supervisor adds verdict slots to each action's [bound](#worker-journal-protocol), at least the [generated verdict payload bound](./limits.md#max_verdict_bytes) per possible evaluation boundary (ordinary Event byte reservations conservatively exceed this): one per Provider call, `in-flight + 1` per child step, two per Tool step (a narrowing replacement is a second outcome), 12 per worker action and one per delegated child or child Tool call. A Run pinned with `supervisor: null` reserves none.
 
 `AgentSteeringNoteRecorded` is an actor-scoped v1 fact with strict `{goal_id,text}` payload and Run/AgentRun IDs in its envelope. Its migration floor is 1; it has no predecessor payload or migration edge. Its payload version is independent of the SQLite schema and compaction compiler. The reducer enforces the [shared steering quota and ChildWork reservation](./goals.md#steering-notes-and-pause); replay rebuilds historical guidance without delivering it.
 
@@ -304,7 +305,11 @@ The complete lifecycle has a 240-second ceiling; requests end at least five seco
 
 ### Journal migration
 
-Live-editor migration advances AgentSpawned 15 → 16 and AgentFinished 10 → 11 together with WorkerLeaseReleased 1 → 2. Spawn keeps floor 11 and the earlier non-editor migration chain; finish keeps floor 10. The cutover transforms strictly preserve only null assignment/null worker source records, with canonical fixtures. Those steps refuse any non-null source assignment or outcome and archive the whole history intact with the ordinary notice. Release has floor 2: an old release cannot prove the current causal record and archives rather than inventing a cause. There is no SQLite schema change or runtime compatibility reader.
+Worker vocabulary retirement removes `WorkerDataChunk`, `WorkerDataSealed`, `WorkerHandoverRecorded`, `WorkerIntegrationRecorded` and `WorkerHandoverDiscarded` from the Event registry. A history containing any of them archives intact, including checkpoint storage, with the ordinary notice. There is no replacement Event or invented effect.
+
+Selective identity steps advance ToolProposed 1 → 2, ToolStarted 23 → 24, ToolFinished 29 → 30, HookStarted 12 → 13, HookFinished 18 → 19, GoalPlanContractRecorded 13 → 14, ProviderCallRecorded 24 → 25, AgentSpawned 16 → 17 and SupervisorVerdictRecorded 1 → 2. Existing floors remain unchanged. Their strictly typed source canonicalizers preserve supported payload bytes and refuse `prepare_worker`, `worker_handover` changeset sources, worker data/read/mutation/command attestations and Supervisor `worker_capture`/`handover` sites wherever the enclosing type carries them. Refusal archives the entire history; supported live-editor and non-editor facts migrate and reopen without execution. Text fields containing those words remain ordinary untrusted data. [Retirement evidence](../../crates/arany/src/store/migrate/retired_worker_tests.rs) owns each supported edge, removed-variant refusal and intact archive/reopen scenario.
+
+Live-editor migration advances AgentSpawned 15 → 16 and AgentFinished 10 → 11 together with WorkerLeaseReleased 1 → 2. Spawn keeps floor 11 and the earlier non-editor migration chain; finish keeps floor 10. The supported adjacent transforms strictly preserve only null assignment/null worker source records, with canonical fixtures. Any non-null source assignment or outcome refuses transformation and archives the whole history intact with the ordinary notice. Release has floor 2: an old release cannot prove the current causal record and archives rather than inventing a cause. There is no SQLite schema change or runtime compatibility reader. The [focused migration corpus](../../crates/arany/src/store/migrate/shared_editors_tests.rs) owns null/strict-field and archive/reopen proof.
 
 AgentFinished 11 → 12 removes the obsolete `lost` and `private_uncertain` outcome variants. Supported live editor and null-worker records migrate with unchanged canonical bytes; an unsupported variant archives the whole history intact. The [focused migration corpus](../../crates/arany/src/store/migrate/shared_editors_tests.rs) owns strict-field, supported-outcome and archive/reopen proof.
 
@@ -312,7 +317,7 @@ AgentFinished 11 → 12 removes the obsolete `lost` and `private_uncertain` outc
 
 The migration accepts only a recognized native profile or a validated `custom:NAME`, preserves the custom name exactly and reconstructs source canonical bytes before re-pinning affected prefixes. Current replay accepts only the tagged record; it never reads legacy strings or resolves credentials. This deliberately differs from Codex's string `model_provider_id`, Claude Code's model strings and OpenCode's string `providerID` to make persisted Run identity closed and explicit.
 
-The current Tool and hook intent payloads omit absolute approval expiry. The expiry-removal steps follow the primary generic-host steps. ToolFinished and HookFinished also require nullable `approval_cause`; migration sets it to `null` because older history cannot prove why approval was absent. The migration removes the intent expiry, validates and rebinds intent references in verdicts, hook subjects, receipts, command integrations and worker cleanup, and retains content hashes. Historical prefix hashes are verified before replacement. A migrated pending intent is interrupted history, never a restored live approval.
+The current Tool and hook intent payloads omit absolute approval expiry. The expiry-removal steps follow the primary generic-host steps. ToolFinished and HookFinished also require nullable `approval_cause`; migration sets it to `null` because older history cannot prove why approval was absent. The migration removes the intent expiry, validates and rebinds intent references in verdicts, hook subjects, receipts and command integrations, retaining content hashes. Historical prefix hashes are verified before replacement. A migrated pending intent is interrupted history, never a restored live approval.
 
 `WorkspaceRewindStarted` 1 → 2 removes the preview-expiry field. Its v1 canonical payload is validated before conversion, and the migration recomputes each affected prefix binding through the standard migration path; it creates no live preview or receipt.
 
