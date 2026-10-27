@@ -55,7 +55,10 @@ fn lists_quotes_and_nested_code_share_consumers_counts_and_source_copy() {
         let answer = run("objective", source);
         assert_eq!(
             render_exec(&answer, &[], Output::Text, false),
-            format!("Answer:\n  {}\n", display_text(source).replace('\n', "\n  "))
+            format!(
+                "Answer:\n  {}\n",
+                display_text(source).replace('\n', "\n  ")
+            )
         );
     }
     assert_eq!(
@@ -181,10 +184,10 @@ fn hostile_nested_text_is_escaped_after_decoding_in_both_consumers() {
     for width in [0, 1, 2, 3, 16, 40, 50, 80, 120] {
         for kind in [MessageKind::Assistant, MessageKind::AgentResult] {
             let rows = display_rows(kind, source, width, None);
-            assert!(rows.iter().all(|row| !row
-                .text
-                .chars()
-                .any(|c| c.is_control() || c == '\u{202e}')));
+            assert!(
+                rows.iter()
+                    .all(|row| !row.text.chars().any(|c| c.is_control() || c == '\u{202e}'))
+            );
             assert_eq!(
                 markdown_cost(kind, source, width),
                 (rows.iter().map(|row| row.text.len()).sum(), rows.len())
@@ -210,13 +213,19 @@ fn container_depth_and_generated_rows_fall_back_whole_only_over_the_limit() {
             let ((_, bytes, rows), cue) = markdown::project(&source, 80, true);
             let ((_, counted_bytes, counted_rows), counted_cue) =
                 markdown::project(&source, 80, false);
-            assert_eq!((bytes, rows, cue), (counted_bytes, counted_rows, counted_cue));
+            assert_eq!(
+                (bytes, rows, cue),
+                (counted_bytes, counted_rows, counted_cue)
+            );
             assert_eq!(cue, (extra > 0).then_some(markdown::LIMIT_CUE));
         }
         let source = format!("- {}", "a".repeat(markdown::MAX_MARKDOWN_ROWS - 2 + extra));
         let ((drawn, bytes, rows), cue) = markdown::project(&source, 1, true);
         let ((_, counted_bytes, counted_rows), counted_cue) = markdown::project(&source, 1, false);
-        assert_eq!((bytes, rows, cue), (counted_bytes, counted_rows, counted_cue));
+        assert_eq!(
+            (bytes, rows, cue),
+            (counted_bytes, counted_rows, counted_cue)
+        );
         assert_eq!(cue, (extra > 0).then_some(markdown::LIMIT_CUE));
         if extra > 0 {
             let (literal, _, _) = markdown::literal(&source, 1, true);
@@ -243,7 +252,10 @@ fn repeated_hanging_indents_charge_generated_output_before_whole_message_fallbac
         let ((_, bytes, rows), cue) = markdown::project(&source, width, true);
         let ((_, counted_bytes, counted_rows), counted_cue) =
             markdown::project(&source, width, false);
-        assert_eq!((bytes, rows, cue), (counted_bytes, counted_rows, counted_cue));
+        assert_eq!(
+            (bytes, rows, cue),
+            (counted_bytes, counted_rows, counted_cue)
+        );
         assert_eq!(cue, (extra > 0).then_some(markdown::LIMIT_CUE));
         for kind in [MessageKind::Assistant, MessageKind::AgentResult] {
             let drawn = display_rows(kind, &source, width + 2, None);
@@ -269,7 +281,10 @@ fn pager_find_steps_container_source_matches_and_reference_uses_through_resize()
     );
     for (source, count) in [
         ("> - needle\n> - needle\n>   ~~~\n>   needle\n>   ~~~", 3),
-        ("> - [label][r]\n> - [label][r]\n\n[r]: https://e.test/needle", 2),
+        (
+            "> - [label][r]\n> - [label][r]\n\n[r]: https://e.test/needle",
+            2,
+        ),
     ] {
         let mut view = session();
         view.runs.push(run("objective", source));

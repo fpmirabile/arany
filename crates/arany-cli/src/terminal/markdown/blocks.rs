@@ -149,7 +149,10 @@ impl Projection {
             Tag::List(number) => self.lists.push(number),
             Tag::Item => {
                 self.items.push(self.depth + 1);
-                let number = self.lists.last_mut().expect("parser item belongs to a list");
+                let number = self
+                    .lists
+                    .last_mut()
+                    .expect("parser item belongs to a list");
                 super::lists::item(source, covered(lines, range), *number);
                 if let Some(number) = number {
                     *number += 1;

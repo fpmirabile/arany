@@ -99,9 +99,11 @@ fn layout(
                 previous = Some(row_index);
                 let empty = cells.is_empty();
                 let extra = line.map_or(0, |line| {
-                    line.decoration.decorate(cells, (first, capture), (byte, width))
+                    line.decoration
+                        .decorate(cells, (first, capture), (byte, width))
                 });
-                if empty && first
+                if empty
+                    && first
                     && let Some(line) = line
                     && line.flow.is_none()
                 {
@@ -114,7 +116,13 @@ fn layout(
             } else if let Some(lines) = line.and_then(|line| line.flow.as_ref()) {
                 inline::layout(lines, inner_width, capture, &mut record_line)?;
             } else {
-                layout_line((start, content), line, inner_width, capture, &mut record_line)?;
+                layout_line(
+                    (start, content),
+                    line,
+                    inner_width,
+                    capture,
+                    &mut record_line,
+                )?;
             }
         }
         start += text.len() + 1;

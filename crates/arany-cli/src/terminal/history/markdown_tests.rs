@@ -644,8 +644,7 @@ fn replace_prefixes(
 #[test]
 fn incomplete_checkpoints_format_with_exact_classic_costs_and_withdraw_on_rejection() {
     use arany::ProviderCallDisposition;
-    let source =
-        "# Result\n\n[retained](https://example.test/body)\n\n> - retained **item**\n>\n>   ~~~rust&amp;lang\n>   retained body";
+    let source = "# Result\n\n[retained](https://example.test/body)\n\n> - retained **item**\n>\n>   ~~~rust&amp;lang\n>   retained body";
     let view = checkpoint_view(source);
     for width in [16, 40, 50, 80, 120] {
         let mut history = History::default();
