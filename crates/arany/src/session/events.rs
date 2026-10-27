@@ -1,7 +1,7 @@
 mod goal;
 mod records;
 mod shared_editors;
-pub(crate) use shared_editors::pre_shared_editor_payload;
+pub(crate) use shared_editors::{live_editor_payload, pre_shared_editor_payload};
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -155,7 +155,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 46] = [
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
     ("AgentSpawned", 16),
-    ("AgentFinished", 11),
+    ("AgentFinished", 12),
     ("ProviderCallRecorded", 24),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),

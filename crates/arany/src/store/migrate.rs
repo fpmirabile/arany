@@ -171,6 +171,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("AgentFinished", 11, crate::session::live_editor_payload),
         variant_step!(
             "AgentSpawned",
             15,

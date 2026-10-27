@@ -86,3 +86,7 @@
 | <a id="max_markdown_events"></a>[`MAX_MARKDOWN_EVENTS`](#max_markdown_events) | 65536 | events | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_output_bytes"></a>[`MAX_MARKDOWN_OUTPUT_BYTES`](#max_markdown_output_bytes) | 524288 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_rows"></a>[`MAX_MARKDOWN_ROWS`](#max_markdown_rows) | 4096 | rows | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_markdown_table_columns"></a>[`MAX_MARKDOWN_TABLE_COLUMNS`](#max_markdown_table_columns) | 16 | columns | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_markdown_table_rows"></a>[`MAX_MARKDOWN_TABLE_ROWS`](#max_markdown_table_rows) | 128 | data rows | `crates/arany-cli/src/terminal/markdown.rs` |
+| <a id="max_cell_pixels"></a>[`MAX_CELL_PIXELS`](#max_cell_pixels) | 128 | pixels | `crates/arany-cli/src/terminal/graphics/sixel.rs` |
+| <a id="preview_max_pixels"></a>[`PREVIEW_MAX_PIXELS`](#preview_max_pixels) | 5242880 | pixels | `crates/arany-cli/src/terminal/graphics/sixel.rs` |

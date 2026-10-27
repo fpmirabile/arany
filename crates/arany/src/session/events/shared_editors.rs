@@ -10,6 +10,13 @@ pub(crate) fn pre_shared_editor_payload(kind: &str, payload: &str) -> Option<Str
     if !value.get(field)?.is_null() {
         return None;
     }
+    live_editor_payload(kind, payload)
+}
+
+pub(crate) fn live_editor_payload(kind: &str, payload: &str) -> Option<String> {
+    if !matches!(kind, "AgentSpawned" | "AgentFinished") {
+        return None;
+    }
     let event = Event::decode(
         kind,
         payload_version(kind)?,

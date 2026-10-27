@@ -127,6 +127,12 @@ pub(super) fn assert_stopped(
     );
     if case == "active_time" {
         assert_eq!(outcome.cause, WorkerCause::Budget);
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::WorkerStopObserved { record, .. }
+                if record.reason == WorkerStopReason::Budget
+                    && event.sequence < worker.outcome.as_ref().unwrap().0
+        )));
         assert_active_time(view);
     } else {
         assert_eq!(run.failure, Some(RunFailure::ToolStopped));
