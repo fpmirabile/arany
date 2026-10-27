@@ -86,8 +86,8 @@ fn largest_switch_and_long_paths_fit_the_derived_frame_bound() {
     let payload_bytes = encode(&plan).unwrap().len();
     let fixed_bytes = 2 * size_of::<u64>()
         + HASH_BYTES
-        + 3 * (LENGTH_BYTES + HASH_BYTES)
-        + 7 * LENGTH_BYTES
+        + (LENGTH_BYTES + HASH_BYTES)
+        + 8 * LENGTH_BYTES
         + plan.publication.head.as_ref().unwrap().len();
     let refs_bytes = MAX_REF_ENTRIES * (LENGTH_BYTES + MAX_PATH_BYTES + HASH_BYTES);
     let files_bytes = MAX_SNAPSHOT_FILES * (MAX_PATH_BYTES + HASH_BYTES + 4 * LENGTH_BYTES)
