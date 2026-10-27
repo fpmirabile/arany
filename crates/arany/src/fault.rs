@@ -85,9 +85,12 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
     Ok(())
 }
 
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+#[cfg_attr(
+    not(any(test, all(feature = "test-support", not(target_os = "linux")))),
+    expect(unused_variables)
+)]
 pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", not(target_os = "linux"))))]
     FaultPlan::commit_marker(token)?;
     Ok(())
 }
@@ -392,7 +395,9 @@ pub(crate) fn commit_latency(recorder: &LatencyRecorder, envelope: &EventEnvelop
 #[cfg(any(test, feature = "test-support"))]
 mod injection {
     use crate::session::{Event, SessionId};
+    #[cfg(any(test, not(target_os = "linux")))]
     use crate::store::BuildCacheIdentity;
+    #[cfg(any(test, not(target_os = "linux")))]
     use std::io;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
@@ -455,6 +460,7 @@ mod injection {
             std::sync::mpsc::Receiver<()>,
             oneshot::Sender<()>,
         ),
+        #[cfg(any(test, not(target_os = "linux")))]
         CommitMarker(String),
         // Without a gate the Session's retry backoffs end at once; a gate holds one backoff.
         RetryBackoff(
@@ -699,6 +705,7 @@ mod injection {
             (wait_entered, release, wait_finished)
         }
 
+        #[cfg(any(test, not(target_os = "linux")))]
         pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
             plan().push(Fault::CommitMarker(identity.token()));
         }
@@ -929,6 +936,7 @@ mod injection {
             }
         }
 
+        #[cfg(any(test, not(target_os = "linux")))]
         pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
             match take(|fault| matches!(fault, Fault::CommitMarker(key) if key == token)) {
                 Some(_) => Err(io::Error::other("injected commit marker failure")),
