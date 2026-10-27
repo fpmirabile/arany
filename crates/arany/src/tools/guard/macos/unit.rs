@@ -895,6 +895,9 @@ fn action_deadlines(
 }
 
 #[cfg(any(test, feature = "test-support"))]
+const FILL_CHUNK_BYTES: usize = 1 << 20;
+
+#[cfg(any(test, feature = "test-support"))]
 fn git_storage_fault(
     root: &Path,
     volumes: &[cap_std::fs::Dir],
@@ -935,9 +938,9 @@ fn git_storage_fault(
                 .ok_or(ToolError::Operation)?
                 .create("fill")
                 .map_err(|_| ToolError::Operation)?;
-            let chunk = [0_u8; 1 << 20];
+            let chunk = [0_u8; FILL_CHUNK_BYTES];
             let mut full = false;
-            for _ in 0..=crate::tools::types::SCRATCH_BYTES / chunk.len() as u64 {
+            for _ in 0..=crate::tools::types::SCRATCH_BYTES / FILL_CHUNK_BYTES as u64 {
                 match file.write_all(&chunk).and_then(|()| file.sync_all()) {
                     Ok(()) => {}
                     Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
@@ -2998,8 +3001,8 @@ int main(int argc, char **argv) {
                 "success" => std::fs::write(view.join("probe"), b"view").unwrap(),
                 "exhaustion" => {
                     let mut file = std::fs::File::create(view.join("fill")).unwrap();
-                    let chunk = [0_u8; 1 << 20];
-                    let full = (0..=crate::tools::types::SCRATCH_BYTES / chunk.len() as u64)
+                    let chunk = [0_u8; FILL_CHUNK_BYTES];
+                    let full = (0..=crate::tools::types::SCRATCH_BYTES / FILL_CHUNK_BYTES as u64)
                         .find_map(|_| file.write_all(&chunk).and_then(|()| file.sync_all()).err())
                         .expect("the view volume must be bounded");
                     assert_eq!(full.raw_os_error(), Some(nix::libc::ENOSPC));
@@ -4340,10 +4343,10 @@ printf 'native command success'
                 volumes[0].write("profile-receipt", b"PROFILE\n").unwrap();
                 return;
             }
-            let block = vec![0; 1024 * 1024];
+            let block = vec![0; FILL_CHUNK_BYTES];
             for volume in &volumes {
                 let mut output = volume.create("filled").unwrap();
-                let full = (0..65).any(|_| {
+                let full = (0..=STORAGE_BYTES_CAP / block.len() as u64).any(|_| {
                     match output.write_all(&block).and_then(|()| output.sync_all()) {
                         Ok(()) => false,
                         Err(error) => {
