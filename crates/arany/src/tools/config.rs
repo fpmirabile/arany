@@ -27,6 +27,8 @@ pub(crate) struct Config {
     pub git: Option<Program>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_identity: Option<GitIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<super::network::Network>,
 }
 
 // Author and committer of typed Git commits; never read from repository configuration.
@@ -117,12 +119,17 @@ impl Config {
         Self::parse(&bytes)
     }
 
-    fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
+    pub(super) fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
         let value =
             super::skills::parse_json(bytes, 64 * 1024).map_err(|_| ToolError::Configuration)?;
         let config: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
         config.validate()?;
-        if !config.runtime_grants.is_empty() {
+        if !config.runtime_grants.is_empty()
+            || config.network.as_ref().is_some_and(|network| {
+                !network.deny.is_empty()
+                    || network.allow.len() > super::network::MAX_NETWORK_PATTERNS
+            })
+        {
             return Err(ToolError::Configuration);
         }
         Ok(config)
@@ -150,6 +157,13 @@ impl Config {
             return Err(ToolError::Configuration);
         }
         validate_selection(&self.runtime_grants)?;
+        if self
+            .network
+            .as_ref()
+            .is_some_and(|network| cfg!(not(target_os = "linux")) || !network.valid())
+        {
+            return Err(ToolError::Configuration);
+        }
         let roots: BTreeSet<_> = self.workspace_paths.iter().collect();
         if roots.len() != self.workspace_paths.len()
             || roots.iter().any(|left| {

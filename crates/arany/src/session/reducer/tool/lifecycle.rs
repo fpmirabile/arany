@@ -280,7 +280,11 @@ pub(super) fn proposed(
             return Err(ReplayError::InvalidTransition);
         }
     }
-    if names_child(current, run_id, agent_run_id) {
+    let child = names_child(current, run_id, agent_run_id);
+    if child && intent.limits.network == crate::tools::NetworkGrant::Proxy {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if child {
         current.start_child_tool(run_id, agent_run_id, intent)?;
     } else {
         start_primary_tool(current, run_id, agent_run_id, intent)?;

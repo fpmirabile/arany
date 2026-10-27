@@ -161,8 +161,8 @@ Event decoding retains owned payload records and strict current-field validation
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 25; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 32 |
-| `ToolStarted` | 25; required nullable `verdict`, with the configured or host permission verdict before dispatch |
+| `ToolFinished` | 33 |
+| `ToolStarted` | 26; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
 | `AgentSpawned` | 17 |
 | `AgentFinished` | 12 |
@@ -175,15 +175,15 @@ Event decoding retains owned payload records and strict current-field validation
 | `GoalStarted` | 8 |
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolProposed` | 3 |
+| `ToolProposed` | 4 |
 | `ToolPreflightRefused` | 1 |
 | `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerStopObserved`, `WorkerVerificationRecorded` | 1 |
 | `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
 | `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
-| `HookStarted` | 14 |
-| `HookFinished` | 21 |
+| `HookStarted` | 15 |
+| `HookFinished` | 22 |
 | All other supported Event kinds | 6 |
 
 `ProviderCallRecorded` wire provenance remains an optional closed enum. `chat_completions_stop_storage_unspecified` records acceptance of a Chat Completions `stop` or `tool_calls` finish with the local non-streaming request; it claims nothing about remote retention. This additive enum value preserves the payload version and existing record bytes. An older reader rejects a record carrying the new value as unsupported history and follows the existing archive path.
@@ -238,7 +238,7 @@ and [hooks](../../crates/arany/tests/engine_run/hooks.rs).
 
 Typed `git_push`, `gh_pr_create`, `gh_pr_list` and `gh_pr_view` use the `host` execution class described by [Tools](./tools.md#human-approved-host-git). This is a second explicit exception to Guard isolation, separate from primary-only generic host commands. An optional `EffectIntent.host` pins write source data or the closed PR-list/PR-view adapter version; absent metadata keeps existing bytes unchanged. Host intents declare the `host` network class, and every other Tool retains `none`. The `Attestation::Host` receipt carries the intent digest, executable digest, PID, nullable exit code and confirmed group-teardown fact. A successful write requires exit zero, confirmed teardown and a committed primary human Ask verdict. Successful PR-list and PR-view reads accept either a committed primary human Ask verdict or a matching user-owned typed prefix verdict with a pinned settings digest; rule-only, AI-only, child, Guard and unguarded substitutions reject. Confirmed typed-read failures are Failed; interrupted host execution without confirmed completion and cleanup is Uncertain and stops continuation. Replay validates committed verdicts and receipts without reauthorizing or dispatching. Host effects with a receipt, Uncertain result, or committed approval without an outcome remain non-rewindable. The process-death fixture between approval and ToolFinished reopens twice with no outcome and no redispatch.
 
-`ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` advance once more after the MultiEdit steps for host calls, metadata/network class and receipts; the current versions are listed in the [version table](#admission-persistence-and-recovery). Each adjacent edge has an identity migration and canonical fixture in `store::migrate`; old rows naming a host operation, host metadata, host network or host receipt refuse. No migration invents approval or host authority.
+`ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` advance once more after the MultiEdit steps for host calls, metadata/network class and receipts; the current versions are listed in the [version table](#admission-persistence-and-recovery). Each adjacent edge has an identity migration and canonical fixture in `store::migrate`; old rows naming a host operation, host metadata, host network or host receipt refuse. After private-target retirement, the `proxy` network class advances ToolProposed 3 → 4, ToolStarted 25 → 26, ToolFinished 31 → 32, HookStarted 14 → 15 and HookFinished 20 → 21 for an egress-proxy Command intent. Each edge is an identity migration that refuses any source row naming `proxy`; floors remain unchanged. No migration invents approval or host authority.
 
 `AgentSpawned.profile` is required nullable provenance, also retained in the reduced Agent view. Outside roster mode it is null. In roster mode the primary references its default and every child references an eligible profile, with null proposals already resolved. Replay rejects missing or forged references, role-ineligible spawns, a reservation before spawn, cross-profile switches and reported output above the actual selected identity's role cap. Calls, fallback, telemetry and replay derive the chain from actor plus role; review/compaction use their fixed roles. No identity copy or replay-time configuration/account lookup can rebind an actor.
 
@@ -323,7 +323,7 @@ The current Tool and hook intent payloads omit absolute approval expiry. The exp
 
 `WorkspaceRewindStarted` 1 → 2 removes the preview-expiry field. Its v1 canonical payload is validated before conversion, and the migration recomputes each affected prefix binding through the standard migration path; it creates no live preview or receipt.
 
-`ToolFinished` 31 → 32 and `HookFinished` 20 → 21 add required nullable `elapsed_ms` to existing command selection summaries. Historical timing is unknown and migrates to `null`; results are refitted within their pinned output budget while preserving totals, exit status, changesets and hook verdicts. Source payloads already carrying timing refuse migration. The [selection timing migration corpus](../../crates/arany/src/store/migrate/selection_timing_tests.rs) owns canonical source preservation and bounded refitting.
+`ToolFinished` 32 → 33 and `HookFinished` 21 → 22 add required nullable `elapsed_ms` to existing command selection summaries. Historical timing is unknown and migrates to `null`; results are refitted within their pinned output budget while preserving totals, exit status, changesets and hook verdicts. Source payloads already carrying timing refuse migration. The [selection timing migration corpus](../../crates/arany/src/store/migrate/selection_timing_tests.rs) owns canonical source preservation and bounded refitting.
 
 `ToolFinished` 25 → 26 and `HookFinished` 14 → 15 add `selection: null` to prior complete command results because historical selection counts were not recorded. A near-limit result is refitted within its original `result_bytes` budget with explicit omission markers. The migration preserves output totals, exit status, changesets and hook verdicts. It refuses a result that already exceeds `result_bytes` or already contains `selection`, or whose converted result cannot fit or validate; non-command observations keep their bytes.
 
