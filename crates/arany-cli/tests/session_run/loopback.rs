@@ -39,9 +39,11 @@ impl Drop for ChildGuard {
     }
 }
 
+pub(super) const PRODUCT_EXIT_WAIT: Duration = Duration::from_secs(10);
+
 pub(super) fn wait_product(child: Child) -> Output {
     let mut child = ChildGuard::new(child);
-    super::process::capture(child.child(), Duration::from_secs(10), 64 * 1024)
+    super::process::capture(child.child(), PRODUCT_EXIT_WAIT, 64 * 1024)
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]

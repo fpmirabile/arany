@@ -8,6 +8,8 @@ use crate::validate::{digest, hex_digest, valid_digest, valid_name, valid_relati
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(super) const MAX_WORKSPACE_PATHS: usize = 32;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
@@ -130,7 +132,7 @@ impl Config {
         if self.child_unguarded != UnguardedGrant::Denied
             || self.version != 1
             || self.workspace_paths.is_empty()
-            || self.workspace_paths.len() > 32
+            || self.workspace_paths.len() > MAX_WORKSPACE_PATHS
             || self.workspace_paths.iter().any(|path| {
                 !valid_relative(path, false) && !(path == "." && self.workspace_paths.len() == 1)
             })
