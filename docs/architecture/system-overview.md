@@ -296,8 +296,9 @@ The [Tool contract](../specs/tools.md) owns supported behavior and acceptance sc
 
 The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. In-process file operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the in-process file publisher, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
 
-Linux bootstrap verifies its own executable pin and bounded tmpfs/xattr operations
-before privilege removal. Both namespace owners attest their own mount topology;
+Linux bootstrap verifies its own executable pin for every launch. Primary Workspace
+commands also perform bounded tmpfs/xattr operations before privilege removal.
+Both namespace owners attest their own mount topology;
 the inner helper also checks its executable pin and the primary copy-view tmpfs.
 The supervisor's pidfd wait/reap precedes namespace release. Typed setup refusals
 can explain unavailable enforcement before GO; missing completion after GO remains
