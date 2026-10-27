@@ -67,4 +67,4 @@ This is the removal checklist; file-wide `ToolCall::` absence is not the criteri
 
 ## Gates
 
-Opens after [shared-workspace-editors](../shared-workspace-editors/README.md) S2b2 removes the worker variants and must land before [network-proxy](../network-proxy/README.md) S2 adds `WebFetch`/`WebSearch`. Coordinate `tool_rows/*` with architecture-residue R4 only if that slice touches presentation. Test-corpus-pruning T5c/T5d follow D2/D1 respectively so projection evidence is moved after its consumer changes.
+Opens after [shared-workspace-editors](../shared-workspace-editors/README.md) S2b2 removes the worker variants and must land before [network-proxy](../network-proxy/README.md) S2 adds `WebFetch`/`WebSearch`. Test-corpus-pruning T5c/T5d follow D2/D1 respectively so projection evidence is moved after its consumer changes.
