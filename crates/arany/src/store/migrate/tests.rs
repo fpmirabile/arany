@@ -858,19 +858,26 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
     });
 }
 
-fn downgrade_run_provider(connection: &Connection) {
+fn downgrade_run_provider(connection: &Connection, allowance: u32) {
     repin(connection, |row| {
         if let Event::RunStarted { config, .. } = decode_row(row) {
             let tagged = serde_json::to_string(&config.provider).unwrap();
             let profile = serde_json::to_string(&config.provider.profile()).unwrap();
-            row.payload = restore_allowance(row.payload.replacen(&tagged, &profile, 1), &config);
+            let payload = row.payload.replacen(&tagged, &profile, 1);
+            row.payload = restore_allowance(payload, &config, allowance);
             row.version = 23;
         }
     });
 }
 
 // Versions before 25 pinned the Worker data allowance after the last policy field.
-fn restore_allowance(payload: String, config: &crate::session::RunConfig) -> String {
+const WORKER_ALLOWANCE: u32 = crate::session::worker::WORKER_DATA_BYTES as u32;
+
+fn restore_allowance(
+    payload: String,
+    config: &crate::session::RunConfig,
+    allowance: u32,
+) -> String {
     let Some(policy) = &config.worker_policy else {
         return payload;
     };
@@ -881,13 +888,13 @@ fn restore_allowance(payload: String, config: &crate::session::RunConfig) -> Str
         &format!(
             r#""max_tools":{},"data_bytes":{}}}"#,
             policy.max_tools,
-            crate::session::worker::WORKER_DATA_BYTES
+            allowance
         ),
         1,
     )
 }
 
-fn downgrade_run_started(connection: &Connection) {
+fn downgrade_run_started(connection: &Connection, allowance: u32) {
     repin(connection, |row| {
         if row.kind == "RunStarted" {
             let event = decode_row(row);
@@ -896,13 +903,15 @@ fn downgrade_run_started(connection: &Connection) {
             };
             let tagged = serde_json::to_string(&config.provider).unwrap();
             let profile = serde_json::to_string(&config.provider.profile()).unwrap();
+            let payload = row.payload.replacen(&tagged, &profile, 1).replacen(
+                r#""user_instruction_digest":null,"#,
+                "",
+                1,
+            );
             row.payload = restore_allowance(
-                row.payload.replacen(&tagged, &profile, 1).replacen(
-                    r#""user_instruction_digest":null,"#,
-                    "",
-                    1,
-                ),
+                payload,
                 config,
+                allowance,
             );
             row.version = 19;
         }
@@ -1201,12 +1210,12 @@ fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
 
 #[test]
 fn run_started_migrations_preserve_identity_and_do_not_read_user_instructions() {
-    for version in [19, 23] {
-        migrate_run_started(version);
+    for (version, allowance) in [(19, WORKER_ALLOWANCE), (23, 512)] {
+        migrate_run_started(version, allowance);
     }
 }
 
-fn migrate_run_started(version: i64) {
+fn migrate_run_started(version: i64, allowance: u32) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
     let History { root, sessions } = history(&path, true, 0);
@@ -1220,9 +1229,9 @@ fn migrate_run_started(version: i64) {
     let current = stored_rows(&connection);
     let digests = fork_digests(&connection);
     if version == 19 {
-        downgrade_run_started(&connection);
+        downgrade_run_started(&connection, allowance);
     } else {
-        downgrade_run_provider(&connection);
+        downgrade_run_provider(&connection, allowance);
     }
     let downgraded = stored_rows(&connection);
     assert_ne!(downgraded, current);
@@ -1344,7 +1353,7 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         let path = temp.path().join("state");
         let History { root, sessions } = forked_history(&path);
         let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
-        downgrade_run_provider(&connection);
+        downgrade_run_provider(&connection, WORKER_ALLOWANCE);
         restore_pre_check_schema(&connection, 4);
         drop(connection);
         let database = path.join(DATABASE_FILE);
@@ -3141,7 +3150,7 @@ fn migrate_provider_prefix(mut started: Event) {
         append(&mut connection, &mut hot, fixture.session, event).unwrap();
     }
     let original = stored_rows(&connection);
-    downgrade_run_provider(&connection);
+    downgrade_run_provider(&connection, WORKER_ALLOWANCE);
     drop(connection);
     assert!(
         root.upgrade_or_archive_history(&REGISTRY)
