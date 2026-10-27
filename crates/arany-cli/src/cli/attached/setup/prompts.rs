@@ -1,8 +1,10 @@
 use super::{
     SetupError, append_linear_choice_character, linear_choice_value, linear_rendered_choices,
-    setup_message_pages,
 };
 use crate::terminal::{AttachedTerminal, TerminalInput};
+use std::future::Future;
+
+const SETUP_MESSAGE_PAGE_CHARS: usize = 36;
 
 pub(in super::super) async fn review_warning(
     terminal: &mut AttachedTerminal,
@@ -186,5 +188,97 @@ async fn review_linear_confirmation(
             TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
             _ => {}
         }
+    }
+}
+
+pub(super) async fn await_setup_ack(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    message: &str,
+) -> Result<bool, SetupError> {
+    let pages = setup_message_pages(message);
+    let mut page = 0usize;
+    let mut notice = None;
+    loop {
+        let text = format!("Page {}/{}\n{}", page + 1, pages.len(), pages[page]);
+        terminal.draw_setup(0, title, &text, 0, notice.take())?;
+        match terminal.next_input().await? {
+            TerminalInput::Submit if page + 1 < pages.len() => page += 1,
+            TerminalInput::Down | TerminalInput::PageDown if page + 1 < pages.len() => page += 1,
+            TerminalInput::Up | TerminalInput::PageUp => page = page.saturating_sub(1),
+            TerminalInput::Submit => return Ok(true),
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                return Ok(false);
+            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            TerminalInput::Resize => {
+                page = 0;
+                notice = Some("Terminal resized; reread all pages");
+            }
+            _ => {}
+        }
+    }
+}
+
+fn setup_message_pages(message: &str) -> Vec<String> {
+    let pages: Vec<_> = message
+        .lines()
+        .flat_map(|line| {
+            let chars: Vec<_> = line.chars().collect();
+            if chars.is_empty() {
+                return vec![String::new()];
+            }
+            chars
+                .chunks(SETUP_MESSAGE_PAGE_CHARS)
+                .map(|chunk| chunk.iter().collect())
+                .collect()
+        })
+        .collect();
+    if pages.is_empty() {
+        vec![String::new()]
+    } else {
+        pages
+    }
+}
+
+pub(in super::super) async fn await_operation<T>(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+    operation: impl Future<Output = T>,
+) -> Result<Option<T>, SetupError> {
+    tokio::pin!(operation);
+    loop {
+        terminal.draw_setup(4, title, instruction, 0, None)?;
+        tokio::select! {
+            result = &mut operation => return Ok(Some(result)),
+            input = terminal.next_input() => match input? {
+                TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                    terminal.discard_draft_input();
+                    return Ok(None);
+                }
+                TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+                TerminalInput::Suspend => terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?,
+                TerminalInput::LineRejected | TerminalInput::LineContinued => terminal.discard_draft_input(),
+                _ => {}
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_pages_show_complete_content_at_bounded_width() {
+        let message = format!("Destination: {}\nDisposition: Uncertain", "x".repeat(160));
+        let pages = setup_message_pages(&message);
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.chars().count() <= SETUP_MESSAGE_PAGE_CHARS)
+        );
+        assert_eq!(pages.concat(), message.replace('\n', ""));
     }
 }
