@@ -417,6 +417,10 @@ fn fixture_with_grant(
         background: false,
         body: "Untrusted".into(),
     };
+    assert!(
+        definition.valid(),
+        "worker fixture definition is normalized"
+    );
     let files = vec![crate::tools::DefinitionFilePin {
         private: false,
         filename: "editor.md".into(),
@@ -1072,3 +1076,6 @@ fn refused(f: &Fixture, event: Event, name: &str) {
 
 #[path = "worker/workspace_tests.rs"]
 mod workspace_tests;
+
+#[path = "worker/command_tests.rs"]
+mod command_tests;

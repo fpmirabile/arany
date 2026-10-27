@@ -253,7 +253,7 @@ fn live_replay_refuses_private_targets_data_and_old_release_fields() {
 }
 
 #[test]
-fn background_and_command_assignments_refuse_before_spawn() {
+fn background_assignments_are_admitted_but_ungranted_commands_refuse_before_spawn() {
     let f = fixture();
     let spawn = f.events.last().unwrap();
     let Event::AgentSpawned {
@@ -271,7 +271,14 @@ fn background_and_command_assignments_refuse_before_spawn() {
         } else {
             request.mode = WorkerMode::Background;
         }
-        assert!(validate_editor_request(&view, &view.runs[0], &request, None).is_err());
+        assert_eq!(
+            validate_editor_request(&view, &view.runs[0], &request, None),
+            if commands {
+                Err(crate::session::ProposalRefusalCause::EditorCommands)
+            } else {
+                Ok(())
+            }
+        );
     }
 }
 

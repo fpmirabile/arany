@@ -101,15 +101,12 @@ async fn cancelled_editor_keeps_landed_workspace_effects_and_causal_release() {
 }
 
 #[tokio::test]
-async fn unsupported_editor_modes_and_invalid_assignments_refuse_before_spawn() {
-    for case in ["background", "command", "catalog_overflow"]
-        .into_iter()
-        .chain(
-            arany::test_support::worker_teams::INVALID_EDITOR_CASES
-                .iter()
-                .map(|(case, _)| *case),
-        )
-    {
+async fn invalid_editor_assignments_refuse_before_spawn() {
+    for case in ["catalog_overflow"].into_iter().chain(
+        arany::test_support::worker_teams::INVALID_EDITOR_CASES
+            .iter()
+            .map(|(case, _)| *case),
+    ) {
         worker_case(case).await;
     }
 }
@@ -166,4 +163,25 @@ async fn foreground_editor_delegation_deadline_keeps_goal_receipt_unexhausted() 
 #[tokio::test]
 async fn foreground_editor_capacity_stop_releases_the_lease_before_returning_store_error() {
     worker_case("capacity").await;
+}
+
+#[tokio::test]
+async fn background_editors_share_live_reads_and_disjoint_primary_writes() {
+    worker_case("background").await;
+}
+
+#[tokio::test]
+async fn editor_commands_publish_whole_leased_changesets_with_checkpoints_and_reports() {
+    for case in [
+        "command",
+        "command_criterion",
+        "command_auto",
+        "command_bash_only",
+        "command_outside",
+        "command_cancel",
+        "command_pause",
+        "command_cache_unknown",
+    ] {
+        worker_case(case).await;
+    }
 }
