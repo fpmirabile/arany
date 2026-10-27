@@ -321,7 +321,7 @@ impl RunLoop<'_> {
         let mut serial = Vec::new();
         for (index, intent) in intents.into_iter().enumerate() {
             let overhead = if step.requests.len() > 1 {
-                runtime.intent_reservation_overhead(&intent)
+                runtime.reservation_overhead(&intent.call)
             } else {
                 Duration::ZERO
             };

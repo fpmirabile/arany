@@ -442,7 +442,6 @@ fn fixture_with_grant(
             concurrency: 4,
             max_turns: 17,
             max_tools: 16,
-            data_bytes: WORKER_DATA_BYTES as u32,
         }),
         agent_definitions: Some(crate::tools::DefinitionRegistryPin {
             digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),

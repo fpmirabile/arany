@@ -18,7 +18,7 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 82] = [
     (
         "AgentFinished",
         11,
@@ -319,6 +319,42 @@ const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
         1,
         include_str!("supervisorverdictrecorded-v1.json"),
         include_str!("supervisorverdictrecorded-v1.json"),
+    ),
+    (
+        "ToolProposed",
+        2,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        24,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        30,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        13,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        19,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "RunStarted",
+        24,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
     ),
 ];
 
@@ -3022,7 +3058,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(upgraded, source);
         let event = Event::decode(
             "RunStarted",
-            24,
+            25,
             &upgraded.to_string(),
             Some(RunId::new()),
             None,
@@ -3036,7 +3072,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(config.provider.profile(), profile);
     }
     let fixture = include_str!("runstarted-v24.json");
-    let event = Event::decode("RunStarted", 24, fixture, Some(RunId::new()), None).unwrap();
+    let event = Event::decode("RunStarted", 25, fixture, Some(RunId::new()), None).unwrap();
     assert_eq!(event.payload().unwrap(), fixture);
     for profile in ["", "unknown", "custom:", "custom:Upper", "custom:bad/name"] {
         let source = GLOBAL_RUNSTARTED.replace(

@@ -132,7 +132,6 @@ pub(super) struct Request<'a> {
     pub(super) result_bytes: usize,
     pub(super) deadline: Instant,
     pub(super) output: Output,
-    pub(super) private_image: bool,
     pub(super) cancellation: Option<&'a super::Cancellation>,
 }
 
@@ -250,9 +249,6 @@ impl<'a> Walk<'a> {
         if path.split('/').count() > MAX_DEPTH || path.len() > crate::validate::MAX_PATH_BYTES {
             return Err(ToolError::Limit);
         }
-        if self.request.private_image && !self.admitted(&path) {
-            return Err(ToolError::FilesystemDenied);
-        }
         let parent = fs::open_file(
             self.request.root,
             if directory.is_empty() { "." } else { directory },
@@ -366,20 +362,14 @@ impl<'a> Walk<'a> {
     }
 
     fn immediate_list(&self) -> bool {
-        !self.request.private_image && self.request.config.workspace_paths == ["."]
+        self.request.config.workspace_paths == ["."]
     }
 
     fn retained_limit(&self) -> usize {
         match self.request.output {
             Output::Suggestions => INDEX_NAMES,
             Output::Tool => match self.query {
-                Query::List => {
-                    if self.request.private_image {
-                        MAX_SNAPSHOT_FILES
-                    } else {
-                        MAX_SCANNED_ENTRIES
-                    }
-                }
+                Query::List => MAX_SCANNED_ENTRIES,
                 Query::Glob { .. } => super::glob::MAX_GLOB_CANDIDATES,
                 Query::Search(_) => MAX_SNAPSHOT_FILES,
             },
@@ -542,9 +532,7 @@ impl<'a> Walk<'a> {
             .entries
             .iter()
             .filter(|(path, node)| {
-                if self.request.private_image {
-                    true
-                } else if self.immediate_list() {
+                if self.immediate_list() {
                     path.rsplit_once('/').map_or("", |(parent, _)| parent) == base
                 } else {
                     !node.directory
@@ -641,7 +629,6 @@ mod tests {
                 result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
                 deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
                 output,
-                private_image: false,
                 cancellation: None,
             })
             .unwrap();
@@ -668,7 +655,6 @@ mod tests {
                 result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
                 deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
                 output: Output::Tool,
-                private_image: false,
                 cancellation: None,
             });
             if path == "." {
@@ -706,7 +692,6 @@ mod tests {
                     result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
                     deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
                     output: Output::Tool,
-                    private_image: false,
                     cancellation: None,
                 })
                 .unwrap();
@@ -718,30 +703,6 @@ mod tests {
                 assert_eq!(result["may_be_truncated"], count > DISPLAY_NAMES);
             }
         }
-    }
-
-    #[test]
-    fn private_discovery_refuses_unavailable_ancestor_controls() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temp.path().join("notes")).unwrap();
-        std::fs::write(temp.path().join("notes/visible"), b"fixture").unwrap();
-        let root = fs::open_directory(temp.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
-        let call = ToolCall::List {
-            path: "notes".into(),
-        };
-        let result = inspect(Request {
-            root: &root,
-            call: &call,
-            config: &config,
-            hidden: fs::NONE,
-            result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
-            deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
-            output: Output::Tool,
-            private_image: true,
-            cancellation: None,
-        });
-        assert!(matches!(result, Err(ToolError::FilesystemDenied)));
     }
 
     #[test]
@@ -845,7 +806,6 @@ mod tests {
             result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
             deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
             output: Output::Suggestions,
-            private_image: false,
             cancellation: None,
         })
         .unwrap();

@@ -192,10 +192,7 @@ pub fn render_cache_update_feedback(run: &RunView) -> Option<&'static str> {
             }
             CacheUpdate::Rejected => rejected = true,
             CacheUpdate::Failed => failed = true,
-            CacheUpdate::NotApplicable
-            | CacheUpdate::NotAttempted
-            | CacheUpdate::Published
-            | CacheUpdate::Discarded => {}
+            CacheUpdate::NotApplicable | CacheUpdate::NotAttempted | CacheUpdate::Published => {}
         }
     }
     if failed {

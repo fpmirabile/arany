@@ -388,8 +388,7 @@ fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
 }
 
 #[test]
-fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
-    use crate::session::worker::*;
+fn worker_command_protocol_requires_pins_and_exact_versions() {
     let f = crate::session::worker_protocol_fixture();
     for (kind, pointer, field) in [
         (
@@ -486,36 +485,6 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
         assert!(decode(&value).is_ok(), "a valid command list decodes");
         *value.pointer_mut("/assignment/request/commands").unwrap() = serde_json::json!(commands);
         assert!(decode(&value).is_err(), "commands {commands:?}");
-    }
-    let result = WorkerCommandResult {
-        exit_code: Some(0),
-        stdout: String::new(),
-        stderr: String::new(),
-        stdout_total: Default::default(),
-        stderr_total: Default::default(),
-        private_capture: PrivateCapture::None {},
-    };
-    for field in [
-        "exit_code",
-        "stdout_total",
-        "stderr_total",
-        "private_capture",
-    ] {
-        let mut value = serde_json::to_value(&result).unwrap();
-        value.as_object_mut().unwrap().remove(field);
-        assert!(
-            serde_json::from_value::<WorkerCommandResult>(value).is_err(),
-            "missing {field}"
-        );
-    }
-    for capture in [
-        serde_json::json!({"kind":"unknown"}),
-        serde_json::json!({"kind":"none","extra":true}),
-        serde_json::json!({"kind":"rejected","cause":"unknown"}),
-    ] {
-        let mut value = serde_json::to_value(&result).unwrap();
-        value["private_capture"] = capture;
-        assert!(serde_json::from_value::<WorkerCommandResult>(value).is_err());
     }
 }
 

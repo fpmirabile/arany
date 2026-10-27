@@ -107,7 +107,6 @@ mod peer_row_tests {
             for (cache, marker) in [
                 (CacheUpdate::NotApplicable, ""),
                 (CacheUpdate::NotAttempted, ""),
-                (CacheUpdate::Discarded, ""),
                 (CacheUpdate::Published, ""),
                 (CacheUpdate::Rejected, " · cache not saved (limit)"),
                 (CacheUpdate::Failed, " · cache update failed"),

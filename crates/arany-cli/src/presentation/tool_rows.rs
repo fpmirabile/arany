@@ -283,10 +283,7 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
 fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
     use arany::CacheUpdate;
     match update {
-        CacheUpdate::NotApplicable
-        | CacheUpdate::Discarded
-        | CacheUpdate::NotAttempted
-        | CacheUpdate::Published => None,
+        CacheUpdate::NotApplicable | CacheUpdate::NotAttempted | CacheUpdate::Published => None,
         CacheUpdate::Rejected => Some("cache not saved (limit)"),
         CacheUpdate::Failed => Some("cache update failed"),
         CacheUpdate::Uncertain => Some("cache outcome uncertain"),

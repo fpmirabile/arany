@@ -25,7 +25,7 @@ fn directory_cache_migrates_archives_reuses_identity_and_requires_clear_after_in
     let mut lease = state.begin_build_cache(identity.clone()).unwrap();
     lease.dir.create_dir(tree_name(&lease.token)).unwrap();
     let mut stamp = create_private_file(&lease.dir, &stamp_name(&lease.token)).unwrap();
-    let generation = lease.generation().unwrap().unwrap();
+    let generation = [1u8; GENERATION_BYTES];
     stamp
         .write_all(&generation[..GENERATION_BYTES - 1])
         .unwrap();
@@ -86,20 +86,15 @@ fn directory_cache_migrates_archives_reuses_identity_and_requires_clear_after_in
     assert_eq!(lower.read("target/nested/new").unwrap(), b"new");
     drop(lower);
     drop(lease);
-    let reader = state
-        .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
-        .unwrap();
-    let (mut stored, _) = reader.archive().unwrap().unwrap();
-    let restored_path = temp.path().join("restored");
-    private_dir(&restored_path);
-    let restored = Dir::open_ambient_dir(&restored_path, cap_std::ambient_authority()).unwrap();
-    restore_archive(&mut stored, &restored, &identity, &[]).unwrap();
-    assert_eq!(restored.read("target/nested/new").unwrap(), b"new");
-    assert!(restored.symlink_metadata("target/nested/old").is_err());
+    let mut reader = state.begin_build_cache(identity.clone()).unwrap();
+    let held = reader.prepare_directory().unwrap();
+    assert_eq!(held.read("target/nested/new").unwrap(), b"new");
+    assert!(held.symlink_metadata("target/nested/old").is_err());
     assert!(matches!(
         state.clear_build_cache(identity.clone()),
         Err(StoreError::BuildCacheBusy)
     ));
+    drop(held);
     drop(reader);
     let mut lease = state.begin_build_cache(identity.clone()).unwrap();
     let lower = lease.prepare_directory().unwrap();
