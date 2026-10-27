@@ -495,8 +495,7 @@ pub(crate) fn annotate(
     Ok(())
 }
 
-// The command budget reserves room for the rows, so a result that cannot take them is a defect, not a quiet drop.
-// A capture refusal replaces the result with plain text; the rows then follow that text so neither is lost.
+// A result that cannot hold the refusal rows is a defect; plain-text results keep the rows after the text.
 fn annotated(output: &str, refusals: Vec<NetworkRefusal>) -> Result<String, ToolError> {
     let Ok(mut result) = serde_json::from_str::<CommandResult>(output) else {
         let rows = serde_json::to_string(&refusals).map_err(|_| ToolError::Operation)?;
