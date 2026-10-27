@@ -573,10 +573,14 @@ impl StateRoot {
                 Err(error) => return Err(error),
             };
             if candidate_limit > 0 {
+                let tree_bytes = own_tree_bytes(&dir, &token)?;
                 let reservation_bytes = candidate_limit
                     .checked_mul(2)
-                    .ok_or(StoreError::StorageFull)?;
+                    .ok_or(StoreError::StorageFull)?
+                    .max(tree_bytes);
                 let projected = inventory(&dir)?
+                    .checked_sub(tree_bytes)
+                    .ok_or(StoreError::StorageFull)?
                     .checked_add(reservation_bytes)
                     .ok_or(StoreError::StorageFull)?;
                 if projected > AGGREGATE_BYTES {
@@ -1541,6 +1545,14 @@ fn check_private(file: &File, max: usize) -> Result<(), StoreError> {
         return Err(StoreError::StateNotPrivate);
     }
     Ok(())
+}
+
+fn own_tree_bytes(dir: &Dir, token: &str) -> Result<u64, StoreError> {
+    let name = directory::tree_name(token);
+    if !file_exists(dir, &name)? {
+        return Ok(0);
+    }
+    directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)
 }
 
 fn inventory(dir: &Dir) -> Result<u64, StoreError> {
