@@ -139,7 +139,10 @@ fn rejected(f: &Fixture, intent: &EffectIntent) {
         },
         events.len() as u64 + 1,
     ));
-    assert!(SessionView::replay_open(f.session, &events).is_err());
+    assert!(matches!(
+        SessionView::replay_open(f.session, &events),
+        Err(ReplayError::InvalidTransition)
+    ));
 }
 
 #[test]
@@ -205,7 +208,10 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
             None,
         );
         assert!(
-            SessionView::replay_open(f.session, &f.envelopes()).is_err(),
+            matches!(
+                SessionView::replay_open(f.session, &f.envelopes()),
+                Err(ReplayError::InvalidTransition)
+            ),
             "a captured batch requires publication before continuation"
         );
         f.events.truncate(count);
@@ -278,7 +284,10 @@ fn unknown_editor_cache_update_blocks_release_continuation_and_goal_recovery() {
         ProviderCallDisposition::Finished,
         None,
     );
-    assert!(SessionView::replay_open(f.session, &f.envelopes()).is_err());
+    assert!(matches!(
+        SessionView::replay_open(f.session, &f.envelopes()),
+        Err(ReplayError::InvalidTransition)
+    ));
 }
 
 #[test]
