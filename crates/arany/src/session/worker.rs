@@ -446,12 +446,6 @@ impl WorkerHistory {
         )
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerLeaseRelease {
-    pub assignment_id: AgentRunId,
-    pub cause_sequence: u64,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
