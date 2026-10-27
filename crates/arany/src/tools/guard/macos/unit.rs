@@ -1151,6 +1151,7 @@ pub(super) async fn run_unit(
                     .map_err(|_| ToolError::Operation)?;
                 if git_stage != Some(GitStage::Plan) {
                     crate::fault::guard_dispatched(intent);
+                    crate::fault::guard_dispatch_gate(intent).await;
                 }
                 if primary_command {
                     use tokio::io::AsyncBufReadExt;
