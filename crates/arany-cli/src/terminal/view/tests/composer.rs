@@ -81,7 +81,12 @@ fn image_preview_cells_are_hidden_and_skipped_for_terminal_graphics() {
     terminal
         .draw(|frame| {
             frame.render_widget(Paragraph::new("History text"), Rect::new(3, 4, 8, 1));
-            draw_image_preview(frame, Rect::new(2, 2, 10, 6), "Image 1: PNG");
+            draw_image_preview(
+                frame,
+                Rect::new(2, 2, 10, 6),
+                "Image 1: PNG",
+                PreviewInterior::Graphics,
+            );
             hidden = frame.buffer_mut()[(3, 4)]
                 .modifier
                 .contains(Modifier::HIDDEN);
