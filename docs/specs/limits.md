@@ -83,6 +83,10 @@
 | <a id="frame_bytes"></a>[`FRAME_BYTES`](#frame_bytes) | 131072 | bytes | `crates/arany/src/tools/mcp.rs` |
 | <a id="write_frame_bytes"></a>[`WRITE_FRAME_BYTES`](#write_frame_bytes) | 92774988 | bytes | `crates/arany/src/tools/git.rs` |
 | <a id="mcp_timeout_ms"></a>[`MCP_TIMEOUT_MS`](#mcp_timeout_ms) | 40000 | ms | `crates/arany/src/tools/types.rs` |
+| <a id="max_network_patterns"></a>[`MAX_NETWORK_PATTERNS`](#max_network_patterns) | 32 | domain patterns per source | `crates/arany/src/tools/network.rs` |
+| <a id="max_network_connections"></a>[`MAX_NETWORK_CONNECTIONS`](#max_network_connections) | 64 | connections | `crates/arany/src/tools/network.rs` |
+| <a id="max_network_bytes"></a>[`MAX_NETWORK_BYTES`](#max_network_bytes) | 33554432 | bytes per direction | `crates/arany/src/tools/network.rs` |
+| <a id="network_idle_ms"></a>[`NETWORK_IDLE_MS`](#network_idle_ms) | 120000 | ms | `crates/arany/src/tools/network.rs` |
 | <a id="max_markdown_parse_bytes"></a>[`MAX_MARKDOWN_PARSE_BYTES`](#max_markdown_parse_bytes) | 32768 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_depth"></a>[`MAX_MARKDOWN_DEPTH`](#max_markdown_depth) | 32 | containers | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_events"></a>[`MAX_MARKDOWN_EVENTS`](#max_markdown_events) | 65536 | events | `crates/arany-cli/src/terminal/markdown.rs` |

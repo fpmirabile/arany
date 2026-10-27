@@ -2,6 +2,7 @@ use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_termi
 mod blocks;
 mod inline;
 mod links;
+mod lists;
 mod tables;
 use blocks::BlockLine;
 use ratatui::style::Modifier;
@@ -84,12 +85,44 @@ fn layout(
         let line = projection.map(|lines| &lines[index]);
         if !line.is_some_and(|line| line.hidden) {
             let content = line.map_or(text, |line| &source[line.content.clone()]);
+            let decoration = line.map(|line| &line.decoration);
+            let inner_width =
+                width.saturating_sub(decoration.map_or(0, |prefix| prefix.width(width)));
+            let mut previous = None;
+            let mut record_line = |cells: &mut Vec<Cell>, byte, bytes| {
+                let (row_index, line) = projection.map_or((index, None), |lines| {
+                    let (index, line) =
+                        lists::row_line(lines, (index, previous.unwrap_or(index)), byte);
+                    (index, Some(line))
+                });
+                let first = previous != Some(row_index);
+                previous = Some(row_index);
+                let empty = cells.is_empty();
+                let extra = line.map_or(0, |line| {
+                    line.decoration
+                        .decorate(cells, (first, capture), (byte, width))
+                });
+                if empty
+                    && first
+                    && let Some(line) = line
+                    && line.flow.is_none()
+                {
+                    inline::envelope(cells, line.envelope.clone());
+                }
+                record(cells, byte, bytes + extra)
+            };
             if let Some(table) = line.and_then(|line| line.table.as_ref()) {
-                tables::layout(table, width, capture, &mut record)?;
+                tables::layout(table, inner_width, capture, &mut record_line)?;
             } else if let Some(lines) = line.and_then(|line| line.flow.as_ref()) {
-                inline::layout(lines, width, capture, &mut record)?;
+                inline::layout(lines, inner_width, capture, &mut record_line)?;
             } else {
-                layout_line((start, content), line, width, capture, &mut record)?;
+                layout_line(
+                    (start, content),
+                    line,
+                    inner_width,
+                    capture,
+                    &mut record_line,
+                )?;
             }
         }
         start += text.len() + 1;
