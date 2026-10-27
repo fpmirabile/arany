@@ -1,18 +1,13 @@
 use super::*;
 use arany::test_support::latency::{
-    JournalIntervals, LatencyError, Operation, Sample, percentiles,
+    CORPUS_ROWS, JournalIntervals, LatencyError, MAX_SAMPLES, MEASURED, Operation, Sample, WARMUPS,
+    percentiles,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const FIXTURE: &str = "fn main() {}\n";
-const CORPUS_ROWS: [(Operation, usize); 3] = [
-    (Operation::Read, 1),
-    (Operation::Read, 4),
-    (Operation::Edit, 1),
-];
-const WARMUPS: usize = 10;
-const MEASURED: usize = 100;
+const PROVISIONAL_P95_US: u64 = 100_000;
 const CORPUS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REPORT_CAP: u64 = 1024 * 1024;
 const SAMPLE_CAP: u64 = 8 * 1024 * 1024;
@@ -25,8 +20,47 @@ fn private_file(path: &Path, bytes: &[u8]) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-fn fixture(root: &Path, path: &str) -> (Engine, Arc<ScriptedProvider>, arany::RunRequest) {
-    fixture_for(root, path, Operation::Read, 1)
+fn noop_pin(root: &Path) -> serde_json::Value {
+    use std::os::unix::fs::MetadataExt;
+    let executable = ["/usr/bin/true", "/bin/true"]
+        .into_iter()
+        .find_map(|path| std::fs::canonicalize(path).ok())
+        .expect("native no-op executable prerequisite");
+    let pin = serde_json::json!({
+        "name":"noop", "executable":executable, "sha256":executable_digest(&executable),
+        "interpreter":false, "inputs":[],
+    });
+    let metadata = std::fs::metadata(&executable).unwrap();
+    private_file(
+        &root.join("prerequisites.json"),
+        &serde_json::to_vec(
+            &serde_json::json!({"pin":pin,"device":metadata.dev(),"inode":metadata.ino()}),
+        )
+        .unwrap(),
+    );
+    pin
+}
+
+fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
+    match operation {
+        Operation::Read => arany::ToolCall::Read {
+            path: path.into(),
+            offset: None,
+            limit: None,
+        },
+        Operation::Edit => arany::ToolCall::Edit {
+            path: path.into(),
+            expected_digest: digest_hex(fixture_content(operation).as_bytes()),
+            old: "fn pick".into(),
+            new: "fn done".into(),
+        },
+        Operation::Command => arany::ToolCall::Command {
+            program: "noop".into(),
+            args: Vec::new(),
+            cwd: "src".into(),
+        },
+        Operation::Other | Operation::InvalidProposal => panic!("unsupported latency operation"),
+    }
 }
 
 fn fixture_for(
@@ -54,41 +88,44 @@ fn fixture_for(
         },
     )
     .unwrap();
-    private_file(
-        &state.join("permissions.json"),
-        br#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
-    );
-    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":[],"skills":[],"mcp":[]})).unwrap());
+    let permissions = if operation == Operation::Command {
+        br#"{"permissions":{"defaultMode":"default","allow":["Bash(noop)"]}}"#.as_slice()
+    } else {
+        br#"{"permissions":{"defaultMode":"acceptEdits"}}"#.as_slice()
+    };
+    private_file(&state.join("permissions.json"), permissions);
+    let commands = if operation == Operation::Command {
+        vec![noop_pin(root)]
+    } else {
+        Vec::new()
+    };
+    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":commands,"skills":[],"mcp":[]})).unwrap());
     let provider = Arc::new(
         ScriptedProvider::new(vec![
             ProviderOutcome::Tools(
                 (0..calls)
                     .map(|index| arany::ToolRequest {
                         id: arany::ToolUseId::new(format!("call_{index}")).unwrap(),
-                        call: match operation {
-                            Operation::Read => arany::ToolCall::Read {
-                                path: path.into(),
-                                offset: None,
-                                limit: None,
-                            },
-                            Operation::Edit => arany::ToolCall::Edit {
-                                path: path.into(),
-                                expected_digest: digest_hex(fixture_content(operation).as_bytes()),
-                                old: "fn pick".into(),
-                                new: "fn done".into(),
-                            },
-                            Operation::Command | Operation::Other | Operation::InvalidProposal => {
-                                panic!("unsupported latency operation")
-                            }
-                        },
+                        call: fixture_call(operation, path),
                     })
                     .collect(),
             ),
-            arany::test_support::goals::finish_with("Read completed"),
+            arany::test_support::goals::finish_with(if operation == Operation::Command {
+                "Command completed"
+            } else {
+                "Read completed"
+            }),
         ])
         .with_known_input_tokens(),
     );
-    let mut input = request(&workspace, "Read the first page of src/main.rs");
+    let mut input = request(
+        &workspace,
+        if operation == Operation::Command {
+            "Run the admitted native no-op command"
+        } else {
+            "Read the first page of src/main.rs"
+        },
+    );
     input.include_paths = if operation == Operation::Edit {
         vec!["src/main.rs".into()]
     } else {
@@ -163,6 +200,47 @@ fn assert_read(view: &SessionView, reads: usize) {
     }
 }
 
+fn assert_operation(view: &SessionView, operation: Operation, calls: usize) {
+    let run = assert_primary_run(view, calls);
+    if operation == Operation::Read {
+        assert_read(view, calls);
+        assert!(run.tools.iter().all(|tool| tool.checkpoint.is_none()));
+        return;
+    }
+    let tool = &run.tools[0];
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+    assert!(tool.permission_verdict.as_ref().unwrap().approved);
+    if operation == Operation::Edit {
+        assert!(matches!(&observation.attestation,
+            Some(arany::Attestation::InProcess { receipt: Some(receipt), .. })
+            if receipt.intent_digest == tool.permission_verdict.as_ref().unwrap().intent_digest
+                && receipt.before == Some(Sha256::digest(fixture_content(operation).as_bytes()).into())
+                && receipt.after == Some(Sha256::digest(fixture_content(operation).replace("fn pick", "fn done").as_bytes()).into())));
+        assert!(tool.checkpoint.is_some());
+    } else {
+        assert_eq!(operation, Operation::Command);
+        assert!(matches!(&observation.attestation,
+            Some(arany::Attestation::Guard(receipt))
+            if receipt.contract_version == 1
+                && receipt.intent_digest == tool.permission_verdict.as_ref().unwrap().intent_digest
+                && receipt.enforcement_digest == observation.intent.enforcement_digest
+                && receipt.limits == observation.intent.limits));
+        let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["stdout"], "");
+        assert_eq!(result["stderr"], "");
+        assert_eq!(result["stdout_total"]["bytes"], 0);
+        assert_eq!(result["stderr_total"]["bytes"], 0);
+        assert_eq!(result["changeset"]["files"], serde_json::json!([]));
+        assert!(tool.checkpoint.is_none());
+        assert_eq!(
+            tool.permission_verdict.as_ref().unwrap().source,
+            arany::permissions::PermissionSource::Rule
+        );
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuditedSample {
@@ -190,17 +268,7 @@ async fn measure(root: &Path, ordinal: usize, operation: Operation, calls: usize
     let (events, view) =
         arany::test_support::goals::replayed(&root.join("state"), outcome.session_id).await;
     assert_eq!(view.runs[0], outcome.run);
-    if operation == Operation::Read {
-        assert_read(&view, calls);
-    } else {
-        let run = assert_primary_run(&view, calls);
-        let observation = run.tools[0].observation.as_ref().unwrap();
-        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
-        assert!(
-            matches!(&observation.attestation, Some(arany::Attestation::InProcess { receipt: Some(receipt), .. }) if receipt.before.is_some() && receipt.after.is_some())
-        );
-        assert!(run.tools[0].checkpoint.is_some());
-    }
+    assert_operation(&view, operation, calls);
     private_file(
         &root.join("expected-show.jsonl"),
         arany_cli::presentation::render_session(
@@ -227,7 +295,7 @@ async fn measure(root: &Path, ordinal: usize, operation: Operation, calls: usize
         warmup: ordinal < WARMUPS,
         journal_interval_ms: audit.unwrap(),
         sample: samples[0].clone(),
-        effective_bounds: serde_json::json!({"goal_budget":view.goals[0].budget,"resource_settings":view.goals[0].resource_settings,"tool_limits":view.runs[0].tools[0].intent.limits,"grant":{"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":[],"skills":[],"mcp":[]},"permission_mode":"acceptEdits","checkpoint":view.runs[0].tools[0].checkpoint}),
+        effective_bounds: effective_bounds(root, &view),
     };
     assert_eq!(
         std::fs::read(root.join("workspace/src/main.rs")).unwrap(),
@@ -239,6 +307,24 @@ async fn measure(root: &Path, ordinal: usize, operation: Operation, calls: usize
         &root.join("sample.json"),
         &serde_json::to_vec(&audited).unwrap(),
     );
+}
+
+fn effective_bounds(root: &Path, view: &SessionView) -> serde_json::Value {
+    let grant: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("state/tools.json")).unwrap()).unwrap();
+    let permissions: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("state/permissions.json")).unwrap())
+            .unwrap();
+    let executable_identity = load_failed_capture(&root.join("prerequisites.json"));
+    assert_eq!(
+        executable_identity.is_some(),
+        !grant["commands"].as_array().unwrap().is_empty()
+    );
+    serde_json::json!({"goal_budget":view.goals[0].budget,
+        "resource_settings":view.goals[0].resource_settings,
+        "tool_limits":view.runs[0].tools[0].intent.limits,"grant":grant,
+        "permission_mode":permissions["permissions"]["defaultMode"],
+        "checkpoint":view.runs[0].tools[0].checkpoint,"executable_identity":executable_identity})
 }
 
 fn audit_show(root: &Path, sample: &Sample, remaining: Duration) {
@@ -390,6 +476,7 @@ fn linux_tool_latency_sample() {
             match std::env::var("ARANY_LATENCY_OPERATION").unwrap().as_str() {
                 "Read" => Operation::Read,
                 "Edit" => Operation::Edit,
+                "Command" => Operation::Command,
                 _ => panic!("unsupported latency operation"),
             },
             std::env::var("ARANY_LATENCY_CALLS")
@@ -476,7 +563,8 @@ fn corpus_row(operation: Operation, calls: usize, deadline: std::time::Instant) 
     let mut attempted = 0;
     for ordinal in 0..WARMUPS + MEASURED {
         if std::time::Instant::now() >= deadline
-            || bytes_under(&root) + SAMPLE_CAP > EVIDENCE_CAP / CORPUS_ROWS.len() as u64
+            || bytes_under(&root) + SAMPLE_CAP + REPORT_CAP
+                > EVIDENCE_CAP / CORPUS_ROWS.len() as u64
         {
             failure = Some("invocation deadline or evidence capacity");
             break;
@@ -569,17 +657,23 @@ fn corpus_row(operation: Operation, calls: usize, deadline: std::time::Instant) 
     } else {
         None
     };
+    let objective = match (operation, calls) {
+        (Operation::Read | Operation::Edit, 1) => Some(PROVISIONAL_P95_US),
+        _ => None,
+    };
     let report = serde_json::json!({
         "corpus_version":1, "operation":operation, "calls_per_step":calls, "profile":"release with test-support", "host":host,
         "binary_sha256":binary_sha256,"test_binary_sha256":test_binary_sha256,"package_version":env!("CARGO_PKG_VERSION"),
         "failed_capture":failed_capture,
-        "evidence_root":root, "workload":"warm 53248-byte file: Read first 2000 lines or Edit unique final function, fresh State/Workspace per sample",
+        "failed_prerequisites":failure.and_then(|_| attempted.checked_sub(1)).and_then(|ordinal|
+            load_failed_capture(&root.join(format!("sample-{ordinal:03}/prerequisites.json")))),
+        "evidence_root":root, "workload":"warm 53248-byte file: Read first 2000 lines, Edit unique final function or guarded native no-op Command, fresh State/Workspace per sample",
         "endpoint":"complete typed Provider receipt to final ToolFinished durable append acknowledgement",
         "excluded":"Provider transport/inference/decoding, startup, final answer, rendering, show; no Guard spawn for Read or Edit",
         "attempted":attempted, "warmups":samples.iter().filter(|sample| sample.warmup).count(), "measured":measured.len(),
         "failed_or_incomplete":attempted - samples.len(), "valid":valid, "failure":failure, "samples":samples,
-        "p50_p95_max_us":summary, "provisional_p95_objective_us":(calls == 1).then_some(100_000),
-        "objective_met":summary.filter(|_| calls == 1).map(|values| values[1] <= 100_000),
+        "p50_p95_max_us":summary, "provisional_p95_objective_us":objective,
+        "objective_met":summary.zip(objective).map(|(values, objective)| values[1] <= objective),
     });
     let bytes = serde_json::to_vec_pretty(&report).unwrap();
     assert!(bytes.len() as u64 <= REPORT_CAP);
@@ -593,11 +687,36 @@ fn corpus_row(operation: Operation, calls: usize, deadline: std::time::Instant) 
     );
 }
 
-#[tokio::test]
-async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
+#[test]
+fn tool_timing_waits_for_acknowledgement_and_audits_closed_history() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for operation in [Operation::Read, Operation::Edit, Operation::Command] {
+                assert_timing_acknowledgement(operation).await;
+            }
+        });
+    assert_eq!(
+        percentiles(&(1..=100).rev().collect::<Vec<_>>()).unwrap(),
+        [50, 95, 100]
+    );
+    assert_eq!(percentiles(&[7]).unwrap(), [7, 7, 7]);
+    assert_eq!(percentiles(&[]), Err(LatencyError::InvalidSampleCount));
+    assert_eq!(
+        percentiles(&[0; MAX_SAMPLES + 1]),
+        Err(LatencyError::InvalidSampleCount)
+    );
+}
+
+async fn assert_timing_acknowledgement(operation: Operation) {
     for acknowledge in [true, false] {
         let temp = tempfile::tempdir().unwrap();
-        let (engine, provider, input) = fixture(temp.path(), "src/main.rs");
+        let (engine, provider, input) = fixture_for(temp.path(), "src/main.rs", operation, 1);
         let recorder = engine_support::record_tool_latency(&engine);
         let requests = Arc::clone(&provider.requests);
         let (gates_sender, gates_receiver) = tokio::sync::oneshot::channel();
@@ -669,40 +788,9 @@ async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
                 .await;
         if acknowledge {
             assert_eq!(view.runs[0], result.unwrap().run);
-            assert_read(&view, 1);
+            assert_operation(&view, operation, 1);
             samples[0].audit(&events).unwrap();
-            for disposition in [
-                arany::ToolDisposition::Denied,
-                arany::ToolDisposition::Failed,
-                arany::ToolDisposition::Conflict,
-                arany::ToolDisposition::Limit,
-                arany::ToolDisposition::Cancelled,
-                arany::ToolDisposition::Uncertain,
-            ] {
-                let mut failed = samples[0].clone();
-                failed.disposition = Some(disposition);
-                assert!(!failed.successful());
-                assert!(failed.audit(&events).is_err());
-            }
-            let mut wrong = samples[0].clone();
-            wrong.intent_id = Some(Uuid::now_v7());
-            assert_eq!(wrong.audit(&events), Err(LatencyError::MismatchedStart));
-            let mut shifted = events.clone();
-            let finish = shifted
-                .iter_mut()
-                .find(|event| Some(event.sequence) == samples[0].finished_sequence)
-                .unwrap();
-            finish.created_at_ms = 0;
-            let intervals = samples[0].audit(&shifted).unwrap();
-            assert!(intervals.clock_invalid);
-            assert_eq!(intervals.provider_to_finish_ms, None);
-            assert!(
-                samples[0].successful(),
-                "wall-clock invalidity never alters the monotonic sample"
-            );
-            let mut missing = events.clone();
-            missing.retain(|event| Some(event.sequence) != samples[0].finished_sequence);
-            assert_eq!(samples[0].audit(&missing), Err(LatencyError::MissingFinish));
+            assert_acknowledged_history(&samples[0], &events);
         } else {
             assert!(result.is_err());
             assert!(samples[0].finished_sequence.is_none());
@@ -714,20 +802,60 @@ async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
             );
         }
     }
-    assert_eq!(
-        percentiles(&(1..=100).rev().collect::<Vec<_>>()).unwrap(),
-        [50, 95, 100]
-    );
-    assert_eq!(percentiles(&[7]).unwrap(), [7, 7, 7]);
-    assert_eq!(percentiles(&[]), Err(LatencyError::InvalidSampleCount));
-    assert_eq!(
-        percentiles(&[0; 331]),
-        Err(LatencyError::InvalidSampleCount)
-    );
 }
 
-#[tokio::test]
-async fn refused_and_failed_reads_never_enter_the_success_distribution() {
+fn assert_acknowledged_history(sample: &Sample, events: &[arany::EventEnvelope]) {
+    for disposition in [
+        arany::ToolDisposition::Denied,
+        arany::ToolDisposition::Failed,
+        arany::ToolDisposition::Conflict,
+        arany::ToolDisposition::Limit,
+        arany::ToolDisposition::Cancelled,
+        arany::ToolDisposition::Uncertain,
+    ] {
+        let mut failed = sample.clone();
+        failed.disposition = Some(disposition);
+        assert!(!failed.successful());
+        assert!(failed.audit(events).is_err());
+    }
+    let mut wrong = sample.clone();
+    wrong.intent_id = Some(Uuid::now_v7());
+    assert_eq!(wrong.audit(events), Err(LatencyError::MismatchedStart));
+    let mut shifted = events.to_vec();
+    let finish = shifted
+        .iter_mut()
+        .find(|event| Some(event.sequence) == sample.finished_sequence)
+        .unwrap();
+    finish.created_at_ms = 0;
+    let intervals = sample.audit(&shifted).unwrap();
+    assert!(intervals.clock_invalid);
+    assert_eq!(intervals.provider_to_finish_ms, None);
+    assert!(
+        sample.successful(),
+        "wall-clock invalidity never alters the monotonic sample"
+    );
+    let mut missing = events.to_vec();
+    missing.retain(|event| Some(event.sequence) != sample.finished_sequence);
+    assert_eq!(sample.audit(&missing), Err(LatencyError::MissingFinish));
+}
+
+#[test]
+fn refused_and_failed_tools_never_enter_the_success_distribution() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for operation in [Operation::Read, Operation::Edit, Operation::Command] {
+                assert_failed_timing(operation).await;
+            }
+        });
+}
+
+async fn assert_failed_timing(operation: Operation) {
     for (path, fail_append, cancel, invalid) in [
         ("outside/main.rs", false, false, false),
         ("src/missing.rs", false, false, false),
@@ -736,14 +864,10 @@ async fn refused_and_failed_reads_never_enter_the_success_distribution() {
         ("src/main.rs", false, false, true),
     ] {
         let temp = tempfile::tempdir().unwrap();
-        let (engine, provider, input) = fixture(temp.path(), path);
-        if invalid {
-            let mut responses = provider.responses.lock().unwrap();
-            let Ok(ProviderOutcome::Tools(requests)) = responses.front_mut().unwrap() else {
-                panic!("Tool proposal");
-            };
-            requests.push(requests[0].clone());
+        if operation == Operation::Command && path == "src/missing.rs" {
+            continue;
         }
+        let (engine, provider, input) = failing_fixture(temp.path(), path, operation, invalid);
         let recorder = engine_support::record_tool_latency(&engine);
         let requests = Arc::clone(&provider.requests);
         let cancellation = RunCancellation::new();
@@ -781,25 +905,7 @@ async fn refused_and_failed_reads_never_enter_the_success_distribution() {
             arany::test_support::goals::replayed(&temp.path().join("state"), samples[0].session_id)
                 .await;
         if invalid {
-            assert_eq!(
-                samples[0].provider_disposition,
-                Some(ProviderCallDisposition::Rejected)
-            );
-            assert_eq!(
-                view.runs[0].agents[0].provider_calls[0]
-                    .refusal
-                    .as_ref()
-                    .unwrap()
-                    .cause,
-                arany::ProposalRefusalCause::InvalidArguments
-            );
-            assert!(samples[0].started_sequence.is_none());
-            assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event.event, Event::ToolStarted { .. }))
-            );
-            samples[0].audit(&events).unwrap();
+            assert_rejected_proposal(&samples[0], &events, &view);
         } else if fail_append || cancel {
             assert!(samples[0].finished_sequence.is_none());
             assert!(
@@ -811,29 +917,100 @@ async fn refused_and_failed_reads_never_enter_the_success_distribution() {
             assert!(result.is_ok());
             let expected = if path.starts_with("outside/") {
                 arany::ToolDisposition::Denied
+            } else if operation == Operation::Edit {
+                arany::ToolDisposition::Conflict
             } else {
                 arany::ToolDisposition::Failed
             };
-            assert_eq!(samples[0].disposition, Some(expected));
-            let observation = events
-                .iter()
-                .find_map(|event| match &event.event {
-                    Event::ToolFinished { observation, .. } => Some(observation),
-                    _ => None,
-                })
-                .unwrap();
-            if expected == arany::ToolDisposition::Denied {
-                assert!(
-                    observation.attestation.is_none(),
-                    "denied authority never dispatches"
-                );
-            } else {
-                assert!(matches!(
-                    observation.attestation,
-                    Some(arany::Attestation::InProcess { .. })
-                ));
-            }
+            assert_failed_observation(&samples[0], &events, expected);
             samples[0].audit(&events).unwrap();
         }
     }
+}
+
+fn failing_fixture(
+    root: &Path,
+    path: &str,
+    operation: Operation,
+    invalid: bool,
+) -> (Engine, Arc<ScriptedProvider>, arany::RunRequest) {
+    let (engine, provider, input) = fixture_for(root, path, operation, 1);
+    if operation == Operation::Command && path.starts_with("outside/") {
+        private_file(
+            &root.join("state/permissions.json"),
+            br#"{"permissions":{"defaultMode":"default","deny":["Bash(noop)"]}}"#,
+        );
+    }
+    if operation == Operation::Edit && path == "src/missing.rs" {
+        let mut responses = provider.responses.lock().unwrap();
+        let Ok(ProviderOutcome::Tools(requests)) = responses.front_mut().unwrap() else {
+            panic!("Edit proposal");
+        };
+        let arany::ToolCall::Edit {
+            path,
+            expected_digest,
+            ..
+        } = &mut requests[0].call
+        else {
+            unreachable!();
+        };
+        *path = "src/main.rs".into();
+        *expected_digest = "0".repeat(64);
+    }
+    if invalid {
+        let mut responses = provider.responses.lock().unwrap();
+        let Ok(ProviderOutcome::Tools(requests)) = responses.front_mut().unwrap() else {
+            panic!("Tool proposal");
+        };
+        requests.push(requests[0].clone());
+    }
+    (engine, provider, input)
+}
+
+fn assert_failed_observation(
+    sample: &Sample,
+    events: &[arany::EventEnvelope],
+    expected: arany::ToolDisposition,
+) {
+    assert_eq!(sample.disposition, Some(expected));
+    let observation = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .unwrap();
+    if expected == arany::ToolDisposition::Denied {
+        assert!(
+            observation.attestation.is_none(),
+            "denied authority never dispatches"
+        );
+    } else {
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::InProcess { .. })
+        ));
+    }
+}
+
+fn assert_rejected_proposal(sample: &Sample, events: &[arany::EventEnvelope], view: &SessionView) {
+    assert_eq!(
+        sample.provider_disposition,
+        Some(ProviderCallDisposition::Rejected)
+    );
+    assert_eq!(
+        view.runs[0].agents[0].provider_calls[0]
+            .refusal
+            .as_ref()
+            .unwrap()
+            .cause,
+        arany::ProposalRefusalCause::InvalidArguments
+    );
+    assert!(sample.started_sequence.is_none());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::ToolStarted { .. }))
+    );
+    sample.audit(events).unwrap();
 }
