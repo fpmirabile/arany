@@ -309,7 +309,7 @@ impl<'a> RunProgress<'a> {
         }
         let approval_more = match &self.approval_ui.pending {
             Some(approval) => match ui.terminal.draw_tool_approval(
-                &approval.prompt,
+                &approval.prompt.for_mode(ui.composer.approval_mode()),
                 ui.view,
                 self.approval_ui.page,
                 (!self.approval_ui.unarmed).then_some(self.approval_ui.choice),
