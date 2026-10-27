@@ -124,6 +124,7 @@ impl CommandEnvironment {
             Some(bytes) => Self::parse(&bytes),
             None => locked(state, || Self::current_or_init(state)).map_err(|error| match error {
                 CommandEnvironmentError::Unconfirmed => ToolError::CommandEnvironmentUnconfirmed,
+                CommandEnvironmentError::TooLarge(_) => ToolError::Limit,
                 _ => ToolError::Configuration,
             }),
         }

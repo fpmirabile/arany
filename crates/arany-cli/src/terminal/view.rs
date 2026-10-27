@@ -879,6 +879,16 @@ pub(super) fn draw_setup_text_frame(
     });
 }
 
+const SETUP_CHOICES_MIN_HEIGHT: u16 = 8;
+const SETUP_CHOICES_CHROME_ROWS: u16 = 4;
+
+pub(super) fn setup_choices_height(choices: usize) -> u16 {
+    u16::try_from(choices)
+        .unwrap_or(u16::MAX)
+        .saturating_add(SETUP_CHOICES_CHROME_ROWS)
+        .max(SETUP_CHOICES_MIN_HEIGHT)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "dialog content and its explicit rendering bounds stay together"
@@ -893,7 +903,7 @@ pub(super) fn draw_setup_choices_frame(
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let height = full.height.min(8);
+    let height = full.height.min(setup_choices_height(choices.len()));
     let width = full.width.min(64);
     let area = Rect::new(
         full.x.saturating_add((full.width - width) / 2),
