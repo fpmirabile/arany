@@ -627,7 +627,9 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
 
 fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
     unprivileged_helper()?;
-    let root = unit_root(task)?;
+    let unit = unit_root(task)?;
+    storage::verify_git_storage(&unit)?;
+    let root = unit.join(storage::GIT_VOLUME);
     let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
     crate::tools::git::verify_host_executable(git)?;
     let git_path = Path::new(&git.executable);
@@ -1662,33 +1664,95 @@ mod tests {
         std::fs::write(workspace.path().join("a.txt"), "two\n").unwrap();
         std::fs::write(root.path().join("outside"), b"synthetic excluded data").unwrap();
         let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tools::guard::macos::tests::native_git_profile_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env_clear()
-            .env("ARANY_TEST_GIT_PROFILE_ROOT", root.path())
-            .env("ARANY_TEST_GIT_PROFILE_WORKSPACE", workspace.path())
-            .env("ARANY_TEST_GIT_PROFILE_HOME", home.path())
-            .env(
-                "ARANY_TEST_GIT_PROFILE_PORT",
-                network.local_addr().unwrap().port().to_string(),
-            )
-            .current_dir(root.path())
-            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+        let reactor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "native git profile: {:?}; stdout={:?}; stderr={:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        crate::test_process::assert_single_test_completed(&output.stdout, "native git profile");
-        assert!(output.stderr.is_empty());
+        struct DetachOnUnwind<'a> {
+            root: &'a Path,
+            armed: bool,
+        }
+
+        impl Drop for DetachOnUnwind<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    // Volume handles drop first, so the image detaches even while unwinding.
+                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        let _ = runtime.block_on(storage::cleanup_storage(self.root));
+                    }
+                }
+            }
+        }
+
+        let mut detach = DetachOnUnwind {
+            root: root.path(),
+            armed: true,
+        };
+        let volume = reactor
+            .block_on(storage::prepare_git_storage(root.path()))
+            .unwrap();
+        let bare = tempfile::Builder::new()
+            .prefix("arany-git-bare-")
+            .tempdir_in(&temp)
+            .unwrap();
+        std::fs::set_permissions(bare.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run = |phase: &str, directory: &Path| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::guard::macos::tests::native_git_profile_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("ARANY_TEST_GIT_PROFILE_PHASE", phase)
+                .env("ARANY_TEST_GIT_PROFILE_ROOT", root.path())
+                .env("ARANY_TEST_GIT_PROFILE_WORKSPACE", workspace.path())
+                .env("ARANY_TEST_GIT_PROFILE_HOME", home.path())
+                .env(
+                    "ARANY_TEST_GIT_PROFILE_PORT",
+                    network.local_addr().unwrap().port().to_string(),
+                )
+                .current_dir(directory)
+                .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+                .unwrap()
+        };
+        let control_root = || {
+            let mut names: Vec<_> = std::fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            (names, std::fs::read(root.path().join("outside")).unwrap())
+        };
+        let before = control_root();
+        let refused = run("bare", bare.path());
+        let read = run("read", root.path());
+        storage::exhaust_git_storage(&volume[0])
+            .expect("the Git view volume must be exhausted before the full-volume run");
+        let exhausted = run("full", root.path());
+        let after = control_root();
+        drop(volume);
+        let detached = reactor.block_on(storage::cleanup_storage(root.path()));
+        detach.armed = false;
+        let mounted = storage::storage_mounted(root.path());
+        for (phase, output) in [("bare", &refused), ("read", &read), ("full", &exhausted)] {
+            assert!(
+                output.status.success(),
+                "native git profile {phase}: {:?}; stdout={:?}; stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            crate::test_process::assert_single_test_completed(&output.stdout, "native git profile");
+            assert!(output.stderr.is_empty());
+        }
+        assert_eq!(before, after, "the control root must stay unchanged");
+        detached.unwrap();
+        assert!(!mounted.unwrap());
     }
 
     #[test]
@@ -1743,6 +1807,14 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
         };
+        let phase = std::env::var("ARANY_TEST_GIT_PROFILE_PHASE").unwrap();
+        if phase == "bare" {
+            let mut stage = super::BootstrapStage::Workspace;
+            assert!(install(&task, &mut stage).is_err());
+            let workspace_file = workspace.join("a.txt");
+            std::fs::write(&workspace_file, b"two\n").unwrap();
+            return;
+        }
         let sibling = Path::new(&git.executable).with_file_name("clang");
         let exec_probes = [
             (Path::new("/usr/bin/true"), &[][..]),
@@ -1774,19 +1846,22 @@ mod tests {
         assert!(std::fs::read_dir(&root).unwrap().next().is_some());
         let workspace_file = workspace.join("a.txt");
         std::fs::write(&workspace_file, b"two\n").unwrap();
-        let view = root.join(crate::tools::git::VIEW);
+        let view = root.join(storage::GIT_VOLUME).join(crate::tools::git::VIEW);
         let writable = view.join("write-probe");
-        std::fs::create_dir(&view).unwrap();
-        std::fs::write(&writable, b"allowed").unwrap();
-        assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
-        std::fs::remove_dir_all(&view).unwrap();
+        if phase == "read" {
+            std::fs::create_dir(&view).unwrap();
+            std::fs::write(&writable, b"allowed").unwrap();
+            assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
+            std::fs::remove_dir_all(&view).unwrap();
+        }
         std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .expect("unsandboxed network baseline");
         let mach = ffi::MachLookupProbe::new();
         assert_eq!(mach.lookup(), 0, "unsandboxed logger lookup baseline");
         configure_resources().unwrap();
         let mut stage = super::BootstrapStage::Workspace;
-        assert_eq!(install(&task, &mut stage).unwrap(), root);
+        let scratch = install(&task, &mut stage).unwrap();
+        assert_eq!(scratch, root.join(storage::GIT_VOLUME));
         assert_eq!(
             mach.lookup(),
             BOOTSTRAP_NOT_PRIVILEGED,
@@ -1804,10 +1879,12 @@ mod tests {
             std::fs::read(&gitconfig).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
         );
-        std::fs::create_dir(&view).unwrap();
-        std::fs::write(&writable, b"allowed").unwrap();
-        assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
-        std::fs::remove_dir_all(&view).unwrap();
+        if phase == "read" {
+            std::fs::create_dir(&view).unwrap();
+            std::fs::write(&writable, b"allowed").unwrap();
+            assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
+            std::fs::remove_dir_all(&view).unwrap();
+        }
         assert_eq!(
             std::fs::read(root.join("outside")).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
@@ -1836,11 +1913,27 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        if phase == "full" {
+            assert!(!scratch.join(crate::tools::git::VIEW).exists());
+            let result = runtime.block_on(crate::tools::git::execute(
+                crate::tools::git::GitReadRequest {
+                    workspace: &workspace,
+                    scratch: &scratch,
+                    git: &git,
+                    call: &call,
+                    hidden: &Default::default(),
+                    max_bytes: 16 * 1024,
+                    runtime: Duration::from_secs(20),
+                },
+            ));
+            assert!(matches!(result, Err(ToolError::Operation)), "{result:?}");
+            return;
+        }
         let output = runtime
             .block_on(crate::tools::git::execute(
                 crate::tools::git::GitReadRequest {
                     workspace: &workspace,
-                    scratch: &root,
+                    scratch: &scratch,
                     git: &git,
                     call: &call,
                     hidden: &Default::default(),
@@ -1857,7 +1950,7 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!({"path": "a.txt", "state": ".M"}))
         );
-        std::fs::remove_dir_all(root.join("git-view")).unwrap();
+        std::fs::remove_dir_all(scratch.join(crate::tools::git::VIEW)).unwrap();
         let log = ToolCall::GitLog {
             path: ".".into(),
             revision: None,
@@ -1867,7 +1960,7 @@ mod tests {
             .block_on(crate::tools::git::execute(
                 crate::tools::git::GitReadRequest {
                     workspace: &workspace,
-                    scratch: &root,
+                    scratch: &scratch,
                     git: &git,
                     call: &log,
                     hidden: &Default::default(),
@@ -1878,5 +1971,6 @@ mod tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["commits"].as_array().unwrap().len(), 1, "{output}");
+        std::fs::remove_dir_all(scratch.join(crate::tools::git::VIEW)).unwrap();
     }
 }
