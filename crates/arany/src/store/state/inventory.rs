@@ -328,8 +328,14 @@ impl Scan<'_> {
             return Err(StorageReason::UnsafeObject);
         }
         if metadata.is_dir() {
-            if walk.category == Category::BuildCache && walk.depth != 0 {
-                return Err(StorageReason::UnexpectedCacheObject);
+            if walk.category == Category::BuildCache && walk.depth == 1 {
+                if !name
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("directory-") && name.ends_with(".tree"))
+                {
+                    return Err(StorageReason::UnexpectedCacheObject);
+                }
+                Self::cache_record(name, cache_tokens, &mut rows[walk.category as usize])?;
             }
             if walk.depth >= MAX_DEPTH {
                 return Err(StorageReason::DepthLimit);
@@ -360,7 +366,7 @@ impl Scan<'_> {
                 },
             )?;
         } else if metadata.is_file() {
-            if walk.category == Category::BuildCache {
+            if walk.category == Category::BuildCache && walk.depth == 1 {
                 Self::cache_record(name, cache_tokens, &mut rows[walk.category as usize])?;
             }
             self.account(&metadata, &mut rows[walk.category as usize])?;

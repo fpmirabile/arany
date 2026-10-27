@@ -7,6 +7,11 @@ use std::collections::BTreeSet;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path};
 
+#[cfg(target_os = "linux")]
+mod directory;
+#[cfg(target_os = "linux")]
+pub(crate) use directory::CacheGuardRecovery;
+
 pub(super) const DIRECTORY: &str = "build-cache";
 const ARCHIVE_PREFIX: &str = "cache-";
 const PREVIOUS_PREFIX: &str = "previous-";
@@ -17,7 +22,11 @@ const IDENTITY_LOCK_PREFIX: &str = "identity-";
 const TRANSACTION_PREFIX: &str = "transaction-";
 const TRANSACTION_NEXT_PREFIX: &str = "transaction-next-";
 // First match wins when classifying names: TRANSACTION_NEXT_PREFIX must precede TRANSACTION_PREFIX.
-const IDENTITY_FILE_KINDS: [(&str, &str); 8] = [
+const IDENTITY_FILE_KINDS: [(&str, &str); 12] = [
+    ("guard-", ".unit"),
+    ("directory-", ".tree"),
+    ("unavailable-", ".pending"),
+    ("generation-", ".generation"),
     (ARCHIVE_PREFIX, ".arc"),
     (PREVIOUS_PREFIX, ".arc"),
     (STAGING_PREFIX, ".arc"),
@@ -38,7 +47,8 @@ const RESERVED_TRANSIENT_BYTES: u64 = DEFAULT_ARCHIVE_BYTES * 2;
 const MAX_RESERVATION_BYTES: u64 = MAX_ARCHIVE_BYTES * 2;
 pub(crate) const AGGREGATE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const IDENTITY_METADATA_BYTES: u64 = 1024;
-const MAX_DIRECTORY_ENTRIES: usize = MAX_IDENTITIES * 8 + 2;
+const GENERATION_BYTES: usize = 32;
+const MAX_DIRECTORY_ENTRIES: usize = MAX_IDENTITIES * IDENTITY_FILE_KINDS.len() + 2;
 const MAX_ARCHIVE_ENTRIES: usize = 16_384;
 const MAX_PATH_DEPTH: usize = 32;
 const MAX_PATH_INDEX_BYTES: usize = 8 * 1024 * 1024;
@@ -316,10 +326,11 @@ impl BuildCacheLease {
             }
             self.dir.rename(&staged, &self.dir, &name)?;
             sync_directory(&self.dir)?;
+            let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
             set_reservation(
                 &self.dir,
                 &self.token,
-                self.candidate_limit.saturating_mul(2),
+                validate_reservation(&reservation, &self.token)?,
             )?;
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
@@ -430,6 +441,11 @@ impl StateRoot {
             Err(error) => return Err(StoreError::Io(io::Error::from(error))),
         }
         let identity_lock = FlockGuard(file);
+        #[cfg(target_os = "linux")]
+        {
+            directory::guard::admit(&dir, &token)?;
+            directory::directory_available(&dir, &token)?;
+        }
         // Readers never recover, reserve, collect or publish an archive.
         if file_exists(&dir, &transaction_name(&token))?
             || file_exists(&dir, &transaction_next_name(&token))?
@@ -481,6 +497,10 @@ impl StateRoot {
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         remove_stale_candidates(&dir)?;
         let token = identity.token();
+        #[cfg(target_os = "linux")]
+        {
+            directory::directory_available(&dir, &token)?;
+        }
         let archive_size = match open_regular(&dir, &archive_name(&token), MAX_ARCHIVE_BYTES) {
             Ok(file) => file.metadata()?.len(),
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => 0,
@@ -532,6 +552,11 @@ impl StateRoot {
         }
         let (identity_file, created_lock) = open_lock_file(&dir, &lock_name)?;
         let identity_lock = FlockGuard::acquire(identity_file, true)?;
+        #[cfg(target_os = "linux")]
+        {
+            directory::guard::admit(&dir, &token)?;
+            directory::directory_available(&dir, &token)?;
+        }
         let mut reservation_created = false;
         let archive_result = (|| {
             let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
@@ -603,9 +628,17 @@ impl StateRoot {
         let lock_name = identity_lock_name(&token);
         let (identity_file, _) = open_lock_file(&dir, &lock_name)?;
         let _identity_lock = FlockGuard::acquire(identity_file, true)?;
+        #[cfg(target_os = "linux")]
+        directory::guard::admit(&dir, &token)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         for name in identity_file_names(&token) {
             if name != lock_name {
+                if name.ends_with(".tree") && file_exists(&dir, &name)? {
+                    #[cfg(target_os = "linux")]
+                    let _lease = dir.open_dir_nofollow(&name)?;
+                    dir.remove_dir_all(&name)?;
+                    continue;
+                }
                 remove_if_present(&dir, &name)?;
             }
         }
@@ -649,6 +682,11 @@ impl StateRoot {
         for name in &names {
             let file = open_regular(&dir, name, 0)?;
             held.push(FlockGuard::acquire(file, true)?);
+            #[cfg(target_os = "linux")]
+            directory::guard::admit(
+                &dir,
+                suffix(name, IDENTITY_LOCK_PREFIX, ".lock").ok_or(StoreError::StateNotPrivate)?,
+            )?;
         }
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         let mut locks = Vec::new();
@@ -668,7 +706,12 @@ impl StateRoot {
                 .iter()
                 .any(|(prefix, _)| name.starts_with(prefix))
             {
-                dir.remove_file(&name)?;
+                if name.ends_with(".tree") {
+                    dir.open_dir_nofollow(&name)?;
+                    dir.remove_dir_all(&name)?;
+                } else {
+                    dir.remove_file(&name)?;
+                }
             }
         }
         sync_directory(&dir)?;
@@ -1516,7 +1559,41 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
             .file_name()
             .into_string()
             .map_err(|_| StoreError::StateNotPrivate)?;
-        if let Some(token) = suffix(&name, ARCHIVE_PREFIX, ".arc") {
+        if let Some(token) = suffix(&name, "guard-", ".unit") {
+            validate_token(token)?;
+            identities.insert(token.to_owned());
+            #[cfg(target_os = "linux")]
+            open_regular(dir, &name, directory::guard::GUARD_BYTES)?;
+            #[cfg(not(target_os = "linux"))]
+            return Err(StoreError::StateNotPrivate);
+        } else if let Some(token) = suffix(&name, "directory-", ".tree") {
+            validate_token(token)?;
+            identities.insert(token.to_owned());
+            #[cfg(target_os = "linux")]
+            {
+                let bytes = directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)?;
+                if file_exists(dir, &format!("unavailable-{token}.pending"))?
+                    && file_exists(dir, &reservation_name(token))?
+                {
+                    let reserve = open_regular(dir, &reservation_name(token), 96)?;
+                    if validate_reservation(&reserve, token)? < bytes {
+                        return Err(StoreError::StorageFull);
+                    }
+                } else {
+                    total = total.checked_add(bytes).ok_or(StoreError::StorageFull)?;
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(StoreError::StateNotPrivate);
+        } else if let Some(token) = suffix(&name, "unavailable-", ".pending") {
+            validate_token(token)?;
+            identities.insert(token.to_owned());
+            open_regular(dir, &name, 0)?;
+        } else if let Some(token) = suffix(&name, "generation-", ".generation") {
+            validate_token(token)?;
+            identities.insert(token.to_owned());
+            open_regular(dir, &name, GENERATION_BYTES as u64)?;
+        } else if let Some(token) = suffix(&name, ARCHIVE_PREFIX, ".arc") {
             validate_token(token)?;
             identities.insert(token.to_owned());
             archives.push(name);
@@ -1663,6 +1740,8 @@ pub(super) fn inventory_record(name: &str) -> Option<(Option<&str>, bool)> {
                 | CANDIDATE_PREFIX
                 | TRANSACTION_PREFIX
                 | TRANSACTION_NEXT_PREFIX
+                | "unavailable-"
+                | "guard-"
         ),
     ))
 }
@@ -1698,6 +1777,16 @@ fn identity_file_names(token: &str) -> impl Iterator<Item = String> + '_ {
 
 fn contains_cache_identity(dir: &Dir, token: &str) -> Result<bool, StoreError> {
     Ok(identity_file_names(token).any(|name| dir.symlink_metadata(name).is_ok()))
+}
+
+fn release_reservation(dir: &Dir, token: &str) -> Result<(), StoreError> {
+    #[cfg(target_os = "linux")]
+    if directory::guard::active(dir, token)?
+        || file_exists(dir, &format!("unavailable-{token}.pending"))?
+    {
+        return Ok(());
+    }
+    remove_if_present(dir, &reservation_name(token))
 }
 
 fn remove_if_present(dir: &Dir, name: &str) -> Result<(), StoreError> {
@@ -1864,7 +1953,7 @@ fn recover_transaction_with_sync(
         remove_if_present(dir, &next)?;
         remove_if_present(dir, &stage_name(token))?;
         remove_if_present(dir, &candidate_name(token))?;
-        remove_if_present(dir, &reservation_name(token))?;
+        release_reservation(dir, token)?;
         sync_directory(dir)?;
         return Ok(());
     };
@@ -1930,7 +2019,7 @@ fn recover_transaction_with_sync(
     remove_if_present(dir, &marker)?;
     remove_if_present(dir, &next)?;
     sync(dir)?;
-    remove_if_present(dir, &reservation_name(token))?;
+    release_reservation(dir, token)?;
     sync(dir)
 }
 
@@ -1984,7 +2073,7 @@ fn finish_committed(dir: &Dir, token: &str) -> Result<(), StoreError> {
     remove_if_present(dir, &transaction_name(token))?;
     remove_if_present(dir, &transaction_next_name(token))?;
     sync_directory(dir)?;
-    remove_if_present(dir, &reservation_name(token))?;
+    release_reservation(dir, token)?;
     sync_directory(dir)
 }
 
@@ -2209,14 +2298,14 @@ mod tests {
     use cap_std::ambient_authority;
     use std::os::unix::fs::DirBuilderExt;
 
-    fn private_dir(path: &Path) {
+    pub(super) fn private_dir(path: &Path) {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(path)
             .expect("private fixture directory");
     }
 
-    fn identity(path: &Path) -> BuildCacheIdentity {
+    pub(super) fn identity(path: &Path) -> BuildCacheIdentity {
         let opened =
             crate::private_fs::open_workspace_directory(path).expect("Workspace admission");
         let metadata = opened.dir_metadata().expect("Workspace metadata");
@@ -2280,14 +2369,18 @@ mod tests {
         ));
     }
 
-    fn archive(identity: &BuildCacheIdentity, source: &Path, exclusions: &[String]) -> Vec<u8> {
+    pub(super) fn archive(
+        identity: &BuildCacheIdentity,
+        source: &Path,
+        exclusions: &[String],
+    ) -> Vec<u8> {
         let source = Dir::open_ambient_dir(source, ambient_authority()).expect("cache source");
         let mut bytes = Vec::new();
         capture_archive(&source, identity, exclusions, &mut bytes).expect("bounded archive");
         bytes
     }
 
-    fn publish(
+    pub(super) fn publish(
         state: &StateRoot,
         identity: BuildCacheIdentity,
         bytes: &[u8],
