@@ -694,6 +694,14 @@ async fn run_live(
                 .all(|(phase, _)| *phase != AgentPhase::ChildWork)
         );
     }
+    assert!(!events.iter().any(|e| matches!(
+        e.event.kind(),
+        "WorkerDataChunk"
+            | "WorkerDataSealed"
+            | "WorkerHandoverRecorded"
+            | "WorkerIntegrationRecorded"
+            | "WorkerHandoverDiscarded"
+    )));
     assert_action_bounds(&events, false, false);
     TeamObservation {
         directory,

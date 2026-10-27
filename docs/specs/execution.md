@@ -165,7 +165,7 @@ Event decoding retains owned payload records and strict current-field validation
 | `ToolStarted` | 24; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
 | `AgentSpawned` | 17 |
-| `AgentFinished` | 11 |
+| `AgentFinished` | 12 |
 | `ProviderCallRecorded` | 25; the closed failure reasons include `rate_limited` and `outcome_decode`; editor refusal causes follow [Accepted outcomes](#accepted-outcomes) |
 | `RunFinished` | 9 |
 | `ProviderSetupEditStarted` | 3 |
@@ -310,6 +310,8 @@ Worker vocabulary retirement removes `WorkerDataChunk`, `WorkerDataSealed`, `Wor
 Selective identity steps advance ToolProposed 1 → 2, ToolStarted 23 → 24, ToolFinished 29 → 30, HookStarted 12 → 13, HookFinished 18 → 19, GoalPlanContractRecorded 13 → 14, ProviderCallRecorded 24 → 25, AgentSpawned 16 → 17 and SupervisorVerdictRecorded 1 → 2. Existing floors remain unchanged. Their strictly typed source canonicalizers preserve supported payload bytes and refuse `prepare_worker`, `worker_handover` changeset sources, worker data/read/mutation/command attestations and Supervisor `worker_capture`/`handover` sites wherever the enclosing type carries them. Refusal archives the entire history; supported live-editor and non-editor facts migrate and reopen without execution. Text fields containing those words remain ordinary untrusted data. [Retirement evidence](../../crates/arany/src/store/migrate/retired_worker_tests.rs) owns each supported edge, removed-variant refusal and intact archive/reopen scenario.
 
 Live-editor migration advances AgentSpawned 15 → 16 and AgentFinished 10 → 11 together with WorkerLeaseReleased 1 → 2. Spawn keeps floor 11 and the earlier non-editor migration chain; finish keeps floor 10. The supported adjacent transforms strictly preserve only null assignment/null worker source records, with canonical fixtures. Any non-null source assignment or outcome refuses transformation and archives the whole history intact with the ordinary notice. Release has floor 2: an old release cannot prove the current causal record and archives rather than inventing a cause. There is no SQLite schema change or runtime compatibility reader. The [focused migration corpus](../../crates/arany/src/store/migrate/shared_editors_tests.rs) owns null/strict-field and archive/reopen proof.
+
+AgentFinished 11 → 12 removes the obsolete `lost` and `private_uncertain` outcome variants. Supported live editor and null-worker records migrate with unchanged canonical bytes; an unsupported variant archives the whole history intact. The [focused migration corpus](../../crates/arany/src/store/migrate/shared_editors_tests.rs) owns strict-field, supported-outcome and archive/reopen proof.
 
 `RunStarted` 23 → 24 replaces `config.provider` with the strict record `{kind, custom_name}`. Kinds are `openai`, `anthropic`, `chatgpt` and `custom`. Native kinds require an explicit null name; custom requires the exact validated profile name, without the `custom:` prefix. Unknown kinds, missing fields, invalid names and inconsistent kind/name pairs reject. Runtime edges reconstruct the same selected profile; provenance, account binding and credentials retain their existing admission. Saved-account and configured-route records retain their own formats.
 
