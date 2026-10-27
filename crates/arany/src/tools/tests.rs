@@ -501,21 +501,30 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
             },
         )
     };
-    for (error, stage, label) in [
+    for (error, stage, label, disposition, limit_cause, stops_run) in [
         (
             ToolError::Timeout(String::new()).in_selection(),
             FailureStage::SelectionTimedOut,
             "project selection timed out",
+            ToolDisposition::Limit,
+            Some(super::LimitCause::Timeout),
+            false,
         ),
         (
             ToolError::NotFound.in_selection(),
             FailureStage::SelectionInputVanished,
             "project input vanished",
+            ToolDisposition::Failed,
+            None,
+            true,
         ),
         (
             ToolError::Conflict.in_selection(),
             FailureStage::SelectionInputConflict,
             "project input conflict",
+            ToolDisposition::Failed,
+            None,
+            true,
         ),
     ] {
         assert!(matches!(
@@ -535,7 +544,10 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
             observation.guard_stage_diagnostic().as_deref(),
             Some(format!("Guard stage: {label}").as_str())
         );
-        assert!(observation.valid() && observation.stops_run());
+        assert!(observation.valid());
+        assert_eq!(observation.disposition, disposition);
+        assert_eq!(observation.limit_cause, limit_cause);
+        assert_eq!(observation.stops_run(), stops_run);
         assert!(
             observation
                 .output
