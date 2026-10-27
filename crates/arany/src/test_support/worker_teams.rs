@@ -516,6 +516,11 @@ async fn run_live(
         ApprovalMode::Request
     });
     let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
+    let mut cache_publication = None::<(
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        crate::store::BuildCacheIdentity,
+    )>;
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -544,11 +549,27 @@ async fn run_live(
                 commands::overlay::dispatched(&state, &workspace, case);
                 overlay_dispatch = None;
             }
+            publishing = async {
+                match &mut cache_publication {
+                    Some((entered, _, _)) => entered.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                publishing.expect("editor cache reached publication");
+                let (_, release, identity) = cache_publication.take().unwrap();
+                if cfg!(target_os = "linux") {
+                    FaultPlan::fail_record_sync(identity.token().into(), "");
+                } else {
+                    FaultPlan::fail_commit_marker(&identity);
+                }
+                release.send(()).unwrap();
+            }
             Some(approval) = inbox.next() => {
                 commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
                     let identity = crate::store::BuildCacheIdentity::new(&workspace, approval.intent.workspace_device, approval.intent.workspace_inode).unwrap();
-                    FaultPlan::fail_commit_marker(&identity);
+                    let (entered, release) = FaultPlan::gate_guard_cache_publication(approval.intent.id);
+                    cache_publication = Some((entered, release, identity));
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);
