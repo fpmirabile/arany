@@ -340,6 +340,24 @@ fn tables_fit_or_use_records_with_source_copy_find_and_exact_classic_costs() {
                         .any(|row| row.matched && row.text.contains("Result"))
                 );
                 if source == TABLE {
+                    history.sync(&view, width, 100);
+                    history.top = history.messages[1].start;
+                    let first = rows
+                        .iter()
+                        .position(|row| row.text.contains("Result"))
+                        .unwrap();
+                    let last = rows
+                        .iter()
+                        .position(|row| row.text.contains("code"))
+                        .unwrap()
+                        - 1;
+                    history.select_at(&view, first, 2, 1);
+                    history.extend_selection(&view, last, rows[last].text.width() - 1);
+                    assert_eq!(
+                        history.selection_text(&view).unwrap().unwrap(),
+                        TABLE.split_inclusive('\n').nth(2).unwrap()
+                    );
+                    history.sync(&view, 80, 100);
                     let body = rows
                         .iter()
                         .map(|row| row.text.as_str())
