@@ -1627,7 +1627,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .await
                         .map_err(|_| ToolError::Operation)?;
                     response_sent = true;
-                    if cleanup.is_ok() && observation.disposition == ToolDisposition::Succeeded {
+                    if cleanup.is_ok() && observation.cache_publication_eligible() {
                         if cache.candidate_bytes == 0 {
                             output
                                 .write_all(b"CACHE_REJECTED\n")
