@@ -24,21 +24,31 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
     }
     let (mut depth, mut code, mut table) = (0, None, None::<super::tables::Table>);
     let mut flow = None::<Flow>;
-    for (index, (event, range)) in Parser::new_ext(source, Options::ENABLE_TABLES)
-        .into_offset_iter()
-        .enumerate()
-    {
+    let parser = Parser::new_ext(source, Options::ENABLE_TABLES);
+    for (_, definition) in parser.reference_definitions().iter() {
+        for line in covered(&mut lines, definition.span.clone()) {
+            line.hidden = true;
+        }
+    }
+    let mut expanded = 0usize;
+    let mut events = parser.into_offset_iter();
+    for index in 0..=MAX_MARKDOWN_EVENTS {
+        let Some((event, range)) = events.next() else {
+            break;
+        };
         if index >= MAX_MARKDOWN_EVENTS {
             return Err(());
         }
         if matches!(event, Event::Start(_)) && depth == MAX_MARKDOWN_DEPTH {
             return Err(());
         }
+        let definition = super::links::definition(&event, events.reference_definitions());
+        super::links::charge(&event, &mut expanded)?;
         if let Some(table) = &mut table {
-            table.event(source, &event, range.clone())?;
+            table.event(source, &event, range.clone(), definition.clone())?;
         }
         if let Some(flow) = &mut flow {
-            flow.event(source, &event, range.clone())?;
+            flow.event(source, &event, range.clone(), definition)?;
         }
         match event {
             Event::Start(tag) => {

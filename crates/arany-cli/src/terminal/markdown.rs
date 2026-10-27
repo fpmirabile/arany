@@ -18,9 +18,35 @@ pub(super) const MAX_MARKDOWN_TABLE_COLUMNS: usize = 16;
 pub(super) const MAX_MARKDOWN_TABLE_ROWS: usize = 128;
 pub(super) const LIMIT_CUE: &str = "Markdown formatting limit; showing source";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Fragment {
+    #[default]
+    Label,
+    Separator,
+    Destination,
+    Marker,
+    Rail,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Coordinate {
+    pub(super) site: usize,
+    pub(super) fragment: Fragment,
+    pub(super) offset: usize,
+}
+impl Coordinate {
+    pub(super) fn source(site: usize) -> Self {
+        Self {
+            site,
+            ..Self::default()
+        }
+    }
+}
 #[derive(Clone)]
 pub(super) struct Cell {
     pub(super) byte: usize,
+    pub(super) coordinate: Coordinate,
+    pub(super) envelope: Option<Range<usize>>,
+    pub(super) definition: Option<Range<usize>>,
     pub(super) source: Range<usize>,
     pub(super) text: String,
     pub(super) style: Modifier,
@@ -112,6 +138,9 @@ fn layout_line(
         if capture {
             cells.push(Cell {
                 byte,
+                coordinate: Coordinate::source(byte),
+                envelope: None,
+                definition: None,
                 source: source_range(line, origin),
                 text: if let Some(value) = replacement {
                     value.to_owned()
@@ -163,6 +192,12 @@ fn decorate(
         .graphemes(true)
         .map(|text| Cell {
             byte: source.start,
+            coordinate: Coordinate {
+                fragment: Fragment::Rail,
+                ..Coordinate::source(byte)
+            },
+            envelope: None,
+            definition: None,
             source: source.clone(),
             text: text.to_owned(),
             style: Modifier::empty(),
@@ -188,16 +223,29 @@ fn projected(source: &str, width: usize) -> Option<Vec<BlockLine>> {
     layout(source, width, false, Some(&lines)).ok()?;
     Some(lines)
 }
-pub(super) fn visible_line(source: &str, byte: usize, width: usize) -> Option<Vec<Cell>> {
+pub(super) fn visible_line(
+    source: &str,
+    coordinate: Coordinate,
+    width: usize,
+) -> Option<Vec<Cell>> {
     projected(source, width)?
         .iter()
-        .find_map(|line| line.flow.as_ref()?.line_at(byte))
+        .find_map(|line| {
+            line.flow
+                .as_ref()
+                .and_then(|flow| flow.line_at(coordinate))
+                .or_else(|| line.table.as_ref()?.line_at(coordinate))
+        })
         .map(<[Cell]>::to_vec)
 }
-pub(super) fn content_at(source: &str, byte: usize, width: usize) -> Option<Range<usize>> {
+pub(super) fn content_at(
+    source: &str,
+    coordinate: Coordinate,
+    width: usize,
+) -> Option<Range<usize>> {
     projected(source, width)?
         .iter()
-        .find(|line| !line.hidden && line.content.contains(&byte))
+        .find(|line| !line.hidden && line.content.contains(&coordinate.site))
         .map(|line| line.content.clone())
 }
 pub(super) fn project(source: &str, width: usize, capture: bool) -> (Layout, Option<&'static str>) {

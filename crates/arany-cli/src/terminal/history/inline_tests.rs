@@ -550,7 +550,7 @@ fn leading_hard_breaks_keep_exact_rows_find_and_reading_anchors() {
 }
 
 #[test]
-fn literal_decoded_links_and_images_keep_accumulated_styles_in_prose_and_tables() {
+fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables() {
     for (markup, literal, style) in [
         ("*![alt](x.png)*", "![alt](x.png)", Modifier::ITALIC),
         (
@@ -561,7 +561,7 @@ fn literal_decoded_links_and_images_keep_accumulated_styles_in_prose_and_tables(
         ("*![**alt**](x.png)*", "![**alt**](x.png)", Modifier::ITALIC),
         (
             "***[label](a&amp;b)***",
-            "[label](a&amp;b)",
+            "label (a&b)",
             Modifier::BOLD | Modifier::ITALIC,
         ),
     ] {

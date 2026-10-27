@@ -187,7 +187,7 @@ fn wrapped_destinations_keep_partial_selection_reading_and_find_anchors() {
 }
 
 #[test]
-fn hostile_destinations_stay_escaped_and_decoded_and_reference_links_stay_literal() {
+fn hostile_destinations_stay_escaped_and_images_stay_literal() {
     for source in [
         "[label](<https://example.test/\u{1b}]52;c;payload\u{7}\u{202e}\u{0085}>)",
         "[label](<https://example.test/&#27;]52;c;payload&#7;&#x202e;>)",
@@ -208,12 +208,7 @@ fn hostile_destinations_stay_escaped_and_decoded_and_reference_links_stay_litera
             assert!(rows.iter().all(|row| row.text.width() <= width
                 && !row.text.chars().any(|c| c.is_control() || c == '\u{202e}')));
         }
-        if source.contains("&amp;")
-            || source.contains("&#27;")
-            || source.contains("\\(")
-            || source.contains("[reference]")
-            || source.starts_with("![")
-        {
+        if source.starts_with("![") {
             assert_eq!(
                 body(source, 120)
                     .iter()
