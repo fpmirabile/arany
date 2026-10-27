@@ -15,7 +15,7 @@ use prompts::{await_setup_ack, choose};
 
 use crate::accounts::chatgpt;
 use crate::accounts::credentials;
-use crate::terminal::{AttachedTerminal, Composer, TerminalInput};
+use crate::terminal::AttachedTerminal;
 #[cfg(all(test, unix, debug_assertions))]
 use arany::{CollaborationPolicy, RecordKind};
 use arany::{
@@ -495,135 +495,6 @@ async fn remove_saved_access(
         _ => return Err("invalid account removal choice".into()),
     }
     Ok(())
-}
-
-async fn read_setup_value(
-    terminal: &mut AttachedTerminal,
-    title: &str,
-    instruction: &str,
-    initial: &str,
-    limit: usize,
-) -> Result<Option<String>, SetupError> {
-    read_setup_value_inner(
-        terminal,
-        SetupValueInput {
-            title,
-            instruction,
-            initial,
-            limit,
-            allow_empty: false,
-        },
-    )
-    .await
-}
-
-async fn read_optional_setup_value(
-    terminal: &mut AttachedTerminal,
-    title: &str,
-    instruction: &str,
-    initial: &str,
-    limit: usize,
-) -> Result<Option<String>, SetupError> {
-    read_setup_value_inner(
-        terminal,
-        SetupValueInput {
-            title,
-            instruction,
-            initial,
-            limit,
-            allow_empty: true,
-        },
-    )
-    .await
-}
-
-struct SetupValueInput<'a> {
-    title: &'a str,
-    instruction: &'a str,
-    initial: &'a str,
-    limit: usize,
-    allow_empty: bool,
-}
-
-async fn read_setup_value_inner(
-    terminal: &mut AttachedTerminal,
-    input: SetupValueInput<'_>,
-) -> Result<Option<String>, SetupError> {
-    let SetupValueInput {
-        title,
-        instruction,
-        initial,
-        limit,
-        allow_empty,
-    } = input;
-    if !initial.is_empty()
-        && !initial.starts_with("re-enter ")
-        && !await_setup_ack(
-            terminal,
-            title,
-            &format!(
-                "Current value: {initial}\nEnter a replacement; empty Enter {}.",
-                if allow_empty { "clears it" } else { "keeps it" }
-            ),
-        )
-        .await?
-    {
-        return Ok(None);
-    }
-    let mut composer = Composer::default();
-    let prompt = if allow_empty {
-        format!("{instruction}; empty Enter clears this field")
-    } else if !initial.is_empty() && !initial.starts_with("re-enter ") {
-        format!("{instruction}; Enter replaces it, empty Enter keeps it")
-    } else {
-        instruction.to_owned()
-    };
-    let mut notice = None::<&str>;
-    loop {
-        terminal.draw_setup_text_input(title, &prompt, &composer, notice.take())?;
-        let input = terminal.next_input().await?;
-        match input {
-            TerminalInput::Character(character) if !character.is_control() => {
-                composer.apply(TerminalInput::Character(character));
-            }
-            TerminalInput::Paste => match terminal.take_paste() {
-                Ok(text)
-                    if !text.chars().any(char::is_control)
-                        && composer.text().len().saturating_add(text.len()) <= limit =>
-                {
-                    composer
-                        .insert_paste(&text)
-                        .map_err(|_| "setup field is too long")?;
-                }
-                _ => notice = Some("Field paste is invalid or over the size limit"),
-            },
-            TerminalInput::Submit if !composer.text().trim().is_empty() => {
-                let value = composer.text().trim().to_owned();
-                if value.len() <= limit && !value.chars().any(char::is_control) {
-                    return Ok(Some(value));
-                }
-                notice = Some("Field is invalid or over the size limit");
-            }
-            TerminalInput::Submit if allow_empty => return Ok(Some(String::new())),
-            TerminalInput::Submit if !initial.is_empty() => return Ok(Some(initial.to_owned())),
-            TerminalInput::Submit => notice = Some("This field cannot be empty"),
-            TerminalInput::Backspace
-            | TerminalInput::Left
-            | TerminalInput::Right
-            | TerminalInput::Delete => {
-                composer.apply(input);
-            }
-            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
-                terminal.discard_draft_input();
-                return Ok(None);
-            }
-            TerminalInput::Suspend => terminal.suspend_and_resume(
-                crate::terminal::MAX_DRAFT_BYTES.saturating_sub(composer.text().len()),
-            )?,
-            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]
