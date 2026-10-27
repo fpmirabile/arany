@@ -83,7 +83,6 @@ impl RunView {
                     },
                     cause: outcome.map(|o| o.cause),
                     publication,
-
                     lease_released: w.released.is_some(),
                     verified: w.verification.as_ref().is_some_and(|(_, v)| v.passed),
                     changed_paths: crate::session::worker::changed_paths(self, a),
