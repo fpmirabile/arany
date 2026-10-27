@@ -24,7 +24,30 @@ fn file(call: &ToolCall, facts: &DisplayFacts<'_>) -> String {
         ToolCall::Move { .. } => format!("move {} to {}", facts.paths[0], facts.paths[1]),
         ToolCall::Glob { .. } => format!("glob {} in {}", facts.subject, facts.paths[0]),
         ToolCall::ApplyChangeset { .. } => "Command changeset publication".into(),
-        _ => format!("{} {}", call.label(), facts.paths[0]),
+        ToolCall::ParseAgentDefinition { .. }
+        | ToolCall::List { .. }
+        | ToolCall::Read { .. }
+        | ToolCall::Search { .. }
+        | ToolCall::Mkdir { .. }
+        | ToolCall::Write { .. }
+        | ToolCall::Edit { .. }
+        | ToolCall::MultiEdit { .. }
+        | ToolCall::Delete { .. }
+        | ToolCall::Command { .. }
+        | ToolCall::CommandUnguarded { .. }
+        | ToolCall::Skill { .. }
+        | ToolCall::McpList { .. }
+        | ToolCall::McpCall { .. }
+        | ToolCall::GitStatus { .. }
+        | ToolCall::GitDiff { .. }
+        | ToolCall::GitLog { .. }
+        | ToolCall::GitCommit { .. }
+        | ToolCall::GitBranch { .. }
+        | ToolCall::GitSwitch { .. }
+        | ToolCall::GitPush { .. }
+        | ToolCall::GhPrCreate { .. }
+        | ToolCall::GhPrList { .. }
+        | ToolCall::GhPrView { .. } => format!("{} {}", call.label(), facts.paths[0]),
     }
 }
 
@@ -36,6 +59,27 @@ fn git(call: &ToolCall, facts: &DisplayFacts<'_>) -> String {
         ToolCall::GhPrView { number, .. } => format!("host PR view #{number} in {}", facts.subject),
         ToolCall::GitCommit { .. } => "Git commit".into(),
         ToolCall::GitBranch { name: None, .. } => "Git branch list".into(),
-        _ => format!("{} {}", facts.verb, facts.subject),
+        ToolCall::GitStatus { .. }
+        | ToolCall::GitDiff { .. }
+        | ToolCall::GitLog { .. }
+        | ToolCall::GitBranch { name: Some(_), .. }
+        | ToolCall::GitSwitch { .. }
+        | ToolCall::ParseAgentDefinition { .. }
+        | ToolCall::List { .. }
+        | ToolCall::Read { .. }
+        | ToolCall::Search { .. }
+        | ToolCall::Mkdir { .. }
+        | ToolCall::Write { .. }
+        | ToolCall::Edit { .. }
+        | ToolCall::MultiEdit { .. }
+        | ToolCall::Delete { .. }
+        | ToolCall::Move { .. }
+        | ToolCall::Command { .. }
+        | ToolCall::CommandUnguarded { .. }
+        | ToolCall::ApplyChangeset { .. }
+        | ToolCall::Skill { .. }
+        | ToolCall::McpList { .. }
+        | ToolCall::McpCall { .. }
+        | ToolCall::Glob { .. } => format!("{} {}", facts.verb, facts.subject),
     }
 }
