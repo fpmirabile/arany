@@ -65,6 +65,9 @@ impl LiveProvider {
             (AgentPhase::RootSynthesis, _) if request.input.child_results.is_empty() => {
                 finish_with("Wait for editor command")
             }
+            (AgentPhase::RootSynthesis, _) if self.case == "command_outside" => {
+                finish_with("The entire out-of-lease command changeset was refused")
+            }
             (AgentPhase::RootSynthesis, _) => {
                 let calls: Vec<_> = request
                     .input
@@ -177,6 +180,9 @@ pub(super) fn assert_commands(
         assert_eq!(editor.tools.len(), 1);
         assert!(events.iter().any(|e| matches!(e.event, Event::ToolPreflightRefused { agent_run_id, .. } if agent_run_id == editor.id)));
         assert!(run.worker_history()[0].changed_paths.is_empty());
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.failure, Some(RunFailure::CriterionUnmet));
+        assert_eq!(view.goals[0].status, GoalStatus::Failed);
         return;
     }
     assert_eq!(

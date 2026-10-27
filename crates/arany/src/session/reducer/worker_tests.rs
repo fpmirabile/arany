@@ -417,6 +417,10 @@ fn fixture_with_grant(
         background: false,
         body: "Untrusted".into(),
     };
+    assert!(
+        definition.valid(),
+        "worker fixture definition is normalized"
+    );
     let files = vec![crate::tools::DefinitionFilePin {
         private: false,
         filename: "editor.md".into(),

@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const TEAM_SIZE: u8 = 3;
+
 pub struct TeamObservation {
     pub directory: tempfile::TempDir,
     pub session: SessionId,
@@ -449,6 +451,9 @@ async fn run_live(
     let cancellation = RunCancellation::new();
     let (bound_gate, mut clock_gate) = tokio::sync::mpsc::channel(bounds::GATE_CAPACITY);
     let mut identity = ProviderIdentity::new("openai", "test-model", Provenance::native());
+    if case == "background" {
+        identity.limits.concurrency = TEAM_SIZE;
+    }
     if bounds::is_timed(case) {
         identity.limits.deadline = crate::engine::MAX_DELEGATION_DEADLINE;
     }
@@ -470,7 +475,7 @@ async fn run_live(
     let mut input = request(&workspace, "Edit leased notes");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
-        max_active_children: 3,
+        max_active_children: TEAM_SIZE,
     };
     input.goal = GoalRequest::new(bounds::budget(case), GoalPhase::Implementation);
     if let LiveStart::Resume { session, goal, .. } = start {
@@ -538,7 +543,13 @@ async fn run_live(
             "{result:?}"
         );
     }
-    let result = if matches!(case, "uncertain" | "capacity") {
+    if case == "command_cache_unknown" {
+        assert!(
+            matches!(&result, Err(EngineError::Tool(ToolError::Uncertain))),
+            "uncertain command cache must stop the Run with Tool(Uncertain)"
+        );
+    }
+    let result = if matches!(case, "uncertain" | "capacity" | "command_cache_unknown") {
         result.ok()
     } else {
         Some(result.unwrap())

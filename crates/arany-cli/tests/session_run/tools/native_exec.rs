@@ -1,4 +1,10 @@
 use super::*;
+#[cfg(target_os = "linux")]
+#[path = "native_exec/overlay.rs"]
+mod overlay;
+#[cfg(target_os = "linux")]
+#[path = "native_exec/supervisor.rs"]
+mod supervisor;
 use crate::{loopback::ChildGuard, process::BoundedOutput};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1384,6 +1390,13 @@ struct SpillFixture {
 }
 
 impl SpillFixture {
+    fn set_workspace_root(&self, root: &str) {
+        let path = self.state.join("tools.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["workspace_paths"] = json!([root]);
+        private_file(&path, &serde_json::to_vec(&config).unwrap());
+    }
+
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
