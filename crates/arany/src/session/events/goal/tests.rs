@@ -90,7 +90,7 @@ fn a_later_git_switch_invalidates_a_satisfied_command_criterion() {
     let passed = observation(
         call,
         ToolDisposition::Succeeded,
-        serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+        serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
     );
     assert!(matches_success(&contract, std::slice::from_ref(&passed)));
     let switch = observation(

@@ -253,7 +253,7 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
         apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
         let mut hook_observation = observation_for(hook_intent.clone(), b"");
         hook_observation.disposition = ToolDisposition::Failed;
-        hook_observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
+        hook_observation.output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
         for event in [
             started(intent.digest(), &hook_intent),
             finished(hook_observation.clone(), deny.clone()),
@@ -476,7 +476,7 @@ fn assert_refused_pre_hook_stop(mut view: SessionView, hook: &EffectIntent, mut 
     );
     let stdout = r#"{"continue":false,"stopReason":"halt"}"#;
     let mut observation = observation_for(hook.clone(), b"");
-    observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":stdout,"stderr":"","stdout_total":{"bytes":stdout.len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
+    observation.output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":stdout,"stderr":"","stdout_total":{"bytes":stdout.len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
     apply(
         &mut view,
         Event::HookFinished {
@@ -678,7 +678,7 @@ fn post_tool_use_hooks_need_a_committed_observation_and_feed_back_only_their_res
         );
         let mut hook_observation = observation_for(hook_intent.clone(), b"");
         hook_observation.disposition = ToolDisposition::Failed;
-        hook_observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
+        hook_observation.output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
         for forged in [
             HookResult::Passed,
             HookResult::Restricted {
@@ -1266,7 +1266,7 @@ fn primary_host_approval_preserves_ignored_hook_outcomes() {
         .unwrap();
         let mut ran = observation_for(host.clone(), b"ok");
         ran.output =
-            r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
+            r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
         assert!(rejected(
             &denied,
             Event::ToolFinished {
@@ -1389,7 +1389,7 @@ fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
         assert!(rejected(&view, reserve_child_call(goal, run, actor)));
         let mut observation = observation_for(intent, b"");
         observation.disposition = ToolDisposition::Failed;
-        observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":2,"stdout":"","stderr":"verify","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":6,"lines":1},"changeset":{"files":[]}}).to_string();
+        observation.output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":2,"stdout":"","stderr":"verify","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":6,"lines":1},"changeset":{"files":[]}}).to_string();
         let finished = Event::HookFinished {
             run_id: run,
             agent_run_id: actor,
@@ -1427,7 +1427,7 @@ fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
             let mut stopped = finished.clone();
             if let Event::HookFinished { outcome, .. } = &mut stopped {
                 outcome.observation.disposition = ToolDisposition::Succeeded;
-                outcome.observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
+                outcome.observation.output = serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
                 outcome.result = HookResult::Stopped {
                     reason: Some("halt".into()),
                 };

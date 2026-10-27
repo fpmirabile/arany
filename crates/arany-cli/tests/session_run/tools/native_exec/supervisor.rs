@@ -264,7 +264,15 @@ fn entry_launch(root: &Path, mode: SupervisorMode) -> (PathBuf, std::fs::File, V
             let workspace = root.join("workspace");
             std::fs::create_dir(&workspace).unwrap();
             let metadata = std::fs::metadata(&workspace).unwrap();
-            launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32],"roots":[{"relative":"","device":metadata.dev(),"inode":metadata.ino(),"directory":true}]});
+            let now = Duration::try_from(rustix::time::clock_gettime(
+                rustix::time::ClockId::Monotonic,
+            ))
+            .unwrap();
+            let runtime = Duration::from_millis(u64::from(arany::ToolLimits::default().runtime_ms));
+            let command_deadline = u64::try_from((now + runtime).as_nanos())
+                .unwrap()
+                .to_le_bytes();
+            launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32],"command_deadline":command_deadline,"roots":[{"relative":"","device":metadata.dev(),"inode":metadata.ino(),"directory":true}]});
         }
         UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement | MountFlags => {}
     }
