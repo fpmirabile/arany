@@ -6,6 +6,9 @@ use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+#[path = "shared_editors_tests.rs"]
+mod shared_editors;
+
 const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 const ROLE_SETUP_V1: &str = r#"{"operation_id":"01900000-0000-7000-8000-000000000001","target":{"kind":"CustomProfile","identity":"example-route"},"expected_digest":null}"#;
@@ -13,7 +16,25 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 64] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 67] = [
+    (
+        "AgentFinished",
+        11,
+        include_str!("agentfinished-v11.json"),
+        include_str!("agentfinished-v11.json"),
+    ),
+    (
+        "AgentSpawned",
+        15,
+        include_str!("agentspawned-v15.json"),
+        include_str!("agentspawned-v15.json"),
+    ),
+    (
+        "AgentFinished",
+        10,
+        include_str!("agentfinished-v10.json"),
+        include_str!("agentfinished-v10.json"),
+    ),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
     ("HookFinished", 10, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
@@ -270,7 +291,6 @@ fn migrated_intent_records_preserve_runtime_bytes() {
     }
     for fixture in [
         crate::session::worker_protocol_fixture(),
-        crate::session::worker_command_protocol_fixture(),
         crate::session::worker_compacted_fixture(true),
         crate::session::host_protocol_fixture(),
         crate::session::session_host_protocol_fixture(),
@@ -2445,7 +2465,6 @@ const SELECTION_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"}
 fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() {
     for (name, fixture) in [
         ("worker", crate::session::worker_protocol_fixture()),
-        ("command", crate::session::worker_command_protocol_fixture()),
         ("compacted", crate::session::worker_compacted_fixture(true)),
         ("host", crate::session::host_protocol_fixture()),
         (

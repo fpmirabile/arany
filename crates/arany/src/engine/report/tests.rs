@@ -1119,7 +1119,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
 }
 
 #[test]
-fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publication() {
+fn worker_recovery_report_preserves_exact_ids_uncertainty_and_unverified_publication() {
     let f = crate::session::worker_protocol_fixture();
     let events = f.envelopes();
     for end in 1..=events.len() {
@@ -1152,11 +1152,8 @@ fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publicatio
                     "prefix {end}"
                 );
             }
-            if worker.private_outcome_unknown {
-                assert!(
-                    text.contains("private_outcome_unknown=true"),
-                    "prefix {end}"
-                );
+            if worker.publication == crate::worker::WorkerPublication::Unknown {
+                assert!(text.contains("publication=Unknown"), "prefix {end}");
             }
         }
         assert!(
@@ -1289,7 +1286,9 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     assert!(!goal.success_criterion_satisfied);
     assert!(!view.runs[0].worker_history()[0].verified);
 
-    let template = view.rewinds.operations[0].clone();
+    let mut template = view.rewinds.operations[0].clone();
+    // Quotes add JSON byte pressure without truncating the rewind history line.
+    template.files[0].path = format!("src/{}file.rs", "\"".repeat(175));
     for index in 1..10 {
         let mut operation = template.clone();
         operation.started.rewind_id = Uuid::now_v7();
@@ -1333,19 +1332,26 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
         .find(|agent| agent.assignment.is_some())
         .unwrap()
         .clone();
-    let mut uncertain_tool = run.tools[0].clone();
+    let mut uncertain_tool = template.tools[0].clone();
     uncertain_tool.observation = None;
     for _ in 0..25 {
         let mut agent = template.clone();
         agent.id = AgentRunId::new();
+        uncertain_tool.intent.agent_run_id = agent.id;
         agent.tools = vec![uncertain_tool.clone()];
+        agent.status = AgentStatus::Interrupted;
+        let assignment = agent.assignment.as_mut().unwrap();
+        assignment.interrupted = true;
+        assignment.pins.request.resumes = Some(template.id);
         run.agents.push(agent);
     }
     let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
     assert_eq!(report.unresolved[25], newest);
-    assert!(report.unresolved[..25].iter().all(|line| {
-        line.starts_with("Worker ") && line.contains("private_outcome_unknown=true")
-    }));
+    assert!(
+        report.unresolved[..25]
+            .iter()
+            .all(|line| { line.starts_with("Worker ") && line.contains("publication=Unknown") })
+    );
     assert_eq!(report.unresolved.last().unwrap(), GOAL_REPORT_OMISSION);
     assert!(report.unresolved.len() < GOAL_REPORT_ITEM_LIMIT);
     assert!(

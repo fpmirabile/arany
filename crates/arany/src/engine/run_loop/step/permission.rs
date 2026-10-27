@@ -550,33 +550,7 @@ impl RunLoop<'_> {
         let (mut decision, mut basis, mut approval) = runtime.permissions().map_or(
             (Decision::Allow, PermissionSource::Mode, None),
             |config| {
-                if let ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { data, .. },
-                } = call
-                {
-                    self.ledger()
-                        .view(|view| {
-                            view.runs
-                                .last()
-                                .and_then(|run| {
-                                    run.workers
-                                        .data
-                                        .iter()
-                                        .find(|sealed| &sealed.reference == data)
-                                })
-                                .and_then(|sealed| match &sealed.facts {
-                                    crate::session::worker::WorkerDataFacts::Changes(paths) => {
-                                        Some(config.evaluate_worker_paths(call, Some(paths)))
-                                    }
-                                    _ => None,
-                                })
-                        })
-                        .ok()
-                        .flatten()
-                        .unwrap_or((Decision::Deny, PermissionSource::PinnedGrant, None))
-                } else {
-                    config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref())
-                }
+                config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref())
             },
         );
         let unguarded = call.is_unguarded();

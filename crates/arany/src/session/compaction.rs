@@ -26,7 +26,13 @@ pub(crate) fn recent_files_across(runs: &[RunView], covered_sequence: u64) -> Ve
         .rev()
         .filter(|run| run.accepted_sequence <= covered_sequence)
     {
-        for tool in run.tools.iter().rev().filter(|tool| {
+        let mut tools = run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|a| &a.tools))
+            .collect::<Vec<_>>();
+        tools.sort_by_key(|t| t.finished_sequence);
+        for tool in tools.into_iter().rev().filter(|tool| {
             tool.finished_sequence
                 .is_some_and(|sequence| sequence <= covered_sequence)
         }) {
@@ -36,7 +42,7 @@ pub(crate) fn recent_files_across(runs: &[RunView], covered_sequence: u64) -> Ve
             }) else {
                 continue;
             };
-            for (path, digest) in observation_changes(run, tool, observation) {
+            for (path, digest) in observation_changes(observation) {
                 if !crate::validate::valid_relative(&path, false) || !paths.insert(path.clone()) {
                     continue;
                 }
@@ -59,11 +65,7 @@ pub(crate) fn recent_files_across(runs: &[RunView], covered_sequence: u64) -> Ve
 
 type RecentChange = (String, Option<String>);
 
-fn observation_changes(
-    run: &RunView,
-    tool: &super::ToolView,
-    observation: &crate::tools::ToolObservation,
-) -> Vec<RecentChange> {
+fn observation_changes(observation: &crate::tools::ToolObservation) -> Vec<RecentChange> {
     match &observation.intent.call {
         ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
@@ -84,56 +86,8 @@ fn observation_changes(
                 )
             })
             .collect(),
-        ToolCall::ApplyChangeset {
-            source:
-                crate::session::worker::ChangesetSource::WorkerHandover {
-                    assignment_id,
-                    data,
-                    ..
-                },
-        } => worker_changes(run, tool, *assignment_id, data),
         _ => Vec::new(),
     }
-}
-
-fn worker_changes(
-    run: &RunView,
-    tool: &super::ToolView,
-    assignment_id: super::AgentRunId,
-    data: &crate::session::worker::WorkerDataRef,
-) -> Vec<RecentChange> {
-    let integrated = run
-        .agents
-        .iter()
-        .find(|agent| agent.id == assignment_id)
-        .and_then(|agent| agent.assignment.as_ref())
-        .and_then(|worker| worker.integration.as_ref())
-        .is_some_and(|(_, record)| Some(record.finished_sequence) == tool.finished_sequence);
-    if !integrated {
-        return Vec::new();
-    }
-    run.workers
-        .data
-        .iter()
-        .find(|sealed| &sealed.reference == data)
-        .and_then(|sealed| match &sealed.facts {
-            crate::session::worker::WorkerDataFacts::Changes(changes) => Some(
-                changes
-                    .iter()
-                    .map(|change| {
-                        let digest = match &change.after {
-                            crate::session::worker::WorkerBaseVersion::File { sha256, .. } => {
-                                Some(sha256.clone())
-                            }
-                            _ => None,
-                        };
-                        (change.path.clone(), digest)
-                    })
-                    .collect(),
-            ),
-            crate::session::worker::WorkerDataFacts::Manifest(_) => None,
-        })
-        .unwrap_or_default()
 }
 
 fn publication_digest(output: &str) -> Option<String> {

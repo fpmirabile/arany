@@ -829,7 +829,6 @@ fn rewind_attestation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::worker::{WorkerBaseVersion, WorkerDataFacts};
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -933,43 +932,39 @@ mod tests {
         publications_at(view, &paths, bytes);
     }
 
+    fn result_path(call: &ToolCall) -> String {
+        let ToolCall::Write { path, .. } = call else {
+            unreachable!()
+        };
+        path.clone()
+    }
     fn publications_at(view: &mut SessionView, paths: &[String], bytes: u32) {
-        let tool = view.runs[0]
-            .tools
-            .iter()
-            .find(|t| matches!(t.intent.call, ToolCall::ApplyChangeset { .. }))
-            .unwrap();
-        let ToolCall::ApplyChangeset {
-            source: ChangesetSource::WorkerHandover { data, .. },
-        } = &tool.intent.call
-        else {
-            unreachable!()
-        };
-        let data = data.clone();
-        let sealed = view.runs[0]
-            .workers
-            .data
-            .iter_mut()
-            .find(|s| s.reference == data)
-            .unwrap();
-        let WorkerDataFacts::Changes(files) = &mut sealed.facts else {
-            unreachable!()
-        };
-        files.clear();
-        for path in paths {
-            files.push(crate::session::worker::WorkerFileFact {
+        let run = &mut view.runs[0];
+        let template = run.agents[1].tools[0].clone();
+        run.agents[1].tools.clear();
+        for (i, path) in paths.iter().enumerate() {
+            let mut tool = template.clone();
+            let before = FileState {
+                sha256: crate::validate::hex_digest(b"old"),
+                bytes,
+                executable: false,
+            };
+            tool.intent.call = ToolCall::Write {
                 path: path.clone(),
-                before: WorkerBaseVersion::File {
-                    sha256: crate::validate::hex_digest(b"old"),
-                    bytes,
-                    executable: false,
-                },
-                after: WorkerBaseVersion::File {
-                    sha256: crate::validate::hex_digest(b"new"),
-                    bytes: 3,
-                    executable: false,
-                },
-            });
+                content: "new".into(),
+                expected_digest: Some(before.sha256.clone()),
+            };
+            tool.finished_sequence = Some(template.finished_sequence.unwrap() + i as u64);
+            let o = tool.observation.as_mut().unwrap();
+            o.intent = tool.intent.clone();
+            o.output = serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+                sha256: crate::validate::hex_digest(b"new"),
+                bytes: 3,
+                executable: false,
+                before: Some(before),
+            })
+            .unwrap();
+            run.agents[1].tools.push(tool);
         }
     }
 
@@ -1138,23 +1133,31 @@ mod tests {
         ] {
             let paths = paths.map(str::to_owned);
             publications_at(&mut view, &paths, 3);
-            let sealed = view.runs[0]
-                .workers
-                .data
-                .iter_mut()
-                .find(|s| {
-                    s.reference.purpose == crate::session::worker::WorkerDataPurpose::Handover
-                })
-                .unwrap();
-            let WorkerDataFacts::Changes(files) = &mut sealed.facts else {
-                unreachable!()
-            };
-            for file in files {
+            for tool in &mut view.runs[0].agents[1].tools {
+                let observation = tool.observation.as_mut().unwrap();
+                let mut result: crate::session::rewind::FilePublicationResult =
+                    serde_json::from_str(&observation.output).unwrap();
                 if restore {
-                    file.after = WorkerBaseVersion::Absent;
+                    tool.intent.call = ToolCall::Delete {
+                        path: result_path(&observation.intent.call),
+                        expected_digest: result.before.as_ref().unwrap().sha256.clone(),
+                    };
+                    observation.output =
+                        serde_json::to_string(&crate::session::rewind::RemovedFileResult {
+                            removed: result.before.unwrap(),
+                        })
+                        .unwrap();
                 } else {
-                    file.before = WorkerBaseVersion::Absent;
+                    if let ToolCall::Write {
+                        expected_digest, ..
+                    } = &mut tool.intent.call
+                    {
+                        *expected_digest = None;
+                    }
+                    result.before = None;
+                    observation.output = serde_json::to_string(&result).unwrap();
                 }
+                observation.intent = tool.intent.clone();
             }
             let refused = engine
                 .prepare_rewind(

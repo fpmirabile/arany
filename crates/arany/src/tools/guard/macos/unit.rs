@@ -2417,7 +2417,6 @@ done
             unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
-            queue_wait: None,
             active_action_gate: None,
             checkpoint_gate: None,
             hook_stdin: None,
