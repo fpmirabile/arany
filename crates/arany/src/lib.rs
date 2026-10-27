@@ -8,8 +8,6 @@ pub mod test_support;
 
 mod diagnostics;
 mod engine;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use engine::MAX_DELEGATION_DEADLINE;
 mod fault;
 mod journal;
 pub mod limits;

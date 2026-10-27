@@ -59,6 +59,10 @@ pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result
             reason: ToolRefusalReason::Lease,
         })?;
     }
+    validate_tool_lease(run, *agent_run_id, &intent.call).map_err(|cause| ToolRefusal {
+        cause,
+        reason: ToolRefusalReason::Lease,
+    })?;
     let (run_id, agent_run_id) = event.scope();
     let mut candidate = view.clone();
     candidate
@@ -104,20 +108,29 @@ pub(crate) fn validate_primary_tool_lease(
     run: &RunView,
     call: &crate::tools::ToolCall,
 ) -> Result<(), crate::session::ProposalRefusalCause> {
+    validate_tool_lease(
+        run,
+        run.primary()
+            .ok_or(crate::session::ProposalRefusalCause::LeaseOverlap)?
+            .id,
+        call,
+    )
+}
+
+pub(crate) fn validate_tool_lease(
+    run: &RunView,
+    actor: crate::session::AgentRunId,
+    call: &crate::tools::ToolCall,
+) -> Result<(), crate::session::ProposalRefusalCause> {
     use crate::session::ProposalRefusalCause::LeaseOverlap;
     use crate::tools::ToolCall;
-    if matches!(
-        call,
-        ToolCall::ApplyChangeset {
-            source: crate::worker::ChangesetSource::WorkerHandover { .. }
-        }
-    ) || !(call.mutates() || call.is_process())
-    {
+    if !(call.mutates() || call.is_process()) {
         return Ok(());
     }
     let leases: Vec<_> = run
         .agents
         .iter()
+        .filter(|agent| agent.id != actor)
         .filter_map(|agent| agent.assignment.as_ref())
         .filter(|worker| worker.released.is_none())
         .flat_map(|worker| &worker.pins.request.lease)
@@ -494,12 +507,6 @@ fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) ->
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
-    if let crate::tools::ToolCall::ApplyChangeset {
-        source: source @ crate::session::worker::ChangesetSource::WorkerHandover { .. },
-    } = &intent.call
-    {
-        return super::worker::integration_source(run, source);
-    }
     let crate::tools::ToolCall::ApplyChangeset {
         source:
             crate::session::worker::ChangesetSource::CommandReceipt {

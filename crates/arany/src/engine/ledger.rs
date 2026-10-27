@@ -194,7 +194,7 @@ pub enum Action {
     Child { in_flight: u32, research: bool },
     Tool,
     ToolStep { calls: usize },
-    Worker { chunks: usize },
+    Worker,
     Review,
     Compaction,
     BoundaryCompaction { goal: bool },
@@ -221,7 +221,7 @@ impl Action {
             Self::ToolStep { calls } => calls
                 .saturating_mul(Self::Tool.max_events().saturating_add(1))
                 .saturating_add(MAX_NARROWINGS_PER_STEP.saturating_mul(NARROWING_EVENTS)),
-            Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6),
+            Self::Worker => 12 + 5 * 8 + 6,
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
@@ -243,7 +243,7 @@ impl Action {
                 .saturating_add(1),
             Self::Tool | Self::Review => 2,
             Self::ToolStep { calls } => calls.saturating_mul(Self::Tool.verdict_slots()),
-            Self::Worker { .. } => 12,
+            Self::Worker => 12,
             Self::Compaction | Self::BoundaryCompaction { .. } => 0,
             Self::Delegation { children, research } => {
                 if research {
@@ -302,7 +302,7 @@ impl Action {
                 }),
             Self::Tool | Self::Review => attempt_facts(ProviderRole::Review),
             Self::ToolStep { calls } => calls.saturating_mul(attempt_facts(ProviderRole::Review)),
-            Self::Worker { .. } => attempt_facts(ProviderRole::Review)
+            Self::Worker => attempt_facts(ProviderRole::Review)
                 .saturating_add(8 * attempt_facts(ProviderRole::Child))
                 .saturating_add(attempt_facts(ProviderRole::Primary)),
             Self::Compaction | Self::BoundaryCompaction { .. } => {
@@ -329,7 +329,7 @@ impl Action {
     pub(super) fn tool_observations(self) -> usize {
         match self {
             // A command can need a separate integration observation, so reserve two observations per Tool step.
-            Self::Tool | Self::Review | Self::Worker { .. } => 2,
+            Self::Tool | Self::Review | Self::Worker => 2,
             Self::ToolStep { calls } => calls
                 .saturating_mul(Self::Tool.tool_observations())
                 .saturating_add(
@@ -630,9 +630,7 @@ impl GoalLedger {
             | Action::Child { .. }
             | Action::Tool
             | Action::ToolStep { .. }
-            | Action::Worker { .. } => {
-                self.can_start_provider_call() && self.remaining_calls() != Some(0)
-            }
+            | Action::Worker => self.can_start_provider_call() && self.remaining_calls() != Some(0),
             Action::Review | Action::Compaction => {
                 self.can_start_provider_call()
                     && self.remaining_calls().is_none_or(|remaining| remaining > 1)
@@ -664,7 +662,7 @@ impl GoalLedger {
                     | Action::Child { .. }
                     | Action::Tool
                     | Action::ToolStep { .. }
-                    | Action::Worker { .. }
+                    | Action::Worker
                     | Action::Review => BudgetAction::Provider,
                 },
                 Some(actor),
@@ -927,12 +925,6 @@ impl GoalLedger {
             in_flight
                 .run_active_ms
                 .saturating_add(in_flight.pending_ms())
-        })
-    }
-
-    pub(super) fn providers_idle(&self) -> Result<bool, EngineError> {
-        self.read(|goal, _| {
-            goal.unobserved_provider_calls.is_empty() && goal.compaction_call_reserved.is_none()
         })
     }
 
