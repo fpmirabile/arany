@@ -1,5 +1,5 @@
 use super::*;
-use pulldown_cmark::{Event, Tag, TagEnd};
+use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
 
 #[derive(Default)]
 pub(super) struct Flow {
@@ -8,6 +8,7 @@ pub(super) struct Flow {
     breaks: Vec<(usize, Range<usize>)>,
     styles: Vec<(Modifier, Range<usize>, usize)>,
     literal: Option<Range<usize>>,
+    link: Option<super::links::Link>,
     bytes: usize,
 }
 pub(super) struct Lines {
@@ -34,6 +35,12 @@ impl Flow {
         {
             return Ok(());
         }
+        if matches!(
+            event,
+            Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link)
+        ) {
+            return self.link_event(source, event, range);
+        }
         match event {
             Event::Start(Tag::Emphasis | Tag::Strong) => {
                 let style = if matches!(event, Event::Start(Tag::Strong)) {
@@ -47,7 +54,7 @@ impl Flow {
                 let (_, range, start) = self.styles.pop().ok_or(())?;
                 self.enclose(start, range);
             }
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
+            Event::Start(Tag::Image { .. }) => {
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);
             }
@@ -101,6 +108,91 @@ impl Flow {
         self.styles
             .iter()
             .fold(self.base, |style, (next, _, _)| style | *next)
+            | if self.link.is_some() {
+                Modifier::UNDERLINED
+            } else {
+                Modifier::empty()
+            }
+    }
+    fn link_event(
+        &mut self,
+        source: &str,
+        event: &Event<'_>,
+        range: Range<usize>,
+    ) -> Result<(), ()> {
+        match event {
+            Event::Start(Tag::Link {
+                link_type: LinkType::Inline,
+                dest_url,
+                ..
+            }) => {
+                self.link = Some(super::links::Link {
+                    range,
+                    start: self.cells.len(),
+                    breaks: self.breaks.len(),
+                    destination: dest_url.to_string(),
+                });
+            }
+            Event::Start(Tag::Link {
+                link_type: LinkType::Autolink | LinkType::Email,
+                ..
+            }) => {
+                let inner = range.start + 1..range.end - 1;
+                let style = self.style() | Modifier::UNDERLINED;
+                self.append(
+                    source,
+                    &source[inner.clone()],
+                    Origin::plain(inner, range.clone()),
+                    style,
+                )?;
+                self.literal = Some(range);
+            }
+            Event::Start(_) => {
+                self.literal_source(source, range.clone(), self.style())?;
+                self.literal = Some(range);
+            }
+            Event::End(_) => self.finish_link(source)?,
+            _ => unreachable!("link events only"),
+        }
+        Ok(())
+    }
+    fn finish_link(&mut self, source: &str) -> Result<(), ()> {
+        let link = self.link.take().ok_or(())?;
+        let label_end = self.cells[link.start..]
+            .last()
+            .map_or(link.range.start + 1, |cell| cell.source.end)
+            .max(
+                self.breaks[link.breaks..]
+                    .last()
+                    .map_or(0, |(_, range)| range.end),
+            );
+        let Some(destination) = link.destination_range(source, label_end) else {
+            self.bytes -= self
+                .cells
+                .drain(link.start..)
+                .map(|cell| cell.text.len())
+                .sum::<usize>();
+            self.breaks.truncate(link.breaks);
+            return self.literal_source(source, link.range, self.style());
+        };
+        let style = self.style() | Modifier::UNDERLINED;
+        let separator = label_end..destination.start;
+        self.append(
+            source,
+            " (",
+            Origin::plain(separator.clone(), separator),
+            style,
+        )?;
+        self.append(
+            source,
+            &link.destination,
+            Origin::plain(destination.clone(), destination.clone()),
+            style,
+        )?;
+        let closing = destination.end..link.range.end;
+        self.append(source, ")", Origin::plain(closing.clone(), closing), style)?;
+        self.enclose(link.start, link.range);
+        Ok(())
     }
     fn enclose(&mut self, start: usize, mut range: Range<usize>) {
         let end = self.breaks.partition_point(|(index, _)| *index <= start);
