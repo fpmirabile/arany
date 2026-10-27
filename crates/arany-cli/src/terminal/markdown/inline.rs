@@ -168,8 +168,7 @@ impl Flow {
         Ok(())
     }
 }
-// `content` holds the bytes the text decodes from; `outer` also holds the delimiters the cells envelop;
-// an atomic entity gives every decoded grapheme the whole entity range.
+// An atomic entity gives every decoded grapheme the whole entity range.
 struct Origin {
     content: Range<usize>,
     outer: Range<usize>,
