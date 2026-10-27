@@ -157,6 +157,7 @@ fn researcher_completion_cannot_retain_editor_checkpoint_metadata() {
             enforcement_cause: None,
             limit_cause: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         },
     };

@@ -40,6 +40,7 @@ fn observation(call: ToolCall, disposition: ToolDisposition, output: String) -> 
         disposition,
         output,
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }
