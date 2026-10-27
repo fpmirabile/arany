@@ -44,7 +44,7 @@ pub use engine::{
     start_provider_setup_edit, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
-pub use fault::FaultPlan;
+pub use fault::{FaultPlan, GitStorageFault};
 pub(crate) use journal::check::CheckJournal;
 pub use journal::check::{
     CHECK_FORMATS, ChatGptCheck, ChatGptCheckError, ChatGptCheckRequest, CheckCallKind,

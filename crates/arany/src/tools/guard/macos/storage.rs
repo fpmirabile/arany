@@ -17,6 +17,9 @@ pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
+pub(super) const GIT_VOLUME: &str = "scratch";
+#[cfg(any(test, feature = "test-support"))]
+pub(super) const FILL_CHUNK_BYTES: usize = 1 << 20;
 const CLEANUP_ATTEMPTS: usize = 8;
 const CLEANUP_PAUSE: Duration = Duration::from_millis(250);
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
@@ -270,20 +273,85 @@ pub(super) fn verify_storage(
     root: &Path,
     limits: &crate::tools::types::ToolLimits,
 ) -> Result<(), ToolError> {
+    verify_volumes(root, &command_volume_sizes(limits))
+}
+
+pub(super) fn verify_git_storage(root: &Path) -> Result<(), ToolError> {
+    verify_volumes(root, &git_volume_sizes())
+}
+
+fn git_volume_sizes() -> [(&'static str, u64); 1] {
+    [(GIT_VOLUME, STORAGE_BYTES_CAP)]
+}
+
+fn verify_volumes(root: &Path, sizes: &[(&str, u64)]) -> Result<(), ToolError> {
     use cap_fs_ext::DirExt;
 
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
-    for (name, bytes) in command_volume_sizes(limits) {
+    for (name, bytes) in sizes {
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0, bytes)?;
+        verify_volume(&volume, parent.0, *bytes)?;
         if volume.dir_metadata().map_err(|_| ToolError::Path)?.mode() & 0o7777 != 0o700 {
             return Err(ToolError::ProtectionUnavailable);
         }
     }
     Ok(())
+}
+
+pub(super) async fn prepare_git_storage(root: &Path) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
+    prepare_storage_with_sizes(root, &git_volume_sizes()).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn exhaust_git_storage(volume: &cap_std::fs::Dir) -> std::io::Result<()> {
+    use std::io::{Error, Write as _};
+
+    let capacity = rustix::fs::fstatvfs(volume)?;
+    let block_bytes = usize::try_from(capacity.f_frsize)
+        .ok()
+        .filter(|bytes| (1..=FILL_CHUNK_BYTES).contains(bytes))
+        .ok_or_else(|| Error::other("invalid Git volume allocation size"))?;
+    let mut file = volume.create("fill")?;
+    let chunk = vec![0_u8; FILL_CHUNK_BYTES];
+    // A failed bulk allocation can leave room for the much smaller Git view.
+    for bytes in [chunk.len(), block_bytes] {
+        let mut full = false;
+        for _ in 0..=STORAGE_BYTES_CAP / bytes as u64 {
+            match file
+                .write_all(&chunk[..bytes])
+                .and_then(|()| file.sync_all())
+            {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                    full = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !full {
+            return Err(Error::other(
+                "Git volume did not reach ENOSPC within its bound",
+            ));
+        }
+    }
+    drop(file);
+    if rustix::fs::fstatvfs(volume)?.f_bavail != 0 {
+        return Err(Error::other(
+            "Git volume still has available blocks after close",
+        ));
+    }
+    match volume
+        .create("full-probe")
+        .and_then(|mut file| file.write_all(b"full").and_then(|()| file.sync_all()))
+    {
+        Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => Ok(()),
+        Err(error) => Err(error),
+        Ok(()) => Err(Error::other("Git volume still permits a new file write")),
+    }
 }
 
 pub(super) async fn prepare_worker_storage(
