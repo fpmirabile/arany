@@ -796,21 +796,7 @@ impl Rule {
             Some("") => return Err("empty specifier"),
             Some("*") if matches!(tool, Tool::Bash | Tool::Native("command")) => None,
             Some(pattern) => Some(match tool {
-                Tool::Bash | Tool::Native("command") => {
-                    let pattern = pattern
-                        .strip_suffix(":*")
-                        .map(|p| format!("{p} *"))
-                        .unwrap_or_else(|| pattern.to_owned());
-                    let mut expression = command_glob(&pattern);
-                    if pattern.ends_with(" *") && pattern.matches('*').count() == 1 {
-                        expression = format!(
-                            "(?:{}|{})",
-                            regex::escape(&pattern[..pattern.len() - 2]),
-                            expression
-                        );
-                    }
-                    compile(&format!("\\A{expression}\\z"))?
-                }
+                Tool::Bash | Tool::Native("command") => command_pattern(pattern)?,
                 Tool::Read
                 | Tool::Edit
                 | Tool::Grep
@@ -1029,6 +1015,22 @@ fn peer_operation_name(name: &str) -> &str {
 
 fn path_matches(pattern: &Regex, path: &str, decision: Decision) -> bool {
     decision != Decision::Allow && !path.is_ascii() || pattern.is_match(path)
+}
+
+fn command_pattern(pattern: &str) -> Result<Regex, &'static str> {
+    let pattern = pattern
+        .strip_suffix(":*")
+        .map(|p| format!("{p} *"))
+        .unwrap_or_else(|| pattern.to_owned());
+    let mut expression = command_glob(&pattern);
+    if pattern.ends_with(" *") && pattern.matches('*').count() == 1 {
+        expression = format!(
+            "(?:{}|{})",
+            regex::escape(&pattern[..pattern.len() - 2]),
+            expression
+        );
+    }
+    compile(&format!("\\A{expression}\\z"))
 }
 
 fn command_glob(pattern: &str) -> String {
