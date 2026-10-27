@@ -1,6 +1,5 @@
 use super::*;
 
-pub(super) const GUARD_PREFIX: &str = "guard-";
 pub(in crate::store::state::build_cache) const GUARD_BYTES: u64 =
     uuid::fmt::Hyphenated::LENGTH as u64;
 

@@ -14,6 +14,10 @@ pub(crate) use directory::{CacheChange, CacheGuardRecovery};
 
 pub(super) const DIRECTORY: &str = "build-cache";
 const ARCHIVE_PREFIX: &str = "cache-";
+pub(super) const GUARD_PREFIX: &str = "guard-";
+pub(super) const TREE_PREFIX: &str = "directory-";
+pub(super) const DIRTY_PREFIX: &str = "unavailable-";
+pub(super) const STAMP_PREFIX: &str = "generation-";
 const PREVIOUS_PREFIX: &str = "previous-";
 const RESERVATION_PREFIX: &str = "reserve-";
 const STAGING_PREFIX: &str = "stage-";
@@ -23,10 +27,10 @@ const TRANSACTION_PREFIX: &str = "transaction-";
 const TRANSACTION_NEXT_PREFIX: &str = "transaction-next-";
 // First match wins when classifying names: TRANSACTION_NEXT_PREFIX must precede TRANSACTION_PREFIX.
 const IDENTITY_FILE_KINDS: [(&str, &str); 12] = [
-    ("guard-", ".unit"),
-    ("directory-", ".tree"),
-    ("unavailable-", ".pending"),
-    ("generation-", ".generation"),
+    (GUARD_PREFIX, ".unit"),
+    (TREE_PREFIX, ".tree"),
+    (DIRTY_PREFIX, ".pending"),
+    (STAMP_PREFIX, ".generation"),
     (ARCHIVE_PREFIX, ".arc"),
     (PREVIOUS_PREFIX, ".arc"),
     (STAGING_PREFIX, ".arc"),
@@ -1497,20 +1501,20 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
             .file_name()
             .into_string()
             .map_err(|_| StoreError::StateNotPrivate)?;
-        if let Some(token) = suffix(&name, "guard-", ".unit") {
+        if let Some(token) = suffix(&name, GUARD_PREFIX, ".unit") {
             validate_token(token)?;
             identities.insert(token.to_owned());
             #[cfg(target_os = "linux")]
             open_regular(dir, &name, directory::guard::GUARD_BYTES)?;
             #[cfg(not(target_os = "linux"))]
             return Err(StoreError::StateNotPrivate);
-        } else if let Some(token) = suffix(&name, "directory-", ".tree") {
+        } else if let Some(token) = suffix(&name, TREE_PREFIX, ".tree") {
             validate_token(token)?;
             identities.insert(token.to_owned());
             #[cfg(target_os = "linux")]
             {
                 let bytes = directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)?;
-                if file_exists(dir, &format!("unavailable-{token}.pending"))?
+                if file_exists(dir, &format!("{DIRTY_PREFIX}{token}.pending"))?
                     && file_exists(dir, &reservation_name(token))?
                 {
                     let reserve = open_regular(dir, &reservation_name(token), 96)?;
@@ -1523,11 +1527,11 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
             }
             #[cfg(not(target_os = "linux"))]
             return Err(StoreError::StateNotPrivate);
-        } else if let Some(token) = suffix(&name, "unavailable-", ".pending") {
+        } else if let Some(token) = suffix(&name, DIRTY_PREFIX, ".pending") {
             validate_token(token)?;
             identities.insert(token.to_owned());
             open_regular(dir, &name, 0)?;
-        } else if let Some(token) = suffix(&name, "generation-", ".generation") {
+        } else if let Some(token) = suffix(&name, STAMP_PREFIX, ".generation") {
             validate_token(token)?;
             identities.insert(token.to_owned());
             open_regular(dir, &name, GENERATION_BYTES as u64)?;
@@ -1678,8 +1682,8 @@ pub(super) fn inventory_record(name: &str) -> Option<(Option<&str>, bool)> {
                 | CANDIDATE_PREFIX
                 | TRANSACTION_PREFIX
                 | TRANSACTION_NEXT_PREFIX
-                | "unavailable-"
-                | "guard-"
+                | DIRTY_PREFIX
+                | GUARD_PREFIX
         ),
     ))
 }
@@ -1720,7 +1724,7 @@ fn contains_cache_identity(dir: &Dir, token: &str) -> Result<bool, StoreError> {
 fn release_reservation(dir: &Dir, token: &str) -> Result<(), StoreError> {
     #[cfg(target_os = "linux")]
     if directory::guard::active(dir, token)?
-        || file_exists(dir, &format!("unavailable-{token}.pending"))?
+        || file_exists(dir, &format!("{DIRTY_PREFIX}{token}.pending"))?
     {
         return Ok(());
     }
