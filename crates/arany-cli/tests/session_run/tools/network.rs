@@ -109,7 +109,7 @@ fn fixture_upstream() -> (u16, Arc<AtomicUsize>) {
     ignore = "native Linux egress proxy: allow-listed tunnel, unlisted refusal record and no direct route"
 )]
 async fn egress_proxy_is_the_only_route_and_records_refusals() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let (upstream, accepted) = fixture_upstream();
@@ -219,7 +219,7 @@ async fn egress_proxy_is_the_only_route_and_records_refusals() {
     ignore = "native Linux egress proxy: connections past the total bound through the payload-facing endpoint are recorded"
 )]
 async fn connections_past_the_total_bound_are_recorded_through_the_endpoint() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let (upstream, _accepted) = fixture_upstream();
@@ -289,7 +289,7 @@ async fn connections_past_the_total_bound_are_recorded_through_the_endpoint() {
     ignore = "native Linux egress proxy: admitted concurrent tunnels stay held until one overflow is recorded"
 )]
 async fn held_tunnels_record_one_overflow_through_the_endpoint() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
 

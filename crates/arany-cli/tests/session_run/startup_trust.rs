@@ -1168,7 +1168,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "Choose what to manage",
+        "Network domains",
     );
     input.write_all(b"\r").unwrap();
     wait(
@@ -1810,7 +1810,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     assert!(!file.exists());
     input.write_all(b"\x1b[B\x1b[B\r").unwrap();
