@@ -37,6 +37,18 @@ async fn editor_inspector_retains_observation_derived_paths_and_digests_after_ca
     .await;
     let state = observed.directory.path().join("state");
     let workspace = observed.directory.path().join("workspace");
+    arany::set_session_defaults(
+        StateRoot::open_existing(&state).expect("fixture State"),
+        workspace.clone(),
+        observed.session,
+        arany::SessionDefaults {
+            provider: Some("openai".into()),
+            ..observed.view.defaults.clone()
+        },
+    )
+    .await
+    .expect("inspector provider defaults");
+    let (before, _) = arany::test_support::goals::replayed(&state, observed.session).await;
     let text = inspect_agents(&state, &workspace, Some(observed.session));
     let report = &observed.view.runs[0].worker_history()[0].changed_paths;
     assert!(text.contains("Changed paths (untrusted"));
@@ -45,7 +57,7 @@ async fn editor_inspector_retains_observation_derived_paths_and_digests_after_ca
     assert!(text.contains(row["after_sha256"].as_str().unwrap()));
     assert!(text.contains("Lease released: true; verified: false"));
     let (events, _) = arany::test_support::goals::replayed(&state, observed.session).await;
-    assert_eq!(events, observed.events);
+    assert_eq!(events, before);
 }
 
 fn inspect_agents(
