@@ -222,12 +222,12 @@ async fn native_git_switch_helper() {
     let leftovers = unit_leftovers();
     prepare(&workspace, &home);
     let outcomes = successful_switches(&engine, &workspace, &home).await;
-    crate::assert_no_new_units(&leftovers, "successful switches leave no unit");
+    assert_no_new_units(&leftovers, "successful switches leave no unit");
     let mut rows = conflicts(&engine, &workspace, &home, &state_path).await;
     rows.extend(recovery::switch_drift(&engine, &workspace, &state_path).await);
     rows.push(recovery::switch_death(&engine, &workspace, &state_path).await);
     engine.close().await.unwrap();
-    crate::assert_no_new_units(&leftovers, "all units and volumes cleaned up");
+    assert_no_new_units(&leftovers, "all units and volumes cleaned up");
     std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
     recovery::replay(&state_path, &home, &workspace, rows).await;
     let before = tree_snapshot(&workspace);
