@@ -106,6 +106,12 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
     );
     assert_eq!(expired.disposition, ToolDisposition::Limit);
     assert_eq!(expired.limit_cause, Some(super::LimitCause::Timeout));
+    let selected = super::unstarted_observation(
+        unstarted.clone(),
+        super::ToolError::Timeout(String::new()).in_selection(),
+    );
+    assert_eq!(selected.disposition, ToolDisposition::Limit);
+    assert_eq!(selected.limit_cause, Some(super::LimitCause::Timeout));
     let mut file = intent(ToolCall::Mkdir {
         path: "src/new".into(),
     });
