@@ -60,7 +60,7 @@ Strict replay reduces committed assignment, Workspace Tool intents/observations,
 
 An interrupted editor retains landed Workspace receipts and checkpoints. Unfinished or Uncertain editor writes block Goal continuation exactly like primary writes; there is no private-only recovery exception. No lease or runner crosses the Run boundary, and explicit reassignment grants fresh authority rather than retrying a historical effect. [Goal recovery](./goals.md#worker-accounting-and-verification) owns continuation requirements.
 
-Historical projections identify assignment, resumes/supersedes lineage, disposition/cause, Workspace publication certainty, lease release and verification. `show` keeps qualified child Tool Events under that AgentRun; JSONL remains the canonical Event stream. Reports and compaction carry bounded untrusted editor text and typed dispositions, never execution authority. Compiler v3 and the canonical summary format remain unchanged.
+Historical projections contain Run and assignment identities, resumes/supersedes lineage, disposition/cause, Workspace publication certainty, lease release, verification and bounded report text. `show` keeps qualified child Tool Events under that AgentRun; JSONL remains the canonical Event stream. Reports and compaction carry bounded untrusted editor text and typed dispositions, never execution authority. Compiler v3 and the canonical summary format remain unchanged.
 
 ## Rewind planning and replay
 

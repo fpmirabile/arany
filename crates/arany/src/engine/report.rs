@@ -72,7 +72,7 @@ pub(super) fn goal_report(
         .collect();
     workers.sort_by_key(|w| {
         use crate::worker::WorkerPublication;
-        if w.publication == WorkerPublication::Unknown || w.private_outcome_unknown {
+        if w.publication == WorkerPublication::Unknown {
             0
         } else if w.publication == WorkerPublication::Confirmed && !w.verified {
             1
@@ -82,9 +82,9 @@ pub(super) fn goal_report(
             3
         }
     });
-    let (critical, workers): (Vec<_>, Vec<_>) = workers.into_iter().partition(|w| {
-        w.publication == crate::worker::WorkerPublication::Unknown || w.private_outcome_unknown
-    });
+    let (critical, workers): (Vec<_>, Vec<_>) = workers
+        .into_iter()
+        .partition(|w| w.publication == crate::worker::WorkerPublication::Unknown);
     for worker in &critical {
         push_goal_report_item(
             &mut report,

@@ -41,16 +41,7 @@ pub(super) fn observe_tool(
         .ok_or(ReplayError::InvalidTransition)?;
     let goal = current_goal_mut(current, goal_id)?;
     if let Some(contract) = goal.plan_contract.as_ref() {
-        if matches!(
-            observation.intent.call,
-            crate::tools::ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-            }
-        ) {
-            goal.success_state = contract.initial_success_state();
-        } else {
-            contract.observe_success(&mut goal.success_state, observation);
-        }
+        contract.observe_success(&mut goal.success_state, observation);
         goal.success_criterion_satisfied = contract.success_state_satisfied(&goal.success_state);
     }
     Ok(())

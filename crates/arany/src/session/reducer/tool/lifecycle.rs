@@ -161,11 +161,6 @@ fn validate_primary_finished(
     let out_of_plan_integration = matches!(
         &observation.intent.call,
         crate::tools::ToolCall::ApplyChangeset { .. }
-    ) && !matches!(
-        observation.intent.call,
-        crate::tools::ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-        }
     ) && goal
         .plan_contract
         .as_ref()

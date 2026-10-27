@@ -481,10 +481,6 @@ pub struct WorkerHistory {
     pub status: String,
     pub cause: Option<WorkerCause>,
     pub publication: WorkerPublication,
-    pub integration: Option<WorkerIntegrationOutcome>,
-    pub discarded: Option<WorkerSettlementReason>,
-    pub private_outcome_unknown: bool,
-    pub cleanup_confirmed: bool,
     pub lease_released: bool,
     pub verified: bool,
     pub report: String,
@@ -493,15 +489,11 @@ pub struct WorkerHistory {
 impl WorkerHistory {
     pub fn description(&self) -> String {
         format!(
-            "Worker {}: {}; cause={:?}; publication={:?}; integration={:?}; discard={:?}; private_outcome_unknown={}; cleanup_confirmed={}; lease_released={}; verified={}; resumes={}; supersedes={}",
+            "Worker {}: {}; cause={:?}; publication={:?}; lease_released={}; verified={}; resumes={}; supersedes={}",
             self.assignment_id,
             self.status,
             self.cause,
             self.publication,
-            self.integration,
-            self.discarded,
-            self.private_outcome_unknown,
-            self.cleanup_confirmed,
             self.lease_released,
             self.verified,
             self.resumes
