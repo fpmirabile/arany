@@ -13,18 +13,18 @@ fn assert_history(stdout: &[u8], events: &[EventEnvelope]) {
 }
 
 fn align_goal_id(event: &mut Event, reference: &Event) {
-    match (event, reference) {
-        (
-            Event::GoalStarted { goal_id, .. }
-            | Event::GoalRunLinked { goal_id, .. }
-            | Event::GoalProviderCallReserved { goal_id, .. }
-            | Event::GoalFinished { goal_id, .. },
-            Event::GoalStarted { goal_id: goal, .. }
-            | Event::GoalRunLinked { goal_id: goal, .. }
-            | Event::GoalProviderCallReserved { goal_id: goal, .. }
-            | Event::GoalFinished { goal_id: goal, .. },
-        ) => *goal_id = *goal,
-        _ => {}
+    if let (
+        Event::GoalStarted { goal_id, .. }
+        | Event::GoalRunLinked { goal_id, .. }
+        | Event::GoalProviderCallReserved { goal_id, .. }
+        | Event::GoalFinished { goal_id, .. },
+        Event::GoalStarted { goal_id: goal, .. }
+        | Event::GoalRunLinked { goal_id: goal, .. }
+        | Event::GoalProviderCallReserved { goal_id: goal, .. }
+        | Event::GoalFinished { goal_id: goal, .. },
+    ) = (event, reference)
+    {
+        *goal_id = *goal;
     }
 }
 
