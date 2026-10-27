@@ -448,6 +448,7 @@ impl GuardCheck {
 #[serde(rename_all = "snake_case")]
 enum BootstrapStage {
     Admission,
+    NamespaceEntry,
     Workspace,
     RuntimeMounts,
     Capabilities,
@@ -464,6 +465,7 @@ impl BootstrapStage {
     fn label(&self) -> &'static str {
         match self {
             Self::Admission => "admission",
+            Self::NamespaceEntry => "namespace authorization",
             Self::Workspace => "Workspace identity",
             Self::RuntimeMounts => "runtime mount topology",
             Self::Capabilities => "kernel capability",
@@ -487,6 +489,8 @@ pub struct BootstrapFailure {
     // Local diagnostics only: never serialized, journaled or shown to the model.
     #[serde(skip)]
     detail: Option<String>,
+    #[serde(skip)]
+    namespace_remedy: Option<String>,
 }
 
 impl std::fmt::Display for BootstrapFailure {
@@ -501,12 +505,14 @@ impl BootstrapFailure {
             stage,
             check: None,
             detail: None,
+            namespace_remedy: None,
         }
     }
 
     pub(super) fn sandbox_setup(&self) -> bool {
         match self.stage {
             BootstrapStage::RuntimeMounts
+            | BootstrapStage::NamespaceEntry
             | BootstrapStage::Capabilities
             | BootstrapStage::Handshake => true,
             BootstrapStage::Admission
@@ -528,9 +534,14 @@ impl BootstrapFailure {
         self.detail.as_deref()
     }
 
+    pub(super) fn namespace_remedy(&self) -> Option<&str> {
+        self.namespace_remedy.as_deref()
+    }
+
     pub(super) fn failure_stage(&self) -> &'static str {
         match self.stage {
             BootstrapStage::Admission => "admission",
+            BootstrapStage::NamespaceEntry => "namespace authorization",
             BootstrapStage::Workspace => "pinned input",
             BootstrapStage::RuntimeMounts => "runtime mount topology",
             BootstrapStage::Capabilities => "native protection",
@@ -692,6 +703,21 @@ fn attest_runtime_mounts(
     macos::verify_runtime_mounts(grants)?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return Err(ToolError::ProtectionUnavailable);
+    Ok(())
+}
+
+fn attest_task_mounts(task: &Task, stage: &mut BootstrapStage) -> Result<(), ToolError> {
+    attest_runtime_mounts(
+        &task.intent.call,
+        &task.config.runtime_grants,
+        task.intent.limits.cache_bytes > 0,
+        stage,
+    )?;
+    #[cfg(target_os = "linux")]
+    if matches!(task.intent.call, ToolCall::Command { .. }) && task.worker.is_none() {
+        *stage = BootstrapStage::RuntimeMounts;
+        linux::verify_copy_mount(task.intent.limits.project_bytes)?;
+    }
     Ok(())
 }
 
@@ -870,6 +896,9 @@ pub(super) async fn execute(
         None
     };
     let result = crate::fault::guard_result(intent.id, result);
+    #[cfg(target_os = "linux")]
+    let result = result
+        .map_err(|error| linux::supervisor::namespace_failure(error, &runtime.guard_executable));
     let result = if super::discovery::possible(&intent.call) {
         discovery_result(intent, dispatched, stop.is_cancelled(), result)
     } else {
@@ -1122,6 +1151,7 @@ pub(super) fn execution_failure(check: GuardCheck) -> ToolError {
         stage: BootstrapStage::Payload,
         check: Some(check),
         detail: None,
+        namespace_remedy: None,
     })
 }
 
@@ -1185,6 +1215,7 @@ pub(super) fn with_worker_exit(error: ToolError, stderr_tail: &[u8]) -> ToolErro
                 stage: BootstrapStage::Payload,
                 check: Some(check),
                 detail: (!detail.is_empty()).then_some(detail),
+                namespace_remedy: None,
             })
         }
         error => error,
@@ -1959,8 +1990,14 @@ fn send_result(
 }
 
 pub(super) fn helper_main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--supervisor")) {
+        return linux::supervisor::main();
+    }
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
+        #[cfg(target_os = "linux")]
+        linux::supervisor::verify_helper()?;
         #[cfg(target_os = "macos")]
         macos::bootstrap()?;
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
@@ -1971,12 +2008,7 @@ pub(super) fn helper_main() -> ExitCode {
             return linux::prepare_main(&task, &mut stdin);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
-        attest_runtime_mounts(
-            &task.intent.call,
-            &task.config.runtime_grants,
-            task.intent.limits.cache_bytes > 0,
-            &mut stage,
-        )?;
+        attest_task_mounts(&task, &mut stage)?;
         #[cfg(target_os = "linux")]
         if let Some(cache) = &task.cache {
             restore_cache(cache, &mut stdin, &root)?;
@@ -2037,12 +2069,7 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
-        attest_runtime_mounts(
-            &task.intent.call,
-            &task.config.runtime_grants,
-            task.intent.limits.cache_bytes > 0,
-            &mut stage,
-        )?;
+        attest_task_mounts(&task, &mut stage)?;
         if image.is_some() || handover.is_some() {
             let mut trailing = [0; 1];
             if stdin
@@ -2815,6 +2842,7 @@ mod tests {
         hook.enforcement_digest = [2; 32];
         for (stage, setup) in [
             (BootstrapStage::Admission, false),
+            (BootstrapStage::NamespaceEntry, true),
             (BootstrapStage::Workspace, false),
             (BootstrapStage::RuntimeMounts, true),
             (BootstrapStage::Capabilities, true),
@@ -2828,7 +2856,25 @@ mod tests {
         ] {
             let failure = BootstrapFailure::at(stage);
             let encoded = serde_json::to_vec(&failure).unwrap();
-            let observation = dispatch_result(&hook, false, parse_observation(&encoded)).unwrap();
+            let decoded = parse_observation(&encoded);
+            #[cfg(target_os = "linux")]
+            let decoded = decoded.map_err(|error| {
+                linux::supervisor::namespace_failure(error, Path::new("/opt/arany/bin/arany"))
+            });
+            let observation = dispatch_result(&hook, false, decoded).unwrap();
+            #[cfg(target_os = "linux")]
+            if matches!(failure.stage, BootstrapStage::NamespaceEntry) {
+                assert!(
+                    observation
+                        .output
+                        .contains("profile arany_supervisor \"/opt/arany/bin/arany\"")
+                );
+                assert!(
+                    observation
+                        .output
+                        .contains("sudo apparmor_parser -r /etc/apparmor.d/arany-userns")
+                );
+            }
             assert_eq!(
                 observation.disposition,
                 ToolDisposition::Failed,

@@ -913,6 +913,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         .map(|line| format!("NATIVE_LINE_{line:03}"))
                         .collect::<Vec<_>>()
                         .join("\n");
+                    let answer = format!("# Streaming result\n\n```text\n{answer}\n```");
                     let run_id = RunId::new();
                     view.runs.push(arany::RunView {
                         skill: None,
@@ -1225,6 +1226,11 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                 2,
                 "feedback belongs to its committed boundary"
             );
+            assert!(
+                !confirmed.contains("```"),
+                "native history hides Markdown fences"
+            );
+            assert!(!confirmed.contains("# Streaming result"));
             for line in 0..200 {
                 let expected = format!("NATIVE_LINE_{line:03}");
                 assert_eq!(

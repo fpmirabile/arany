@@ -18,6 +18,7 @@ use tokio::time::Instant;
 
 mod ask;
 mod checkpoint;
+mod child;
 mod dispatch;
 pub(super) mod hooks;
 mod intent;
@@ -1105,61 +1106,18 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         queue_pause: Option<ActivePause>,
     ) -> Result<Answer, EngineError> {
-        if matches!(intent.call, ToolCall::PrepareWorker { .. }) {
-            if let Some(pause) = queue_pause {
-                self.settle_active_pause(pause, None)?;
-            }
-            let Admission::Reserved(segment) = self.reserve_active_segment(
-                tool_action_bound(runtime, &intent),
-                crate::session::BudgetAction::Tool,
-                intent.agent_run_id,
-            )?
-            else {
-                return Ok(Answer {
-                    checkpoint: None,
-                    observation: not_dispatched(intent, &NotDispatched::ActiveTime),
-                    stop: None,
-                    active_time: Some(ActiveTime {
-                        segment: None,
-                        exhausted: true,
-                    }),
-                });
-            };
-            let _active_work = self.ledger().active_work();
-            let observation = self.capture_worker_base(runtime, intent).await?;
-            return Ok(Answer {
-                checkpoint: None,
-                observation,
-                stop: None,
-                active_time: Some(ActiveTime {
-                    segment: Some(segment),
-                    exhausted: false,
-                }),
-            });
-        }
-        let runtime = runtime.clone();
-        let runtime = if let ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { assignment_id, .. },
-        } = &intent.call
-        {
-            let bytes = self
-                .handover
-                .lock()
-                .map_err(|_| EngineError::CoordinatorFailed)?
-                .get(assignment_id)
-                .cloned()
-                .ok_or(EngineError::CoordinatorFailed)?;
-            runtime.with_handover(bytes)
-        } else {
-            runtime
-        };
-        let runtime = &runtime;
         let (observation, segment, exhausted, checkpoint) =
             if matches!(intent.call.facts().site, crate::tools::catalog::Site::Guard)
                 || intent.call.facts().mutates
                     && intent.call.facts().site == crate::tools::catalog::Site::InProcess
             {
-                Box::pin(self.dispatch_effect(runtime, intent, queue_pause)).await?
+                Box::pin(self.dispatch_effect(
+                    runtime,
+                    intent,
+                    queue_pause,
+                    &self.controls.cancellation,
+                ))
+                .await?
             } else {
                 match self.reserve_active_segment(
                     tool_action_bound(runtime, &intent),
@@ -1197,6 +1155,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
         queue_pause: Option<ActivePause>,
+        cancellation: &RunCancellation,
     ) -> Result<
         (
             ToolObservation,
@@ -1220,7 +1179,7 @@ impl RunLoop<'_> {
         let mut checkpoint = None;
         let mut _active_work = None;
         let worker_cancellation = RunCancellation::new();
-        let mut run_cancellation = self.controls.cancellation.clone();
+        let mut run_cancellation = cancellation.clone();
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
             .saturating_add(crate::tools::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);

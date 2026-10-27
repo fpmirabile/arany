@@ -144,11 +144,6 @@ pub(super) struct RunLoop<'a> {
     ledger: &'a GoalLedger,
     supervisor: std::sync::Mutex<crate::supervisor::SupervisorState>,
     hints: Option<&'a HintPublisher>,
-    worker_data_bytes: std::sync::Mutex<std::collections::HashMap<AgentRunId, u32>>,
-    worker_requests:
-        std::sync::Mutex<std::collections::HashMap<AgentRunId, crate::worker::EditorAssignment>>,
-    worker: tokio::sync::Mutex<std::collections::HashMap<AgentRunId, crate::tools::worker::View>>,
-    handover: std::sync::Mutex<std::collections::HashMap<AgentRunId, std::sync::Arc<[u8]>>>,
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
@@ -218,10 +213,6 @@ impl<'a> RunLoop<'a> {
                 steering: controls.steering.clone(),
             },
             supervisor: std::sync::Mutex::new(supervisor),
-            worker_data_bytes: Default::default(),
-            worker_requests: Default::default(),
-            worker: Default::default(),
-            handover: Default::default(),
             definitions: std::sync::OnceLock::new(),
             active_time_floor: std::sync::atomic::AtomicBool::new(false),
             window_pressure_handled: std::sync::atomic::AtomicU64::new(0),
