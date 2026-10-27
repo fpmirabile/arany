@@ -63,12 +63,36 @@ fn file(call: &ToolCall) -> String {
 
 fn process(call: &ToolCall) -> String {
     match call {
-        ToolCall::Command { program, args, .. } => format!("Command({program} {})", args.join(" ")),
+        ToolCall::Command { program, args, .. } => {
+            format!("Command({program} {})", command_line(args))
+        }
         ToolCall::CommandUnguarded { program, args, .. } => {
-            format!("Unguarded command({program} {})", args.join(" "))
+            format!("Unguarded command({program} {})", command_line(args))
         }
         _ => unreachable!("process family operation"),
     }
+}
+
+// Shows a multi-line script argument as its first non-blank line plus "…".
+fn command_line(args: &[String]) -> String {
+    let mut shown = Vec::with_capacity(args.len());
+    for (index, arg) in args.iter().enumerate() {
+        if !arg.contains('\n') {
+            shown.push(arg.clone());
+            continue;
+        }
+        let mut lines = arg.lines().skip_while(|line| line.trim().is_empty());
+        let first = lines.next().unwrap_or_default();
+        let more = lines.any(|line| !line.trim().is_empty())
+            || args[index + 1..].iter().any(|rest| !rest.trim().is_empty());
+        shown.push(if more {
+            format!("{first} …")
+        } else {
+            first.into()
+        });
+        break;
+    }
+    shown.join(" ")
 }
 
 fn simple(call: &ToolCall) -> String {
