@@ -534,8 +534,8 @@ async fn run_live(
             Some(()) = clock_gate.recv() => bounds::exhaust(case).await,
             Some(approval) = inbox.next() => {
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
-                    let identity = crate::store::BuildCacheIdentity::new(&workspace, approval.intent.workspace_device, approval.intent.workspace_inode).unwrap();
-                    FaultPlan::fail_commit_marker(&identity);
+                    commands::approve_cache_failure(&workspace, approval).await;
+                    continue;
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);
