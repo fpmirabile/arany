@@ -776,3 +776,6 @@ impl GoalReport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
