@@ -12,6 +12,50 @@ fn opaque(path: &Path) {
 }
 
 #[test]
+fn subtree_capture_refuses_links_special_entries_and_file_directory_conversion() {
+    for case in ["symlink", "ignored-symlink", "fifo", "type-change"] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        if case == "type-change" {
+            std::fs::write(lower.path().join("tree"), b"before").unwrap();
+        } else {
+            std::fs::create_dir(lower.path().join("tree")).unwrap();
+            let path = lower.path().join("tree/unsupported");
+            if case == "fifo" {
+                rustix::fs::mknodat(
+                    rustix::fs::CWD,
+                    path,
+                    rustix::fs::FileType::Fifo,
+                    rustix::fs::Mode::RUSR,
+                    0,
+                )
+                .unwrap();
+            } else {
+                std::os::unix::fs::symlink("target", path).unwrap();
+            }
+            if case == "ignored-symlink" {
+                std::fs::write(lower.path().join(".gitignore"), b"tree/unsupported\n").unwrap();
+            }
+        }
+        let source = open_directory(lower.path()).unwrap();
+        let baseline = baseline(&source);
+        std::fs::create_dir(upper.path().join("tree")).unwrap();
+        opaque(&upper.path().join("tree"));
+        assert!(
+            matches!(
+                baseline.capture(
+                    &source,
+                    &open_directory(upper.path()).unwrap(),
+                    Instant::now() + crate::tools::selection::PHASE_TIME,
+                ),
+                Err(ToolError::Path)
+            ),
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn opaque_removal_and_recreation_use_frozen_baseline_file_preconditions() {
     for case in [
         "remove",
@@ -205,18 +249,58 @@ fn subtree_capture_refuses_lower_drift_masks_incomplete_inventory_and_overflow()
 }
 
 fn assert_scan_limit(baseline: &Baseline, source: &Dir, target: &Dir, deadline: Instant) {
-    let mut totals = Totals::default();
-    totals.budget.entries = COMMAND_SCAN_ENTRIES;
-    let mut capture = Capture {
-        baseline,
-        lower: source,
-        upper: target,
-        prefix: "",
-        selector: &mut Selector::new(0, deadline),
-        totals: &mut totals,
-        files: BTreeMap::new(),
-        discarded: BTreeSet::new(),
-        subtrees: BTreeSet::from(["tree".into()]),
-    };
-    assert!(matches!(capture.remove_subtrees(), Err(ToolError::Limit)));
+    for remaining in [0, 1, 2] {
+        let mut totals = Totals::default();
+        totals.budget.entries = COMMAND_SCAN_ENTRIES - remaining;
+        let mut capture = Capture {
+            baseline,
+            lower: source,
+            upper: target,
+            prefix: "",
+            selector: &mut Selector::new(0, deadline),
+            totals: &mut totals,
+            files: BTreeMap::new(),
+            discarded: BTreeSet::new(),
+            subtrees: BTreeSet::from(["tree".into()]),
+        };
+        if remaining < 2 {
+            assert!(matches!(capture.remove_subtrees(), Err(ToolError::Limit)));
+        } else {
+            capture.remove_subtrees().unwrap();
+            capture.check_subtrees().unwrap();
+            assert_eq!(capture.totals.budget.entries, COMMAND_SCAN_ENTRIES);
+            assert_eq!(capture.files.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn subtree_directory_open_refuses_replacement_or_removal_after_path_check() {
+    for case in ["replace", "remove"] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        std::fs::create_dir(lower.path().join("tree")).unwrap();
+        let source = open_directory(lower.path()).unwrap();
+        let baseline = baseline(&source);
+        baseline.check(&source, "tree").unwrap();
+        std::fs::rename(lower.path().join("tree"), lower.path().join("old")).unwrap();
+        if case == "replace" {
+            std::fs::create_dir(lower.path().join("tree")).unwrap();
+        }
+        let mut capture = Capture {
+            baseline: &baseline,
+            lower: &source,
+            upper: &open_directory(upper.path()).unwrap(),
+            prefix: "",
+            selector: &mut Selector::new(0, Instant::now() + crate::tools::selection::PHASE_TIME),
+            totals: &mut Totals::default(),
+            files: BTreeMap::new(),
+            discarded: BTreeSet::new(),
+            subtrees: BTreeSet::new(),
+        };
+        assert!(
+            matches!(capture.check_directory("tree"), Err(ToolError::Conflict)),
+            "{case}"
+        );
+    }
 }

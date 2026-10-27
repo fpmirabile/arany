@@ -17,11 +17,13 @@ impl Capture<'_> {
             }
         }
         self.subtrees = roots;
-        self.check_subtrees()?;
         for root in &self.subtrees {
             for (path, metadata) in descendants(self.baseline, root) {
                 self.selector.check_time()?;
                 self.totals.budget.entry(&joined(self.prefix, path))?;
+                if !metadata.is_file() && !metadata.is_dir() {
+                    return Err(ToolError::Path);
+                }
                 if !metadata.is_file()
                     || self.files.contains_key(path)
                     || self.discarded.contains(path)
@@ -35,7 +37,7 @@ impl Capture<'_> {
                 }
             }
         }
-        Ok(())
+        self.check_subtrees()
     }
 
     pub(super) fn check_subtrees(&mut self) -> Result<(), ToolError> {
@@ -79,7 +81,20 @@ impl Capture<'_> {
         let directory = if path.is_empty() {
             self.lower.try_clone().map_err(|_| ToolError::Conflict)?
         } else {
-            Dir::from_std_file(open_file(self.lower, path)?)
+            let file = open_file(self.lower, path).map_err(|_| ToolError::Conflict)?;
+            let metadata = file
+                .metadata()
+                .map(Metadata::from_just_metadata)
+                .map_err(|_| ToolError::Conflict)?;
+            if !self
+                .baseline
+                .entries
+                .get(path)
+                .is_some_and(|before| fingerprint(before) == fingerprint(&metadata))
+            {
+                return Err(ToolError::Conflict);
+            }
+            Dir::from_std_file(file)
         };
         for entry in directory.entries().map_err(|_| ToolError::Conflict)? {
             self.selector.check_time()?;
@@ -89,11 +104,9 @@ impl Capture<'_> {
                 .into_string()
                 .map_err(|_| ToolError::Conflict)?;
             let child = joined(path, &name);
-            self.totals.budget.entry(&joined(self.prefix, &child))?;
             if !self.baseline.entries.contains_key(&child) {
                 return Err(ToolError::Conflict);
             }
-            self.baseline.check(self.lower, &child)?;
         }
         Ok(())
     }

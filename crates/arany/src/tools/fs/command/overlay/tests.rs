@@ -99,8 +99,11 @@ fn capture_validates_ignored_and_publishable_metadata_before_selection() {
         ("user.overlay.opaque", b"x", true, false),
         ("user.overlay.opaque", b"x", false, false),
         ("user.overlay.metacopy", b"y", true, false),
+        ("user.overlay.metacopy", b"y", false, false),
         ("user.overlay.whiteout", b"", true, false),
+        ("user.overlay.whiteout", b"", false, false),
         ("user.overlay.redirect", b"outside", true, false),
+        ("user.overlay.redirect", b"outside", false, false),
         ("user.overlay.impure", b"y", false, true),
         ("user.note", b"ordinary", false, true),
     ] {
@@ -132,6 +135,9 @@ fn capture_validates_ignored_and_publishable_metadata_before_selection() {
             Instant::now() + crate::tools::selection::PHASE_TIME,
         );
         assert_eq!(result.is_ok(), accepted, "{name}, ignored={ignored}");
+        if !accepted {
+            assert!(matches!(result, Err(ToolError::Path)));
+        }
     }
     for kind in ["symlink", "hardlink", "setid", "fifo"] {
         let lower = tempfile::tempdir().unwrap();
