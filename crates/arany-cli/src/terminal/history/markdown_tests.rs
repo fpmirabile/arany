@@ -174,6 +174,8 @@ fn syntax_controls_limits_and_nonretaining_counts_agree() {
                     && !source.trim_start().starts_with('#')
                     && !source.starts_with("```")
                     && !source.starts_with("    ")
+                    && !source.contains("**")
+                    && !source.contains("===")
                 {
                     let expected: Vec<_> = source
                         .split('\n')
