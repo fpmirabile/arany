@@ -1819,7 +1819,6 @@ async fn capture_phase(
             if read_line_capped(stdout, 64).await? != b"CAPTURE_READY\n" {
                 return Err(ToolError::Operation);
             }
-            crate::fault::guard_capture(intent).await;
             unit.set_limits(unit.capture_limits(&intent.limits)?)
                 .await?;
             let (capture_deadline, report_deadline) =
