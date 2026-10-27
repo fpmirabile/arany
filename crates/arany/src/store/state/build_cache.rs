@@ -1576,9 +1576,7 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
             #[cfg(target_os = "linux")]
             {
                 let bytes = directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)?;
-                if file_exists(dir, &format!("{DIRTY_PREFIX}{token}.pending"))?
-                    && file_exists(dir, &reservation_name(token))?
-                {
+                if file_exists(dir, &reservation_name(token))? {
                     let reserve = open_regular(dir, &reservation_name(token), 96)?;
                     if validate_reservation(&reserve, token)? < bytes {
                         return Err(StoreError::StorageFull);
