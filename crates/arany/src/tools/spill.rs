@@ -122,8 +122,18 @@ impl OutputSpill {
         observation: &ToolObservation,
         captured: Option<Vec<u8>>,
     ) -> Option<Self> {
+        if !cfg!(target_os = "macos") && !has_excerpt(observation) {
+            return None;
+        }
+        Self::pending(observation, captured)
+    }
+
+    pub(super) fn pending(
+        observation: &ToolObservation,
+        captured: Option<Vec<u8>>,
+    ) -> Option<Self> {
         let mut captured = captured?;
-        let total = retained_total(observation, !cfg!(target_os = "macos"))?;
+        let total = retained_total(observation, false)?;
         if captured.len() as u64 != total.min(MAX_SPILL_RESULT_BYTES as u64) {
             return None;
         }

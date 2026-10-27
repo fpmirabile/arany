@@ -239,15 +239,40 @@ impl View {
     }
 
     pub(super) fn finish(&self) -> Result<(), ToolError> {
-        let empty = unavailable(std::fs::read_dir(self.root.join("upper")))?
-            .next()
-            .transpose()
-            .map_err(|_| ToolError::ProtectionUnavailable)?
-            .is_none();
+        let mut output = std::io::stdout().lock();
+        output
+            .write_all(b"CAPTURE_READY\n")
+            .and_then(|()| output.flush())
+            .map_err(|_| ToolError::Operation)?;
+        drop(output);
+        let mut input = std::io::stdin().lock();
+        let mut acknowledgement = [0; 8];
+        input
+            .read_exact(&mut acknowledgement)
+            .map_err(|_| ToolError::Operation)?;
+        if acknowledgement != *b"CAPTURE\n" {
+            return Err(ToolError::Configuration);
+        }
+        let mut frame = [0; 8];
+        input
+            .read_exact(&mut frame)
+            .map_err(|_| ToolError::Operation)?;
+        let deadline = super::super::selection_phase::decode_deadline(frame)?;
+        let capture = (|| {
+            let lower = crate::tools::fs::open_directory(&self.root.join("lower"))?;
+            let upper = crate::tools::fs::open_directory(&self.root.join("upper"))?;
+            self.inventory.baseline.capture(&lower, &upper, deadline)
+        })();
         let report = Completion {
             digest: self.grant.digest,
             namespaces: profile::Namespaces::read()?,
-            empty,
+            capture: capture.map_err(|error| match error {
+                ToolError::Limit => CaptureFailure::Limit,
+                ToolError::Timeout(_) => CaptureFailure::Timeout,
+                ToolError::FilesystemDenied => CaptureFailure::Filesystem,
+                ToolError::Conflict | ToolError::ChangedInput => CaptureFailure::Conflict,
+                _ => CaptureFailure::Rejected,
+            }),
         };
         let mut output = std::io::stdout().lock();
         serde_json::to_writer(&mut output, &report).map_err(|_| ToolError::Operation)?;
@@ -421,7 +446,55 @@ pub(in crate::tools::guard) fn verify_helper(
 struct Completion {
     digest: [u8; 32],
     namespaces: profile::Namespaces,
-    empty: bool,
+    capture: Result<
+        (
+            crate::tools::CommandChangeset,
+            crate::tools::types::CommandSelectionSummary,
+        ),
+        CaptureFailure,
+    >,
+}
+
+#[derive(Serialize, Deserialize)]
+enum CaptureFailure {
+    Limit,
+    Timeout,
+    Filesystem,
+    Rejected,
+    Conflict,
+}
+
+const COMPLETION_BYTES: usize =
+    crate::tools::types::MAX_CHANGESET_SERIALIZED_BYTES + MAX_PATH_BYTES;
+
+pub(super) async fn capture(
+    unit: &mut Unit,
+    (writer, reader): (
+        &mut (impl tokio::io::AsyncWrite + Unpin),
+        &mut (impl tokio::io::AsyncBufRead + Unpin),
+    ),
+    (runtime, intent, parent, deadline): (
+        &ToolRuntime,
+        &EffectIntent,
+        &profile::Namespaces,
+        tokio::time::Instant,
+    ),
+    (observation, candidate): (&mut ToolObservation, &mut super::super::CacheCandidate),
+) -> Result<(), ToolError> {
+    let truncation = if runtime.hook_stdin.is_some() {
+        crate::tools::process::Truncation::Refuse
+    } else {
+        crate::tools::process::Truncation::Allow
+    };
+    let report_deadline = capture_phase(unit, intent, writer, reader, deadline)
+        .await?
+        .ok_or(ToolError::Operation)?;
+    tokio::time::timeout_at(
+        report_deadline,
+        complete(reader, (intent, parent), observation, candidate, truncation),
+    )
+    .await
+    .map_err(|_| ToolError::Operation)?
 }
 
 pub(super) async fn complete(
@@ -429,28 +502,91 @@ pub(super) async fn complete(
     (intent, parent): (&EffectIntent, &profile::Namespaces),
     observation: &mut ToolObservation,
     candidate: &mut super::super::CacheCandidate,
+    truncation: crate::tools::process::Truncation,
 ) -> Result<(), ToolError> {
     crate::fault::guard_completion(intent.id)?;
     let report: Completion =
-        serde_json::from_slice(&read_line_capped(reader, MAX_PATH_BYTES).await?)
+        serde_json::from_slice(&read_line_capped(reader, COMPLETION_BYTES).await?)
             .map_err(|_| ToolError::Operation)?;
     if report.digest != intent.digest() || !report.namespaces.supervisor_isolated_from(parent) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    if !report.empty {
-        if !matches!(
-            observation.disposition,
-            crate::tools::ToolDisposition::Limit | crate::tools::ToolDisposition::Cancelled
-        ) {
-            observation.disposition = crate::tools::ToolDisposition::Denied;
-            observation.output = "Command overlay capture refused: the private upper is not empty; nothing was published".into();
-            observation.spill = None;
-            observation.enforcement_cause = None;
-            observation.limit_cause = None;
-        }
-        if *candidate != super::super::CacheCandidate::Uncertain {
+    let nonzero_exit = observation.disposition == crate::tools::ToolDisposition::Failed
+        && serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+            .is_ok_and(|result| result.valid() && result.exit_code.is_some_and(|code| code != 0));
+    if observation.disposition != crate::tools::ToolDisposition::Succeeded
+        && (!nonzero_exit || report.capture.is_err())
+    {
+        if !report
+            .capture
+            .as_ref()
+            .is_ok_and(|(changeset, _)| changeset.files.is_empty())
+            && *candidate != super::super::CacheCandidate::Uncertain
+        {
             *candidate = super::super::CacheCandidate::Rejected;
+        }
+        if observation.disposition == crate::tools::ToolDisposition::Uncertain {
+            *candidate = super::super::CacheCandidate::Uncertain;
+        }
+        return Ok(());
+    }
+    let captured = report
+        .capture
+        .and_then(|(changeset, selection)| merge(observation, changeset, selection, truncation));
+    match captured {
+        Ok(output) => observation.output = output,
+        Err(failure) => {
+            observation.disposition = match failure {
+                CaptureFailure::Limit | CaptureFailure::Timeout => {
+                    crate::tools::ToolDisposition::Limit
+                }
+                CaptureFailure::Filesystem | CaptureFailure::Rejected => {
+                    crate::tools::ToolDisposition::Denied
+                }
+                CaptureFailure::Conflict => crate::tools::ToolDisposition::Conflict,
+            };
+            observation.output = "Command overlay capture refused; nothing was published".into();
+            observation.spill = None;
+            observation.enforcement_cause = matches!(failure, CaptureFailure::Filesystem)
+                .then_some(crate::tools::EnforcementCause::FilesystemDenied);
+            observation.limit_cause = match failure {
+                CaptureFailure::Limit => Some(crate::tools::LimitCause::Resource),
+                CaptureFailure::Timeout => Some(crate::tools::LimitCause::Timeout),
+                CaptureFailure::Filesystem
+                | CaptureFailure::Rejected
+                | CaptureFailure::Conflict => None,
+            };
+            if *candidate != super::super::CacheCandidate::Uncertain {
+                *candidate = super::super::CacheCandidate::Rejected;
+            }
         }
     }
     Ok(())
+}
+
+fn merge(
+    observation: &ToolObservation,
+    changeset: crate::tools::CommandChangeset,
+    selection: crate::tools::types::CommandSelectionSummary,
+    truncation: crate::tools::process::Truncation,
+) -> Result<String, CaptureFailure> {
+    if !changeset.valid() || !selection.valid() {
+        return Err(CaptureFailure::Rejected);
+    }
+    let result: crate::tools::types::CommandResult =
+        serde_json::from_str(&observation.output).map_err(|_| CaptureFailure::Rejected)?;
+    let stdout = crate::tools::output::Window::from_recorded(&result.stdout, result.stdout_total)
+        .ok_or(CaptureFailure::Rejected)?;
+    let stderr = crate::tools::output::Window::from_recorded(&result.stderr, result.stderr_total)
+        .ok_or(CaptureFailure::Rejected)?;
+    crate::tools::process::fit_selected_command(
+        result.exit_code,
+        &stdout,
+        &stderr,
+        changeset,
+        observation.intent.limits.result_bytes as usize,
+        truncation,
+        selection,
+    )
+    .map_err(|_| CaptureFailure::Limit)
 }

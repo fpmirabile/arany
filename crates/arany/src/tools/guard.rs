@@ -1890,7 +1890,16 @@ fn send_result(
             crate::tools::CacheUpdate::NotApplicable
         },
     };
-    observation.spill = super::spill::OutputSpill::captured(&observation, result.1);
+    observation.spill = {
+        #[cfg(target_os = "linux")]
+        if linux::overlay::selected(&observation.intent, &task.config) {
+            super::spill::OutputSpill::pending(&observation, result.1)
+        } else {
+            super::spill::OutputSpill::captured(&observation, result.1)
+        }
+        #[cfg(not(target_os = "linux"))]
+        super::spill::OutputSpill::captured(&observation, result.1)
+    };
     if private_command
         && serde_json::from_str::<crate::session::worker::WorkerCommandResult>(&observation.output)
             .is_err()
