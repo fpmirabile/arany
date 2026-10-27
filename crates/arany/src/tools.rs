@@ -21,8 +21,12 @@ mod guard;
 pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
+mod network;
 pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
+pub(crate) use network::{
+    MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, NETWORK_IDLE_MS,
+};
 mod output;
 pub(crate) mod spill;
 pub use spill::OutputSpill;
@@ -457,6 +461,25 @@ fn admission_resources(
         fs::reject_overlap(Path::new(path), state.path())?;
         fs::reject_overlap(Path::new(path), account)?;
     }
+    Ok(())
+}
+
+// The pinned configuration digest covers the effective domain set, so every admission and re-admission merges the same way.
+fn merge_network(
+    config: &mut Config,
+    permissions: Option<&PermissionSnapshot>,
+) -> Result<(), ToolError> {
+    let Some(network) = config.network.take() else {
+        return Ok(());
+    };
+    let (allow, restrict) = permissions.map_or_else(Default::default, |snapshot| {
+        snapshot.config.network_domains()
+    });
+    let network = network.merged(&allow, &restrict);
+    if !network.valid() {
+        return Err(ToolError::Configuration);
+    }
+    config.network = Some(network);
     Ok(())
 }
 
@@ -946,6 +969,7 @@ impl ToolRuntime {
         let mut config = match Config::load(state) {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
+                merge_network(&mut config, Some(&snapshot))?;
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -960,6 +984,7 @@ impl ToolRuntime {
             Err(error) => return Err(error),
         };
         config.discover_skills(workspace)?;
+        merge_network(&mut config, Some(&snapshot))?;
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1033,6 +1058,7 @@ impl ToolRuntime {
                 Ok(snapshot)
             })
             .transpose()?;
+        merge_network(&mut config, permissions.as_ref())?;
         let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
@@ -1292,7 +1318,7 @@ impl ToolRuntime {
     }
 
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
-        let catalog = serde_json::json!({
+        let mut catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write && self.guard_available,
@@ -1320,6 +1346,18 @@ impl ToolRuntime {
                 serde_json::json!("unavailable")
             },
         });
+        if let Some(network) = self
+            .config
+            .network
+            .as_ref()
+            .filter(|_| self.guard_available)
+        {
+            catalog["network"] = serde_json::json!({
+                "allow": network.allow,
+                "deny": network.deny,
+                "contract": catalog::NETWORK_CONTRACT,
+            });
+        }
         let context = ToolContext::new(catalog);
         if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
