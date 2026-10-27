@@ -7,7 +7,7 @@ use crate::tools::types::*;
 use serde_json::{Value, json};
 
 #[test]
-fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
+fn tool_call_display_and_site_facts_cover_every_variant() {
     use crate::session::worker::ChangesetSource;
     use crate::tools::types::CommandChangeset;
 
@@ -73,7 +73,13 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt {
                 source_intent_digest: [1; 32],
-                changeset: CommandChangeset::default(),
+                changeset: CommandChangeset {
+                    files: vec![FileChange {
+                        path: "src".into(),
+                        before: None,
+                        after: Some(FileVersion::from_bytes(b"text", false)),
+                    }],
+                },
             },
         },
         ToolCall::Skill {
@@ -135,6 +141,24 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
             body: String::new(),
             draft: true,
         },
+        ToolCall::GhPrList {
+            repository: "github.com/o/r".into(),
+            state: PrState::Open,
+            base: None,
+            head: None,
+            limit: DEFAULT_PR_LIMIT,
+        },
+        ToolCall::GhPrView {
+            repository: "github.com/o/r".into(),
+            number: 1,
+        },
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind {
+                plan_digest: [3; 32],
+                bytes: 1,
+                sha256: [4; 32],
+            },
+        },
         ToolCall::Glob {
             pattern: "**/*.rs".into(),
             path: path(),
@@ -142,8 +166,59 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
         },
     ];
 
-    for call in calls {
-        let old_is_host = matches!(call, ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. });
+    let expected = [
+        ("Parse agent definition", "", vec![]),
+        ("List", "src", vec!["src"]),
+        ("Read", "src", vec!["src"]),
+        ("Search", "q", vec!["src"]),
+        ("Delete", "src", vec!["src"]),
+        ("Move", "src", vec!["src", "destination"]),
+        ("Create folder", "src", vec!["src"]),
+        ("Write", "src", vec!["src"]),
+        ("Edit", "src", vec!["src"]),
+        ("MultiEdit", "src", vec!["src"]),
+        ("Command", "cargo", vec!["."]),
+        ("Unguarded command", "cargo", vec!["."]),
+        ("Publish", "src", vec!["src"]),
+        ("Skill", "guide", vec![]),
+        ("MCP list", "local", vec![]),
+        ("MCP", "local.t", vec![]),
+        ("Git status", "src", vec!["src"]),
+        ("Git diff", "src", vec!["src"]),
+        ("Git log", "src", vec!["src"]),
+        ("Git commit", "src", vec!["src"]),
+        ("Git branches", "", vec![]),
+        ("Git branch", "topic", vec![]),
+        ("Git switch", "topic", vec![]),
+        ("Git push", "topic", vec![]),
+        ("PR create", "github.com/o/r", vec![]),
+        ("PR list", "github.com/o/r", vec![]),
+        ("PR view", "github.com/o/r", vec![]),
+        ("Rewind publication", "", vec![]),
+        ("Glob", "**/*.rs", vec!["src"]),
+    ];
+    assert_eq!(calls.len(), expected.len());
+    let mut operations = std::collections::BTreeSet::new();
+    for (call, (verb, subject, paths)) in calls.into_iter().zip(expected) {
+        let display = call.display_facts();
+        assert_eq!(
+            (display.verb, display.subject.as_ref(), display.paths),
+            (verb, subject, paths),
+            "{call:?}"
+        );
+        assert_eq!(
+            (display.family, display.site),
+            (call.family(), call.site()),
+            "{call:?}"
+        );
+        operations.insert(call.label());
+        let old_is_host = matches!(
+            call,
+            ToolCall::GitPush { .. }
+                | ToolCall::GhPrCreate { .. }
+                | ToolCall::GhPrList { .. }
+                | ToolCall::GhPrView { .. }
+        );
         let old_is_unguarded = matches!(call, ToolCall::CommandUnguarded { .. });
         let old_is_internal = matches!(call, ToolCall::ParseAgentDefinition { .. });
 
@@ -157,6 +232,7 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
         );
         assert_eq!(call.is_internal(), old_is_internal, "{call:?}");
     }
+    assert_eq!(operations.len(), super::catalog::ALL.len());
 }
 
 #[test]
