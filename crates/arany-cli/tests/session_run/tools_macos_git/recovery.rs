@@ -180,11 +180,7 @@ async fn capacity_released(engine: &Engine, workspace: &Path, name: &str, leftov
         0,
         "both reservations released after cleanup"
     );
-    assert_eq!(
-        unit_leftovers(),
-        leftovers,
-        "roots and volumes removed before capacity reuse"
-    );
+    assert_no_new_units(leftovers, "roots and volumes removed before capacity reuse");
     let (outcome, _) = approved_git_write(engine, workspace, branch_creation(name)).await;
     assert_eq!(outcome.run.status, RunStatus::Finished);
     assert_eq!(
@@ -195,7 +191,7 @@ async fn capacity_released(engine: &Engine, workspace: &Path, name: &str, leftov
             .disposition,
         ToolDisposition::Succeeded
     );
-    assert_eq!(unit_leftovers(), leftovers, "both capacity slots released");
+    assert_no_new_units(leftovers, "both capacity slots released");
 }
 
 pub(super) async fn run(
