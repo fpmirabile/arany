@@ -14,7 +14,7 @@ const MOUNT_DIRECTORY: &str = "namespace";
 const PROBE_NAME: &str = "user.arany_probe";
 const PROBE_VALUE: &[u8] = b"arany";
 const MAX_SUPERVISOR_ARGUMENTS: usize = 4096;
-const MAX_PIN_BYTES: usize = 4096;
+pub(super) const MAX_PIN_BYTES: usize = 2 * overlay::MASK_ARGUMENT_BYTES + MAX_PATH_BYTES;
 pub(super) const MAX_SUPERVISOR_EXECUTABLE_BYTES: u64 = crate::tools::types::MEMORY_BYTES;
 pub(super) const TMPFS_INODES: u64 = (crate::tools::types::COMMAND_SCAN_ENTRIES
     + crate::tools::config::MAX_WORKSPACE_PATHS * overlay::SETUP_INODES
@@ -312,7 +312,7 @@ fn mount_view(
         })
         .map_err(|_| ToolError::Configuration)?
         .into();
-        if helper.len() > MAX_PATH_BYTES {
+        if helper.len() > MAX_PIN_BYTES {
             return Err(ToolError::ProtectionUnavailable);
         }
     }

@@ -62,6 +62,7 @@
 | <a id="max_snapshot_bytes"></a>[`MAX_SNAPSHOT_BYTES`](#max_snapshot_bytes) | 33554432 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_snapshot_files"></a>[`MAX_SNAPSHOT_FILES`](#max_snapshot_files) | 2048 | files | `crates/arany/src/tools/types.rs` |
 | <a id="command_snapshot_bytes"></a>[`COMMAND_SNAPSHOT_BYTES`](#command_snapshot_bytes) | 134217728 | bytes | `crates/arany/src/tools/types.rs` |
+| <a id="command_compare_bytes_per_upper_byte"></a>[`COMMAND_COMPARE_BYTES_PER_UPPER_BYTE`](#command_compare_bytes_per_upper_byte) | 2 | compared bytes per upper byte | `crates/arany/src/tools/types.rs` |
 | <a id="command_snapshot_files"></a>[`COMMAND_SNAPSHOT_FILES`](#command_snapshot_files) | 16384 | files | `crates/arany/src/tools/types.rs` |
 | <a id="command_scan_entries"></a>[`COMMAND_SCAN_ENTRIES`](#command_scan_entries) | 131072 | entries | `crates/arany/src/tools/types.rs` |
 | <a id="command_snapshot_depth"></a>[`COMMAND_SNAPSHOT_DEPTH`](#command_snapshot_depth) | 32 | levels | `crates/arany/src/tools/types.rs` |

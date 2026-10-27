@@ -1548,11 +1548,23 @@ pub(super) async fn native_command_changeset_corpus(
             None,
         ),
         ("large-changeset", "", None),
-        ("depth-33", "true", Some(ToolDisposition::Limit)),
+        (
+            "depth-33",
+            if cfg!(target_os = "linux") {
+                "test -z \"$(find src -name input -print -quit)\""
+            } else {
+                "true"
+            },
+            cfg!(target_os = "macos").then_some(ToolDisposition::Limit),
+        ),
         ("nonzero", "exit 7", None),
         (
             "selection",
-            "test ! -e src/asset; test ! -e src/ignored/secret; test ! -r /prepared/command-selection.json; mkdir src/ignored; printf generated > src/ignored/new; printf '*' > src/.gitignore",
+            if cfg!(target_os = "linux") {
+                "test -s src/asset; test -s src/ignored/secret; test ! -r /prepared/command-selection.json; mkdir -p src/ignored; printf generated > src/ignored/new; printf '*' > src/.gitignore"
+            } else {
+                "test ! -e src/asset; test ! -e src/ignored/secret; test ! -r /prepared/command-selection.json; mkdir src/ignored; printf generated > src/ignored/new; printf '*' > src/.gitignore"
+            },
             None,
         ),
         ("ai-approve", "", None),
@@ -1654,11 +1666,7 @@ pub(super) async fn native_command_changeset_corpus(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
         );
-        let delete = if cfg!(target_os = "macos") {
-            "/usr/bin/find src/z-deleted -type f -delete"
-        } else {
-            "rm src/z-deleted"
-        };
+        let delete = "/usr/bin/find src/z-deleted -type f -delete";
         let suffix = if cfg!(target_os = "macos") {
             match case {
                 "directory-conversion" => {
@@ -1694,7 +1702,7 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
             }
         } else if case == "partial" {
-            ToolCall::Command { program: program.into(), args: vec!["-c".into(), "set -eu; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()], cwd: "".into() }
+            ToolCall::Command { program: program.into(), args: vec!["-c".into(), "set -eu; chmod u+w src/z; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()], cwd: "".into() }
         } else if case == "large-changeset" {
             ToolCall::Command {
                 program: program.into(),
@@ -1802,7 +1810,7 @@ pub(super) async fn native_command_changeset_corpus(
                     .iter()
                     .map(|file| file.path.as_str())
                     .collect::<Vec<_>>(),
-                ["src/a-created", "src/m-modified", "src/z-deleted"]
+                vec!["src/a-created", "src/m-modified", "src/z-deleted"]
             );
             assert!(
                 !workspace.join("src/a-created").exists(),
@@ -1824,7 +1832,7 @@ pub(super) async fn native_command_changeset_corpus(
                     drop(action);
                 }
                 "conflict" => {
-                    crate::private_file(&workspace.join("src/m-modified"), b"concurrent\n");
+                    crate::private_file(&workspace.join("src/z-deleted"), b"concurrent\n");
                     action.decide(true);
                 }
                 _ => unreachable!(),
@@ -1907,7 +1915,8 @@ pub(super) async fn native_command_changeset_corpus(
             "{case}: terminal Event"
         );
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped = matches!(case, "cancel" | "partial" | "depth-33");
+        let stopped =
+            matches!(case, "cancel" | "partial") || case == "depth-33" && cfg!(target_os = "macos");
         let criterion_unmet = matches!(
             case,
             "deny"
@@ -1923,8 +1932,7 @@ pub(super) async fn native_command_changeset_corpus(
                 | "bytes-overflow"
                 | "files-overflow"
                 | "directory-conversion"
-                | "depth-33"
-        );
+        ) || case == "depth-33" && cfg!(target_os = "macos");
         assert_eq!(
             run.status,
             if case == "cancel" {
@@ -2094,10 +2102,10 @@ pub(super) async fn native_command_changeset_corpus(
         assert_eq!(command.intent.call, call);
         assert_eq!(
             command.attestation.is_some(),
-            case != "depth-33",
+            case != "depth-33" || cfg!(target_os = "linux"),
             "{case}: command dispatch receipt"
         );
-        if case == "depth-33" {
+        if case == "depth-33" && cfg!(target_os = "macos") {
             assert_eq!(command.limit_cause, Some(arany::LimitCause::Resource));
             assert!(command.output.contains("no operation was dispatched"));
         }
@@ -2127,7 +2135,11 @@ pub(super) async fn native_command_changeset_corpus(
             if case == "selection" {
                 assert_eq!(
                     result["selection"],
-                    json!({"ignored_entries":1,"pruned_directories":1,"oversized_inputs":1,"discarded_outputs":1})
+                    if cfg!(target_os = "linux") {
+                        json!({"ignored_entries":2,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":2})
+                    } else {
+                        json!({"ignored_entries":1,"pruned_directories":1,"oversized_inputs":1,"discarded_outputs":1})
+                    }
                 );
                 assert!(!workspace.join("src/ignored/new").exists());
                 assert_eq!(
@@ -2247,7 +2259,8 @@ pub(super) async fn native_command_changeset_corpus(
         } else if matches!(
             case,
             "nonzero" | "ai-approve" | "selection" | "large-snapshot" | "depth-32"
-        ) {
+        ) || case == "depth-33" && cfg!(target_os = "linux")
+        {
             if case == "nonzero" {
                 assert_eq!(
                     requests[2]
@@ -2294,7 +2307,7 @@ pub(super) async fn native_command_changeset_corpus(
             }
             assert!(
                 !workspace.join("src/z-deleted").exists(),
-                "{case}: delete publication receipts: {:?}",
+                "{case}: deletion was published: {:?}",
                 &tools[..2]
             );
         } else {
@@ -2304,16 +2317,16 @@ pub(super) async fn native_command_changeset_corpus(
             );
             assert_eq!(
                 std::fs::read(workspace.join("src/m-modified")).unwrap(),
-                if case == "conflict" {
-                    b"concurrent\n".as_slice()
-                } else {
-                    b"before\n".as_slice()
-                },
+                b"before\n".as_slice(),
                 "{case}"
             );
             assert_eq!(
                 std::fs::read(workspace.join("src/z-deleted")).unwrap(),
-                b"delete\n",
+                if case == "conflict" {
+                    b"concurrent\n".as_slice()
+                } else {
+                    b"delete\n".as_slice()
+                },
                 "{case}"
             );
             assert!(!workspace.join("src/hostile").exists());

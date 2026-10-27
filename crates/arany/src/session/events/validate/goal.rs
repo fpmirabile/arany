@@ -88,3 +88,6 @@ impl Event {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
