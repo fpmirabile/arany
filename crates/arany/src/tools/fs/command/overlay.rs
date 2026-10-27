@@ -55,6 +55,9 @@ impl Baseline {
         }
         let calls = selector.calls();
         for directory in &self.complete {
+            if ignored(&joined(prefix, directory), true, selector)? {
+                continue;
+            }
             let path = if directory.is_empty() {
                 ".gitignore".into()
             } else {

@@ -194,6 +194,14 @@ fn capture_restores_private_readability_and_refuses_incomplete_absence_or_caps()
             .unwrap(),
         b"readable"
     );
+    assert_eq!(
+        std::fs::metadata(upper.path().join("created"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o400
+    );
     let deep = vec!["nested"; COMMAND_SNAPSHOT_DEPTH - 1].join("/");
     std::fs::create_dir_all(upper.path().join(&deep)).unwrap();
     std::fs::write(upper.path().join(deep).join("leaf"), b"deep content").unwrap();
@@ -213,7 +221,7 @@ fn capture_restores_private_readability_and_refuses_incomplete_absence_or_caps()
     ));
     let baseline = self::baseline(&source);
     std::fs::write(
-        upper.path().join("created"),
+        upper.path().join("oversized"),
         vec![0; MAX_CHANGESET_BYTES + 1],
     )
     .unwrap();

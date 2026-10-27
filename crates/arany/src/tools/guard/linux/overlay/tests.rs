@@ -40,6 +40,59 @@ fn masks_keep_dependencies_and_large_inputs_but_refuse_known_protected_aliases()
 }
 
 #[test]
+fn ignored_controls_do_not_exhaust_publication_budgets() {
+    use crate::tools::selection::{CONTROL_FILES, PHASE_TIME};
+    for (prefix, directory, controls, accepted) in [
+        ("", "node_modules", CONTROL_FILES + 1, true),
+        ("", "ignored", CONTROL_FILES + 1, true),
+        ("", "visible", 1, true),
+        ("", "visible", CONTROL_FILES + 1, false),
+        ("src", "ignored", CONTROL_FILES + 1, true),
+        ("src", "visible", CONTROL_FILES + 1, false),
+    ] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join(".gitignore"), b"ignored/\n").unwrap();
+        for index in 0..controls {
+            let path = lower.path().join(format!("{directory}/control-{index}"));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(".gitignore"), b"generated\n").unwrap();
+        }
+        let source = crate::tools::fs::open_directory(lower.path()).unwrap();
+        let deadline = std::time::Instant::now() + PHASE_TIME;
+        let inventory = masks::Inventory::read_shared(
+            &source,
+            (prefix, MASK_ARGUMENT_BYTES),
+            &mut Default::default(),
+            &mut crate::tools::selection::Selector::new(0, deadline),
+            deadline,
+        );
+        if !accepted {
+            assert!(matches!(inventory, Err(ToolError::Limit)), "{directory}");
+            continue;
+        }
+        let inventory = inventory.unwrap();
+        assert!(inventory.paths().is_empty());
+        let generated = upper.path().join(format!("{directory}/control-0"));
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("generated"), b"discarded").unwrap();
+        std::fs::write(upper.path().join("created"), b"published").unwrap();
+        let target = crate::tools::fs::open_directory(upper.path()).unwrap();
+        let (changeset, _) = crate::tools::fs::command::overlay::capture_roots(
+            &[(&inventory.baseline, source, target, prefix)],
+            std::time::Instant::now() + PHASE_TIME,
+        )
+        .unwrap();
+        assert_eq!(changeset.files.len(), 1, "{directory}");
+        assert_eq!(
+            Path::new(&changeset.files[0].path),
+            Path::new(prefix).join("created"),
+            "{directory}"
+        );
+    }
+}
+
+#[test]
 fn protected_links_and_unwalkable_trees_mask_an_enclosing_subtree() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
@@ -222,10 +275,16 @@ async fn completion_merges_candidates_with_totals_and_keeps_hook_output_fail_clo
         namespaces[name] = (namespaces[name].as_u64().unwrap() + 1).into();
     }
     let namespaces: profile::Namespaces = serde_json::from_value(namespaces).unwrap();
-    for hook in [false, true] {
+    for (exit_code, hook) in [(0, false), (0, true), (1, false), (1, true)] {
         let mut observation = crate::tools::guard::tests::command_observation();
         let intent = observation.intent.clone();
         let mut original: CommandResult = serde_json::from_str(&observation.output).unwrap();
+        original.exit_code = Some(exit_code);
+        observation.disposition = if exit_code == 0 {
+            crate::tools::ToolDisposition::Succeeded
+        } else {
+            crate::tools::ToolDisposition::Failed
+        };
         original.stdout = "x".repeat(intent.limits.result_bytes as usize / 2);
         original.stdout_total = crate::tools::types::OutputTotal {
             bytes: original.stdout.len() as u64,
@@ -289,6 +348,15 @@ async fn completion_merges_candidates_with_totals_and_keeps_hook_output_fail_clo
         } else {
             let result: CommandResult = serde_json::from_str(&observation.output).unwrap();
             assert_eq!(result.changeset, changeset);
+            assert_eq!(result.exit_code, Some(exit_code));
+            assert_eq!(
+                observation.disposition,
+                if exit_code == 0 {
+                    crate::tools::ToolDisposition::Succeeded
+                } else {
+                    crate::tools::ToolDisposition::Failed
+                }
+            );
             assert_eq!(result.selection, Some(selection));
             assert_eq!(result.stdout_total, original.stdout_total);
             assert!(crate::tools::spill::has_excerpt(&observation));

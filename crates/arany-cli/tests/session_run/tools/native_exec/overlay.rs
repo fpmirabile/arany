@@ -335,21 +335,7 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         case,
         "recreation" | "host-edit" | "host-create" | "delete-drift" | "narrow-replacement"
     );
-    assert_eq!(
-        observation.disposition,
-        if matches!(
-            case,
-            "host-edit" | "host-create" | "delete-drift" | "narrow-replacement"
-        ) {
-            ToolDisposition::Conflict
-        } else if refused {
-            ToolDisposition::Denied
-        } else {
-            ToolDisposition::Succeeded
-        },
-        "{case}: {}",
-        observation.output
-    );
+    check_overlay_disposition(observation, case, refused);
     let publishes = matches!(
         case,
         "writes"
@@ -407,6 +393,31 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
     assert!(!observation.output.contains("PRIVATE_OVERLAY_CANARY"));
     assert!(!observation.output.contains("PRIVATE_SIBLING_CANARY"));
     check_overlay_files(&fixture.workspace, case);
+}
+
+fn check_overlay_disposition(observation: &arany::ToolObservation, case: &str, refused: bool) {
+    let expected = if matches!(
+        case,
+        "host-edit" | "host-create" | "delete-drift" | "narrow-replacement"
+    ) {
+        ToolDisposition::Conflict
+    } else if refused {
+        ToolDisposition::Denied
+    } else if matches!(case, "no-space" | "narrow-no-space") {
+        ToolDisposition::Failed
+    } else {
+        ToolDisposition::Succeeded
+    };
+    if observation.disposition != expected {
+        let exit = serde_json::from_str::<Value>(&observation.output)
+            .ok()
+            .and_then(|result| result["exit_code"].as_i64());
+        crate::process::annotate_native_fixture(&format!(
+            "fixture=command_overlay; case={case}; expected={expected:?}; observed={:?}; exit={exit:?}; limit={:?}; enforcement={:?}",
+            observation.disposition, observation.limit_cause, observation.enforcement_cause
+        ));
+    }
+    assert_eq!(observation.disposition, expected, "{case}");
 }
 
 fn check_overlay_files(workspace: &std::path::Path, case: &str) {
