@@ -1292,7 +1292,6 @@ impl<'a> RunLoop<'a> {
             | crate::tools::ToolCall::Command { .. }
             | crate::tools::ToolCall::CommandUnguarded { .. }
             | crate::tools::ToolCall::ApplyChangeset { .. }
-            | crate::tools::ToolCall::PrepareWorker { .. }
             | crate::tools::ToolCall::McpList { .. }
             | crate::tools::ToolCall::McpCall { .. }
             | crate::tools::ToolCall::GitStatus { .. }
@@ -1321,7 +1320,6 @@ impl<'a> RunLoop<'a> {
                 call,
                 crate::tools::ToolCall::ApplyChangeset { .. }
                     | crate::tools::ToolCall::ParseAgentDefinition { .. }
-                    | crate::tools::ToolCall::PrepareWorker { .. }
             )
         {
             return Err(NotOffered);

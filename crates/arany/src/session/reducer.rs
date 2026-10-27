@@ -336,12 +336,6 @@ impl RunView {
             .iter()
             .enumerate()
             .skip((self.tool_compaction_covered_count as usize).max(self.initial_tool_count()))
-            .filter(|(_, tool)| {
-                !matches!(
-                    tool.intent.call,
-                    crate::tools::ToolCall::PrepareWorker { .. }
-                )
-            })
     }
 
     pub(crate) fn tool_step_boundaries(&self) -> Vec<Option<usize>> {
@@ -683,7 +677,6 @@ fn model_tools(run: &RunView) -> impl Iterator<Item = &ToolView> {
                 && !matches!(
                     tool.intent.call,
                     crate::tools::ToolCall::ParseAgentDefinition { .. }
-                        | crate::tools::ToolCall::PrepareWorker { .. }
                 )
         })
 }
@@ -755,15 +748,7 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
         })
         && run.hooks_settled()
         && run.tools.iter().all(|tool| {
-            tool.settled_without_stop()
-                && tool.observation.as_ref().is_some_and(|observation| {
-                    observed_command_changeset(observation)
-                        .is_none_or(|changeset| changeset.files.is_empty() || run.tools.iter().any(|integration| {
-                            matches!(&integration.intent.call, crate::tools::ToolCall::ApplyChangeset {
-                                source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
-                            } if *source_intent_digest == observation.intent.digest()) && integration.settled_without_stop()
-                        }))
-                })
+            tool.settled_without_stop() && tool::command_publication_settled(&run.tools, tool)
         })
         && requested_tool_total(agent).checked_sub(model_tool_count(run)) == Some(0)
 }
@@ -1367,12 +1352,7 @@ impl SessionView {
             | Event::ProviderRetryScheduled { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::AgentFinished { .. } => agent::apply(current, &envelope.event)?,
-            Event::WorkerDataChunk { .. }
-            | Event::WorkerDataSealed { .. }
-            | Event::WorkerStopObserved { .. }
-            | Event::WorkerHandoverRecorded { .. }
-            | Event::WorkerIntegrationRecorded { .. }
-            | Event::WorkerHandoverDiscarded { .. }
+            Event::WorkerStopObserved { .. }
             | Event::WorkerLeaseReleased { .. }
             | Event::WorkerVerificationRecorded { .. } => {
                 worker::apply(current, &envelope.event, prior)?

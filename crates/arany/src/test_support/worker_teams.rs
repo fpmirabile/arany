@@ -1,4 +1,6 @@
+mod background;
 mod bounds;
+mod commands;
 mod waves;
 
 use super::goals::{assert_action_bounds, finish_with, replayed};
@@ -8,6 +10,8 @@ use crate::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const TEAM_SIZE: u8 = 3;
 
 pub struct TeamObservation {
     pub directory: tempfile::TempDir,
@@ -74,6 +78,8 @@ struct LiveProvider {
     cancellation: RunCancellation,
     calls: Mutex<Vec<(AgentPhase, AgentRunId)>>,
     bound_gate: tokio::sync::mpsc::Sender<()>,
+    background: background::Gates,
+    steering: RunSteering,
 }
 
 #[derive(Clone, Copy)]
@@ -92,7 +98,11 @@ impl LiveProvider {
         GoalPlanContract {
             mission: "Edit and verify leased notes".into(),
             paths: vec!["notes".into()],
-            commands: Vec::new(),
+            commands: if commands::is_case(self.case) {
+                vec!["build".into()]
+            } else {
+                Vec::new()
+            },
             resource_class: ToolResourceClass::Default,
             command_timeout_ms: None,
             skills: Vec::new(),
@@ -152,8 +162,15 @@ impl LiveProvider {
         if self.case == "background" {
             assignment.mode = WorkerMode::Background;
         }
-        if self.case == "command" {
+        if commands::is_case(self.case) {
+            assignment.mode = WorkerMode::Background;
+            assignment.lease = vec!["notes/0".into()];
             assignment.commands = vec!["build".into()];
+            if matches!(self.case, "command_criterion" | "command_bash_only") {
+                assignment.criterion = GoalSuccessCriterion::ToolCallSucceeded {
+                    call: Box::new(commands::call(false)),
+                };
+            }
         }
         ProviderOutcome::Delegate(Delegate {
             agent: None,
@@ -294,7 +311,11 @@ impl Provider for LiveProvider {
             self.bound_gate.send(()).await.unwrap();
             return std::future::pending().await;
         }
-        let outcome = if matches!(self.case, "waves_stale" | "waves_fresh") {
+        let outcome = if self.case == "background" {
+            self.background_outcome(&request, step).await
+        } else if commands::is_case(self.case) {
+            self.command_outcome(&request, step)
+        } else if matches!(self.case, "waves_stale" | "waves_fresh") {
             self.wave_outcome(&request, step)
         } else {
             match (request.phase, step) {
@@ -371,7 +392,11 @@ async fn run_case_inner(
     } else {
         ""
     };
-    let tools = if case == "discovery" {
+    let tools = if case == "command_bash_only" {
+        "Bash"
+    } else if commands::is_case(case) {
+        "Read, Write, Bash"
+    } else if case == "discovery" {
         "Read, Write, Glob"
     } else {
         "Read, Write"
@@ -400,6 +425,9 @@ async fn run_case_inner(
             .unwrap(),
         );
     }
+    if commands::is_case(case) {
+        commands::configure(&state, case);
+    }
     run_live(directory, root, guard, case, LiveStart::New { padding }).await
 }
 
@@ -423,9 +451,13 @@ async fn run_live(
     let cancellation = RunCancellation::new();
     let (bound_gate, mut clock_gate) = tokio::sync::mpsc::channel(bounds::GATE_CAPACITY);
     let mut identity = ProviderIdentity::new("openai", "test-model", Provenance::native());
+    if case == "background" {
+        identity.limits.concurrency = TEAM_SIZE;
+    }
     if bounds::is_timed(case) {
         identity.limits.deadline = crate::engine::MAX_DELEGATION_DEADLINE;
     }
+    let steering = RunSteering::new();
     let provider = Arc::new(LiveProvider {
         identity,
         workspace: workspace.clone(),
@@ -437,11 +469,13 @@ async fn run_live(
         cancellation: cancellation.clone(),
         calls: Default::default(),
         bound_gate,
+        background: background::Gates::default(),
+        steering: steering.clone(),
     });
     let mut input = request(&workspace, "Edit leased notes");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
-        max_active_children: 3,
+        max_active_children: TEAM_SIZE,
     };
     input.goal = GoalRequest::new(bounds::budget(case), GoalPhase::Implementation);
     if let LiveStart::Resume { session, goal, .. } = start {
@@ -467,7 +501,11 @@ async fn run_live(
     } else {
         engine
     };
-    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let (approvals, mut inbox) = ToolApprovals::new(if case == "command_auto" {
+        ApprovalMode::Auto
+    } else {
+        ApprovalMode::Request
+    });
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -476,6 +514,7 @@ async fn run_live(
                 tools: ToolGrant::Configured,
                 approvals: (case != "no_channel").then_some(approvals),
                 cancellation,
+                steering: Some(steering),
                 ..Default::default()
             },
         )
@@ -486,6 +525,10 @@ async fn run_live(
             result = &mut running => break result,
             Some(()) = clock_gate.recv() => bounds::exhaust(case).await,
             Some(approval) = inbox.next() => {
+                if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
+                    let identity = crate::store::BuildCacheIdentity::new(&workspace, approval.intent.workspace_device, approval.intent.workspace_inode).unwrap();
+                    FaultPlan::fail_commit_marker(&identity);
+                }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);
                 }
@@ -500,7 +543,13 @@ async fn run_live(
             "{result:?}"
         );
     }
-    let result = if matches!(case, "uncertain" | "capacity") {
+    if case == "command_cache_unknown" {
+        assert!(
+            matches!(&result, Err(EngineError::Tool(ToolError::Uncertain))),
+            "uncertain command cache must stop the Run with Tool(Uncertain)"
+        );
+    }
+    let result = if matches!(case, "uncertain" | "capacity" | "command_cache_unknown") {
         result.ok()
     } else {
         Some(result.unwrap())
@@ -545,6 +594,12 @@ async fn run_live(
             b"edited 0"
         );
         assert!(run.agents[1].tools[0].checkpoint.is_some());
+        assert!(run.worker_history()[0].changed_paths.contains("notes/0"));
+        assert!(
+            run.worker_history()[0]
+                .changed_paths
+                .contains(&crate::validate::hex_digest(b"edited 0"))
+        );
         assert_eq!(run.status, RunStatus::Cancelled);
         let goal = view.goals.last().unwrap();
         assert_eq!(goal.status, GoalStatus::Interrupted);
@@ -570,6 +625,8 @@ async fn run_live(
     assert_live_editor_evidence(case, session, &events, &view);
     bounds::assert_stopped(case, &events, &view, &provider);
     waves::assert_waves(case, &events, &view);
+    background::assert_background(case, &events, &view);
+    commands::assert_commands(case, &workspace, &events, &view);
     if case == "no_change" {
         let worker = run.agents[1].assignment.as_ref().unwrap();
         assert_eq!(
@@ -615,17 +672,16 @@ async fn run_live(
                     && hook.outcome.is_some())
         );
     }
-    if matches!(case, "background" | "command" | "catalog_overflow") || case.starts_with("invalid_")
-    {
+    if case == "catalog_overflow" || case.starts_with("invalid_") {
         assert_eq!(run.agents.len(), 1, "{case}: no child spawn");
-        let expected = INVALID_EDITOR_CASES
-            .iter()
-            .find_map(|(name, cause)| (*name == case).then_some(*cause))
-            .unwrap_or(if matches!(case, "background" | "catalog_overflow") {
-                ProposalRefusalCause::DelegateInvalid
-            } else {
-                ProposalRefusalCause::EditorCommands
-            });
+        let expected = if case == "catalog_overflow" {
+            ProposalRefusalCause::DelegateInvalid
+        } else {
+            INVALID_EDITOR_CASES
+                .iter()
+                .find_map(|(name, cause)| (*name == case).then_some(*cause))
+                .expect("invalid editor scenario has a refusal cause")
+        };
         assert!(
             events.iter().any(|e| matches!(&e.event,
                 Event::ProviderCallRecorded { record, .. }
@@ -649,14 +705,6 @@ async fn run_live(
                 .all(|(phase, _)| *phase != AgentPhase::ChildWork)
         );
     }
-    assert!(!events.iter().any(|e| matches!(
-        e.event,
-        Event::WorkerDataChunk { .. }
-            | Event::WorkerDataSealed { .. }
-            | Event::WorkerIntegrationRecorded { .. }
-            | Event::WorkerHandoverRecorded { .. }
-            | Event::WorkerHandoverDiscarded { .. }
-    )));
     assert_action_bounds(&events, false, false);
     TeamObservation {
         directory,

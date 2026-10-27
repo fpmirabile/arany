@@ -63,9 +63,6 @@ fn file(call: &ToolCall) -> String {
             source: arany::worker::ChangesetSource::Rewind { .. },
         } => "Rewind publication()".into(),
         ToolCall::ApplyChangeset {
-            source: arany::worker::ChangesetSource::WorkerHandover { .. },
-        } => "Worker changeset publication()".into(),
-        ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
         } => format!("Publish({} command file changes)", changeset.files.len()),
         _ => unreachable!("file family operation"),
@@ -136,7 +133,6 @@ fn host(call: &ToolCall) -> String {
 
 fn preparation(call: &ToolCall) -> String {
     match call {
-        ToolCall::PrepareWorker { .. } => "Worker data preparation()".into(),
         ToolCall::ParseAgentDefinition { .. } => "Parse agent definition()".into(),
         _ => unreachable!("preparation family operation"),
     }

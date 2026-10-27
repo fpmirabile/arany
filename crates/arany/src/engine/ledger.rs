@@ -360,7 +360,7 @@ impl Action {
     }
 }
 
-// ProviderCallRecorded or ToolFinished, AgentFinished, WorkerHandoverDiscarded and WorkerLeaseReleased.
+// ProviderCallRecorded or ToolFinished, AgentFinished and WorkerLeaseReleased.
 const DRAIN_EVENTS_PER_EDITOR: usize = 4;
 
 pub(super) fn duration_ms(duration: Duration) -> u64 {

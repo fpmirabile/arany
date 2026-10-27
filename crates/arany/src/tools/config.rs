@@ -300,11 +300,8 @@ impl Config {
             return false;
         }
         let path = match call {
-            ToolCall::PrepareWorker { .. }
-            | ToolCall::ApplyChangeset {
-                source:
-                    crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                    | crate::session::worker::ChangesetSource::Rewind { .. },
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::Rewind { .. },
             } => return false,
             ToolCall::ParseAgentDefinition { .. } => return true,
             ToolCall::List { path }

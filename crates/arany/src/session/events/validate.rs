@@ -66,12 +66,7 @@ impl Event {
             | Self::ProviderCallRecorded { .. }
             | Self::AssistantDisplayRecorded { .. } => Event::validate_run(self),
             Self::AgentFinished { .. } | Self::RunFinished { .. } => Event::validate_agent(self),
-            Self::WorkerDataChunk { .. }
-            | Self::WorkerDataSealed { .. }
-            | Self::WorkerStopObserved { .. }
-            | Self::WorkerHandoverRecorded { .. }
-            | Self::WorkerIntegrationRecorded { .. }
-            | Self::WorkerHandoverDiscarded { .. }
+            Self::WorkerStopObserved { .. }
             | Self::WorkerLeaseReleased { .. }
             | Self::WorkerVerificationRecorded { .. } => Event::validate_worker(self),
         }

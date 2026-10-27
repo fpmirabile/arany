@@ -35,6 +35,7 @@ use crate::{
             MCP_TIMEOUT_MS, MEMORY_BYTES, SCRATCH_BYTES,
         },
     },
+    worker::MAX_EDITOR_CHANGE_REPORT_BYTES,
 };
 
 #[derive(Debug)]
@@ -52,6 +53,12 @@ pub struct LimitsTable {
 
 pub const LIMITS: LimitsTable = LimitsTable {
     rows: &[
+        Limit {
+            name: "MAX_EDITOR_CHANGE_REPORT_BYTES",
+            value: MAX_EDITOR_CHANGE_REPORT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/worker.rs",
+        },
         Limit {
             name: "MAX_CONTEXT_CONTENT_BYTES",
             value: MAX_CONTEXT_CONTENT_BYTES as u64,

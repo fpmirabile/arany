@@ -44,11 +44,14 @@ pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> b
                     .tools
                     .iter()
                     .filter(|t| {
-                        !matches!(t.intent.call, crate::tools::ToolCall::PrepareWorker { .. })
+                        !matches!(t.intent.call, crate::tools::ToolCall::ApplyChangeset { .. })
                     })
                     .count()
                     == child_tool_requests(agent)
-                && agent.tools.iter().all(ToolView::settled_without_stop)))
+                && agent.tools.iter().all(|tool| {
+                    tool.settled_without_stop()
+                        && super::tool::command_publication_settled(&agent.tools, tool)
+                })))
 }
 
 pub(super) fn names_child(view: &SessionView, run_id: RunId, agent_run_id: AgentRunId) -> bool {
@@ -167,10 +170,6 @@ impl SessionView {
             .as_ref()
             .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
         if out_of_plan
-            && !matches!(
-                observation.intent.call,
-                crate::tools::ToolCall::PrepareWorker { .. }
-            )
             && (observation.disposition != ToolDisposition::Denied
                 || observation.attestation.is_some()
                 || observation.cache_update != CacheUpdate::NotApplicable)

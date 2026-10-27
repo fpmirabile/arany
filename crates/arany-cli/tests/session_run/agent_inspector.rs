@@ -19,25 +19,62 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    let text = inspect_agents(&state, &workspace, None);
+    assert!(text.contains("No Runs yet"));
+    assert!(text.contains("History: 0 agents in 0 recent Runs; 0 older Runs"));
+    assert!(text.contains("No AgentRuns yet"));
+    assert!(text.contains("Next Run: auto · up to 3 children"));
+    assert!(text.contains("Agent inspection closed"));
+    assert!(!text.contains("\x1b[?1000h"));
+}
+
+#[tokio::test]
+async fn editor_inspector_retains_observation_derived_paths_and_digests_after_cancel() {
+    let observed = arany::test_support::worker_teams::run_case(
+        std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
+        "command_cancel",
+    )
+    .await;
+    let state = observed.directory.path().join("state");
+    let workspace = observed.directory.path().join("workspace");
+    arany::set_session_defaults(
+        StateRoot::open_existing(&state).expect("fixture State"),
+        workspace.clone(),
+        observed.session,
+        arany::SessionDefaults {
+            provider: Some("openai".into()),
+            ..observed.view.defaults.clone()
+        },
+    )
+    .await
+    .expect("inspector provider defaults");
+    let (before, _) = arany::test_support::goals::replayed(&state, observed.session).await;
+    let text = inspect_agents(&state, &workspace, Some(observed.session));
+    let report = &observed.view.runs[0].worker_history()[0].changed_paths;
+    assert!(text.contains("Changed paths (untrusted"));
+    assert!(text.contains("notes/0"));
+    let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
+    assert!(text.contains(row["after_sha256"].as_str().unwrap()));
+    assert!(text.contains("Lease released: true; verified: false"));
+    assert!(text.contains("Publication: Confirmed"));
+    for removed in [
+        "integration:",
+        "discarded:",
+        "Private outcome unknown:",
+        "cleanup confirmed:",
+    ] {
+        assert!(!text.contains(removed), "retired worker field: {removed}");
+    }
+    let (events, _) = arany::test_support::goals::replayed(&state, observed.session).await;
+    assert_eq!(events, before);
+}
+
+fn inspect_agents(
+    state: &std::path::Path,
+    workspace: &std::path::Path,
+    session: Option<SessionId>,
+) -> String {
+    let mut command = inspector_command(state, workspace, session);
     let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
@@ -47,11 +84,11 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
-        let stages: [&[u8]; 3] = [
-            b"Input:",
-            b"Agent choice: n next",
-            b"Notice: Agent inspection closed",
-        ];
+        let mut stages: Vec<&[u8]> = vec![b"Input:", b"Agent choice: n next"];
+        if session.is_some() {
+            stages.push(b"Changed paths (untrusted");
+        }
+        stages.push(b"Notice: Agent inspection closed");
         let mut next = 0;
         loop {
             let mut chunk = [0; 4096];
@@ -84,8 +121,12 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     stage(0);
     input.write_all(b"/agents\n").expect("open inspector");
     stage(1);
+    if session.is_some() {
+        input.write_all(b"n\n").expect("select the editor");
+        stage(2);
+    }
     input.write_all(b"q\n").expect("close inspector");
-    stage(2);
+    stage(if session.is_some() { 3 } else { 2 });
     input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -102,12 +143,37 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     }
     let output = reader.join().expect("PTY output reader");
     let text = String::from_utf8_lossy(&output);
-    assert!(text.contains("No Runs yet"));
-    assert!(text.contains("History: 0 agents in 0 recent Runs; 0 older Runs"));
-    assert!(text.contains("No AgentRuns yet"));
-    assert!(text.contains("Next Run: auto · up to 3 children"));
-    assert!(text.contains("Agent inspection closed"));
-    assert!(!text.contains("\x1b[?1000h"));
+    text.into_owned()
+}
+
+fn inspector_command(
+    state: &std::path::Path,
+    workspace: &std::path::Path,
+    session: Option<SessionId>,
+) -> Command {
+    let invocation = if session.is_some() {
+        "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai"
+    } else {
+        "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai"
+    };
+    let mut command =
+        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE", state)
+        .env("ARANY_TEST_WORKSPACE", workspace)
+        .env(
+            "ARANY_TEST_SESSION",
+            session.map(|id| id.to_string()).unwrap_or_default(),
+        )
+        .env("TERM", "dumb")
+        .current_dir(workspace)
+        .args(["-q", "-e", "-c", invocation, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
 }
 
 #[test]

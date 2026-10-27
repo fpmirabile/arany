@@ -1,0 +1,1 @@
+{"subject_sequence":1,"site":"tool_outcome","evaluator":1,"mode":"shadow","signals":[{"signal":"loop","level":"notice","would_response":null,"features":{"repeat_identical":3,"repeat_failing":0,"cycle_reps":0,"cycle_len":0,"edit_oscillation":0,"stalled_calls":0},"evidence":[1]}],"capped":false}

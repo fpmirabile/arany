@@ -842,7 +842,7 @@ fn supervisor_trace_verdict() -> crate::supervisor::SupervisorVerdict {
     ];
     SupervisorVerdict {
         subject_sequence: 1,
-        site: Site::WorkerCapture,
+        site: Site::CommandCapture,
         evaluator: 1,
         mode: Mode::Shadow,
         signals,
@@ -2342,7 +2342,6 @@ fn worker_recovery_history_and_lineage_export_only_closed_metadata() {
                 pins.request.direction = canary.into();
                 pins.request.resumes = Some(AgentRunId::new());
             }
-            Event::WorkerDataChunk { record, .. } => record.content = canary.into(),
             Event::AgentFinished {
                 result: Some(text), ..
             } => *text = canary.into(),

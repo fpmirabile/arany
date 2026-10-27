@@ -12,7 +12,7 @@ fn config_value() -> Value {
 
 #[test]
 fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
-    use crate::session::worker::{ChangesetSource, WorkerDataPurpose, WorkerPreparation};
+    use crate::session::worker::ChangesetSource;
     use crate::tools::types::CommandChangeset;
 
     let path = || "src".to_owned();
@@ -78,22 +78,6 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
             source: ChangesetSource::CommandReceipt {
                 source_intent_digest: [1; 32],
                 changeset: CommandChangeset::default(),
-            },
-        },
-        ToolCall::PrepareWorker {
-            preparation: WorkerPreparation {
-                assignment_id: crate::session::AgentRunId::new(),
-                purpose: WorkerDataPurpose::Base,
-                max_chunks: 1,
-                max_bytes: 1,
-            },
-        },
-        ToolCall::PrepareWorker {
-            preparation: WorkerPreparation {
-                assignment_id: crate::session::AgentRunId::new(),
-                purpose: WorkerDataPurpose::Handover,
-                max_chunks: 1,
-                max_bytes: 1,
             },
         },
         ToolCall::Skill {
@@ -165,10 +149,7 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
     for call in calls {
         let old_is_host = matches!(call, ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. });
         let old_is_unguarded = matches!(call, ToolCall::CommandUnguarded { .. });
-        let old_is_internal = matches!(
-            call,
-            ToolCall::ParseAgentDefinition { .. } | ToolCall::PrepareWorker { .. }
-        );
+        let old_is_internal = matches!(call, ToolCall::ParseAgentDefinition { .. });
 
         assert_eq!(call.is_host(), call.facts().site == Site::Host);
         assert_eq!(call.is_host(), old_is_host, "{call:?}");
