@@ -234,10 +234,7 @@ fn upper_handles() -> Vec<PathBuf> {
     handles
         .into_iter()
         .filter_map(|entry| std::fs::read_link(entry.unwrap().path()).ok())
-        .filter(|path| {
-            path.to_string_lossy()
-                .contains("/cache-namespace/view/upper")
-        })
+        .filter(|path| path.ends_with("view/upper"))
         .collect()
 }
 
