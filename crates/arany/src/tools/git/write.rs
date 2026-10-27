@@ -1243,6 +1243,8 @@ fn publish(
             Err(ToolError::Conflict) => return Ok(Err(DRIFT)),
             Err(error) => return Err(error),
         }
+        #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+        crate::fault::git_write::published(intent);
     }
     let effects = (|| {
         copy_objects(&git_dir, plan)?;

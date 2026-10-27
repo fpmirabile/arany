@@ -3,6 +3,10 @@
 mod recovery;
 
 #[cfg(any(debug_assertions, arany_ci))]
+#[path = "tools_macos_git/switch.rs"]
+mod switch;
+
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::engine_support::run_with;
 #[cfg(any(debug_assertions, arany_ci))]
 use crate::git::{host_git, tree_snapshot};
@@ -158,6 +162,20 @@ fn guarded_native_git_commit_publishes_through_two_units_and_replays() {
     crate::tools::native_journey("tools_git::native_git_commit_helper");
     #[cfg(all(not(debug_assertions), arany_ci))]
     release_git_journey("tools_git::native_git_commit_helper");
+    #[cfg(all(not(debug_assertions), not(arany_ci)))]
+    panic!("release Git journey requires CI's disposable account");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS Git write journey; release requires CI's disposable account"
+)]
+fn guarded_native_git_switch_publishes_through_two_units_and_replays() {
+    #[cfg(debug_assertions)]
+    crate::tools::native_journey("tools_git::switch::native_git_switch_helper");
+    #[cfg(all(not(debug_assertions), arany_ci))]
+    release_git_journey("tools_git::switch::native_git_switch_helper");
     #[cfg(all(not(debug_assertions), not(arany_ci)))]
     panic!("release Git journey requires CI's disposable account");
 }
@@ -928,7 +946,8 @@ async fn native_git_branch_helper() {
             "git_diff",
             "git_log",
             "git_commit",
-            "git_branch"
+            "git_branch",
+            "git_switch"
         ])
     );
     assert_eq!(catalog["git"]["write"], true);

@@ -361,13 +361,7 @@ impl Config {
             | ToolCall::GitBranch { .. }
             | ToolCall::GitSwitch { .. } => {
                 return self.git_available()
-                    && match call {
-                        ToolCall::GitBranch { name: Some(_), .. } => {
-                            super::guard::git_branch_creation_available()
-                        }
-                        ToolCall::GitCommit { .. } => super::guard::git_commit_available(),
-                        _ => !call.mutates() || super::guard::git_writes_available(),
-                    };
+                    && (!call.mutates() || super::guard::git_writes_available());
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self

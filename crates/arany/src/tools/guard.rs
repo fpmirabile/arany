@@ -55,19 +55,14 @@ pub(super) fn git_writes_available() -> bool {
     {
         landlock::available()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         false
     }
-}
-
-// macOS offers branch creation and commits until its units cover switches.
-pub(super) fn git_branch_creation_available() -> bool {
-    cfg!(target_os = "macos") || git_writes_available()
-}
-
-pub(super) fn git_commit_available() -> bool {
-    git_branch_creation_available()
 }
 
 #[cfg(target_os = "macos")]
