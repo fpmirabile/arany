@@ -689,6 +689,8 @@ pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>
 
 pub(crate) const HOST_SESSION_APPROVAL_HINT: &str =
     "Shift+Tab to Request offers session approval for later eligible commands";
+// Linear input has no mode cycle, so it names the visual-mode route instead.
+pub(crate) const HOST_SESSION_APPROVAL_LINEAR_HINT: &str = "Session approval for later eligible commands needs Request approvals, selected with Shift+Tab in a visual mode";
 
 #[derive(Clone)]
 pub struct ToolApprovalPrompt {

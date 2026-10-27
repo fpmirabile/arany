@@ -1,6 +1,7 @@
 use crate::presentation::{
-    AgentInspectorModel, MAX_AGENT_ROWS, MAX_ROW_WIDTH, escape_terminal, image_message_lines,
-    linear_session_lines, safe_truncate, user_message_lines,
+    AgentInspectorModel, HOST_SESSION_APPROVAL_HINT, HOST_SESSION_APPROVAL_LINEAR_HINT,
+    MAX_AGENT_ROWS, MAX_ROW_WIDTH, escape_terminal, image_message_lines, linear_session_lines,
+    safe_truncate, user_message_lines,
 };
 #[cfg(test)]
 use arany::ModelEntry;
@@ -110,7 +111,16 @@ impl LinearState {
         choices: &[crate::presentation::ToolApprovalChoice],
         armed: bool,
     ) -> io::Result<()> {
-        let mut lines = lines.to_vec();
+        let mut lines: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                if line == HOST_SESSION_APPROVAL_HINT {
+                    HOST_SESSION_APPROVAL_LINEAR_HINT.into()
+                } else {
+                    line.clone()
+                }
+            })
+            .collect();
         lines.push("Do you want to proceed?".into());
         lines.extend(
             choices
@@ -957,7 +967,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "Run outside the Guard? (unguarded)\nShift+Tab to Request offers session approval for later eligible commands\nDo you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
+            "Run outside the Guard? (unguarded)\nSession approval for later eligible commands needs Request approvals, selected with Shift+Tab in a visual mode\nDo you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
         );
     }
 
