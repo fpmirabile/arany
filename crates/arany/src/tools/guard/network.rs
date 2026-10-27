@@ -11,7 +11,7 @@ pub(super) fn validate(task: &Task) -> Result<(), ToolError> {
         task.config.network.is_some()
     };
     if task.intent.limits.network == NetworkGrant::Proxy
-        && (!admitted || task.worker.is_some() || cfg!(not(target_os = "linux")))
+        && (!admitted || cfg!(not(target_os = "linux")))
     {
         return Err(ToolError::Configuration);
     }
