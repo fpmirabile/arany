@@ -296,14 +296,15 @@ The [Tool contract](../specs/tools.md) owns supported behavior and acceptance sc
 
 The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. In-process file operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Linux whole-root primary commands instead receive a supervisor-owned Workspace overlay; narrow Linux commands, macOS commands and MCP retain fresh private selected-file snapshots. All retain no network/accounts and bounded memory/PID/CPU/time/scratch. Copy commands return bounded changesets after descendant termination; whole-root overlays currently accept only empty uppers, and MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the in-process file publisher, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
 
-Linux bootstrap verifies its own executable pin and bounded tmpfs/xattr operations
-before privilege removal. Both namespace owners attest their own mount topology;
-the inner helper also checks its executable pin and its copy tmpfs or merged overlay
-and masks. Whole-root lower clones, bounded inventory, masks and private tmpfs
-upper/work belong only to the retained supervisor. It checks D5 before any lower
-walk, constructs the view before capability clearing, and reattests before relaying
-GO. Raw layers and their descriptors never reach the payload. Its pidfd wait/reap
-precedes empty-upper validation, completion reporting and namespace release.
+Linux bootstrap verifies its own executable pin for every launch. Primary Workspace
+commands also perform bounded tmpfs/xattr operations before privilege removal.
+Both namespace owners attest their own mount topology;
+the inner helper also checks its executable pin and the primary copy-view tmpfs or
+merged overlay and masks. Whole-root lower clones, bounded inventory, masks and
+private tmpfs upper/work belong only to the retained supervisor. It checks D5 before
+any lower walk, constructs the view before capability clearing, and reattests before
+relaying GO. Raw layers and their descriptors never reach the payload. Its pidfd
+wait/reap precedes empty-upper validation, completion reporting and namespace release.
 Typed setup refusals can explain unavailable enforcement before GO; missing completion after GO remains
 Uncertain. Neither path grants host authority or chooses an alternate launcher.
 
