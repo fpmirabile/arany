@@ -10,6 +10,9 @@ pub(super) struct Flow {
     literal: Option<Range<usize>>,
     link: Option<super::links::Link>,
     bytes: usize,
+    source_end: usize,
+    #[cfg(test)]
+    scanned_bytes: usize,
 }
 pub(super) struct Lines {
     cells: Vec<Cell>,
@@ -36,6 +39,11 @@ impl Flow {
         {
             return Ok(());
         }
+        let gap_start = self.source_end.min(range.start);
+        // Opening tags span future content, so they do not consume it yet.
+        if !matches!(event, Event::Start(_)) {
+            self.source_end = range.end;
+        }
         if matches!(
             event,
             Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link)
@@ -56,14 +64,21 @@ impl Flow {
                 self.enclose(start, range);
             }
             Event::Start(Tag::Image { .. }) => {
+                self.source_end = range.end;
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);
             }
             Event::Text(text) => {
-                let slashes = source.as_bytes()[..range.start]
+                let slashes = source.as_bytes()[gap_start..range.start]
                     .iter()
                     .rev()
-                    .take_while(|byte| **byte == b'\\')
+                    .take_while(|byte| {
+                        #[cfg(test)]
+                        {
+                            self.scanned_bytes += 1;
+                        }
+                        **byte == b'\\'
+                    })
                     .count();
                 let escaped = slashes % 2 == 1;
                 let outer = range.start - usize::from(escaped)..range.end;
@@ -150,9 +165,11 @@ impl Flow {
                     Origin::plain(inner, range.clone()),
                     style,
                 )?;
+                self.source_end = range.end;
                 self.literal = Some(range);
             }
             Event::Start(_) => {
+                self.source_end = range.end;
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);
             }
@@ -467,3 +484,6 @@ pub(super) fn layout(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -552,6 +552,13 @@ fn leading_hard_breaks_keep_exact_rows_find_and_reading_anchors() {
 #[test]
 fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables() {
     for (markup, literal, style) in [
+        ("**[label](dest)**", "label (dest)", Modifier::BOLD),
+        (
+            "***[label](dest)***",
+            "label (dest)",
+            Modifier::BOLD | Modifier::ITALIC,
+        ),
+        ("**[a *label*](dest)**", "a label (dest)", Modifier::BOLD),
         ("*![alt](x.png)*", "![alt](x.png)", Modifier::ITALIC),
         (
             "***![alt](x.png)***",
@@ -583,7 +590,9 @@ fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables(
                 for modifier in [Modifier::BOLD, Modifier::ITALIC] {
                     assert_eq!(
                         styled(row, modifier),
-                        if style.contains(modifier) {
+                        if markup == "**[a *label*](dest)**" && modifier == Modifier::ITALIC {
+                            "label"
+                        } else if style.contains(modifier) {
                             literal
                         } else {
                             ""
