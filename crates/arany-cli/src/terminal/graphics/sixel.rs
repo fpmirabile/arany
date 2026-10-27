@@ -18,6 +18,7 @@ const PALETTE_COLORS: usize = PALETTE_RED * PALETTE_GREEN * PALETTE_BLUE;
 const SIXEL_ROWS: usize = 6;
 const RGBA_CHANNELS: usize = 4;
 const TRANSPARENT: u8 = u8::MAX;
+const _: () = assert!(PALETTE_COLORS <= TRANSPARENT as usize);
 
 pub(in crate::terminal) const LIMITS: &[arany::limits::Limit] = &[
     arany::limits::Limit {
