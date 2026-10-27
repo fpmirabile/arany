@@ -434,7 +434,7 @@ Archives capture regular files by content regardless of link count, so Cargo har
 
 ## Command input selection
 
-Linux primary guarded commands with the whole-root `["."]` grant read a private Workspace overlay. Reads include gitignored files, dependency directories and inputs above 1 MiB within that grant; ignore rules do not select Linux overlay read access. Only an empty private upper currently succeeds: any payload-created upper entry refuses capture and publishes nothing, including edits, deletions, ignored outputs and identical copy-ups. Narrow Linux grants and macOS retain the disposable-copy selection below.
+Linux primary guarded commands with the whole-root `["."]` grant read a private Workspace overlay. Reads include gitignored files, dependency directories and inputs above [1 MiB](./limits.md#max_file_bytes) within that grant; ignore rules do not select Linux overlay read access. Only an empty private upper currently succeeds: any payload-created upper entry refuses capture and publishes nothing, including edits, deletions, ignored outputs and identical copy-ups. Narrow Linux grants and macOS retain the disposable-copy selection below.
 
 ### Linux overlay visibility
 
