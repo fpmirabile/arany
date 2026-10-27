@@ -35,8 +35,6 @@ Done when a normal engineering day in this repository needs no fallback to anoth
 
 ### Tool and Engine follow-ups
 
-- **Editor/worker overlay commands.** Shared-workspace-editors [S2c′](./planning/shared-workspace-editors/README.md#s2c--verify-child-identity-commands-after-overlays) verifies the shared primary/editor command path after overlay S3: child identity, narrow grants, launch baseline/conflict and lease checks, D6 cache leasing, checkpoints/receipts, cancellation and uncertainty. No dispatch migration or private-image command path remains for this successor. Its closing slice may remove S2c′ only by citing existing child-identity overlay evidence proving those claims; closing the overlay plan does not close this verification.
-
 - **Compaction hook refusal mapping.** The idle/boundary [compaction path](./crates/arany/src/engine/compaction.rs#L299) still maps `HookRefusal` through [into_engine_error](./crates/arany/src/engine/run_loop/stop.rs#L126), while the active Run loop retains typed stop causes. Reconcile only with preserved budget, cancellation, context and replay semantics; existing owners are [Engine hook replay](./crates/arany/tests/engine_run/hooks.rs#L5) and [Guard PreCompact scenarios](./crates/arany-cli/tests/guard_runs/permissions/hooks.rs). This difference remains unchanged.
 
 - **Recorded native Guard storage.** Extend the [storage report](./docs/specs/terminal.md#storage-report) through the existing Linux seed and macOS image ownership records: backing-byte accounting, live/retained/unknown labels and the existing maintenance guidance. Cover mounted-image non-traversal, unrecorded prefixes, stale boot, replaced roots, busy or changing records and aggregate overflow. Do not introduce worktree management.
