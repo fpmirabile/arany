@@ -685,7 +685,7 @@ pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>
 }
 
 pub(crate) const HOST_SESSION_APPROVAL_HINT: &str =
-    "Session approval is offered in Request approvals (Shift+Tab)";
+    "Shift+Tab to Request offers session approval for later eligible commands";
 
 #[derive(Clone)]
 pub struct ToolApprovalPrompt {

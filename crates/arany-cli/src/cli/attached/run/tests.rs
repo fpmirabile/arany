@@ -215,7 +215,7 @@ mod approval_reply_tests {
                     assert_eq!(displayed.intent_id, prompt.intent_id);
                     assert_eq!(
                         displayed.lines.last().unwrap()
-                            == "Session approval is offered in Request approvals (Shift+Tab)",
+                            == "Shift+Tab to Request offers session approval for later eligible commands",
                         hint
                     );
                 }
