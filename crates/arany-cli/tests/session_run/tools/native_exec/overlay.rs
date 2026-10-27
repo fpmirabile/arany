@@ -306,7 +306,7 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
             "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt"
         }
         OverlayCase::NarrowNoSpace => {
-            "printf partial > src/current.txt; dd if=/dev/zero of=src/node_modules/fill bs=1M count=160 2>/dev/null; dd if=/dev/zero of=lib/deep/node_modules/fill bs=1M count=160 2>/dev/null"
+            "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=src/node_modules/fill bs=1M count=160; LC_ALL=C dd if=/dev/zero of=lib/deep/node_modules/fill bs=1M count=160"
         }
 
         OverlayCase::Writes => {
@@ -317,7 +317,7 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
         }
         OverlayCase::ModeZero => "umask 0777; printf readable > created",
         OverlayCase::NoSpace => {
-            "printf partial > src/current.txt; dd if=/dev/zero of=node_modules/fill bs=1M count=300 2>/dev/null"
+            "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=node_modules/fill bs=1M count=300"
         }
         OverlayCase::Deletion => "rm src/current.txt",
         OverlayCase::CopyUps => {
@@ -512,6 +512,14 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         if case == OverlayCase::CopyUps {
             assert_eq!(result["selection"]["discarded_outputs"], 0);
         }
+        if matches!(case, OverlayCase::NoSpace | OverlayCase::NarrowNoSpace) {
+            assert!(
+                result["stderr"]
+                    .as_str()
+                    .unwrap()
+                    .contains("No space left on device")
+            );
+        }
         if !publishes {
             assert_eq!(result["changeset"]["files"], json!([]));
         }
@@ -548,6 +556,18 @@ fn check_overlay_files(workspace: &std::path::Path, case: OverlayCase) {
             std::fs::read(workspace.join("src/current.txt")).unwrap(),
             expected,
             "{case}"
+        );
+    }
+    if case == OverlayCase::Writes {
+        assert_eq!(
+            std::fs::read(workspace.join("created")).unwrap(),
+            b"private create"
+        );
+    }
+    if case == OverlayCase::SpillMerge {
+        assert_eq!(
+            std::fs::read(workspace.join("created")).unwrap(),
+            vec![b' '; MERGE_OUTPUT_BYTES]
         );
     }
     if case == OverlayCase::ModeZero {
