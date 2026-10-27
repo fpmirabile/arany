@@ -8,9 +8,6 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let facts = call.facts();
     match facts.family {
         Family::File if super::discovery::possible(call) => discover(site),
-        Family::File if site.worker_paths.is_some() => {
-            fs::native(site.workspace, call, site.config)
-        }
         Family::File => Err(ToolError::Configuration),
         Family::Process => process::run(site).await,
         Family::Skill => Err(ToolError::Configuration),
@@ -150,19 +147,14 @@ pub(super) fn outcome(
 
 fn discover(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let root = fs::open_directory(site.workspace)?;
-    let mut config = site.config.clone();
-    if let Some(paths) = site.worker_paths {
-        config.workspace_paths = paths.to_vec();
-    }
     super::discovery::inspect(super::discovery::Request {
         root: &root,
         call: &site.intent.call,
-        config: &config,
+        config: site.config,
         hidden: &|path| site.hidden.covers(path),
         deadline: std::time::Instant::now() + site.remaining_runtime(),
         result_bytes: site.intent.limits.result_bytes as usize,
         output: super::discovery::Output::Tool,
-        private_image: site.worker_paths.is_some(),
         cancellation: None,
     })
 }

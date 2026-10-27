@@ -42,7 +42,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),
-        worker: None,
         handover: None,
         definitions: Default::default(),
         permissions: None,

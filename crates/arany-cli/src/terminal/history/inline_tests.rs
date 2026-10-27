@@ -580,9 +580,9 @@ fn links_and_images_keep_accumulated_styles_in_prose_and_tables() {
         ),
         (
             "***[label](a&amp;b)***",
-            "[label](a&amp;b)",
-            "[label](a&amp;b)",
-            "[label](a&amp;b)",
+            "label (a&b)",
+            "label (a&b)",
+            "label (a&b)",
         ),
     ] {
         for source in [

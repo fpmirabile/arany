@@ -245,7 +245,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     unit::check_available()
 }
 
-const MACOS_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
+const MACOS_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
 
 const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
@@ -253,10 +253,9 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v16:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
+    let mut bytes = b"arany-macos-guard-v17:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
-    bytes.extend_from_slice(MACOS_WORKER_CONTRACT);
-    bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
+    bytes.extend_from_slice(MACOS_REWIND_CONTRACT);
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
     bytes.extend_from_slice(super::DISCOVERY_DONE);
@@ -472,24 +471,12 @@ pub(super) fn install(
     }
     configure_file_cpu()?;
     let mut profile = SeatbeltProfile::new(ProfileKind::File);
-    let worker_root = if task.worker.is_some() {
-        Some(std::env::current_dir().map_err(|_| ToolError::Path)?)
-    } else {
-        None
-    };
-    if let Some(root) = &worker_root {
-        super::super::fs::reject_overlap(root, &task.workspace)?;
-        storage::verify_storage(root, &task.intent.limits)?;
-        for name in ["workspace", "scratch"] {
-            let path = root.join(name);
-            profile.grant("allow file-read* file-write*", "subpath", &path)?;
-        }
-    } else if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
+    if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
         profile.grant("allow file-read*", "subpath", &task.workspace)?;
     }
     profile.protect_guard(&task.guard_executable)?;
     profile.install()?;
-    Ok(worker_root.unwrap_or_else(|| PathBuf::from("/")))
+    Ok(PathBuf::from("/"))
 }
 
 fn unit_root(task: &Task) -> Result<PathBuf, ToolError> {
@@ -1035,7 +1022,6 @@ impl Task {
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
             hidden: runtime.hidden_paths(&intent.call),
             definition: runtime.definitions.payload(&intent.call)?,
-            worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
             handover: runtime
                 .handover
                 .as_ref()
@@ -1070,14 +1056,6 @@ impl Task {
             git_writes_available: false,
             host_authentication: Default::default(),
             handover,
-            worker: self.worker.zip(worker_input).map(|(transfer, input)| {
-                Arc::new(super::transfer::Action {
-                    transfer,
-                    input: input.into(),
-                    output: std::sync::Mutex::new(None),
-                    contained: AtomicBool::new(false),
-                })
-            }),
             definitions: super::super::definitions::DefinitionSnapshots::from_payload(
                 &self.intent.call,
                 self.definition,
@@ -1126,7 +1104,10 @@ async fn worker_ready(
                 .map_err(|_| ToolError::Operation)?;
             let mut bytes = read_line_capped(stdout, 2048).await?;
             if bytes == b"WORKER_READY\n" {
-                let input = super::transfer::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+                let input = runtime
+                    .handover
+                    .as_deref()
+                    .ok_or(ToolError::Configuration)?;
                 super::transfer::send_frame(stdin, input).await?;
                 bytes = read_line_capped(stdout, 2048).await?;
             }
@@ -1152,13 +1133,27 @@ struct GoGate {
     git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
+impl GoGate {
+    async fn wait(
+        self,
+        stdin: &mut tokio::process::ChildStdin,
+        result_bytes: usize,
+    ) -> Result<(), ToolError> {
+        if let Some(input) = self.git_input {
+            let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
+            super::transfer::send_frame_capped(stdin, &result, result_bytes).await?;
+            super::transfer::send_frame_capped(stdin, &frame, crate::tools::git::WRITE_FRAME_BYTES)
+                .await?;
+        }
+        self.receive_go.await.map_err(|_| ToolError::Operation)
+    }
+}
+
 async fn read_command_windows(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
-    runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<Option<crate::tools::output::CommandWindows>, ToolError> {
-    if runtime.worker.is_none()
-        && matches!(intent.call, ToolCall::Command { .. })
+    if matches!(intent.call, ToolCall::Command { .. })
         && tokio::io::AsyncBufReadExt::fill_buf(stdout)
             .await
             .map_err(|_| ToolError::Operation)?
@@ -1184,7 +1179,6 @@ async fn read_command_windows(
 async fn worker_receipt(
     mut stdin: tokio::process::ChildStdin,
     stdout: &mut BufReader<tokio::process::ChildStdout>,
-    runtime: &ToolRuntime,
     intent: &EffectIntent,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     git_stage: Option<super::GitStage>,
@@ -1195,7 +1189,7 @@ async fn worker_receipt(
         .await
         .map_err(|_| ToolError::Operation)?;
     drop(stdin);
-    let windows = read_command_windows(stdout, runtime, intent).await?;
+    let windows = read_command_windows(stdout, intent).await?;
     let mut frame = None;
     let observation = if git_stage == Some(super::GitStage::Plan) {
         let (observation, framed) = super::read_plan_report(stdout, intent).await?;
@@ -1209,14 +1203,6 @@ async fn worker_receipt(
             }
         }
         observation
-    } else if runtime.worker.is_some() {
-        super::read_worker_observation(
-            stdout,
-            runtime,
-            intent,
-            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
-        )
-        .await?
     } else {
         read_observation(stdout, intent).await?
     };
@@ -1244,13 +1230,9 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let GoGate {
-        receive_go,
-        git_stage,
-        git_input,
-        #[cfg(any(test, feature = "test-support"))]
-        git_fault,
-    } = gate;
+    let git_stage = gate.git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
     task.git_stage = git_stage;
     #[cfg(any(test, feature = "test-support"))]
@@ -1261,13 +1243,11 @@ async fn execute_worker(
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
-        .current_dir(
-            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git() {
-                root
-            } else {
-                Path::new("/")
-            },
-        )
+        .current_dir(if intent.call.is_process() || intent.call.is_git() {
+            root
+        } else {
+            Path::new("/")
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1302,22 +1282,8 @@ async fn execute_worker(
                 .map_err(|_| ToolError::Operation)?;
             capture.complete();
             let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
-            if let Some(input) = git_input {
-                let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
-                super::transfer::send_frame_capped(
-                    &mut stdin,
-                    &result,
-                    intent.limits.result_bytes as usize,
-                )
+            gate.wait(&mut stdin, intent.limits.result_bytes as usize)
                 .await?;
-                super::transfer::send_frame_capped(
-                    &mut stdin,
-                    &frame,
-                    crate::tools::git::WRITE_FRAME_BYTES,
-                )
-                .await?;
-            }
-            receive_go.await.map_err(|_| ToolError::Operation)?;
             #[cfg(any(test, feature = "test-support"))]
             if matches!(
                 git_fault,
@@ -1336,14 +1302,10 @@ async fn execute_worker(
             let payload_deadline = super::payload_report_deadline(
                 tokio::time::Instant::now(),
                 intent.limits.runtime_ms,
-            ) + if runtime.worker.is_some() {
-                super::transfer::transfer_time(intent)
-            } else {
-                Duration::ZERO
-            };
+            );
             tokio::time::timeout_at(
                 payload_deadline,
-                worker_receipt(stdin, &mut stdout, runtime, intent, control, git_stage),
+                worker_receipt(stdin, &mut stdout, intent, control, git_stage),
             )
             .await
             .map_err(|_| ToolError::Limit)?
@@ -1351,7 +1313,7 @@ async fn execute_worker(
         let deadline = tokio::time::Instant::now()
             + RESERVATION_OVERHEAD
             + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-            + super::transfer::transfer_overhead(intent);
+            + super::transfer::transfer_time(intent);
         let execution = tokio::time::timeout_at(deadline, execution);
         tokio::pin!(execution);
         let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
@@ -1416,8 +1378,8 @@ mod tests {
         use crate::validate::hex_digest;
 
         assert_eq!(
-            hex_digest(MACOS_WORKER_CONTRACT),
-            "798b3db8dab2b75accfbc4eabdc643f5275248da221a78edfe572e96ae9f9db2"
+            hex_digest(MACOS_REWIND_CONTRACT),
+            "6417dc6f02793f6d31d0e1b108b019982e2f49b74d5b23b23fab35a1780df097"
         );
         assert_eq!(
             hex_digest(MACOS_SELECTION_CONTRACT),
@@ -1425,7 +1387,7 @@ mod tests {
         );
         super::super::tests::assert_enforcement_prose(
             MACOS_SELECTION_CONTRACT,
-            MACOS_WORKER_CONTRACT,
+            MACOS_REWIND_CONTRACT,
         );
     }
 
@@ -1656,7 +1618,6 @@ mod tests {
         .unwrap();
         let task = Task {
             definition: None,
-            worker: None,
             handover: None,
             intent: EffectIntent {
                 host: None,
@@ -2136,7 +2097,6 @@ mod tests {
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
             definition: None,
-            worker: None,
             handover: None,
             intent: EffectIntent {
                 host: None,
