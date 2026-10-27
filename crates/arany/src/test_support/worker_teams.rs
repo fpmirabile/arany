@@ -516,7 +516,11 @@ async fn run_live(
         ApprovalMode::Request
     });
     let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
-    let mut cache_gate = None;
+    let mut cache_gate: Option<(
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        String,
+    )> = None;
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
