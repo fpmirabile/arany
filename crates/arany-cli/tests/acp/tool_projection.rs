@@ -58,6 +58,7 @@ async fn family_projection_preserves_titles_locations_and_raw_calls() {
             output: String::new(),
             attestation: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: arany::CacheUpdate::NotApplicable,
         };
         adapter.item(&intent, Some(&observation)).await;
@@ -118,6 +119,7 @@ async fn move_live_and_permission_projection_preserves_file_change_details() {
         output: String::new(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&uncertain)).await;
@@ -154,6 +156,7 @@ async fn move_completion_preserves_denial_projection() {
         output: String::new(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -381,6 +384,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         output: "é`\u{001b}".repeat(64 * 1024),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;

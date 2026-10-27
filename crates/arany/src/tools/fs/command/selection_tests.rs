@@ -421,3 +421,30 @@ fn command_selection_negations_cannot_disclose_protected_names() {
     assert!(target.join("visible").is_file());
     assert_eq!(result.summary.ignored_entries, 0);
 }
+
+#[test]
+fn an_expired_selection_names_the_selection_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    let resources = temp.path().join("resources");
+    for path in [&source, &target, &resources] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let mut config = config_value();
+    config["workspace_paths"] = json!(["."]);
+    let config: Config = serde_json::from_value(config).unwrap();
+    let result = super::fs::prepare_command(
+        &super::fs::open_directory(&source).unwrap(),
+        &super::fs::open_directory(&target).unwrap(),
+        &super::fs::open_directory(&resources).unwrap(),
+        &config,
+        std::time::Instant::now(),
+    );
+    assert!(matches!(
+        result,
+        Err(super::ToolError::ProjectSelection(
+            super::SelectionCause::TimedOut
+        ))
+    ));
+}

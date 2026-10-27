@@ -1531,6 +1531,7 @@ fn narrowed_host_pr_list_result_replays_within_its_pinned_budget() {
         disposition: ToolDisposition::Succeeded,
         output: output.clone(),
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
@@ -1611,6 +1612,7 @@ fn minimum_budget_host_pr_list_preparation_refusal_finishes_and_replays() {
         enforcement_cause: None,
         limit_cause: None,
         approval_cause: None,
+        guard_stage: None,
     };
     assert!(observation.valid());
     fixture.events.push(Event::ToolFinished {

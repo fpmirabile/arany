@@ -77,6 +77,7 @@ pub(super) fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::T
         disposition: crate::tools::ToolDisposition::Succeeded,
         output: "{}".into(),
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }
