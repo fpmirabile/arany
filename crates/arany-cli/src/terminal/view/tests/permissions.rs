@@ -317,9 +317,6 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                 rendered.push_str(row);
             }
             if !progress.more {
-                if width == 80 {
-                    println!("{}", rows.join("\n"));
-                }
                 break;
             }
         }
