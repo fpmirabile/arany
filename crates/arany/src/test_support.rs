@@ -124,6 +124,18 @@ static ACCOUNT_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLo
 #[cfg(unix)]
 static ACCOUNT_LEASE: std::sync::OnceLock<cap_std::fs::File> = std::sync::OnceLock::new();
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn inherit_account_root(path: &std::path::Path) {
+    assert!(path.is_absolute(), "absolute inherited test account root");
+    let lease = account_roots::inherit(path)
+        .expect("inherited account lease")
+        .expect("managed test account root");
+    ACCOUNT_LEASE.set(lease).expect("one account lease");
+    ACCOUNT_ROOT
+        .set(path.to_path_buf())
+        .expect("one test account root");
+}
+
 pub fn isolate_account_root() -> &'static std::path::Path {
     ACCOUNT_ROOT
         .get_or_init(|| {
