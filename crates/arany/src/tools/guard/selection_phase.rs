@@ -18,15 +18,9 @@ pub(super) async fn begin_action(
     runtime: &crate::tools::ToolRuntime,
     intent: &EffectIntent,
     admitted_at: tokio::time::Instant,
-) -> Result<
-    (
-        Option<crate::tools::ActiveToolWindow>,
-        Option<tokio::time::Instant>,
-    ),
-    ToolError,
-> {
+) -> Result<Option<crate::tools::ActiveToolWindow>, ToolError> {
     let window = runtime.begin_active_action(admitted_at).await?;
-    Ok((command_window(intent, window), command_deadline(intent)))
+    Ok(command_window(intent, window))
 }
 
 #[cfg(target_os = "linux")]
