@@ -1996,7 +1996,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                 let events = [
                     serde_json::json!({"type":"message_start","message":{"id":"msg_cancel","type":"message","role":"assistant","model":case.model,"content":[],"stop_reason":null,"usage":{"input_tokens":20,"output_tokens":0}}}),
                     serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-                    serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"safe preview test-"}}),
+                    serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"# safe preview\n\n```text\nsafe body test-"}}),
                 ];
                 let prefix: String = events
                     .iter()
@@ -2095,6 +2095,11 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             &mut answered,
             (0, 100, 30),
             "safe preview",
+        );
+        assert!(
+            super::screen_rows(&transcript, 100, 30)
+                .iter()
+                .any(|row| row.trim() == "safe preview")
         );
     } else {
         wait_settled(
@@ -2198,6 +2203,20 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         );
         assert_eq!(view.runs[0].agents[0].provider_calls.len(), 1);
         if cancel {
+            let checkpoint: String = view.runs[0]
+                .display
+                .iter()
+                .filter(|chunk| chunk.category == arany::DisplayCategory::Commentary)
+                .map(|chunk| chunk.text.as_str())
+                .collect();
+            assert!(checkpoint.starts_with("# safe preview\n\n```text\n"));
+            assert!(!checkpoint.contains("test-"));
+            assert!(
+                view.runs[0]
+                    .display
+                    .iter()
+                    .all(|chunk| chunk.category != arany::DisplayCategory::Answer)
+            );
             assert!(view.runs[0].assistant_message.is_none());
             assert_eq!(view.runs[0].agents[0].provider_calls[0].input_tokens, None);
         } else {
