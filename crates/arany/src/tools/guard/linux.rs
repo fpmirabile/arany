@@ -1803,7 +1803,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(LINUX_SELECTION_CONTRACT),
-            "35f1aa2d4c41ec3e4703f055ab4a9921d8aa39d6daffd3c9d670ec73582e74d5"
+            "ac6ba2cdae3e03d83caaf69c0b224079af11bfc05ef3e5ce6da5577ae0edb03a"
         );
         super::super::tests::assert_enforcement_prose(
             LINUX_SELECTION_CONTRACT,
