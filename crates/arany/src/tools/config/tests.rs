@@ -159,3 +159,46 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(Config::load(&state).is_err());
 }
+
+#[test]
+fn network_grant_is_closed_pinned_and_linux_only() {
+    let base = config_value();
+    let mut value = base.clone();
+    value["network"] = json!({"allow": ["example.com", "*.pypi.org", "127.0.0.1"]});
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let parsed = Config::parse(&bytes);
+    assert_eq!(parsed.is_ok(), cfg!(target_os = "linux"));
+    let config: Config = serde_json::from_value(value.clone()).unwrap();
+    assert_ne!(
+        config.digest(),
+        serde_json::from_value::<Config>(base.clone())
+            .unwrap()
+            .digest()
+    );
+    for invalid in [
+        json!({"allow": ["*.com"]}),
+        json!({"allow": ["10.0.0.1"]}),
+        json!({"allow": ["example.com:443"]}),
+        json!({"allow": ["example.com", "example.com"]}),
+        json!({"allow": [], "deny": ["example.com"]}),
+        json!({"allow": (0..=32).map(|index| format!("h{index}.example.com")).collect::<Vec<_>>()}),
+    ] {
+        let mut row = base.clone();
+        row["network"] = invalid;
+        assert!(
+            Config::parse(&serde_json::to_vec(&row).unwrap()).is_err(),
+            "{row}"
+        );
+    }
+    let mut unknown = base.clone();
+    unknown["network"] = json!({"allow": [], "ports": [80]});
+    assert!(Config::parse(&serde_json::to_vec(&unknown).unwrap()).is_err());
+    let mut absent = base;
+    absent["network"] = json!(null);
+    assert!(
+        Config::parse(&serde_json::to_vec(&absent).unwrap())
+            .unwrap()
+            .network
+            .is_none()
+    );
+}

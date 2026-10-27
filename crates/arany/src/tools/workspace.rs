@@ -486,6 +486,7 @@ impl WorkspacePermissions {
             runtime_grants: self.runtime_grants.clone(),
             git: super::git::discover(),
             git_identity: super::git::user_identity(),
+            network: None,
         };
         config.validate()?;
         Ok(config)
