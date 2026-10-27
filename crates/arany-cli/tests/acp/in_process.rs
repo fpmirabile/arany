@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
+#[path = "tool_projection.rs"]
+mod tool_projection;
+
 type Reader = BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>;
 type Writer = tokio::io::WriteHalf<tokio::io::DuplexStream>;
 const RPC_WAIT: Duration = Duration::from_secs(60);

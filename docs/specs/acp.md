@@ -185,7 +185,7 @@ detail, and both source and destination locations. Available journaled call
 fields form `rawInput`; file-change items expose paths without invented content
 or diff bytes. Locations join the client's original cwd spelling with
 Workspace-relative paths for display only; they are never re-resolved or used
-for access. The typed Tool fallback matches every ToolCall variant explicitly;
+for access. The typed Tool fallback dispatches every Tool family explicitly;
 only the outer non-Tool item fallback remains open.
 
 `item/completed` becomes `tool_call_update`: success is `completed`; declined
