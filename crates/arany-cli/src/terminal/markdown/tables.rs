@@ -200,32 +200,7 @@ pub(super) fn layout(
     let minimum =
         widths.iter().sum::<usize>() + SEPARATOR.width() * table.columns.saturating_sub(1);
     if minimum > width {
-        for (index, row) in table.rows.iter().enumerate() {
-            for (column, value) in row.cells.iter().enumerate() {
-                let anchor = value
-                    .first()
-                    .map_or(row.range.end, |cell| cell.source.start);
-                let mut cell = Vec::new();
-                if index > 0 {
-                    for header in &table.rows[0].cells[column] {
-                        cell.push(Cell {
-                            byte: anchor,
-                            source: anchor..anchor,
-                            text: header.text.clone(),
-                            style: header.style | Modifier::BOLD,
-                        });
-                    }
-                    cell.push(Cell {
-                        byte: anchor,
-                        source: anchor..anchor,
-                        text: ": ".into(),
-                        style: Modifier::empty(),
-                    });
-                }
-                cell.extend(value.iter().cloned());
-                emit(&[cell], &[width], anchor, capture, record)?;
-            }
-        }
+        records(table, width, capture, record)?;
     } else {
         let mut spare = width - minimum;
         while spare > 0 {
@@ -243,6 +218,40 @@ pub(super) fn layout(
         }
         for row in &table.rows {
             emit(&row.cells, &widths, row.range.start, capture, record)?;
+        }
+    }
+    Ok(())
+}
+fn records(
+    table: &Table,
+    width: usize,
+    capture: bool,
+    record: &mut impl FnMut(&mut Vec<Cell>, usize, usize) -> Result<(), ()>,
+) -> Result<(), ()> {
+    for (index, row) in table.rows.iter().enumerate() {
+        for (column, value) in row.cells.iter().enumerate() {
+            let anchor = value
+                .first()
+                .map_or(row.range.end, |cell| cell.source.start);
+            let mut cell = Vec::new();
+            if index > 0 {
+                for header in &table.rows[0].cells[column] {
+                    cell.push(Cell {
+                        byte: anchor,
+                        source: anchor..anchor,
+                        text: header.text.clone(),
+                        style: header.style | Modifier::BOLD,
+                    });
+                }
+                cell.push(Cell {
+                    byte: anchor,
+                    source: anchor..anchor,
+                    text: ": ".into(),
+                    style: Modifier::empty(),
+                });
+            }
+            cell.extend(value.iter().cloned());
+            emit(&[cell], &[width], anchor, capture, record)?;
         }
     }
     Ok(())
@@ -287,11 +296,8 @@ fn emit(
             let range = wrapped[column].get(line).cloned().unwrap_or(0..0);
             let mut columns = 0;
             for cell in &cell[range] {
-                let text = if cell.text.width() > widths[column] {
-                    if widths[column] == 0 { "" } else { "…" }
-                } else {
-                    &cell.text
-                };
+                let text =
+                    overflow_replacement(cell.text.width(), widths[column]).unwrap_or(&cell.text);
                 columns += text.width();
                 bytes += text.len();
                 if capture {
