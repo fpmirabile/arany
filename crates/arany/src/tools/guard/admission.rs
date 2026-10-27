@@ -1154,6 +1154,8 @@ mod tests {
             runtime_grants: Vec::new(),
             git: None,
             git_identity: None,
+            locale: Default::default(),
+            environment_sha256: None,
         }
     }
 

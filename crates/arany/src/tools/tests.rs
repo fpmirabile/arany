@@ -205,6 +205,9 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
+            "/usr/bin:/bin",
+        )),
         spill_access: None,
         config: serde_json::from_value(config.clone()).unwrap(),
         workspace: workspace.to_owned(),
@@ -620,4 +623,79 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
     observation.limit_cause = Some(super::LimitCause::RequestedTime);
     assert!(observation.valid());
     assert!(!observation.stops_run());
+}
+
+#[test]
+fn compaction_readmission_accepts_a_recorded_locale() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    super::CommandEnvironment::for_path("/usr/bin:/bin")
+        .with_name("LANG", "C.UTF-8")
+        .save(&state)
+        .unwrap();
+    let tools = state.path().join("tools.json");
+    std::fs::write(
+        &tools,
+        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    state
+        .record(crate::store::RecordKind::Permissions)
+        .replace(
+            br#"{"hooks":{"PreCompact":[{"matcher":"manual|auto","hooks":[{"type":"command","command":"check"}]}]}}"#,
+        )
+        .unwrap();
+    let snapshot = super::load_permissions(&state).unwrap().unwrap();
+    let mut config = Config::load(&state).unwrap();
+    config.discover_skills(&workspace).unwrap();
+    config.bind_environment(&super::CommandEnvironment::load(&state).unwrap());
+    assert_eq!(config.locale.len(), 1);
+    let mut pin = config.receipt();
+    pin.permissions_digest = Some(snapshot.digest);
+    let runtime = super::ToolRuntime::readmit_compaction_hooks(
+        &state,
+        &workspace,
+        Some(std::env::current_exe().unwrap()),
+        &pin,
+    )
+    .unwrap();
+    assert!(runtime.is_some());
+}
+
+#[test]
+fn a_changed_environment_record_changes_the_process_policy_digest() {
+    let digest = |path: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+        super::CommandEnvironment::for_path(path)
+            .save(&state)
+            .unwrap();
+        let tools = state.path().join("tools.json");
+        std::fs::write(
+            &tools,
+            br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let config = Config::load(&state).unwrap();
+        super::ToolRuntime::admit(
+            config,
+            None,
+            None,
+            &workspace,
+            &state,
+            std::env::current_exe().unwrap(),
+        )
+        .unwrap()
+        .receipt()
+        .config_digest
+    };
+    assert_eq!(digest("/usr/bin"), digest("/usr/bin"));
+    assert_ne!(digest("/usr/bin"), digest("/usr/bin:/bin"));
 }

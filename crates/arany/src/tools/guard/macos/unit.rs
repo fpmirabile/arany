@@ -2424,6 +2424,9 @@ done
             checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
+            command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
+                "/usr/bin:/bin",
+            )),
             spill_access: None,
             config: crate::tools::config::Config {
                 version: 1,
@@ -2451,6 +2454,8 @@ done
                 runtime_grants: runtime_grants.clone(),
                 git: None,
                 git_identity: None,
+                locale: Default::default(),
+                environment_sha256: None,
             },
             workspace: workspace.to_path_buf(),
             reads: None,

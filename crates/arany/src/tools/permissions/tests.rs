@@ -2468,8 +2468,9 @@ fn remembered_host_prefix_revalidates_executable_bytes_before_saving() {
     let identity = crate::tools::workspace_identity(&workspace).unwrap();
     intent.workspace_device = identity.device;
     intent.workspace_inode = identity.inode;
-    let mut pin =
-        crate::tools::unguarded::pin("inspect", &workspace, root.to_str().unwrap()).unwrap();
+    let environment = crate::tools::CommandEnvironment::for_path(root.to_str().unwrap());
+    environment.save(&state).unwrap();
+    let mut pin = crate::tools::unguarded::pin("inspect", &workspace, &environment).unwrap();
     pin.state_roots = [
         state.path().to_str().unwrap().into(),
         root.join("account").to_str().unwrap().into(),

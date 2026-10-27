@@ -1844,6 +1844,33 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut input,
         &mut transcript,
         &mut answered,
+        "environment area menu",
+        &shows("Choose what to manage"),
+    );
+    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "command environment page",
+        &shows("Select a name from the Arany process"),
+    );
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "command environment cancellation",
+        &shows("Command environment unchanged"),
+    );
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
         "typed area menu",
         &shows("Choose what to manage"),
     );

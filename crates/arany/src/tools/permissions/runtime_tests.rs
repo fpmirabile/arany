@@ -294,7 +294,9 @@ fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path:
     let executable = root.join("inspect");
     std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut pin = super::unguarded::pin("inspect", workspace, root.to_str().unwrap()).unwrap();
+    let environment = super::CommandEnvironment::for_path(root.to_str().unwrap());
+    environment.save(state).unwrap();
+    let mut pin = super::unguarded::pin("inspect", workspace, &environment).unwrap();
     pin.state_roots = [
         state.path().to_str().unwrap().into(),
         root.join("account").to_str().unwrap().into(),

@@ -12,11 +12,13 @@ mod dispatch;
 pub use discovery::{
     FileSuggestionSource, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
 };
+pub(crate) mod command_environment;
 mod executable;
 mod fs;
 mod git;
 mod glob;
 mod grant;
+pub use command_environment::{CommandEnvironment, CommandEnvironmentError};
 mod guard;
 pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
@@ -196,6 +198,10 @@ pub enum ToolError {
         "Inactive host-rule archive at archive/inactive-host-commands conflicts with its source. Stop Arany, preserve the source and archive intact, and restore a verified backup or obtain manual recovery; never overwrite either copy."
     )]
     InactiveHostArchiveConflict,
+    #[error(
+        "Creating command-environment.json is unconfirmed; open /permissions > Command environment to verify it before relying on Tools."
+    )]
+    CommandEnvironmentUnconfirmed,
     #[error("another process is updating private account state; retry when that update finishes")]
     AccountBusy,
     #[error("required native Tool protection is unavailable")]
@@ -285,6 +291,7 @@ impl ToolError {
             Self::HostPrefixConflict { .. } => "HostPrefixConflict",
             Self::InactiveHostArchiveUnconfirmed => "InactiveHostArchiveUnconfirmed",
             Self::InactiveHostArchiveConflict => "InactiveHostArchiveConflict",
+            Self::CommandEnvironmentUnconfirmed => "CommandEnvironmentUnconfirmed",
             Self::AccountBusy => "AccountBusy",
             Self::ProtectionUnavailable => "ProtectionUnavailable",
             Self::QueueFull => "QueueFull",
@@ -368,6 +375,7 @@ pub(crate) struct ToolRuntime {
     hook_stdin: Option<std::sync::Arc<str>>,
     checkpoint_gate: Option<tokio::sync::mpsc::Sender<CheckpointRequest>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
+    command_environment: std::sync::Arc<CommandEnvironment>,
     spill_access: Option<std::sync::Arc<crate::store::SpillAccess>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
@@ -384,6 +392,7 @@ struct RuntimeAdmission<'a> {
 
 struct RuntimeState {
     root: cap_std::fs::Dir,
+    command_environment: std::sync::Arc<CommandEnvironment>,
     workspace_identity: WorkspaceIdentity,
     guard_available: bool,
     enforcement_digest: [u8; 32],
@@ -939,9 +948,11 @@ impl ToolRuntime {
         {
             return Ok(None);
         }
+        let environment = CommandEnvironment::load(state)?;
         let mut config = match Config::load(state) {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
+                config.bind_environment(&environment);
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -956,6 +967,7 @@ impl ToolRuntime {
             Err(error) => return Err(error),
         };
         config.discover_skills(workspace)?;
+        config.bind_environment(&environment);
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1008,6 +1020,8 @@ impl ToolRuntime {
         } = admission;
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
+        let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
+        config.bind_environment(&command_environment);
         let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
@@ -1054,6 +1068,7 @@ impl ToolRuntime {
             },
             RuntimeState {
                 root,
+                command_environment,
                 workspace_identity,
                 guard_available,
                 enforcement_digest,
@@ -1080,6 +1095,7 @@ impl ToolRuntime {
         } = admission;
         let RuntimeState {
             root,
+            command_environment,
             workspace_identity,
             guard_available,
             enforcement_digest,
@@ -1113,6 +1129,7 @@ impl ToolRuntime {
                     .try_clone()
                     .map_err(|_| ToolError::ProtectionUnavailable)?,
             )),
+            command_environment,
             workspace: workspace.to_owned(),
             reads: Some(InProcessReads {
                 skills,
@@ -1469,9 +1486,8 @@ impl ToolRuntime {
             host: git::host::pin(&self.workspace, &call).ok(),
             host_command: match &call {
                 ToolCall::CommandUnguarded { program, .. } => {
-                    let path = std::env::var("PATH").unwrap_or_default();
                     let requested = self.command_executable(program).unwrap_or(program);
-                    unguarded::pin(requested, &self.workspace, &path)
+                    unguarded::pin(requested, &self.workspace, &self.command_environment)
                         .ok()
                         .map(|mut pin| {
                             pin.state_roots = [
@@ -1538,8 +1554,9 @@ impl ToolRuntime {
         }
         let intent = intent.clone();
         let commands = self.config.commands.clone();
+        let environment = std::sync::Arc::clone(&self.command_environment);
         tokio::task::spawn_blocking(move || {
-            unguarded::wrapper_interpreters_admitted(&intent, &commands)
+            unguarded::wrapper_interpreters_admitted(&intent, &commands, &environment)
         })
         .await
         .unwrap_or(false)
@@ -1799,7 +1816,8 @@ impl ToolRuntime {
         }
         let checked_pin = pin.clone();
         let workspace = self.workspace.clone();
-        if !tokio::task::spawn_blocking(move || checked_pin.verify(&workspace))
+        let environment = std::sync::Arc::clone(&self.command_environment);
+        if !tokio::task::spawn_blocking(move || checked_pin.verify(&workspace, &environment))
             .await
             .is_ok_and(|result| result.is_ok())
         {
@@ -1817,6 +1835,7 @@ impl ToolRuntime {
                 launcher: &self.guard_executable,
                 program: &pinned,
                 host: Some(pin),
+                environment: &self.command_environment,
                 args,
                 cwd,
                 workspace: &self.workspace,
@@ -2129,7 +2148,8 @@ pub(crate) fn failure_stage(error: &ToolError) -> FailureStage {
         ToolError::Configuration
         | ToolError::HostPrefixConflict { .. }
         | ToolError::InactiveHostArchiveUnconfirmed
-        | ToolError::InactiveHostArchiveConflict => FailureStage::Admission,
+        | ToolError::InactiveHostArchiveConflict
+        | ToolError::CommandEnvironmentUnconfirmed => FailureStage::Admission,
         ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => {
             FailureStage::PinnedInput
         }
