@@ -434,6 +434,20 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         }),
         super::guard::git_branch_creation_available()
     );
+    assert_eq!(
+        config.allows(&ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![".".into()],
+            staged: false,
+        }),
+        super::guard::git_commit_available()
+    );
+    assert_eq!(
+        config.allows(&ToolCall::GitSwitch {
+            branch: "topic".into()
+        }),
+        super::guard::git_writes_available()
+    );
     for git_writes in [false, true] {
         let creation = git_writes || super::guard::git_branch_creation_available();
         let operations = if git_writes {
@@ -444,6 +458,14 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
                 "git_commit",
                 "git_branch",
                 "git_switch",
+            ]
+        } else if cfg!(target_os = "macos") {
+            vec![
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_commit",
+                "git_branch",
             ]
         } else {
             vec!["git_status", "git_diff", "git_log", "git_branch"]
