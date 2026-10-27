@@ -5,6 +5,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
 
 mod compare;
 mod metadata;
+mod subtree;
 #[cfg(test)]
 mod tests;
 
@@ -202,15 +203,19 @@ pub(in crate::tools) fn capture_roots(
             selector: &mut selector,
             totals: &mut totals,
             files: BTreeMap::new(),
+            discarded: BTreeSet::new(),
+            subtrees: BTreeSet::new(),
         };
         if metadata::validate(&pin(upper, "")?, &mut capture.totals.budget)? {
-            return Err(ToolError::Path);
+            capture.subtrees.insert(String::new());
         }
         capture.scan()?;
+        capture.remove_subtrees()?;
         for (path, output) in std::mem::take(&mut capture.files) {
             capture.selector.check_time()?;
             capture.file(&path, output, &mut comparison)?;
         }
+        capture.check_subtrees()?;
     }
     totals.changes.files.sort_by(|a, b| a.path.cmp(&b.path));
     let changes = CommandChangeset {
@@ -258,6 +263,8 @@ struct Capture<'a> {
     prefix: &'a str,
     totals: &'a mut Totals,
     files: BTreeMap<String, Output>,
+    discarded: BTreeSet<String>,
+    subtrees: BTreeSet<String>,
 }
 
 impl Capture<'_> {
@@ -337,25 +344,25 @@ impl Capture<'_> {
         if whiteout && !discard {
             self.baseline.check(self.lower, path)?;
         }
-        let plain_deletion = whiteout
-            && self
+        if whiteout
+            && !directory_type
+            && !self
                 .baseline
                 .entries
                 .get(path)
-                .is_some_and(Metadata::is_file);
-        if (whiteout && !plain_deletion) || opaque {
-            let directory = if opaque || directory_type {
-                path
-            } else {
-                path.rsplit_once('/').map_or("", |(parent, _)| parent)
-            };
-            let directory = joined(self.prefix, directory);
-            if directory.is_empty() || !ignored(&directory, true, self.selector)? {
+                .is_some_and(Metadata::is_file)
+        {
+            let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+            if !discard || !ignored(&joined(self.prefix, parent), true, self.selector)? {
                 return Err(ToolError::Path);
             }
         }
         if discard {
             self.totals.summary.discarded_outputs += 1;
+            self.discarded.insert(path.into());
+        } else if opaque || whiteout && directory_type {
+            self.baseline.check(self.lower, path)?;
+            self.subtrees.insert(path.into());
         } else {
             self.select_output(path, &metadata, whiteout)?;
         }
