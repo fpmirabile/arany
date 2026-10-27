@@ -305,6 +305,8 @@ fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
     }
 }
 
+pub(crate) const HOST_SENSITIVE_PATH_WARNING: &str = "SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.";
+
 pub fn unguarded_approval_lines(
     intent: &arany::EffectIntent,
     prompt: &arany::UnguardedPrompt,
@@ -319,7 +321,11 @@ pub fn unguarded_approval_lines(
     else {
         return tool_approval_lines(intent);
     };
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    if prompt.sensitive {
+        lines.push(HOST_SENSITIVE_PATH_WARNING.into());
+    }
+    lines.extend([
         "Run outside the Guard? (unguarded)".to_owned(),
         "The primary asks to run this command on this machine with no sandbox.".into(),
         format!(
@@ -327,7 +333,7 @@ pub fn unguarded_approval_lines(
             escape_terminal(program),
             escape_terminal(&prompt.executable)
         ),
-    ];
+    ]);
     if args.is_empty() {
         lines.push("Args: none".into());
     } else {
@@ -359,9 +365,6 @@ pub fn unguarded_approval_lines(
         "Model's reason: {}",
         escape_terminal(justification)
     ));
-    if prompt.sensitive {
-        lines.push("SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.".into());
-    }
     if prompt.inactive_rules {
         lines.push(
             "Previous exact project approvals were archived intact under archive/inactive-host-commands; fresh approval is required.".into(),
