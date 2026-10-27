@@ -5,40 +5,79 @@ use std::os::unix::fs::PermissionsExt;
 
 const HELPER: &str = "tools::native_exec::supervisor::supervisor_entry_helper";
 
-fn entry_case(mode: &str) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupervisorMode {
+    UnalignedProbe,
+    NamespaceDenied,
+    ProbeDenied,
+    Success,
+    Replacement,
+    MountFlags,
+}
+
+impl SupervisorMode {
+    fn parse(value: &str) -> Self {
+        match value {
+            "unaligned-probe" => Self::UnalignedProbe,
+            "namespace-denied" => Self::NamespaceDenied,
+            "probe-denied" => Self::ProbeDenied,
+            "success" => Self::Success,
+            "replacement" => Self::Replacement,
+            "mount-flags" => Self::MountFlags,
+            _ => panic!("unsupported supervisor fixture mode: {value}"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UnalignedProbe => "unaligned-probe",
+            Self::NamespaceDenied => "namespace-denied",
+            Self::ProbeDenied => "probe-denied",
+            Self::Success => "success",
+            Self::Replacement => "replacement",
+            Self::MountFlags => "mount-flags",
+        }
+    }
+}
+
+fn entry_case(mode: SupervisorMode) {
+    use SupervisorMode::*;
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().unwrap();
     let executable = std::env::current_exe().unwrap();
-    let mut command = if mode == "mount-flags" {
-        let mut command = Command::new("/usr/bin/unshare");
-        command
-            .args([
-                "--user",
-                "--map-current-user",
-                "--mount",
-                "--propagation",
-                "private",
-                "--keep-caps",
-                "--",
-            ])
-            .arg(executable);
-        command
-    } else {
-        Command::new(executable)
+    let mut command = match mode {
+        MountFlags => {
+            let mut command = Command::new("/usr/bin/unshare");
+            command
+                .args([
+                    "--user",
+                    "--map-current-user",
+                    "--mount",
+                    "--propagation",
+                    "private",
+                    "--keep-caps",
+                    "--",
+                ])
+                .arg(executable);
+            command
+        }
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement => {
+            Command::new(executable)
+        }
     };
     let output = command
         .args(["--exact", HELPER, "--ignored", "--nocapture"])
         .env_clear()
-        .env("ARANY_TEST_SUPERVISOR_MODE", mode)
+        .env("ARANY_TEST_SUPERVISOR_MODE", mode.as_str())
         .env("ARANY_TEST_SUPERVISOR_ROOT", root.path())
         .current_dir(root.path())
         .bounded_output_for(Duration::from_secs(30), 32 * 1024)
         .unwrap();
     assert!(
         output.status.success(),
-        "supervisor {mode}: {:?}",
+        "supervisor {mode:?}: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
     crate::process::assert_single_test_completed(&output.stdout, "production supervisor entry");
@@ -48,8 +87,8 @@ fn entry_case(mode: &str) {
 
 #[test]
 fn supervisor_admission_and_namespace_denials_precede_probe_and_payload() {
-    entry_case("unaligned-probe");
-    entry_case("namespace-denied");
+    entry_case(SupervisorMode::UnalignedProbe);
+    entry_case(SupervisorMode::NamespaceDenied);
 }
 
 #[test]
@@ -58,48 +97,49 @@ fn supervisor_admission_and_namespace_denials_precede_probe_and_payload() {
     ignore = "native Linux supervisor namespaces and fresh tmpfs"
 )]
 fn supervisor_probes_tmpfs_clears_caps_and_reaps_bwrap() {
-    entry_case("probe-denied");
-    entry_case("success");
-    entry_case("replacement");
-    entry_case("mount-flags");
+    entry_case(SupervisorMode::ProbeDenied);
+    entry_case(SupervisorMode::Success);
+    entry_case(SupervisorMode::Replacement);
+    entry_case(SupervisorMode::MountFlags);
 }
 
 #[test]
 #[ignore = "isolated production-supervisor fixture"]
 fn supervisor_entry_helper() {
-    let mode = std::env::var("ARANY_TEST_SUPERVISOR_MODE").unwrap();
+    use SupervisorMode::*;
+    let mode = SupervisorMode::parse(&std::env::var("ARANY_TEST_SUPERVISOR_MODE").unwrap());
     let root = PathBuf::from(std::env::var_os("ARANY_TEST_SUPERVISOR_ROOT").unwrap());
-    let (executable, file, mut launch) = entry_launch(&root, &mode);
-    if mode == "unaligned-probe" {
-        launch["probe"]["bytes"] = json!(1);
-    }
+    let (executable, file, launch) = entry_launch(&root, mode);
     let namespace = root.join("namespace");
-    deny_entry(&mode);
-    let path = if mode == "replacement" {
-        PathBuf::from(format!(
+    deny_entry(mode);
+    let path = match mode {
+        Replacement => PathBuf::from(format!(
             "/proc/{}/fd/{}",
             std::process::id(),
             file.as_raw_fd()
-        ))
-    } else {
-        executable.clone()
+        )),
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | MountFlags => executable.clone(),
     };
     let mut command = entry_command(&path, &launch);
-    if matches!(mode.as_str(), "replacement" | "mount-flags") {
-        command.args(["/arany", "--version"]);
-    }
-    if mode == "replacement" {
-        let replacement = root.join("replacement");
-        std::fs::write(
-            &replacement,
-            b"#!/bin/sh\nprintf 'replacement executed\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::rename(replacement, &executable).unwrap();
-    } else if mode != "mount-flags" {
-        command.args(["/usr/bin/sh", "-c",
-            "set -eu; count=0; while IFS= read -r line; do case \"$line\" in CapInh:*|CapPrm:*|CapEff:*|CapBnd:*|CapAmb:*) set -- $line; test \"$2\" = 0000000000000000; count=$((count + 1));; NoNewPrivs:*) set -- $line; test \"$2\" = 1;; esac; done < /proc/self/status; test \"$count\" = 5; printf 'capabilities cleared\\n'"]);
+    match mode {
+        Replacement => {
+            command.args(["/arany", "--version"]);
+            let replacement = root.join("replacement");
+            std::fs::write(
+                &replacement,
+                b"#!/bin/sh\nprintf 'replacement executed\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::rename(replacement, &executable).unwrap();
+        }
+        MountFlags => {
+            command.args(["/arany", "--version"]);
+        }
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success => {
+            command.args(["/usr/bin/sh", "-c",
+                "set -eu; count=0; while IFS= read -r line; do case \"$line\" in CapInh:*|CapPrm:*|CapEff:*|CapBnd:*|CapAmb:*) set -- $line; test \"$2\" = 0000000000000000; count=$((count + 1));; NoNewPrivs:*) set -- $line; test \"$2\" = 1;; esac; done < /proc/self/status; test \"$count\" = 5; printf 'capabilities cleared\\n'"]);
+        }
     }
     let output = command
         .env_clear()
@@ -107,54 +147,58 @@ fn supervisor_entry_helper() {
         .current_dir("/")
         .bounded_output_for(Duration::from_secs(20), 16 * 1024)
         .unwrap();
-    if matches!(mode.as_str(), "success" | "replacement" | "mount-flags") {
-        assert!(
-            output.status.success(),
-            "post-clear bwrap: {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let expected = if matches!(mode.as_str(), "replacement" | "mount-flags") {
-            format!("arany {}\n", env!("CARGO_PKG_VERSION"))
-        } else {
-            "capabilities cleared\n".into()
-        };
-        assert_eq!(output.stdout, expected.as_bytes());
-        assert!(output.stderr.is_empty());
-    } else {
-        assert!(!output.status.success());
-        assert!(
-            output.stdout.is_empty(),
-            "no payload or READY before probe admission"
-        );
-        let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
-        let expected = match mode.as_str() {
-            "unaligned-probe" => "admission",
-            "namespace-denied" => "namespace_entry",
-            "probe-denied" => "runtime_mounts",
-            _ => panic!("unsupported supervisor refusal mode"),
-        };
-        assert_eq!(failure, json!({"stage":expected}));
+    let expected = match mode {
+        Success => Ok("capabilities cleared\n".to_owned()),
+        Replacement | MountFlags => Ok(format!("arany {}\n", env!("CARGO_PKG_VERSION"))),
+        UnalignedProbe => Err("admission"),
+        NamespaceDenied => Err("namespace_entry"),
+        ProbeDenied => Err("runtime_mounts"),
+    };
+    match expected {
+        Ok(stdout) => {
+            assert!(
+                output.status.success(),
+                "post-clear bwrap: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, stdout.as_bytes());
+            assert!(output.stderr.is_empty());
+        }
+        Err(stage) => {
+            assert!(!output.status.success());
+            assert!(
+                output.stdout.is_empty(),
+                "no payload or READY before probe admission"
+            );
+            let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(failure, json!({"stage":stage}));
+        }
     }
     drop(file);
     std::fs::remove_dir(namespace).unwrap();
     std::fs::remove_file(executable).unwrap();
-    if mode == "mount-flags" {
-        let directory = root.join("restricted");
-        rustix::mount::unmount(&directory, rustix::mount::UnmountFlags::empty()).unwrap();
-        std::fs::remove_dir(directory).unwrap();
+    match mode {
+        MountFlags => {
+            let directory = root.join("restricted");
+            rustix::mount::unmount(&directory, rustix::mount::UnmountFlags::empty()).unwrap();
+            std::fs::remove_dir(directory).unwrap();
+        }
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement => {}
     }
 }
 
-fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
+fn entry_launch(root: &Path, mode: SupervisorMode) -> (PathBuf, std::fs::File, Value) {
+    use SupervisorMode::*;
     let namespace = root.join("namespace");
     std::fs::create_dir(&namespace).unwrap();
     let installed = Path::new(env!("CARGO_BIN_EXE_arany"));
-    let executable = if mode == "mount-flags" {
-        restricted_executable(root, installed)
-    } else {
-        let path = root.join("arany");
-        std::fs::copy(installed, &path).unwrap();
-        path
+    let executable = match mode {
+        MountFlags => restricted_executable(root, installed),
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement => {
+            let path = root.join("arany");
+            std::fs::copy(installed, &path).unwrap();
+            path
+        }
     };
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut hash = Sha256::new();
@@ -169,8 +213,14 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
         hash.update(&buffer[..count]);
     }
     let digest: [u8; 32] = hash.finalize().into();
+    let bytes = match mode {
+        UnalignedProbe => 1,
+        NamespaceDenied | ProbeDenied | Success | Replacement | MountFlags => {
+            arany::ToolLimits::default().project_bytes
+        }
+    };
     let launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
-        "probe":{"root":namespace,"bytes":arany::ToolLimits::default().project_bytes}});
+        "probe":{"root":namespace,"bytes":bytes}});
     (executable, file, launch)
 }
 
@@ -196,24 +246,23 @@ fn restricted_executable(root: &Path, installed: &Path) -> PathBuf {
     executable
 }
 
-fn deny_entry(mode: &str) {
-    if matches!(mode, "namespace-denied" | "probe-denied") {
-        let syscall = match mode {
-            "namespace-denied" => nix::libc::SYS_unshare,
-            "probe-denied" => nix::libc::SYS_fsetxattr,
-            _ => panic!("unsupported supervisor fixture mode"),
-        };
-        let filter: seccompiler::BpfProgram = seccompiler::SeccompFilter::new(
-            std::collections::BTreeMap::from([(syscall, Vec::new())]),
-            seccompiler::SeccompAction::Allow,
-            seccompiler::SeccompAction::Errno(nix::libc::EPERM as u32),
-            std::env::consts::ARCH.try_into().unwrap(),
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-        seccompiler::apply_filter_all_threads(&filter).unwrap();
-    }
+fn deny_entry(mode: SupervisorMode) {
+    use SupervisorMode::*;
+    let syscall = match mode {
+        NamespaceDenied => nix::libc::SYS_unshare,
+        ProbeDenied => nix::libc::SYS_fsetxattr,
+        UnalignedProbe | Success | Replacement | MountFlags => return,
+    };
+    let filter: seccompiler::BpfProgram = seccompiler::SeccompFilter::new(
+        std::collections::BTreeMap::from([(syscall, Vec::new())]),
+        seccompiler::SeccompAction::Allow,
+        seccompiler::SeccompAction::Errno(nix::libc::EPERM as u32),
+        std::env::consts::ARCH.try_into().unwrap(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    seccompiler::apply_filter_all_threads(&filter).unwrap();
 }
 
 fn entry_command(path: &Path, launch: &Value) -> Command {
