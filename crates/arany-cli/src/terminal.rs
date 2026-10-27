@@ -412,6 +412,7 @@ use view::{
     draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
     draw_settings_frame, draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame,
     draw_setup_warning_frame, history_top_padding, screen_terminal, session_picker_index,
+    setup_choices_height,
 };
 
 struct UsagePanel {
@@ -3489,7 +3490,7 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(8, |frame, area| {
+        self.draw_frame(setup_choices_height(choices.len()), |frame, area| {
             draw_setup_choices_frame(
                 frame,
                 area,
