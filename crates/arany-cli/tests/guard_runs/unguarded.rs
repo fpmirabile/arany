@@ -761,10 +761,8 @@ async fn non_reusable_host_requests_offer_once_only() {
             [ToolApprovalChoice::Yes, ToolApprovalChoice::No]
         );
         assert_eq!(
-            seen.displayed_prompts[0]
-                .lines
-                .iter()
-                .any(|line| line == "Session approval is offered in Request approvals (Shift+Tab)"),
+            seen.displayed_prompts[0].lines.iter().any(|line| line
+                == "Shift+Tab to Request offers session approval for later eligible commands"),
             terminal == ApprovalMode::AutoEdits
         );
         denied(&seen, "user_declined");

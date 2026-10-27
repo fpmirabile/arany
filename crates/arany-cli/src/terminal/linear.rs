@@ -957,7 +957,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "Run outside the Guard? (unguarded)\nSession approval is offered in Request approvals (Shift+Tab)\nDo you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
+            "Run outside the Guard? (unguarded)\nShift+Tab to Request offers session approval for later eligible commands\nDo you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
         );
     }
 
