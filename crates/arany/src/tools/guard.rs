@@ -1829,7 +1829,7 @@ fn receive_bulk(
         .write_all(b"WORKER_READY\n")
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
-    let bytes = transfer::read_frame(stdin)?;
+    let bytes = transfer::read_frame(stdin, crate::session::worker::WORKER_DATA_BYTES)?;
     if !stdin.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
@@ -1982,7 +1982,7 @@ fn send_result(
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
     if let Some(bytes) = candidate {
-        transfer::write_frame(stdout, &bytes)?;
+        transfer::write_frame(stdout, &bytes, crate::session::worker::WORKER_DATA_BYTES)?;
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
     #[cfg(target_os = "linux")]
