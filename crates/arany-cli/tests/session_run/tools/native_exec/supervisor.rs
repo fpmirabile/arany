@@ -10,6 +10,8 @@ enum SupervisorMode {
     UnalignedProbe,
     NamespaceDenied,
     ProbeDenied,
+    OverlayProbeDenied,
+    Submount,
     Success,
     Replacement,
     MountFlags,
@@ -21,6 +23,8 @@ impl SupervisorMode {
             "unaligned-probe" => Self::UnalignedProbe,
             "namespace-denied" => Self::NamespaceDenied,
             "probe-denied" => Self::ProbeDenied,
+            "overlay-probe-denied" => Self::OverlayProbeDenied,
+            "submount" => Self::Submount,
             "success" => Self::Success,
             "replacement" => Self::Replacement,
             "mount-flags" => Self::MountFlags,
@@ -33,6 +37,8 @@ impl SupervisorMode {
             Self::UnalignedProbe => "unaligned-probe",
             Self::NamespaceDenied => "namespace-denied",
             Self::ProbeDenied => "probe-denied",
+            Self::OverlayProbeDenied => "overlay-probe-denied",
+            Self::Submount => "submount",
             Self::Success => "success",
             Self::Replacement => "replacement",
             Self::MountFlags => "mount-flags",
@@ -48,7 +54,7 @@ fn entry_case(mode: SupervisorMode) {
     let root = tempfile::tempdir().unwrap();
     let executable = std::env::current_exe().unwrap();
     let mut command = match mode {
-        MountFlags => {
+        MountFlags | Submount => {
             let mut command = Command::new("/usr/bin/unshare");
             command
                 .args([
@@ -63,9 +69,8 @@ fn entry_case(mode: SupervisorMode) {
                 .arg(executable);
             command
         }
-        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement => {
-            Command::new(executable)
-        }
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Success
+        | Replacement => Command::new(executable),
     };
     let output = command
         .args(["--exact", HELPER, "--ignored", "--nocapture"])
@@ -104,12 +109,27 @@ fn supervisor_probes_tmpfs_clears_caps_and_reaps_bwrap() {
 }
 
 #[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux overlay probe and host submount refusal"
+)]
+fn supervisor_overlay_probe_and_submount_refusal_clean_up_before_payload() {
+    entry_case(SupervisorMode::OverlayProbeDenied);
+    entry_case(SupervisorMode::Submount);
+}
+
+#[test]
 #[ignore = "isolated production-supervisor fixture"]
 fn supervisor_entry_helper() {
     use SupervisorMode::*;
     let mode = SupervisorMode::parse(&std::env::var("ARANY_TEST_SUPERVISOR_MODE").unwrap());
     let root = PathBuf::from(std::env::var_os("ARANY_TEST_SUPERVISOR_ROOT").unwrap());
     let (executable, file, launch) = entry_launch(&root, mode);
+    match mode {
+        Submount => submount_fixture(&root),
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Success
+        | Replacement | MountFlags => {}
+    }
     let namespace = root.join("namespace");
     deny_entry(mode);
     let path = match mode {
@@ -118,7 +138,8 @@ fn supervisor_entry_helper() {
             std::process::id(),
             file.as_raw_fd()
         )),
-        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | MountFlags => executable.clone(),
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Submount
+        | Success | MountFlags => executable.clone(),
     };
     let mut command = entry_command(&path, &launch);
     match mode {
@@ -136,7 +157,8 @@ fn supervisor_entry_helper() {
         MountFlags => {
             command.args(["/arany", "--version"]);
         }
-        UnalignedProbe | NamespaceDenied | ProbeDenied | Success => {
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Submount
+        | Success => {
             command.args(["/usr/bin/sh", "-c",
                 "set -eu; count=0; while IFS= read -r line; do case \"$line\" in CapInh:*|CapPrm:*|CapEff:*|CapBnd:*|CapAmb:*) set -- $line; test \"$2\" = 0000000000000000; count=$((count + 1));; NoNewPrivs:*) set -- $line; test \"$2\" = 1;; esac; done < /proc/self/status; test \"$count\" = 5; printf 'capabilities cleared\\n'"]);
         }
@@ -152,7 +174,7 @@ fn supervisor_entry_helper() {
         Replacement | MountFlags => Ok(format!("arany {}\n", env!("CARGO_PKG_VERSION"))),
         UnalignedProbe => Err("admission"),
         NamespaceDenied => Err("namespace_entry"),
-        ProbeDenied => Err("runtime_mounts"),
+        ProbeDenied | OverlayProbeDenied | Submount => Err("runtime_mounts"),
     };
     match expected {
         Ok(stdout) => {
@@ -175,6 +197,21 @@ fn supervisor_entry_helper() {
         }
     }
     drop(file);
+    match mode {
+        Submount => {
+            rustix::mount::unmount(
+                root.join("workspace/vendor"),
+                rustix::mount::UnmountFlags::empty(),
+            )
+            .unwrap();
+        }
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Success
+        | Replacement | MountFlags => {}
+    }
+    match mode {
+        OverlayProbeDenied | Submount => std::fs::remove_dir_all(root.join("workspace")).unwrap(),
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement | MountFlags => {}
+    }
     std::fs::remove_dir(namespace).unwrap();
     std::fs::remove_file(executable).unwrap();
     match mode {
@@ -183,7 +220,8 @@ fn supervisor_entry_helper() {
             rustix::mount::unmount(&directory, rustix::mount::UnmountFlags::empty()).unwrap();
             std::fs::remove_dir(directory).unwrap();
         }
-        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement => {}
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Submount
+        | Success | Replacement => {}
     }
 }
 
@@ -194,7 +232,8 @@ fn entry_launch(root: &Path, mode: SupervisorMode) -> (PathBuf, std::fs::File, V
     let installed = Path::new(env!("CARGO_BIN_EXE_arany"));
     let executable = match mode {
         MountFlags => restricted_executable(root, installed),
-        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement => {
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Submount
+        | Success | Replacement => {
             let path = root.join("arany");
             std::fs::copy(installed, &path).unwrap();
             path
@@ -215,12 +254,20 @@ fn entry_launch(root: &Path, mode: SupervisorMode) -> (PathBuf, std::fs::File, V
     let digest: [u8; 32] = hash.finalize().into();
     let bytes = match mode {
         UnalignedProbe => 1,
-        NamespaceDenied | ProbeDenied | Success | Replacement | MountFlags => {
-            arany::ToolLimits::default().project_bytes
-        }
+        NamespaceDenied | ProbeDenied | OverlayProbeDenied | Submount | Success | Replacement
+        | MountFlags => arany::ToolLimits::default().project_bytes,
     };
-    let launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
+    let mut launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
         "probe":{"root":namespace,"bytes":bytes}});
+    match mode {
+        OverlayProbeDenied | Submount => {
+            let workspace = root.join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let metadata = std::fs::metadata(&workspace).unwrap();
+            launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32]});
+        }
+        UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement | MountFlags => {}
+    }
     (executable, file, launch)
 }
 
@@ -251,7 +298,8 @@ fn deny_entry(mode: SupervisorMode) {
     let syscall = match mode {
         NamespaceDenied => nix::libc::SYS_unshare,
         ProbeDenied => nix::libc::SYS_fsetxattr,
-        UnalignedProbe | Success | Replacement | MountFlags => return,
+        OverlayProbeDenied => nix::libc::SYS_umount2,
+        UnalignedProbe | Submount | Success | Replacement | MountFlags => return,
     };
     let filter: seccompiler::BpfProgram = seccompiler::SeccompFilter::new(
         std::collections::BTreeMap::from([(syscall, Vec::new())]),
@@ -313,24 +361,119 @@ fn helper_death_after_go_stays_uncertain_without_retry_or_publication() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _deadline =
         arany::test_support::engine::deadline("supervisor helper death", SPILL_JOURNEY_WAIT);
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let fixture = SpillFixture::new();
-        let session = fixture.engine.create_session(fixture.workspace.clone(), None).await.unwrap();
-        let command = ToolCall::Command { program: "bash".into(), args: vec!["-c".into(), "kill -KILL \"$PPID\"".into()], cwd: String::new() };
-        let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![crate::tool_outcome(command)]));
-        let mut request = proposal_request(&fixture.workspace);
-        request.session_id = Some(session);
-        let outcome = run_with(&fixture.engine, &provider, request, RunControls { tools: ToolGrant::Configured, ..Default::default() }).await;
-        assert!(matches!(outcome, Err(arany::EngineError::Tool(arany::ToolError::Uncertain))));
-        assert_eq!(provider.requests.lock().unwrap().len(), 1);
-        fixture.engine.close().await.unwrap();
-        let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
-        let run = &view.runs[0];
-        let observation = run.tools[0].observation.as_ref().unwrap();
-        assert_eq!(observation.disposition, ToolDisposition::Uncertain);
-        assert_eq!(observation.enforcement_cause, None);
-        assert_eq!(view.run_stop(run), Some(arany::RunStop::Uncertain));
-        assert!(!events.iter().any(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))));
-        assert_eq!(std::fs::read(fixture.workspace.join("src/current.txt")).unwrap(), b"current");
-    });
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (root, loss) in [
+                ("src", LostEvidence::Helper),
+                (".", LostEvidence::Helper),
+                (".", LostEvidence::Completion),
+            ] {
+                assert_lost_guard_evidence(root, loss).await;
+            }
+        });
+}
+
+#[derive(Clone, Copy)]
+enum LostEvidence {
+    Helper,
+    Completion,
+}
+
+async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
+    let fixture = SpillFixture::new();
+    fixture.set_workspace_root(root);
+    let session = fixture
+        .engine
+        .create_session(fixture.workspace.clone(), None)
+        .await
+        .unwrap();
+    let script = match loss {
+        LostEvidence::Helper => "printf private > src/current.txt; kill -KILL \"$PPID\"",
+        LostEvidence::Completion => {
+            "printf private > src/current.txt; printf overlay-command-completed"
+        }
+    };
+    let command = ToolCall::Command {
+        program: "bash".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: String::new(),
+    };
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        crate::tool_outcome(command.clone()),
+    ]));
+    let mut request = proposal_request(&fixture.workspace);
+    request.session_id = Some(session);
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let completion_loss = matches!(loss, LostEvidence::Completion);
+    let inject = async {
+        if completion_loss {
+            let action = inbox
+                .next()
+                .await
+                .expect("one exact completion-loss intent");
+            assert_eq!(action.intent.call, command);
+            let entered = arany::FaultPlan::lose_guard_completion(action.intent.id);
+            action.decide(true);
+            entered
+                .await
+                .expect("the overlay completion reader reached the injected loss");
+        }
+    };
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: completion_loss.then_some(approvals),
+        ..Default::default()
+    };
+    let (outcome, ()) = tokio::time::timeout(SPILL_JOURNEY_WAIT, async {
+        tokio::join!(
+            run_with(&fixture.engine, &provider, request, controls),
+            inject
+        )
+    })
+    .await
+    .expect("bounded lost Guard evidence journey");
+    assert!(matches!(
+        outcome,
+        Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+    ));
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_uncertain_guard_replay(fixture, session, &command).await;
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+async fn assert_uncertain_guard_replay(
+    fixture: SpillFixture,
+    session: arany::SessionId,
+    command: &ToolCall,
+) {
+    fixture.engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
+    let run = &view.runs[0];
+    assert_eq!(run.tools.len(), 1);
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(&observation.intent.call, command);
+    assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+    assert_eq!(observation.enforcement_cause, None);
+    assert_eq!(view.run_stop(run), Some(arany::RunStop::Uncertain));
+    assert!(!events.iter().any(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))));
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("src/current.txt")).unwrap(),
+        b"current"
+    );
+}
+
+fn submount_fixture(root: &Path) {
+    let target = root.join("workspace/vendor");
+    std::fs::create_dir(&target).unwrap();
+    rustix::mount::mount(
+        "tmpfs",
+        target,
+        "tmpfs",
+        rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
+        c"size=4096,nr_inodes=2",
+    )
+    .unwrap();
 }
