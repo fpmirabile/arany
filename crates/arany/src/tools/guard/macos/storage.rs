@@ -315,7 +315,7 @@ pub(super) fn exhaust_git_storage(volume: &cap_std::fs::Dir) -> std::io::Result<
         .filter(|bytes| (1..=FILL_CHUNK_BYTES).contains(bytes))
         .ok_or_else(|| Error::other("invalid Git volume allocation size"))?;
     let mut file = volume.create("fill")?;
-    let chunk = [0_u8; FILL_CHUNK_BYTES];
+    let chunk = vec![0_u8; FILL_CHUNK_BYTES];
     // A failed bulk allocation can leave room for the much smaller Git view.
     for bytes in [chunk.len(), block_bytes] {
         let mut full = false;
