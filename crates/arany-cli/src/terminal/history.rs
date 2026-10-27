@@ -425,9 +425,23 @@ impl History {
         self.push_count(source, kind, rows);
     }
 
-    pub(super) fn set_preview(&mut self, preview: Option<arany::DisplayUpdate>) {
+    pub(super) fn set_preview(&mut self, preview: Option<arany::DisplayUpdate>) -> bool {
+        let unchanged = match (&self.preview, &preview) {
+            (None, None) => true,
+            (Some(previous), Some(next)) => {
+                previous.run_id == next.run_id
+                    && previous.agent_run_id == next.agent_run_id
+                    && previous.call_index == next.call_index
+                    && previous.text == next.text
+            }
+            _ => false,
+        };
+        if unchanged {
+            return false;
+        }
         self.preview = preview;
         self.preview_dirty = true;
+        true
     }
 
     pub(super) fn set_details(&mut self, details: bool) {
@@ -458,7 +472,10 @@ impl History {
         let text = self
             .preview
             .as_ref()
-            .filter(|preview| preview.run_id == run.id)
+            .filter(|preview| {
+                preview.run_id == run.id
+                    && crate::presentation::display_call_visible(run, preview.call_index)
+            })
             .map(|preview| preview.text.answer.clone())
             .filter(|text| !text.is_empty())
             .or_else(|| crate::presentation::display_answer(run));
@@ -788,16 +805,15 @@ impl History {
             .find(|message| message.source == point.source)?;
         let text = message_text(view, message, &self.notices);
         let (mut line_start, mut line_end) = line_bounds(&text, point.byte);
-        if matches!(
-            message.kind,
-            MessageKind::Assistant | MessageKind::AgentResult
-        ) && let Some(content) = super::markdown::content_at(
-            &text,
-            point.byte,
-            self.width
-                .min(MAX_ROW_CELLS)
-                .saturating_sub(row_indent(message.kind)),
-        ) {
+        if formats_markdown(message.kind)
+            && let Some(content) = super::markdown::content_at(
+                &text,
+                point.byte,
+                self.width
+                    .min(MAX_ROW_CELLS)
+                    .saturating_sub(row_indent(message.kind)),
+            )
+        {
             line_start = line_start.max(content.start);
             line_end = line_end.min(content.end);
         }
@@ -1305,7 +1321,7 @@ fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
         bytes = bytes.saturating_add(token.kind.len() + 3);
     }
     let mut add_message = |kind, text: &str| {
-        let (message_bytes, message_rows) = if kind == MessageKind::Assistant {
+        let (message_bytes, message_rows) = if formats_markdown(kind) {
             let (bytes, rows) = markdown_cost(kind, text, width);
             (bytes + native_marker(kind, true).len(), rows + 1)
         } else if kind == MessageKind::Tool {
@@ -1332,25 +1348,9 @@ fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
     } else if !matches!(
         run.status,
         arany::RunStatus::Pending | arany::RunStatus::Active
-    ) && let Some(chunks) = crate::presentation::display_answer_chunks(run)
+    ) && let Some(text) = crate::presentation::display_answer(run)
     {
-        let mut chunk_count = 0usize;
-        let mut body_rows = 0usize;
-        for chunk in chunks {
-            bytes = bytes.saturating_add(crate::presentation::escaped_terminal_bytes(chunk));
-            body_rows = body_rows.saturating_add(message_row_count(chunk, width).saturating_sub(2));
-            chunk_count = chunk_count.saturating_add(1);
-        }
-        if chunk_count > 0 {
-            bytes = bytes.saturating_add(1);
-            let (message_bytes, message_rows) = classic_message_cost(
-                MessageKind::Incomplete,
-                0,
-                body_rows.saturating_add(chunk_count.saturating_sub(1)),
-            );
-            bytes = bytes.saturating_add(message_bytes);
-            rows = rows.saturating_add(message_rows);
-        }
+        add_message(MessageKind::Incomplete, &text);
     }
     (bytes, rows)
 }
@@ -1623,6 +1623,16 @@ fn url_span(graphemes: &[(usize, &str)], at: usize) -> Option<(usize, usize)> {
     (last > separator + 2 && (url_first..=url_last).contains(&at)).then_some((url_first, url_last))
 }
 
+fn formats_markdown(kind: MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::Assistant
+            | MessageKind::AgentResult
+            | MessageKind::Preview
+            | MessageKind::Incomplete
+    )
+}
+
 fn has_heading(kind: MessageKind) -> bool {
     !matches!(
         kind,
@@ -1758,7 +1768,7 @@ fn message_heading(kind: MessageKind) -> &'static str {
 }
 
 fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
-    if !matches!(kind, MessageKind::Assistant | MessageKind::AgentResult) {
+    if !formats_markdown(kind) {
         return literal_rows(kind, text, width);
     }
     let body_width = width.min(MAX_ROW_CELLS).saturating_sub(2);
@@ -1855,7 +1865,7 @@ fn literal_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
 
 fn indexed_row_count(kind: MessageKind, text: &str, width: usize) -> usize {
     match kind {
-        MessageKind::Assistant | MessageKind::AgentResult => markdown_cost(kind, text, width).1,
+        kind if formats_markdown(kind) => markdown_cost(kind, text, width).1,
         MessageKind::Supervisor | MessageKind::Tool | MessageKind::ToolDetails => {
             message_rows(kind, text, width).len()
         }

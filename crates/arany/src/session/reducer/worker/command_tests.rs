@@ -11,7 +11,7 @@ fn command_fixture_with_tools(only_command: bool) -> Fixture {
         if only_command {
             vec!["command".into()]
         } else {
-            vec!["read".into(), "write".into(), "command".into()]
+            vec!["command".into(), "read".into(), "write".into()]
         },
         vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Command],
         None,
@@ -139,7 +139,30 @@ fn rejected(f: &Fixture, intent: &EffectIntent) {
         },
         events.len() as u64 + 1,
     ));
-    assert!(SessionView::replay_open(f.session, &events).is_err());
+    assert!(matches!(
+        SessionView::replay_open(f.session, &events),
+        Err(ReplayError::InvalidTransition)
+    ));
+}
+
+#[test]
+fn editor_admission_refuses_partially_granted_command_lists() {
+    for only_command in [false, true] {
+        let f = command_fixture_with_tools(only_command);
+        let view = f.view();
+        let mut request = view.runs[0].agents[1]
+            .assignment
+            .as_ref()
+            .unwrap()
+            .pins
+            .request
+            .clone();
+        request.commands.push("unadmitted".into());
+        assert_eq!(
+            crate::session::validate_editor_request(&view, &view.runs[0], &request, None),
+            Err(crate::session::ProposalRefusalCause::EditorCommands)
+        );
+    }
 }
 
 #[test]
@@ -185,7 +208,10 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
             None,
         );
         assert!(
-            SessionView::replay_open(f.session, &f.envelopes()).is_err(),
+            matches!(
+                SessionView::replay_open(f.session, &f.envelopes()),
+                Err(ReplayError::InvalidTransition)
+            ),
             "a captured batch requires publication before continuation"
         );
         f.events.truncate(count);
@@ -241,24 +267,67 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
 }
 
 #[test]
-fn unknown_editor_cache_update_blocks_release_continuation_and_goal_recovery() {
+fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() {
+    for unknown in [false, true] {
+        let mut f = command_fixture();
+        command(&mut f, &[]);
+        let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
+            unreachable!()
+        };
+        observation.cache_update = if unknown {
+            CacheUpdate::Uncertain
+        } else {
+            CacheUpdate::NotApplicable
+        };
+        let view = f.view();
+        assert_eq!(view.runs[0].agents[1].tools[0].outcome_unknown(), unknown);
+        if unknown {
+            assert!(!view.goals[0].can_resume(&view));
+            assert!(!wave_settled(&view.runs[0]));
+            let count = f.events.len();
+            f.call(
+                f.child,
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::Finished,
+                None,
+            );
+            assert!(matches!(
+                SessionView::replay_open(f.session, &f.envelopes()),
+                Err(ReplayError::InvalidTransition)
+            ));
+            f.events.truncate(count);
+        }
+        let recovered = SessionView::replay(f.session, &f.envelopes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.runs[0].status, RunStatus::Interrupted);
+        let goal = recovered.goal(f.goal).unwrap();
+        assert_eq!(goal.active_run, None);
+        assert_eq!(
+            goal.can_resume(&recovered),
+            !unknown,
+            "uncertain: {unknown}"
+        );
+    }
+}
+
+#[test]
+fn uncertain_command_cache_blocks_an_otherwise_settled_editor_wave() {
     let mut f = command_fixture();
     command(&mut f, &[]);
-    let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
-        unreachable!()
-    };
-    observation.cache_update = CacheUpdate::Uncertain;
-    let view = f.view();
-    assert!(view.runs[0].agents[1].tools[0].outcome_unknown());
-    assert!(!view.goals[0].can_resume(&view));
-    assert!(!wave_settled(&view.runs[0]));
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::Finished,
-        None,
-    );
-    assert!(SessionView::replay_open(f.session, &f.envelopes()).is_err());
+    f.mutation();
+    let cause = f.finish_worker();
+    f.release(cause);
+    f.verify();
+    let mut view = f.view();
+    let run = &mut view.runs[0];
+    assert!(wave_settled(run));
+    run.agents[1].tools[0]
+        .observation
+        .as_mut()
+        .unwrap()
+        .cache_update = CacheUpdate::Uncertain;
+    assert!(!wave_settled(run));
 }
 
 #[test]

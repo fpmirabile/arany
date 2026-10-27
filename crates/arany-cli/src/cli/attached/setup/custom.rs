@@ -1,7 +1,5 @@
-use super::{
-    SetupError, SetupJournal, await_setup_ack, choose_focused, read_optional_setup_value,
-    read_setup_value, review_warning,
-};
+use super::prompts::{read_optional_setup_value, read_setup_value};
+use super::{SetupError, SetupJournal, await_setup_ack, choose_focused, review_warning};
 use crate::presentation::{escape_terminal, format_duration};
 use crate::terminal::{AttachedTerminal, TerminalInput};
 use arany::{

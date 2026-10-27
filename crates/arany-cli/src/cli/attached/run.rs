@@ -736,9 +736,10 @@ impl RunProgress<'_> {
                 let display: TurnDisplayNotification =
                     serde_json::from_value(note.params.unwrap_or_default())
                         .map_err(|_| "invalid Server display".to_owned())?;
-                match display.update {
+                let changed = match display.update {
                     arany_cli::protocol::methods::DisplayUpdate::Waiting { intent_id } => {
-                        ui.terminal.set_waiting_tool(intent_id)
+                        ui.terminal.set_waiting_tool(intent_id);
+                        true
                     }
                     arany_cli::protocol::methods::DisplayUpdate::Preview { preview } => ui
                         .terminal
@@ -753,8 +754,10 @@ impl RunProgress<'_> {
                                 tentative: preview.tentative,
                             }),
                         })),
+                };
+                if changed {
+                    self.draw_hint(ui)?;
                 }
-                self.draw_hint(ui)?;
             }
             _ => {}
         }
