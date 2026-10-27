@@ -78,6 +78,13 @@ pub(super) async fn relay_plan(
     if observation.disposition != crate::tools::ToolDisposition::Succeeded {
         return Err(ToolError::Operation);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    fixture_gate(
+        intent,
+        crate::fault::git_write::GitWriteStage::FramePending,
+        unit,
+    )
+    .await?;
     let helper = unit.supervisor()?;
     if !unit
         .scope
@@ -146,10 +153,45 @@ pub(super) async fn send_plan(
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
+    cancellation: Cancellation,
+    dispatched: &AtomicBool,
+) -> Result<ToolObservation, ToolError> {
+    let result = execute_pair(runtime, intent, cancellation, dispatched).await;
+    if dispatched.load(Ordering::Acquire) {
+        return result;
+    }
+    match result {
+        Err(ToolError::GuardBootstrap(super::super::BootstrapFailure {
+            check: Some(super::super::GuardCheck::Cancelled),
+            ..
+        })) => Ok(crate::tools::unstarted_observation(
+            intent.clone(),
+            ToolError::Cancelled,
+        )),
+        Err(ToolError::Limit) => Ok(crate::tools::unattested_limit(
+            intent.clone(),
+            crate::tools::LimitCause::Resource,
+            "Git executor resource limit reached; nothing was published",
+        )),
+        Err(ToolError::Timeout(_)) => Ok(crate::tools::unattested_limit(
+            intent.clone(),
+            crate::tools::LimitCause::Timeout,
+            "Git executor runtime expired; nothing was published",
+        )),
+        other => other,
+    }
+}
+
+async fn execute_pair(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
     mut cancellation: Cancellation,
     dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
-    let ((executor, publisher), window) = admit_pair(runtime, intent, &mut cancellation).await?;
+    let ((mut executor, mut publisher), window) =
+        admit_pair(runtime, intent, &mut cancellation).await?;
+    // Both envelopes stay reserved until both units have completed cleanup.
+    let _capacity = [executor.take_capacity()?, publisher.take_capacity()?];
     let (segments, frames) = tokio::sync::mpsc::channel(1);
     let (go_out, go_in) = tokio::sync::oneshot::channel();
     let handed_off = Arc::new(AtomicBool::new(false));
@@ -203,11 +245,12 @@ async fn admit_pair(
     intent: &EffectIntent,
     cancellation: &mut Cancellation,
 ) -> Result<((Unit, Unit), Option<crate::tools::ActiveToolWindow>), ToolError> {
+    let unit_ids = [intent.id, uuid::Uuid::now_v7()];
     let reserved = tokio::select! {
         biased;
-        () = cancellation.cancelled() => return Err(ToolError::Operation),
+        () = cancellation.cancelled() => return Err(ToolError::Cancelled),
         permits = super::super::admission::acquire_all(
-            &[intent.id, uuid::Uuid::now_v7()],
+            &unit_ids,
             intent.limits.runtime_ms,
             |queued| runtime.queue_changed(intent.id, queued),
         ) => permits?,
@@ -222,4 +265,80 @@ async fn admit_pair(
     executor.limits = Some(intent.limits.clone());
     publisher.limits = Some(intent.limits.clone());
     Ok(((executor, publisher), window))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn fixture_gate(
+    intent: &EffectIntent,
+    stage: crate::fault::git_write::GitWriteStage,
+    unit: &Unit,
+) -> Result<(), ToolError> {
+    crate::fault::git_write::wait(&intent.call, stage, unit.fixture_witness()?).await;
+    Ok(())
+}
+
+pub(super) async fn send_go(
+    stream: &mut tokio::net::UnixStream,
+    intent: &EffectIntent,
+    unit: &Unit,
+    stage: Option<GitStage>,
+) -> Result<(), ToolError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if stage == Some(GitStage::Publish) {
+        stream
+            .write_all(b"G")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        fixture_gate(
+            intent,
+            crate::fault::git_write::GitWriteStage::PartialGo,
+            unit,
+        )
+        .await?;
+        stream
+            .write_all(b"O\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+    } else {
+        stream
+            .write_all(b"GO\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let _ = (intent, unit, stage);
+        stream
+            .write_all(b"GO\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        use crate::fault::git_write::GitWriteStage;
+        use tokio::io::AsyncReadExt;
+        let held = if stage == Some(GitStage::Publish) {
+            GitWriteStage::PublisherHeld
+        } else {
+            GitWriteStage::ExecutorTimeout
+        };
+        if crate::fault::git_write::has_gate(&intent.call, held) {
+            let mut marker = [0; 9];
+            stream
+                .read_exact(&mut marker)
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            if marker != *b"GIT_HELD\n" {
+                return Err(ToolError::Operation);
+            }
+            fixture_gate(intent, held, unit).await?;
+            if held == GitWriteStage::ExecutorTimeout {
+                return tokio::time::timeout(Duration::ZERO, std::future::pending())
+                    .await
+                    .map_err(|_| ToolError::Timeout(String::new()))?;
+            }
+            return Err(ToolError::Operation);
+        }
+    }
+    Ok(())
 }

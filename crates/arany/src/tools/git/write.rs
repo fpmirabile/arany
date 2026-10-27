@@ -178,7 +178,7 @@ fn status_failure(captured: &Captured, max_bytes: usize, hidden: &HiddenPaths) -
     failure(&message, detail, max_bytes, hidden)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(super) async fn execute(
     workspace: &Path,
     scratch: &Path,
@@ -1248,6 +1248,8 @@ fn publish(
         copy_objects(&git_dir, plan)?;
         for mut lock in [reference, index, head].into_iter().flatten() {
             lock.commit()?;
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            crate::fault::git_write::published(intent);
         }
         Ok::<_, ToolError>(())
     })();

@@ -33,8 +33,6 @@ pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use state::restore_archive_with_limit;
 pub(crate) use state::spill::{SWEEP_TIME_MS, SpillAccess};
 pub(crate) use state::{
     AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,

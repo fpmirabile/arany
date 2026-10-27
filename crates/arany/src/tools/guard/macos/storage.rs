@@ -354,19 +354,6 @@ pub(super) fn exhaust_git_storage(volume: &cap_std::fs::Dir) -> std::io::Result<
     }
 }
 
-pub(super) async fn prepare_worker_storage(
-    root: &Path,
-    limits: &crate::tools::types::ToolLimits,
-) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
-    if limits.project_bytes != STORAGE_BYTES_CAP
-        || limits.scratch_bytes != STORAGE_BYTES_CAP
-        || limits.cache_bytes != 0
-    {
-        return Err(ToolError::Configuration);
-    }
-    prepare_storage_with_sizes(root, &command_volume_sizes(limits)).await
-}
-
 pub(super) async fn prepare_command_storage(
     root: &Path,
     runtime: &ToolRuntime,
@@ -409,7 +396,7 @@ pub(super) async fn prepare_command_storage(
     crate::tools::fs::snapshot_into(
         &workspace,
         &runtime.config,
-        (runtime.worker.is_none() && !command).then_some(&volumes[0]),
+        (!command).then_some(&volumes[0]),
         &resources,
     )?;
     Ok(volumes)

@@ -42,6 +42,10 @@ pub(super) fn receive_git_input(
     stdin: &mut std::io::BufReader<impl Read>,
 ) -> Result<GitWork, ToolError> {
     let stage = task.git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    if task.git_fault == Some(crate::fault::git_write::GitWriteStage::Published) {
+        crate::fault::git_write::arm_death(task.intent.id);
+    }
     if stage != Some(GitStage::Publish) {
         return Ok(GitWork { stage, input: None });
     }

@@ -28,9 +28,7 @@ pub(super) async fn session(
             Ok(None)
         };
     }
-    if runtime.worker.is_none()
-        && let Some(state) = &runtime.cache_state
-    {
+    if let Some(state) = &runtime.cache_state {
         super::recover_build_cache(state, Some(&runtime.workspace))
             .await
             .map_err(super::map_cache_error)?;

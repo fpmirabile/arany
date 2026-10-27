@@ -14,9 +14,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "telemetry/observations.rs"]
+mod observations;
+
+#[derive(Clone, Copy)]
+enum CollectorResponse {
+    Complete,
+    Incomplete,
+}
+
+const COLLECTOR_IO_WAIT: Duration = Duration::from_secs(5);
+
 fn trace_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(COLLECTOR_IO_WAIT))
         .expect("trace request deadline");
     let mut request = Vec::new();
     loop {
@@ -43,12 +54,26 @@ fn trace_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
                 })
                 .expect("trace Content-Length");
             if request.len() >= header_end + body_len {
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                .expect("Collector acknowledgment");
                 return request[header_end..header_end + body_len].to_vec();
+            }
+        }
+    }
+}
+
+fn answer_trace(stream: &mut std::net::TcpStream, response: CollectorResponse) {
+    match response {
+        CollectorResponse::Complete => stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .expect("Collector acknowledgment"),
+        CollectorResponse::Incomplete => {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
+                .expect("incomplete Collector response");
+            let mut byte = [0];
+            match stream.read(&mut byte) {
+                Ok(0) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                other => panic!("Collector response read was not released: {other:?}"),
             }
         }
     }
@@ -58,6 +83,7 @@ fn collect_trace_requests(
     listener: TcpListener,
     done: Receiver<()>,
     mut first_export: Option<mpsc::Sender<()>>,
+    response: CollectorResponse,
 ) -> Vec<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut bodies = Vec::new();
@@ -68,7 +94,11 @@ fn collect_trace_requests(
                 stream
                     .set_nonblocking(false)
                     .expect("blocking accepted Collector stream");
+                stream
+                    .set_write_timeout(Some(COLLECTOR_IO_WAIT))
+                    .expect("Collector response deadline");
                 bodies.push(trace_request(&mut stream));
+                answer_trace(&mut stream, response);
                 if let Some(sender) = first_export.take() {
                     sender.send(()).expect("first trace batch gate");
                 }
@@ -183,16 +213,14 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     provider_listener
         .set_nonblocking(true)
         .expect("bounded Provider accept");
-    write_profile(
-        &state,
-        provider_listener
-            .local_addr()
-            .expect("Provider address")
-            .port(),
-    );
+    let provider_port = provider_listener
+        .local_addr()
+        .expect("Provider address")
+        .port();
+    write_profile(&state, provider_port);
     let (first_team_export, team_export_gate) = mpsc::channel();
     let provider = thread::spawn(move || {
-        for index in 0..9 {
+        for index in 0..12 {
             let mut stream = crate::process::accept_with_deadline(
                 &provider_listener,
                 Duration::from_secs(10),
@@ -204,7 +232,8 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                     .windows(b"OMITTED_SECRET_CANARY".len())
                     .any(|part| part == b"OMITTED_SECRET_CANARY")
             );
-            let text = match index {
+            let response_index = if index >= 8 { index - 8 } else { index };
+            let text = match response_index {
                 0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
@@ -217,7 +246,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                     serde_json::json!("RESULT_SECRET_CANARY")
                 }
             };
-            send_response(&mut stream, index, text);
+            send_response(&mut stream, response_index, text);
             if index == 4 {
                 team_export_gate
                     .recv_timeout(Duration::from_secs(10))
@@ -233,8 +262,14 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .expect("bounded Collector accept");
     let collector_address = collector_listener.local_addr().expect("Collector address");
     let (collector_done, collector_wait) = mpsc::channel();
-    let collector =
-        thread::spawn(move || collect_trace_requests(collector_listener, collector_wait, None));
+    let collector = thread::spawn(move || {
+        collect_trace_requests(
+            collector_listener,
+            collector_wait,
+            None,
+            CollectorResponse::Complete,
+        )
+    });
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
@@ -357,7 +392,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         "only the first marker carries context compilation"
     );
 
-    let lines = String::from_utf8(result.stdout)
+    let lines = String::from_utf8(result.stdout.clone())
         .expect("JSONL output")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("Event JSONL"))
@@ -444,7 +479,12 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let team_address = team_listener.local_addr().expect("team Collector address");
     let (team_done, team_wait) = mpsc::channel();
     let team_collector = thread::spawn(move || {
-        collect_trace_requests(team_listener, team_wait, Some(first_team_export))
+        collect_trace_requests(
+            team_listener,
+            team_wait,
+            Some(first_team_export),
+            CollectorResponse::Complete,
+        )
     });
     let mut team = Command::new(env!("CARGO_BIN_EXE_arany"));
     team.env_clear()
@@ -539,13 +579,30 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     assert_eq!(team_view.runs[0].status, RunStatus::Finished);
     assert_eq!(team_view.runs[0].agents.len(), 3);
 
-    let refused_listener = TcpListener::bind("127.0.0.1:0").expect("unavailable Collector port");
+    let failed_state = temp.path().join("failed-state");
+    write_profile(&failed_state, provider_port);
+    check_profile(&workspace, &failed_state);
+
+    let refused_listener = TcpListener::bind("127.0.0.1:0").expect("failed Collector port");
+    refused_listener
+        .set_nonblocking(true)
+        .expect("bounded failed Collector accept");
     let refused_address = refused_listener.local_addr().expect("unavailable address");
-    drop(refused_listener);
+    let (failed_done, failed_wait) = mpsc::channel();
+    let failed_collector = thread::spawn(move || {
+        collect_trace_requests(
+            refused_listener,
+            failed_wait,
+            None,
+            CollectorResponse::Incomplete,
+        )
+    });
     let mut unavailable = Command::new(env!("CARGO_BIN_EXE_arany"));
     unavailable
         .env_clear()
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .env("OTEL_RESOURCE_ATTRIBUTES", "leak=RESOURCE_SECRET_CANARY")
+        .env("HTTP_PROXY", "http://127.0.0.1:1")
         .current_dir(&workspace)
         .args([
             "--otlp-endpoint",
@@ -553,7 +610,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
             "exec",
         ])
         .arg("--state-dir")
-        .arg(&state)
+        .arg(&failed_state)
         .arg("--workspace")
         .arg(&workspace)
         .args([
@@ -570,13 +627,32 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let unavailable_result = wait_product(unavailable.spawn().expect("unavailable Collector run"));
+    failed_done.send(()).expect("failed Collector completion");
+    let failed_bodies = failed_collector
+        .join()
+        .expect("failed Collector through shutdown");
+    for canary in [
+        "OBJECTIVE_SECRET_CANARY",
+        "GUIDANCE_SECRET_CANARY",
+        "OMITTED_SECRET_CANARY",
+        "RESOURCE_SECRET_CANARY",
+        "test-key",
+    ] {
+        assert!(
+            failed_bodies.iter().all(|body| !body
+                .windows(canary.len())
+                .any(|part| part == canary.as_bytes())),
+            "failed export leaked a canary"
+        );
+    }
     provider.join().expect("Provider server");
     assert!(
         unavailable_result.status.success(),
         "Collector outage is nonfatal"
     );
-    assert_eq!(unavailable_result.stderr, b"");
-    let unavailable_lines = String::from_utf8(unavailable_result.stdout)
+    assert_eq!(unavailable_result.status.code(), result.status.code());
+    assert_eq!(unavailable_result.stderr, result.stderr);
+    let unavailable_lines = String::from_utf8(unavailable_result.stdout.clone())
         .expect("unavailable JSONL")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("unavailable Event"))
@@ -587,12 +663,31 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
             .expect("unavailable Session ID"),
     )
     .expect("typed unavailable Session ID");
+    let failed_store = Store::open_read_only(
+        StateRoot::open_existing(&failed_state).expect("failed Collector state root"),
+    )
+    .expect("failed Collector read-only Store");
     let unavailable_view = runtime
-        .block_on(store.load_view(unavailable_session))
+        .block_on(failed_store.load_view(unavailable_session))
         .expect("unavailable Collector replay")
         .expect("unavailable Session");
     assert_eq!(unavailable_view.runs.len(), 1);
     assert_eq!(unavailable_view.runs[0].status, RunStatus::Finished);
+    let events = runtime
+        .block_on(store.load_session(session_id))
+        .expect("closed Events");
+    let failed_events = runtime
+        .block_on(failed_store.load_session(unavailable_session))
+        .expect("failed Collector closed Events");
+    observations::assert_equivalent(
+        &result.stdout,
+        &events,
+        &unavailable_result.stdout,
+        &failed_events,
+    );
+    runtime
+        .block_on(failed_store.close())
+        .expect("close failed Collector Store");
 
     let show_listener = TcpListener::bind("127.0.0.1:0").expect("show Collector listener");
     show_listener
