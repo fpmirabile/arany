@@ -252,10 +252,7 @@ impl View {
     ) -> Result<(), ToolError> {
         let mut input = std::io::BufReader::new(std::io::stdin().lock());
         let task = super::super::super::read_task(&mut input)?;
-        if task.intent.digest() != self.grant.digest
-            || !selected(&task.intent, &task.config)
-            || task.preparation
-        {
+        if task.intent.digest() != self.grant.digest || !selected(&task.intent, &task.config) {
             return Err(ToolError::Configuration);
         }
         child

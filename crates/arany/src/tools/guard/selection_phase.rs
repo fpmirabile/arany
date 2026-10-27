@@ -1,4 +1,6 @@
-use super::{Cancellation, ToolError, read_line_capped};
+use super::ToolError;
+#[cfg(any(test, target_os = "macos"))]
+use super::{Cancellation, read_line_capped};
 use crate::tools::selection::PHASE_TIME;
 use crate::tools::{EffectIntent, ToolCall, ToolLimits, ToolResourceClass};
 use std::time::{Duration, Instant};
@@ -75,6 +77,7 @@ pub(in crate::tools) fn decode_deadline(frame: [u8; 8]) -> Result<Instant, ToolE
     Ok(now + remaining)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
     match result {
         Ok(_) => b"SELECT_DONE\n",
@@ -115,6 +118,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(super) async fn receive(
     reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
     deadline: tokio::time::Instant,
@@ -141,6 +145,7 @@ pub(super) async fn receive(
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(super) async fn wait<T>(
     deadline: tokio::time::Instant,
     cancellation: &mut Cancellation,

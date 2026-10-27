@@ -498,17 +498,6 @@ impl Permit {
         replace_record(&self.dir, &self.seed_name(), &seed)
     }
 
-    pub(super) fn prepared(&self) -> Result<(), ToolError> {
-        let mut seed = self
-            .seed_record()?
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        let SeedPhase::LaunchRequested { root } = seed.phase else {
-            return Err(ToolError::ProtectionUnavailable);
-        };
-        seed.phase = SeedPhase::Ready { root };
-        replace_record(&self.dir, &self.seed_name(), &seed)
-    }
-
     pub(super) fn terminated(&self) -> Result<(), ToolError> {
         let mut seed = self
             .seed_record()?
