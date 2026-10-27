@@ -1670,11 +1670,6 @@ fn bootstrap_locations(
     ))
 }
 
-type Dispatched = (
-    (Result<String, ToolError>, Option<Vec<u8>>),
-    Option<Vec<u8>>,
-);
-
 pub(super) struct GuardContext<'a> {
     pub(super) captured: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "linux")]
@@ -1695,7 +1690,12 @@ pub(super) struct GuardContext<'a> {
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(self) -> Dispatched {
+    async fn dispatch(
+        self,
+    ) -> (
+        (Result<String, ToolError>, Option<Vec<u8>>),
+        Option<Vec<u8>>,
+    ) {
         let result = super::dispatch::run(&self).await;
         let plan = self.git_plan.into_inner().ok().flatten();
         ((result, self.captured.into_inner().ok().flatten()), plan)
