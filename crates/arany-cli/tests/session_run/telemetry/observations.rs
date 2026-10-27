@@ -61,7 +61,9 @@ fn align_ids(event: &mut EventEnvelope, reference: &EventEnvelope) {
 fn align_clocks(event: &mut Event, reference: &Event) {
     match (event, reference) {
         (
-            Event::GoalProviderCallReserved { active_ceiling_ms, .. },
+            Event::GoalProviderCallReserved {
+                active_ceiling_ms, ..
+            },
             Event::GoalProviderCallReserved {
                 active_ceiling_ms: ceiling,
                 ..
@@ -69,8 +71,12 @@ fn align_clocks(event: &mut Event, reference: &Event) {
         ) => *active_ceiling_ms = *ceiling,
         (
             Event::RunFinished { active_ms, .. } | Event::GoalFinished { active_ms, .. },
-            Event::RunFinished { active_ms: elapsed, .. }
-            | Event::GoalFinished { active_ms: elapsed, .. },
+            Event::RunFinished {
+                active_ms: elapsed, ..
+            }
+            | Event::GoalFinished {
+                active_ms: elapsed, ..
+            },
         ) => *active_ms = *elapsed,
         _ => {}
     }
@@ -84,10 +90,18 @@ pub(super) fn assert_equivalent(
 ) {
     assert_history(stdout, events);
     assert_history(failed_stdout, failed_events);
-    assert_eq!(events.len(), failed_events.len(), "same committed transitions");
+    assert_eq!(
+        events.len(),
+        failed_events.len(),
+        "same committed transitions"
+    );
     let mut normalized = failed_events.to_vec();
     for (event, reference) in normalized.iter_mut().zip(events) {
-        assert_eq!(event.event.kind(), reference.event.kind(), "same Event kind");
+        assert_eq!(
+            event.event.kind(),
+            reference.event.kind(),
+            "same Event kind"
+        );
         event.created_at_ms = reference.created_at_ms;
         align_ids(event, reference);
         align_clocks(&mut event.event, &reference.event);
