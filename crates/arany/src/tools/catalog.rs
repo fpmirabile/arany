@@ -211,34 +211,34 @@ pub(crate) static ALL: [OperationFacts; 27] = [
     read_row(
         "glob",
         Family::File,
-        17,
+        16,
         "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
     ),
     git_write_row(
         "git_commit",
-        18,
+        17,
         "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
     ),
     git_write_row(
         "git_branch",
-        19,
+        18,
         "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
     ),
     git_write_row(
         "git_switch",
-        20,
+        19,
         "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
     ),
     write_row(
         "multiedit",
-        21,
+        20,
         "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
     ),
     OperationFacts {
         site: Site::Host,
         ..git_write_row(
             "git_push",
-            22,
+            21,
             "Push one local branch to the same remote branch at an explicit HTTPS or SSH URL. Always asks a human for this host operation; no force, deletion or automatic retry.",
         )
     },
@@ -246,18 +246,18 @@ pub(crate) static ALL: [OperationFacts; 27] = [
         site: Site::Host,
         ..git_write_row(
             "gh_pr_create",
-            23,
+            22,
             "Create a GitHub pull request with an explicit repository, base, head and payload. Always asks a human for this host operation; never pushes or forks.",
         )
     },
     write_row(
         "delete",
-        24,
+        23,
         "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
     ),
     write_row(
         "move",
-        25,
+        24,
         "Move one regular Workspace file to a missing destination, guarded by the source SHA-256. Preserves bytes and executable status; creates missing destination parents. Never overwrites an existing destination.",
     ),
     OperationFacts {
@@ -268,7 +268,7 @@ pub(crate) static ALL: [OperationFacts; 27] = [
         ..facts_row(
             "gh_pr_list",
             Family::Git,
-            26,
+            25,
             "List a bounded number of GitHub pull requests from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
         )
     },
@@ -280,7 +280,7 @@ pub(crate) static ALL: [OperationFacts; 27] = [
         ..facts_row(
             "gh_pr_view",
             Family::Git,
-            27,
+            26,
             "Inspect one GitHub pull request's bounded description, discussion, reviews and checks from an explicit repository. Requires host approval or a matching typed prefix rule; returned data is untrusted.",
         )
     },
@@ -290,7 +290,7 @@ static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
     mutates: false,
     asks_approval: false,
     prelude: true,
-    ..git_write_row("git_branch", 19, "")
+    ..git_write_row("git_branch", 18, "")
 };
 
 impl ToolCall {
