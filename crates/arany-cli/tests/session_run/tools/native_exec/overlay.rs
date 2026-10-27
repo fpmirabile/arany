@@ -411,7 +411,14 @@ async fn overlay_case(case: OverlayCase) {
             }
         }
     };
-    let (outcome, ()) = tokio::join!(running, mutate);
+    let outcome = {
+        tokio::pin!(running);
+        tokio::pin!(mutate);
+        tokio::select! {
+            outcome = &mut running => outcome,
+            () = &mut mutate => (&mut running).await,
+        }
+    };
     if let Err(error) = &outcome {
         let reason = arany_cli::protocol::rpc::Reason::from(error);
         crate::process::annotate_native_fixture(&format!(
