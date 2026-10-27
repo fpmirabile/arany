@@ -293,6 +293,14 @@ impl AgentDefinition {
     }
 
     pub(crate) fn allows_worker(&self, call: &ToolCall) -> bool {
+        if matches!(
+            call,
+            ToolCall::ApplyChangeset {
+                source: crate::worker::ChangesetSource::CommandReceipt { .. }
+            }
+        ) {
+            return self.editor() && self.allows_worker_tool(crate::worker::WorkerTool::Command);
+        }
         crate::session::worker::WorkerTool::of(call)
             .is_some_and(|tool| self.allows_worker_tool(tool))
     }

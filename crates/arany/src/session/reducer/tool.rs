@@ -136,6 +136,14 @@ pub(crate) fn validate_tool_lease(
         .flat_map(|worker| &worker.pins.request.lease)
         .collect();
     let paths: Vec<_> = match call {
+        ToolCall::Command { .. }
+            if run
+                .agents
+                .iter()
+                .any(|agent| agent.id == actor && agent.assignment.is_some()) =>
+        {
+            Vec::new()
+        }
         ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
         | ToolCall::Delete { path, .. }
@@ -154,6 +162,18 @@ pub(crate) fn validate_tool_lease(
         _ if !leases.is_empty() => return Err(LeaseOverlap),
         _ => Vec::new(),
     };
+    if let Some(worker) = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == actor)
+        .and_then(|agent| agent.assignment.as_ref())
+        && paths.iter().any(|path| {
+            !crate::worker::writable_path(path)
+                || !crate::worker::within(path, &worker.pins.grant.write_paths)
+        })
+    {
+        return Err(LeaseOverlap);
+    }
     if paths.iter().any(|path| {
         leases
             .iter()
@@ -506,7 +526,7 @@ fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) ->
         .is_none_or(|(_, source)| source.narrowed_call() == Some(&intent.call))
 }
 
-fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+pub(super) fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
     let crate::tools::ToolCall::ApplyChangeset {
         source:
             crate::session::worker::ChangesetSource::CommandReceipt {
@@ -517,20 +537,29 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
     else {
         return false;
     };
-    let Some(primary) = run.primary() else {
+    let Some(agent) = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == intent.agent_run_id)
+    else {
         return false;
     };
-    if primary.provider_calls.last().is_none_or(|call| {
+    if agent.provider_calls.last().is_none_or(|call| {
         call.disposition != ProviderCallDisposition::ToolRequested
             && call.phase != AgentPhase::ToolReview
     }) {
         return false;
     }
-    !run.tools.iter().any(|tool| matches!(&tool.intent.call,
+    let tools = if agent.assignment.is_some() {
+        &agent.tools
+    } else {
+        &run.tools
+    };
+    !tools.iter().any(|tool| matches!(&tool.intent.call,
         crate::tools::ToolCall::ApplyChangeset {
             source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest: existing, .. }
         } if existing == source_intent_digest))
-        && run.tools.iter().filter_map(|tool| tool.observation.as_ref()).any(|observation| {
+        && tools.iter().filter_map(|tool| tool.observation.as_ref()).any(|observation| {
             observation.intent.digest() == *source_intent_digest
                 && observed_command_changeset(observation)
                     .is_some_and(|source| source == *changeset)
@@ -972,4 +1001,17 @@ fn valid_host_prefix_approval(
             .host_prefixes
             .iter()
             .any(|other| other.decision != Decision::Allow && other.scope_matches(intent))
+}
+
+pub(super) fn command_publication_settled(tools: &[ToolView], tool: &ToolView) -> bool {
+    tool.observation.as_ref().is_some_and(|observation| {
+        observed_command_changeset(observation).is_none_or(|changeset| {
+            changeset.files.is_empty() || tools.iter().any(|integration| {
+                matches!(&integration.intent.call, crate::tools::ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
+                } if *source_intent_digest == observation.intent.digest())
+                    && integration.settled_without_stop()
+            })
+        })
+    })
 }
