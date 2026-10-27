@@ -351,6 +351,7 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   running. Retain every attempt and current intent-correlated stage/check capture.
   No recurrence closes VR4 as evidence plus row removal (≤150 changed lines),
   without source changes or a claim that the historical cause is known.
+- **R2 result:** N=5 sequential Focused CI `macos-release` runs at `e6d33c30b954c4e819cb220945d35b5f52fdf7fb` all succeeded with nonzero test counts and no execution- or storage-cleanup-unconfirmed failure: [40514236959](https://github.com/fpmirabile/arany/actions/runs/40514236959), [40519063160](https://github.com/fpmirabile/arany/actions/runs/40519063160), [40534470573](https://github.com/fpmirabile/arany/actions/runs/40534470573), [40538385142](https://github.com/fpmirabile/arany/actions/runs/40538385142), [40544264386](https://github.com/fpmirabile/arany/actions/runs/40544264386). The family is closed without a cause claim.
 - On recurrence, bind mode/rule/operation, intent identity, GO state and first
   closed stage/check before teardown overwrites a snapshot. Reuse the bounded
   release recorder/debug stages; distinguish execution unconfirmed
