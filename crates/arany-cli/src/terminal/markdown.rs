@@ -1,5 +1,6 @@
 use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_terminal_width};
-use pulldown_cmark::{Event, Parser, Tag};
+mod blocks;
+use blocks::BlockLine;
 use ratatui::style::Modifier;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -22,63 +23,13 @@ pub(super) struct Row {
     pub(super) cells: Vec<Cell>,
     pub(super) source_byte: usize,
 }
-struct Heading {
-    envelope: Range<usize>,
-    content: Range<usize>,
-}
-fn headings(source: &str) -> Result<Vec<Heading>, ()> {
-    if source.len() > MAX_MARKDOWN_PARSE_BYTES {
-        return Err(());
-    }
-    if source.split("\r\n").any(|part| part.contains('\r')) {
-        return Ok(Vec::new());
-    }
-    let (mut headings, mut depth) = (Vec::new(), 0usize);
-    for (index, (event, range)) in Parser::new(source).into_offset_iter().enumerate() {
-        if index >= MAX_MARKDOWN_EVENTS || headings.len() >= MAX_MARKDOWN_ROWS {
-            return Err(());
-        }
-        match event {
-            Event::Start(tag) => {
-                if depth == MAX_MARKDOWN_DEPTH {
-                    return Err(());
-                }
-                if depth == 0
-                    && matches!(tag, Tag::Heading { .. })
-                    && source[range.clone()].lines().nth(1).is_none()
-                {
-                    let start = source[..range.start].rfind('\n').map_or(0, |at| at + 1);
-                    let line = source[range.clone()].trim_end_matches(['\r', '\n']);
-                    let body = line.trim_start_matches('#').trim_start_matches([' ', '\t']);
-                    let content_start = range.start + line.len() - body.len();
-                    let body = body.trim_end_matches([' ', '\t']);
-                    let closing = body.trim_end_matches('#');
-                    let body = if closing.is_empty() || closing.ends_with([' ', '\t']) {
-                        closing.trim_end_matches([' ', '\t'])
-                    } else {
-                        body
-                    };
-                    headings.push(Heading {
-                        content: content_start..content_start + body.len(),
-                        envelope: start..range.end,
-                    });
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth = depth.checked_sub(1).ok_or(())?,
-            _ => {}
-        }
-    }
-    Ok(headings)
-}
 fn layout(
     source: &str,
     width: usize,
     capture: bool,
-    headings: Option<&[Heading]>,
+    projection: Option<&[BlockLine]>,
 ) -> Result<Layout, ()> {
-    let bounded = headings.is_some();
-    let mut headings = headings.unwrap_or_default().iter().peekable();
+    let bounded = projection.is_some();
     let mut rows = Vec::new();
     let (mut bytes, mut count, mut start) = (0, 0, 0);
     let mut record = |cells: &mut Vec<Cell>, source_byte, row_bytes| {
@@ -97,51 +48,132 @@ fn layout(
         }
         Ok(())
     };
-    for line in source.split('\n') {
-        let end = start + line.len();
-        let heading = headings.next_if(|heading| heading.envelope.start == start);
-        let range = heading.map_or(start..end, |heading| heading.content.clone());
-        let (mut columns, mut row_bytes, mut row_start) = (0, 0, start);
-        let mut cells = Vec::new();
-        for (offset, grapheme) in source[range.clone()].grapheme_indices(true) {
-            let byte = range.start + offset;
-            let size = escaped_terminal_width(grapheme);
-            if columns > 0 && columns + size > width {
-                record(&mut cells, row_start, row_bytes)?;
-                (columns, row_bytes, row_start) = (0, 0, byte);
-            }
-            let replacement = (size > width).then_some(if width == 0 { "" } else { "…" });
-            columns += replacement.map_or(size, UnicodeWidthStr::width);
-            row_bytes += replacement.map_or_else(|| escaped_terminal_bytes(grapheme), str::len);
-            if capture {
-                cells.push(Cell {
-                    byte,
-                    source: source_range(heading, byte, grapheme.len()),
-                    text: replacement.map_or_else(|| escape_terminal(grapheme), str::to_owned),
-                    style: heading.map_or(Modifier::empty(), |_| Modifier::BOLD),
-                });
-            }
+    for (index, text) in source.split('\n').enumerate() {
+        let line = projection.map(|lines| &lines[index]);
+        if !line.is_some_and(|line| line.hidden) {
+            let content = line.map_or(text, |line| &source[line.content.clone()]);
+            layout_line((start, content), line, width, capture, &mut record)?;
         }
-        record(&mut cells, row_start, row_bytes)?;
-        start = end + 1;
+        start += text.len() + 1;
     }
     Ok((rows, bytes, count))
 }
-fn source_range(heading: Option<&Heading>, byte: usize, len: usize) -> Range<usize> {
-    let mut mapped = byte..byte + len;
-    if let Some(heading) = heading {
-        if byte == heading.content.start {
-            mapped.start = heading.envelope.start;
+fn layout_line(
+    (start, source): (usize, &str),
+    line: Option<&BlockLine>,
+    width: usize,
+    capture: bool,
+    record: &mut impl FnMut(&mut Vec<Cell>, usize, usize) -> Result<(), ()>,
+) -> Result<(), ()> {
+    let range = line.map_or(start..start + source.len(), |line| line.content.clone());
+    let text = source;
+    let (mut columns, mut bytes, mut row_start) =
+        (0, 0, line.map_or(start, |line| line.envelope.start));
+    let mut cells = Vec::new();
+    let mut source_columns = line.map_or(0, |line| line.padding);
+    let mut decoration = prefix(line, false, width);
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        let origin = range.start + offset..range.start + offset + grapheme.len();
+        let byte = origin.start;
+        let tab = grapheme == "\t" && line.is_some_and(|line| line.style == Modifier::REVERSED);
+        let size = if tab {
+            blocks::TAB_CELLS - source_columns % blocks::TAB_CELLS
+        } else {
+            escaped_terminal_width(grapheme)
+        };
+        source_columns += size;
+        let available = width.saturating_sub(decoration.width());
+        if columns > 0 && columns + size > available {
+            decorate(&mut cells, &decoration, line, row_start, capture);
+            record(&mut cells, row_start, bytes + decoration.len())?;
+            decoration = prefix(line, true, width);
+            (columns, bytes, row_start) = (0, 0, byte);
         }
-        if mapped.end == heading.content.end {
-            mapped.end = heading.envelope.end;
+        let available = width.saturating_sub(decoration.width());
+        let replacement = (size > available).then_some(if available == 0 { "" } else { "…" });
+        columns += replacement.map_or(size, UnicodeWidthStr::width);
+        bytes += match replacement {
+            Some(value) => value.len(),
+            None if tab => size,
+            None => escaped_terminal_bytes(grapheme),
+        };
+        if capture {
+            cells.push(Cell {
+                byte,
+                source: source_range(line, origin),
+                text: if let Some(value) = replacement {
+                    value.to_owned()
+                } else if tab {
+                    " ".repeat(size)
+                } else {
+                    escape_terminal(grapheme)
+                },
+                style: line.map_or(Modifier::empty(), |line| line.style),
+            });
+        }
+    }
+    decorate(&mut cells, &decoration, line, row_start, capture);
+    record(&mut cells, row_start, bytes + decoration.len())
+}
+fn prefix(line: Option<&BlockLine>, continuation: bool, width: usize) -> String {
+    let padding = line.map_or(0, |line| if continuation { 0 } else { line.padding });
+    crate::presentation::safe_truncate(&" ".repeat(padding), width.saturating_sub(1))
+}
+fn decorate(
+    cells: &mut Vec<Cell>,
+    prefix: &str,
+    line: Option<&BlockLine>,
+    byte: usize,
+    capture: bool,
+) {
+    if !capture || prefix.is_empty() {
+        return;
+    }
+    let source = line.map_or(byte..byte, |line| {
+        if byte == line.envelope.start {
+            line.envelope.start..if line.content.is_empty() {
+                line.envelope.end
+            } else {
+                line.content.start
+            }
+        } else {
+            byte..byte
+        }
+    });
+    let mut decoration = prefix
+        .graphemes(true)
+        .map(|text| Cell {
+            byte: source.start,
+            source: source.clone(),
+            text: text.to_owned(),
+            style: Modifier::empty(),
+        })
+        .collect::<Vec<_>>();
+    decoration.append(cells);
+    *cells = decoration;
+}
+fn source_range(line: Option<&BlockLine>, mut mapped: Range<usize>) -> Range<usize> {
+    if let Some(line) = line {
+        if mapped.start == line.content.start {
+            mapped.start = line.envelope.start;
+        }
+        if mapped.end == line.content.end {
+            mapped.end = line.envelope.end;
         }
     }
     mapped
 }
 type Layout = (Vec<Row>, usize, usize);
+pub(super) fn content_at(source: &str, byte: usize, width: usize) -> Option<Range<usize>> {
+    let lines = blocks::project(source).ok()?;
+    layout(source, width, false, Some(&lines)).ok()?;
+    lines
+        .iter()
+        .find(|line| !line.hidden && line.content.contains(&byte))
+        .map(|line| line.content.clone())
+}
 pub(super) fn project(source: &str, width: usize, capture: bool) -> (Layout, Option<&'static str>) {
-    match headings(source).and_then(|headings| layout(source, width, capture, Some(&headings))) {
+    match blocks::project(source).and_then(|lines| layout(source, width, capture, Some(&lines))) {
         Ok(layout) => (layout, None),
         Err(()) => (literal(source, width, capture), Some(LIMIT_CUE)),
     }
