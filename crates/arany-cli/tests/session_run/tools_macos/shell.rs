@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde_json::Value) {
     for option in ["-lc", "-i"] {
+        trace_case(root, "refusal");
         let state_path = root.join(format!("state-shell{option}"));
         let state = StateRoot::admit(&state_path).unwrap();
         private_file(
