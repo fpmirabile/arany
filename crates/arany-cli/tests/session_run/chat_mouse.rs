@@ -493,6 +493,108 @@ fn kitty_hover_tracks_drag_leave_and_revalidates_composer_geometry() {
     assert_eq!(modes.active, Vec::<u32>::new(), "capture restored on exit");
 }
 
+fn write_hover_images(workspace: &Path) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let opaque = STANDARD
+        .decode(arany::test_support::test_image().base64())
+        .expect("opaque PNG");
+    std::fs::write(workspace.join("opaque.png"), opaque).expect("opaque file");
+    let mut transparent = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut transparent, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        let mut writer = encoder.write_header().expect("transparent PNG header");
+        writer
+            .write_image_data(&[0, 0, 0, 0])
+            .expect("transparent pixel");
+    }
+    std::fs::write(workspace.join("transparent.png"), transparent).expect("transparent file");
+}
+
+#[test]
+fn sixel_hover_repaints_overlap_before_transparent_replacement() {
+    let (temp, state, workspace) = session_fixture(true);
+    write_hover_images(&workspace);
+    let mut chat = Chat::start(temp.path(), &state, &workspace, &[]);
+    chat.graphics_peer = Some(GraphicsPeer::Sixel);
+    chat.wait_for(0, &[b"\x1b[?1003h"], "Sixel motion capture");
+    chat.wait_armed(0, "armed fullscreen picker");
+    chat.step(
+        "picker close",
+        b"\r",
+        &[EMPTY_COMPOSER],
+        &CAPTURE_WITH_MOTION,
+    );
+    for (index, name) in ["opaque.png", "transparent.png"].into_iter().enumerate() {
+        let from = chat.send(format!("\x1b[200~{name}\x1b[201~").as_bytes());
+        let label = format!("[Image #{}]", index + 1);
+        chat.wait(
+            0,
+            |bytes| {
+                position(&bytes[from..], b"\x1b[?25h").is_some()
+                    && screen_text_position(bytes, &label).is_some()
+            },
+            "image chip frame",
+        );
+    }
+    let (column, row) = image_chip_position(&chat.transcript);
+    let opaque = chat.send(format!("\x1b[<35;{column};{row}M").as_bytes());
+    chat.wait_for(
+        opaque,
+        &[GraphicsPeer::Sixel.transfer(), b"\x1b\\\x1b[u"],
+        "complete opaque Sixel transfer",
+    );
+    let (column, row) =
+        screen_text_position(&chat.transcript, "[Image #2]").expect("transparent image chip");
+    let switch = chat.send(format!("\x1b[<35;{column};{row}M").as_bytes());
+    chat.wait_for(
+        switch,
+        &[GraphicsPeer::Sixel.transfer(), b"\x1b\\\x1b[u"],
+        "complete transparent Sixel transfer",
+    );
+    assert_sixel_replacement_clears_overlap(&chat.transcript, opaque, switch);
+    let modes = chat.exit();
+    assert!(modes.active.is_empty(), "capture restored on exit");
+}
+
+fn assert_sixel_replacement_clears_overlap(transcript: &[u8], opaque: usize, switch: usize) {
+    let (old_row, old_column) =
+        kitty_image_cursor(&transcript[opaque..switch]).expect("opaque Sixel placement");
+    let old_screen = visible_screen(&transcript[..switch]);
+    let old_right = old_screen[old_row - 2]
+        .chars()
+        .position(|character| character == '┐')
+        .expect("opaque balloon right border")
+        + 1;
+    let replacement = &transcript[switch..];
+    let (new_row, new_column) =
+        kitty_image_cursor(replacement).expect("transparent Sixel placement");
+    assert_eq!(new_row, old_row);
+    assert!(
+        new_column > old_column && new_column < old_right,
+        "placements overlap"
+    );
+    let mut painted = transcript[..switch].to_vec();
+    // The text-only screen peer models an old Sixel pixel as an external cell write.
+    painted.extend_from_slice(format!("\x1b[s\x1b[{new_row};{new_column}H█\x1b[u").as_bytes());
+    assert_eq!(
+        visible_screen(&painted)[new_row - 1]
+            .chars()
+            .nth(new_column - 1),
+        Some('█')
+    );
+    let transfer = position(replacement, GraphicsPeer::Sixel.transfer()).expect("replacement DCS");
+    painted.extend_from_slice(&replacement[..transfer]);
+    assert_eq!(
+        visible_screen(&painted)[new_row - 1]
+            .chars()
+            .nth(new_column - 1),
+        Some(' '),
+        "AttachedTerminal repaints the overlap before publishing transparent graphics"
+    );
+}
+
 #[test]
 fn kitty_hover_redraws_through_active_run_and_compaction_input_loops() {
     active_hover_journey(GraphicsPeer::Kitty);
