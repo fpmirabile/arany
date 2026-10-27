@@ -1172,6 +1172,9 @@ mod tests {
         reactor.block_on(async {
             let cache_stage = stage == "cache";
             let directory_path = if cache_stage {
+                let account =
+                    PathBuf::from(std::env::var_os("ARANY_TEST_SEED_ACCOUNT_ROOT").unwrap());
+                crate::test_support::inherit_account_root(&account);
                 crate::store::StateRoot::account_path()
                     .unwrap()
                     .join("guard")
@@ -1279,7 +1282,7 @@ mod tests {
                 .env("ARANY_TEST_ADMISSION", path)
                 .env("ARANY_TEST_SEED_STAGE", stage)
                 .env(
-                    "ARANY_TEST_ACCOUNT_ROOT",
+                    "ARANY_TEST_SEED_ACCOUNT_ROOT",
                     crate::test_support::isolate_account_root(),
                 )
                 .env("ARANY_TEST_SEED_ID", id.to_string())
