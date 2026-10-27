@@ -54,9 +54,11 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
-    let fixture_deadline = Instant::now()
-        + Duration::from_secs(u64::from(crate::isolation::NATIVE_TEST_TIMEOUT_SECONDS))
-        - PRODUCT_EXIT_WAIT;
+    let fixture_deadline = crate::isolation::native_test_deadline() - PRODUCT_EXIT_WAIT;
+    assert!(
+        Instant::now() < fixture_deadline,
+        "native fixture startup deadline"
+    );
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let tls = crate::tls_fixture::build(root);

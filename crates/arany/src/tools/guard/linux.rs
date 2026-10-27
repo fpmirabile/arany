@@ -1365,16 +1365,11 @@ fn verify_copy_entries(mounts: &[MountInfoEntry], project_bytes: u64) -> Result<
         .iter()
         .find(|entry| entry.path == target)
         .ok_or(ToolError::ProtectionUnavailable)?;
-    let size = format!("size={}k", project_bytes.div_ceil(1024));
+    let size = tmpfs_size_option(project_bytes);
     if entry.filesystem != b"tmpfs"
         || entry.source != b"tmpfs"
         || entry.root != Path::new("/")
-        || entry
-            .super_options
-            .split(|byte| *byte == b',')
-            .filter(|option| *option == size.as_bytes())
-            .count()
-            != 1
+        || mount_option_count(&entry.super_options, size.as_bytes()) != 1
     {
         return Err(ToolError::ProtectionUnavailable);
     }
@@ -1434,6 +1429,17 @@ struct MountInfoEntry {
     source: Vec<u8>,
     super_options: Vec<u8>,
     optional_fields: usize,
+}
+
+fn mount_option_count(options: &[u8], expected: &[u8]) -> usize {
+    options
+        .split(|byte| *byte == b',')
+        .filter(|option| *option == expected)
+        .count()
+}
+
+fn tmpfs_size_option(bytes: u64) -> String {
+    format!("size={}k", bytes.div_ceil(1024))
 }
 
 fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfoEntry>, ToolError> {

@@ -73,6 +73,28 @@ pub fn enter_native_account_isolated_test() -> bool {
 pub(crate) const NATIVE_TEST_TIMEOUT_SECONDS: u32 = 80;
 
 #[cfg(target_os = "linux")]
+fn native_test_clock() -> std::time::Duration {
+    std::time::Duration::try_from(rustix::time::clock_gettime(
+        rustix::time::ClockId::Monotonic,
+    ))
+    .expect("native fixture monotonic clock")
+}
+
+#[cfg(target_os = "linux")]
+pub fn native_test_deadline() -> std::time::Instant {
+    let now = std::time::Instant::now();
+    let deadline = std::time::Duration::from_nanos(
+        std::env::var("ARANY_NATIVE_TEST_DEADLINE_NS")
+            .expect("inherited native fixture deadline")
+            .parse()
+            .expect("numeric native fixture deadline"),
+    );
+    now + deadline
+        .checked_sub(native_test_clock())
+        .expect("native fixture deadline has not expired")
+}
+
+#[cfg(target_os = "linux")]
 pub fn enter_native_account_isolated_test_with_timeout(timeout_seconds: u32) -> bool {
     const CHILD: &str = "ARANY_ACCOUNT_ISOLATED_TEST";
     use crate::process::BoundedOutput;
@@ -250,18 +272,21 @@ pub fn native_account_isolated_test_command_with_timeout(
     )
     .expect("private native fixture passwd entry");
     passwd.sync_all().expect("native fixture passwd sync");
+    // Sampling before launch keeps the child's deadline earlier than the watchdog's.
+    let deadline = native_test_clock() + std::time::Duration::from_secs(u64::from(timeout_seconds));
     let mut command = Command::new("/usr/bin/sudo");
     command
         .args([
             "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
             "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
-            "root=$1; uid=$2; gid=$3; duration=$4; shift 4; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s \"$duration\" /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" XDG_CONFIG_HOME=\"$root/home/.config\" GH_CONFIG_DIR=\"$root/home/.config/gh\" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
+            "root=$1; uid=$2; gid=$3; duration=$4; deadline=$5; shift 5; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s \"$duration\" /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" XDG_CONFIG_HOME=\"$root/home/.config\" GH_CONFIG_DIR=\"$root/home/.config/gh\" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 ARANY_NATIVE_TEST_DEADLINE_NS=\"$deadline\" \"$@\"",
             "arany-native-account-fixture",
         ])
         .arg(root)
         .arg(user.uid.as_raw().to_string())
         .arg(user.gid.as_raw().to_string())
         .arg(timeout_seconds.to_string())
+        .arg(u64::try_from(deadline.as_nanos()).expect("bounded native fixture deadline").to_string())
         .arg(test_executable);
     command
 }

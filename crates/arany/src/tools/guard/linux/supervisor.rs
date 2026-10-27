@@ -331,12 +331,7 @@ fn verify_helper_mount() -> Result<(), ToolError> {
         || entry.source != b"tmpfs"
         || ![b"ro".as_slice(), b"nosuid", b"nodev"]
             .iter()
-            .all(|expected| {
-                entry
-                    .options
-                    .split(|byte| *byte == b',')
-                    .any(|option| option == *expected)
-            })
+            .all(|expected| mount_option_count(&entry.options, expected) > 0)
     {
         return Err(ToolError::ProtectionUnavailable);
     }
@@ -544,29 +539,17 @@ pub(super) fn verify_tmpfs(root: &Path, bytes: u64) -> Result<(), ToolError> {
         || entry.source != b"tmpfs"
         || entry.root != Path::new("/")
         || entry.optional_fields != 0
-        || !entry
-            .options
-            .split(|byte| *byte == b',')
-            .any(|option| option == b"nosuid")
-        || !entry
-            .options
-            .split(|byte| *byte == b',')
-            .any(|option| option == b"nodev")
+        || ![b"nosuid".as_slice(), b"nodev"]
+            .iter()
+            .all(|expected| mount_option_count(&entry.options, expected) > 0)
     {
         return Err(ToolError::ProtectionUnavailable);
     }
     let inode_option = format!("nr_inodes={TMPFS_INODES}");
-    let size_option = format!("size={}k", bytes.div_ceil(1024));
+    let size_option = tmpfs_size_option(bytes);
     if ![inode_option.as_bytes(), size_option.as_bytes()]
         .iter()
-        .all(|expected| {
-            entry
-                .super_options
-                .split(|byte| *byte == b',')
-                .filter(|option| option == expected)
-                .count()
-                == 1
-        })
+        .all(|expected| mount_option_count(&entry.super_options, expected) == 1)
     {
         return Err(ToolError::ProtectionUnavailable);
     }
