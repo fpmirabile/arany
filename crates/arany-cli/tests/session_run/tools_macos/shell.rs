@@ -22,7 +22,7 @@ pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde
         };
         let provider = Arc::new(Journey {
             requests: requests.clone(),
-            calls: vec![call.clone()],
+            calls: vec![call],
             linked_file: None,
         });
         let engine = arany::test_support::engine::open(
@@ -52,31 +52,51 @@ pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde
         assert_eq!(outcome.run.status, RunStatus::Failed, "{option}");
         assert_eq!(
             outcome.run.failure,
-            Some(arany::RunFailure::ToolStopped),
+            Some(arany::RunFailure::ProposalRefused),
             "{option}"
         );
-        assert_eq!(outcome.run.tools.len(), 1, "{option}");
+        assert!(outcome.run.tools.is_empty(), "{option}");
         assert_eq!(
             requests.lock().unwrap().len(),
             2,
             "no continuation: {option}"
         );
-        let observation = outcome.run.tools[0].observation.as_ref().unwrap();
-        assert_eq!(observation.intent.call, call);
-        assert_eq!(observation.disposition, ToolDisposition::Failed);
-        assert!(observation.attestation.is_none());
-        assert!(observation.enforcement_cause.is_none());
-        assert!(observation.output.contains("no operation was dispatched"));
-        assert!(
-            observation
-                .output
-                .contains("Cause: pinned shell requires -c SCRIPT")
-        );
+        assert_eq!(trace_snapshot(root)["stages"]["admission"], "unknown");
         assert_eq!(trace_snapshot(root)["stages"]["worker_go"], "unknown");
         assert!(!workspace.join("src/shell-started.txt").exists());
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(outcome.session_id).await.unwrap();
         store.close().await.unwrap();
+        let refusals: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                arany::Event::ToolPreflightRefused { record, .. } => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refusals.len(), 1, "one shell proposal refusal: {option}");
+        let refusal = refusals[0];
+        assert_eq!(
+            refusal.refusal,
+            arany::ToolRefusal {
+                cause: arany::ProposalRefusalCause::InvalidArguments,
+                reason: arany::ToolRefusalReason::Payload,
+            }
+        );
+        assert!(refusal.verdict.is_none());
+        assert!(!events.iter().any(|event| matches!(
+            event.event,
+            arany::Event::ToolProposed { .. }
+                | arany::Event::ToolStarted { .. }
+                | arany::Event::ToolFinished { .. }
+        )));
+        let primary = outcome
+            .run
+            .agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Primary)
+            .unwrap();
+        assert_eq!(primary.tool_refusal.as_ref(), Some(refusal));
         let replay = SessionView::replay(outcome.session_id, &events)
             .unwrap()
             .unwrap();
