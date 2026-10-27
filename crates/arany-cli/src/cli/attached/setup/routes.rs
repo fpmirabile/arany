@@ -1,8 +1,8 @@
-use super::custom::{CustomRouteContext, add_custom_route, edit_custom_route, remove_custom_route};
-use super::{
-    SetupError, SetupJournal, SetupSelection, check_custom_route, choose, custom_profile_choices,
-    inspect_custom_route,
+use super::custom::{
+    CustomRouteContext, add_custom_route, check_custom_route, custom_profile_choices,
+    edit_custom_route, inspect_custom_route, remove_custom_route,
 };
+use super::{SetupError, SetupJournal, SetupSelection, choose};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
 use arany::{
