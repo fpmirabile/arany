@@ -20,6 +20,10 @@ pub const fn max_changeset_bytes() -> usize {
     crate::tools::types::MAX_CHANGESET_BYTES
 }
 
+pub const fn max_changeset_files() -> usize {
+    crate::tools::types::MAX_CHANGESET_FILES
+}
+
 pub async fn record_setup_edit_state(
     store: &crate::Store,
     session_id: crate::SessionId,

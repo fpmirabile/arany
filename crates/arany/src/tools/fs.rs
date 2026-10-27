@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 pub(super) mod command;
+mod removal;
 pub(super) use command::{CommandSelection, prepare_command, selected_command_changeset};
 
 pub(super) fn valid(call: &ToolCall) -> bool {
@@ -1510,6 +1511,8 @@ pub(super) struct MutationControl {
     cancellation: Option<super::Cancellation>,
     deadline: Option<tokio::time::Instant>,
     phase: std::sync::Arc<std::sync::Mutex<MutationPhase>>,
+    #[cfg(test)]
+    removal_hook: Option<fn(&Dir, &str, removal::Phase)>,
 }
 
 impl MutationControl {
@@ -2063,13 +2066,7 @@ fn apply_files_controlled(
                     },
                 )?;
             } else {
-                control.commit()?;
-                parent
-                    .directory
-                    .remove_file(&parent.leaf)
-                    .map_err(|_| ToolError::Operation)?;
-                affected = true;
-                control.sync_parent(&parent.directory)?;
+                removal::remove(root, &parent, change.before.as_ref(), control)?;
             }
             affected = true;
             Ok(())
