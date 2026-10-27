@@ -412,20 +412,15 @@ fn table_matrix_padding_and_output_limits_fall_back_as_whole_messages() {
             markdown_cost(MessageKind::Assistant, source, width),
             (rows.iter().map(|row| row.text.len()).sum(), rows.len())
         );
-        assert_eq!(
-            rows.iter()
-                .any(|row| row.text.contains(markdown::LIMIT_CUE)),
-            limited
-        );
+        let literal = literal_rows(MessageKind::Assistant, source, width);
+        let mut expected: Vec<_> = literal.iter().map(|row| &row.text).collect();
+        let cue_rows = literal_rows(MessageKind::Notice, markdown::LIMIT_CUE, width);
+        let cue: Vec<_> = cue_rows.iter().skip(1).map(|row| &row.text).collect();
+        let actual: Vec<_> = rows.iter().map(|row| &row.text).collect();
+        assert_eq!(actual.ends_with(&cue), limited, "width {width}");
         if limited {
-            let literal = literal_rows(MessageKind::Assistant, source, width);
-            assert_eq!(
-                rows[..literal.len()]
-                    .iter()
-                    .map(|row| &row.text)
-                    .collect::<Vec<_>>(),
-                literal.iter().map(|row| &row.text).collect::<Vec<_>>()
-            );
+            expected.extend(cue);
+            assert_eq!(actual, expected, "width {width}");
         }
     }
 }
