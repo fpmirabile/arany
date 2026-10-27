@@ -41,6 +41,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             output: "bounded\noutput".into(),
             attestation: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         let item =
@@ -61,6 +62,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         output: String::new(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::Uncertain,
     };
     assert_eq!(
@@ -182,6 +184,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         output: format!("Hook denied this Tool: {canary}"),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     });
     run.tools[0].permission_verdict = Some(arany::permissions::PermissionVerdict {

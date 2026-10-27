@@ -3,6 +3,7 @@ use cap_std::fs::{Metadata, MetadataExt};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
 
+pub(in crate::tools) mod cache;
 mod compare;
 mod metadata;
 mod subtree;

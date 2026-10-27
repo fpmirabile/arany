@@ -551,18 +551,38 @@ fn leading_hard_breaks_keep_exact_rows_find_and_reading_anchors() {
 
 #[test]
 fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables() {
-    for (markup, literal, style) in [
-        ("*![alt](x.png)*", "![alt](x.png)", Modifier::ITALIC),
+    for (markup, literal, bold, italic) in [
+        ("**[label](dest)**", "label (dest)", "label (dest)", ""),
+        ("*![alt](x.png)*", "![alt](x.png)", "", "![alt](x.png)"),
+        (
+            "***[label](dest)***",
+            "label (dest)",
+            "label (dest)",
+            "label (dest)",
+        ),
         (
             "***![alt](x.png)***",
             "![alt](x.png)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "![alt](x.png)",
+            "![alt](x.png)",
         ),
-        ("*![**alt**](x.png)*", "![**alt**](x.png)", Modifier::ITALIC),
+        (
+            "**[a *label*](dest)**",
+            "a label (dest)",
+            "a label (dest)",
+            "label",
+        ),
+        (
+            "*![**alt**](x.png)*",
+            "![**alt**](x.png)",
+            "",
+            "![**alt**](x.png)",
+        ),
         (
             "***[label](a&amp;b)***",
             "label (a&b)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "label (a&b)",
+            "label (a&b)",
         ),
     ] {
         for source in [
@@ -579,17 +599,8 @@ fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables(
                 let rows = display_rows(kind, &source, 120, None);
                 let row = rows.iter().find(|row| row.text.contains(literal)).unwrap();
                 assert_eq!(row.text, format!("  {literal} plain"));
-                assert_eq!(styled(row, style), literal);
-                for modifier in [Modifier::BOLD, Modifier::ITALIC] {
-                    assert_eq!(
-                        styled(row, modifier),
-                        if style.contains(modifier) {
-                            literal
-                        } else {
-                            ""
-                        }
-                    );
-                }
+                assert_eq!(styled(row, Modifier::BOLD), bold);
+                assert_eq!(styled(row, Modifier::ITALIC), italic);
             }
         }
     }
