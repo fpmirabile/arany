@@ -1134,7 +1134,13 @@ fn spawn_confined_before(
     {
         super::guard::spawn_confined(command, &[writable, Path::new("/dev/null")])
     }
-    #[cfg(not(target_os = "linux"))]
+    // The executor unit's Seatbelt profile is already installed and every child inherits it.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = writable;
+        super::guard::spawn_before(command, deadline)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (command, writable);
         Err(ToolError::ProtectionUnavailable)
@@ -1227,6 +1233,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let scratch = site.root;
     let max_bytes = site.intent.limits.result_bytes as usize;
     let output = if site.intent.call.mutates() {
+        #[cfg(target_os = "macos")]
+        {
+            write_stage(site, git).await
+        }
+        #[cfg(not(target_os = "macos"))]
         write::execute(
             site.workspace,
             scratch,
@@ -1252,6 +1263,45 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     #[cfg(target_os = "linux")]
     site.stop_descendants().await?;
     output
+}
+
+pub(super) const WRITE_FRAME_BYTES: usize = write::FRAME_BYTES;
+
+#[cfg(target_os = "macos")]
+async fn write_stage(site: &GuardContext<'_>, git: &Program) -> Result<String, ToolError> {
+    use super::guard::GitStage;
+    match site.git.stage {
+        Some(GitStage::Plan) => {
+            let identity = site.config.git_identity.clone().unwrap_or_default();
+            match write::plan_frame(
+                site.workspace,
+                site.root,
+                git,
+                &identity,
+                site.intent,
+                site.hidden,
+                site.remaining_runtime(),
+            )
+            .await?
+            {
+                Ok((frame, result)) => {
+                    *site.git_plan.lock().map_err(|_| ToolError::Operation)? = Some(frame);
+                    Ok(result.to_string())
+                }
+                Err(failure) => Ok(failure),
+            }
+        }
+        Some(GitStage::Publish) => {
+            let (result, frame) = site.git.input.as_ref().ok_or(ToolError::Configuration)?;
+            let result: serde_json::Value =
+                serde_json::from_slice(result).map_err(|_| ToolError::Configuration)?;
+            if !result.is_object() || result.get("publication").is_some() {
+                return Err(ToolError::Configuration);
+            }
+            write::publish_frame(site.workspace, frame, result, site.intent, site.hidden)
+        }
+        None => Err(ToolError::Configuration),
+    }
 }
 
 pub(super) struct GitReadRequest<'a> {

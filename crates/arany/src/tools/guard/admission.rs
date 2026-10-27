@@ -822,19 +822,29 @@ pub(super) async fn acquire(
     runtime_ms: u32,
     queued: impl Fn(bool),
 ) -> Result<Permit, ToolError> {
+    let [permit] = acquire_all(&[id], runtime_ms, queued).await?;
+    Ok(permit)
+}
+
+// Reserves every unit of one effect together, so a later unit can never wait behind another effect's first.
+pub(super) async fn acquire_all<const N: usize>(
+    ids: &[uuid::Uuid; N],
+    runtime_ms: u32,
+    queued: impl Fn(bool),
+) -> Result<[Permit; N], ToolError> {
     let expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
     let path = crate::store::StateRoot::account_path()
         .map_err(|_| ToolError::Path)?
         .join("guard");
     let directory = open_directory(&path, true).map_err(|_| ToolError::Path)?;
-    acquire_in(
+    acquire_all_in(
         &directory,
         Path::new(if cfg!(target_os = "linux") {
             "/tmp"
         } else {
             "/private/tmp"
         }),
-        id,
+        ids,
         expires_at_ms,
         queued,
         crate::tools::now_ms,
@@ -995,6 +1005,7 @@ impl RecoveryBudget {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn acquire_in(
     directory: &PrivateDirectory,
     root_parent: &Path,
@@ -1003,6 +1014,19 @@ pub(super) async fn acquire_in(
     queued: impl Fn(bool),
     now: impl Fn() -> u64,
 ) -> Result<Permit, ToolError> {
+    let [permit] =
+        acquire_all_in(directory, root_parent, &[id], expires_at_ms, queued, now).await?;
+    Ok(permit)
+}
+
+pub(super) async fn acquire_all_in<const N: usize>(
+    directory: &PrivateDirectory,
+    root_parent: &Path,
+    ids: &[uuid::Uuid; N],
+    expires_at_ms: u64,
+    queued: impl Fn(bool),
+    now: impl Fn() -> u64,
+) -> Result<[Permit; N], ToolError> {
     let expires_at_ms = expires_at_ms.min(now().saturating_add(CAPACITY_WAIT_MS));
     let mut ticket: Option<Ticket> = None;
     let mut recovery = RecoveryBudget {
@@ -1024,19 +1048,25 @@ pub(super) async fn acquire_in(
         if let Some(_lock) = try_lock(file)? {
             reap_publications(&directory.dir)?;
             let limits = limits(&directory.dir)?;
+            if N > limits.units {
+                return Err(ToolError::Limit);
+            }
             let waiters = waiting(&directory.dir, now())?;
             let first = match &ticket {
                 Some(ticket) => waiters.first() == Some(&ticket.sequence),
                 None => waiters.is_empty(),
             };
-            if first && reserved(&directory.dir, root_parent)? < limits.units {
+            if first && reserved(&directory.dir, root_parent)? + N <= limits.units {
                 if now() >= expires_at_ms {
                     return Err(ToolError::Limit);
                 }
-                let unit = reserve(directory, id, root_parent)?;
+                let mut permits = Vec::with_capacity(N);
+                for id in ids {
+                    permits.push(reserve(directory, *id, root_parent)?);
+                }
                 drop(ticket);
                 queued(false);
-                return Ok(unit);
+                return permits.try_into().map_err(|_| ToolError::Operation);
             }
             recover_capacity = first;
             if ticket.is_none() {
@@ -1984,6 +2014,70 @@ mod tests {
                 .is_empty()
         );
         drop(permit);
+    }
+
+    #[tokio::test]
+    async fn one_effect_reserves_all_its_units_together_or_none() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
+        let ids = [uuid::Uuid::now_v7(), uuid::Uuid::now_v7()];
+        let expiry = crate::tools::now_ms() + 60_000;
+        replace_record(
+            &directory.dir,
+            "limits.json",
+            &Limits {
+                version: 1,
+                units: 2,
+                queued: 4,
+            },
+        )
+        .unwrap();
+        let pair = acquire_all_in(
+            &directory,
+            fixture.path(),
+            &ids,
+            expiry,
+            |_| {},
+            crate::tools::now_ms,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pair.each_ref().map(|permit| permit.id), ids);
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 2);
+        let single = acquire_in(
+            &directory,
+            fixture.path(),
+            uuid::Uuid::now_v7(),
+            crate::tools::now_ms() + 200,
+            |_| {},
+            crate::tools::now_ms,
+        )
+        .await;
+        assert!(matches!(single, Err(ToolError::Limit)));
+        drop(pair);
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 0);
+
+        replace_record(
+            &directory.dir,
+            "limits.json",
+            &Limits {
+                version: 1,
+                units: 1,
+                queued: 4,
+            },
+        )
+        .unwrap();
+        let oversized = acquire_all_in(
+            &directory,
+            fixture.path(),
+            &ids,
+            expiry,
+            |_| {},
+            crate::tools::now_ms,
+        )
+        .await;
+        assert!(matches!(oversized, Err(ToolError::Limit)));
+        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 0);
     }
 
     #[test]

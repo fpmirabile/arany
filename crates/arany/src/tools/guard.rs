@@ -59,6 +59,11 @@ pub(super) fn git_writes_available() -> bool {
     }
 }
 
+// macOS offers branch creation alone until its executor and publisher units cover the other verbs.
+pub(super) fn git_branch_creation_available() -> bool {
+    cfg!(target_os = "macos") || git_writes_available()
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -113,6 +118,14 @@ pub(super) use linux::RESERVATION_OVERHEAD;
 #[cfg(target_os = "macos")]
 pub(super) use macos::RESERVATION_OVERHEAD;
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum GitStage {
+    Plan,
+    Publish,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Task {
@@ -137,6 +150,9 @@ struct Task {
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     system_programs: Option<SystemPrograms>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_stage: Option<GitStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1140,6 +1156,24 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
         .map_err(|rejected| rejected.0)
 }
 
+// An executor's report may be followed by its plan frame; the flag says whether bytes remain.
+#[cfg(target_os = "macos")]
+async fn read_plan_report<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<(ToolObservation, bool), ToolError> {
+    let bytes = read_line_capped(reader, super::spill::report_cap(intent)).await?;
+    let observation = parse_observation(&bytes)?;
+    if observation.cache_update != CacheUpdate::NotApplicable || !observation.attested_for(intent) {
+        return Err(ToolError::Operation);
+    }
+    let framed = !tokio::io::AsyncBufReadExt::fill_buf(reader)
+        .await
+        .map_err(|_| ToolError::Operation)?
+        .is_empty();
+    Ok((observation, framed))
+}
+
 // A rejection keeps the error the reader has always returned and, where it is an Operation, a closed check.
 async fn read_report<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -1651,15 +1685,24 @@ pub(super) struct GuardContext<'a> {
     pub(super) hidden: &'a HiddenPaths,
     pub(super) worker_paths: Option<&'a [String]>,
     pub(super) definition: Option<Vec<u8>>,
+    pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
+    #[cfg(target_os = "macos")]
+    pub(super) git: GitWork,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
+    async fn dispatch(
+        self,
+    ) -> (
+        (Result<String, ToolError>, Option<Vec<u8>>),
+        Option<Vec<u8>>,
+    ) {
         let result = super::dispatch::run(&self).await;
-        (result, self.captured.into_inner().ok().flatten())
+        let plan = self.git_plan.into_inner().ok().flatten();
+        ((result, self.captured.into_inner().ok().flatten()), plan)
     }
 
     pub(super) fn remaining_runtime(&self) -> Duration {
@@ -1709,6 +1752,10 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         .is_some_and(|data| Some(data.clone()) != transfer::handover_ref(&task.intent))
         || task.worker.is_some() && task.handover.is_some()
     {
+        return Err(ToolError::Configuration);
+    }
+    #[cfg(target_os = "macos")]
+    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
         return Err(ToolError::Configuration);
     }
     if task.worker.is_none()
@@ -1857,6 +1904,38 @@ fn receive_bulk(
         )?;
         Ok((None, Some(changeset)))
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) struct GitWork {
+    pub(super) stage: Option<GitStage>,
+    pub(super) input: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+// A publisher receives the executor's result text, then its plan frame, before GO.
+#[cfg(target_os = "macos")]
+fn receive_git_input(
+    task: &Task,
+    stdin: &mut std::io::BufReader<impl Read>,
+) -> Result<GitWork, ToolError> {
+    let stage = task.git_stage;
+    if stage != Some(GitStage::Publish) {
+        return Ok(GitWork { stage, input: None });
+    }
+    let result = transfer::read_frame(stdin, task.intent.limits.result_bytes as usize)?;
+    let frame = transfer::read_frame(stdin, super::git::WRITE_FRAME_BYTES)?;
+    Ok(GitWork {
+        stage,
+        input: Some((result, frame)),
+    })
+}
+
+fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
+    if let Some(plan) = plan {
+        transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
+        stdout.flush().map_err(|_| ToolError::Operation)?;
+    }
+    Ok(())
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
@@ -2079,6 +2158,9 @@ pub(super) fn helper_main() -> ExitCode {
             .write_all(b"\n")
             .and_then(|()| stdout.flush())
             .map_err(|_| ToolError::Operation)?;
+        drop(stdout);
+        #[cfg(target_os = "macos")]
+        let git = receive_git_input(&task, &mut stdin)?;
         let mut go = [0; 3];
         stdin
             .read_exact(&mut go)
@@ -2136,16 +2218,18 @@ pub(super) fn helper_main() -> ExitCode {
                 .as_ref()
                 .map(|worker| worker.grant.read_paths.as_slice()),
             definition,
+            git_plan: Default::default(),
+            #[cfg(target_os = "macos")]
+            git,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
-        // Capture handshakes acquire stdout from a blocking worker during dispatch.
-        drop(stdout);
-        let result = runtime.block_on(site.dispatch());
+        let (result, plan) = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
         send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
+        send_plan(plan, &mut stdout)?;
         Ok(())
     })();
     if result.is_ok() {
