@@ -3165,6 +3165,7 @@ mod child_tool_report_tests {
                     limits: intent.limits.clone(),
                 })),
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: CacheUpdate::NotApplicable,
             }),
             review_call_index: None,

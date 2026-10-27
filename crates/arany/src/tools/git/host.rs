@@ -1313,6 +1313,7 @@ fn observation(
         enforcement_cause: None,
         limit_cause: None,
         approval_cause: None,
+        guard_stage: None,
     }
 }
 

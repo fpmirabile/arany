@@ -51,7 +51,7 @@ impl Inventory {
         };
         if inventory.walk(lower, Path::new(""), deadline).is_err() {
             if Instant::now() >= deadline {
-                return Err(ToolError::ProtectionUnavailable);
+                return Err(ToolError::Timeout(String::new()).in_selection());
             }
             inventory.mask(lower, Path::new(""))?;
         }
@@ -64,7 +64,10 @@ impl Inventory {
                 return Err(ToolError::ProtectionUnavailable);
             }
         }
-        inventory.baseline.freeze_at(lower, prefix, selector)?;
+        inventory
+            .baseline
+            .freeze_at(lower, prefix, selector)
+            .map_err(ToolError::in_selection)?;
         *budget = std::mem::take(&mut inventory.budget);
         Ok(inventory)
     }
