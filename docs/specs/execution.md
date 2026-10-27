@@ -22,7 +22,7 @@ Workspace file mutations attest in process with an intent-bound FileReceipt on s
 
 ## Collaboration
 
-Each accepted task is durably linked to a Goal before its first `MessageAccepted`. Each Run has one accountable primary AgentRun and an ordered, bounded collection of direct researcher and EditOnly children. Children cannot create nested teams; only EditOnly children may mutate the Workspace within their assignment leases. In a Run with a Tool runtime each researcher is read-only: its spawn pins the `read_only` grant, while each EditOnly child works under its pinned leased assignment grant. A researcher may alternate calls with Workspace List/Read/Search, admitted Skill reads and MCP catalog listing, within the Goal plan contract, before returning its bounded report. Before any plan contract a researcher may read any admitted Workspace path, as the primary prelude may; MCP catalog listing starts the admitted stdio server under the Guard. Without a Tool runtime a child makes one reasoning call. A researcher failure, including one out-of-grant MCP call, fails the Run and drains every sibling. An editor failure remains local as specified below. The primary obtains file evidence, performs authorized effects and owns the final answer. Goal completion and Run completion are separate receipts as defined by the [Goal lifecycle](./goals.md#lifecycle-budgets-and-recovery).
+Each accepted task is durably linked to a Goal before its first `MessageAccepted`. Each Run has one accountable primary AgentRun and an ordered, bounded collection of direct researcher and EditOnly children. Children cannot create nested teams; only EditOnly children may mutate the Workspace within their assignment leases. In a Run with a Tool runtime each researcher is read-only: its spawn pins the `read_only` grant, while each EditOnly child works under its pinned leased assignment grant. A researcher may alternate calls with Workspace List/Read/Search, admitted Skill reads, MCP catalog listing and explicitly granted [web Tools](./tools.md#web-fetch-and-web-search), within the Goal plan contract, before returning its bounded report. Before any plan contract a researcher may read any admitted Workspace path, as the primary prelude may; MCP catalog listing starts the admitted stdio server under the Guard. Without a Tool runtime a child makes one reasoning call. A researcher failure, including one out-of-grant MCP call, fails the Run and drains every sibling. An editor failure remains local as specified below. The primary obtains file evidence, performs authorized effects and owns the final answer. Goal completion and Run completion are separate receipts as defined by the [Goal lifecycle](./goals.md#lifecycle-budgets-and-recovery).
 
 Pin one policy before the Run: `single` admits no children; default `auto` allows up to three total direct children when useful; explicit `team` requires decomposition on the first non-Tool outcome. The persisted `max_active_children` field limits total direct assignment attempts across the Run, including researchers, replacements and later waves. Policy, process safety and remaining call, token, byte and time budgets bound team size; the pinned primary and child Provider concurrency ceilings separately bound simultaneous calls while admitted children wait in order. A ceiling is permission, not a required team size.
 
@@ -160,30 +160,30 @@ Event decoding retains owned payload records and strict current-field validation
 
 | Event kind | Current payload version |
 |---|---|
-| `RunStarted` | 24; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 31 |
-| `ToolStarted` | 25; required nullable `verdict`, with the configured or host permission verdict before dispatch |
+| `RunStarted` | 25; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
+| `ToolFinished` | 32 |
+| `ToolStarted` | 26; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
-| `AgentSpawned` | 17 |
+| `AgentSpawned` | 18 |
 | `AgentFinished` | 12 |
-| `ProviderCallRecorded` | 25; the closed failure reasons include `rate_limited` and `outcome_decode`; editor refusal causes follow [Accepted outcomes](#accepted-outcomes) |
+| `ProviderCallRecorded` | 26; the closed failure reasons include `rate_limited` and `outcome_decode`; editor refusal causes follow [Accepted outcomes](#accepted-outcomes) |
 | `RunFinished` | 9 |
 | `ProviderSetupEditStarted` | 3 |
 | `ProviderSetupEditFinished` | 1 |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
-| `GoalPlanContractRecorded` | 14 |
+| `GoalPlanContractRecorded` | 15 |
 | `GoalStarted` | 8 |
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolProposed` | 3 |
+| `ToolProposed` | 4 |
 | `ToolPreflightRefused` | 1 |
 | `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerStopObserved`, `WorkerVerificationRecorded` | 1 |
 | `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
 | `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
-| `HookStarted` | 14 |
-| `HookFinished` | 20 |
+| `HookStarted` | 15 |
+| `HookFinished` | 21 |
 | All other supported Event kinds | 6 |
 
 `ProviderCallRecorded` wire provenance remains an optional closed enum. `chat_completions_stop_storage_unspecified` records acceptance of a Chat Completions `stop` or `tool_calls` finish with the local non-streaming request; it claims nothing about remote retention. This additive enum value preserves the payload version and existing record bytes. An older reader rejects a record carrying the new value as unsupported history and follows the existing archive path.
@@ -238,7 +238,7 @@ and [hooks](../../crates/arany/tests/engine_run/hooks.rs).
 
 Typed `git_push`, `gh_pr_create`, `gh_pr_list` and `gh_pr_view` use the `host` execution class described by [Tools](./tools.md#human-approved-host-git). This is a second explicit exception to Guard isolation, separate from primary-only generic host commands. An optional `EffectIntent.host` pins write source data or the closed PR-list/PR-view adapter version; absent metadata keeps existing bytes unchanged. Host intents declare the `host` network class, and every other Tool retains `none`. The `Attestation::Host` receipt carries the intent digest, executable digest, PID, nullable exit code and confirmed group-teardown fact. A successful write requires exit zero, confirmed teardown and a committed primary human Ask verdict. Successful PR-list and PR-view reads accept either a committed primary human Ask verdict or a matching user-owned typed prefix verdict with a pinned settings digest; rule-only, AI-only, child, Guard and unguarded substitutions reject. Confirmed typed-read failures are Failed; interrupted host execution without confirmed completion and cleanup is Uncertain and stops continuation. Replay validates committed verdicts and receipts without reauthorizing or dispatching. Host effects with a receipt, Uncertain result, or committed approval without an outcome remain non-rewindable. The process-death fixture between approval and ToolFinished reopens twice with no outcome and no redispatch.
 
-`ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` advance once more after the MultiEdit steps for host calls, metadata/network class and receipts; the current versions are listed in the [version table](#admission-persistence-and-recovery). Each adjacent edge has an identity migration and canonical fixture in `store::migrate`; old rows naming a host operation, host metadata, host network or host receipt refuse. The same five kinds advanced once more for the `proxy` network class of an egress-proxy Command intent: the edge is an identity migration that refuses any source row naming `proxy`. No migration invents approval or host authority.
+`ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` advance once more after the MultiEdit steps for host calls, metadata/network class and receipts; the current versions are listed in the [version table](#admission-persistence-and-recovery). Each adjacent edge has an identity migration and canonical fixture in `store::migrate`; old rows naming a host operation, host metadata, host network or host receipt refuse. The same five kinds advanced once more for the `proxy` network class of an egress-proxy Command intent: the edge is an identity migration that refuses any source row naming `proxy`. The seven kinds that carry a Tool call (`ToolProposed`, `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded`, `ProviderCallRecorded`) advanced once more for `web_fetch` and `web_search`: an identity migration that refuses any source row naming either operation. The web Tool identity steps also advance `RunStarted` 24 → 25 and `AgentSpawned` 17 → 18. Their canonicalizers reject source worker policies or assignment grants naming `web_fetch` or `web_search`, and source Tool policy receipts enabling `child_web`. Supported source records retain denied child web access and migrate without effects. No migration invents approval or host authority.
 
 `AgentSpawned.profile` is required nullable provenance, also retained in the reduced Agent view. Outside roster mode it is null. In roster mode the primary references its default and every child references an eligible profile, with null proposals already resolved. Replay rejects missing or forged references, role-ineligible spawns, a reservation before spawn, cross-profile switches and reported output above the actual selected identity's role cap. Calls, fallback, telemetry and replay derive the chain from actor plus role; review/compaction use their fixed roles. No identity copy or replay-time configuration/account lookup can rebind an actor.
 

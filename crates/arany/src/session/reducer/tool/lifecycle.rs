@@ -281,7 +281,13 @@ pub(super) fn proposed(
         }
     }
     let child = names_child(current, run_id, agent_run_id);
-    if child && intent.limits.network == crate::tools::NetworkGrant::Proxy {
+    if super::search_allowance_spent(current, &intent.call) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if child
+        && intent.limits.network == crate::tools::NetworkGrant::Proxy
+        && !intent.call.is_web()
+    {
         return Err(ReplayError::InvalidTransition);
     }
     if child {

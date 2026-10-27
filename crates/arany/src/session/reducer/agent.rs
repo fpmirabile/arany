@@ -92,6 +92,8 @@ fn child_tool_is_admissible(
         && intent.workspace_device == config.workspace_device
         && intent.workspace_inode == config.workspace_inode
         && intent.call.is_child_research()
+        && (!intent.call.is_web()
+            || config.tool_policy.as_ref().is_some_and(|policy| policy.child_web))
         && child.definition.as_ref().is_none_or(|name| {
             super::definition_registry(run)
                 .ok()

@@ -18,6 +18,8 @@ pub(crate) struct Config {
     pub write: bool,
     #[serde(default, skip_serializing_if = "UnguardedGrant::is_denied")]
     pub child_unguarded: UnguardedGrant,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child_web: bool,
     pub commands: Vec<Program>,
     pub skills: Vec<Skill>,
     pub mcp: Vec<Server>,
@@ -29,6 +31,42 @@ pub(crate) struct Config {
     pub git_identity: Option<GitIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<super::network::Network>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<WebSearch>,
+}
+
+// The backend speaks the Brave Search API; `key` names an ARANY_WEB_SEARCH_* variable and is never stored here.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WebSearch {
+    pub endpoint: String,
+    pub key: String,
+}
+
+impl WebSearch {
+    const KEY_PREFIX: &'static str = "ARANY_WEB_SEARCH_";
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn host(&self) -> Option<String> {
+        let call = ToolCall::WebFetch {
+            url: self.endpoint.clone(),
+        };
+        super::web::host(&call)
+    }
+
+    pub(super) fn valid(&self) -> bool {
+        let call = ToolCall::WebFetch {
+            url: self.endpoint.clone(),
+        };
+        call.valid()
+            && self.key.strip_prefix(Self::KEY_PREFIX).is_some_and(|name| {
+                !name.is_empty()
+                    && self.key.len() <= 64
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+    }
 }
 
 // Author and committer of typed Git commits; never read from repository configuration.
@@ -156,11 +194,21 @@ impl Config {
         {
             return Err(ToolError::Configuration);
         }
+        if self.child_web && cfg!(not(target_os = "linux")) {
+            return Err(ToolError::Configuration);
+        }
         validate_selection(&self.runtime_grants)?;
         if self
             .network
             .as_ref()
             .is_some_and(|network| cfg!(not(target_os = "linux")) || !network.valid())
+        {
+            return Err(ToolError::Configuration);
+        }
+        if self
+            .web_search
+            .as_ref()
+            .is_some_and(|search| cfg!(not(target_os = "linux")) || !search.valid())
         {
             return Err(ToolError::Configuration);
         }
@@ -298,6 +346,7 @@ impl Config {
             unguarded_rules_digest: None,
             unguarded: UnguardedGrant::HumanOnly,
             child_unguarded: UnguardedGrant::Denied,
+            child_web: self.child_web && cfg!(target_os = "linux"),
         }
     }
 
@@ -382,6 +431,9 @@ impl Config {
                     .mcp
                     .iter()
                     .any(|value| &value.name == server && value.tools.contains(tool));
+            }
+            ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => {
+                return self.admits_web(call);
             }
         };
         let path = path.expect("file operation has path");

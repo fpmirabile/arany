@@ -1148,6 +1148,7 @@ mod tests {
             workspace_paths: vec!["sample".into()],
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
+            child_web: false,
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -1155,6 +1156,7 @@ mod tests {
             git: None,
             git_identity: None,
             network: None,
+            web_search: None,
         }
     }
 

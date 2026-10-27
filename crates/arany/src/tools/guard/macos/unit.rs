@@ -2491,6 +2491,7 @@ done
                 workspace_paths,
                 write: true,
                 child_unguarded: crate::tools::UnguardedGrant::Denied,
+                child_web: false,
                 commands,
                 skills: Vec::new(),
                 mcp: vec![crate::tools::config::Server {

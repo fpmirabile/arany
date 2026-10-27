@@ -21,7 +21,8 @@ use crate::{
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
         FRAME_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
-        NETWORK_IDLE_MS,
+        MAX_QUERY_BYTES, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES,
+        WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
         permissions::MAX_CONFIG_BYTES,
         toolchains::MAX_RUNTIME_GRANTS,
         types::{
@@ -549,6 +550,42 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: NETWORK_IDLE_MS,
             unit: "ms",
             owner: "crates/arany/src/tools/network.rs",
+        },
+        Limit {
+            name: "WEB_FETCH_CHARS",
+            value: WEB_FETCH_CHARS as u64,
+            unit: "characters",
+            owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "WEB_DOWNLOAD_BYTES",
+            value: WEB_DOWNLOAD_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "WEB_SEARCH_RESULTS",
+            value: WEB_SEARCH_RESULTS as u64,
+            unit: "results",
+            owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "MAX_SESSION_SEARCHES",
+            value: MAX_SESSION_SEARCHES as u64,
+            unit: "web_search calls per Session",
+            owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "MAX_URL_BYTES",
+            value: MAX_URL_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "MAX_QUERY_BYTES",
+            value: MAX_QUERY_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/web.rs",
         },
     ],
 };

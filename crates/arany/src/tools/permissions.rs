@@ -667,6 +667,7 @@ enum Tool {
     Grep,
     Skill,
     Network(String),
+    WebFetch(String),
     Native(&'static str),
     NameGlob(Regex),
     Mcp {
@@ -708,6 +709,21 @@ impl Rule {
             "Read" => Tool::Read,
             "Edit" => Tool::Edit,
             "MultiEdit" => Tool::Native("multiedit"),
+            "WebFetch" => match specifier {
+                None => Tool::Native("web_fetch"),
+                Some(specifier) => {
+                    let domain = specifier
+                        .strip_prefix("domain:")
+                        .filter(|domain| super::network::valid_pattern(domain))
+                        .ok_or("WebFetch rules take a `domain:` host pattern")?;
+                    return Ok(Self {
+                        tool: Tool::WebFetch(domain.to_owned()),
+                        pattern: None,
+                        commit_prefix: None,
+                    });
+                }
+            },
+            "WebSearch" => Tool::Native("web_search"),
             "Write" => Tool::Write,
             "Glob" => Tool::Glob,
             "Grep" => Tool::Grep,
@@ -844,6 +860,8 @@ impl Rule {
             Tool::Grep => matches!(call, ToolCall::Search { .. }),
             Tool::Skill => facts.family == Family::Skill,
             Tool::Network(_) => false,
+            Tool::WebFetch(domain) => super::web::host(call)
+                .is_some_and(|host| super::web::host_matches(domain, &host)),
             Tool::Native(name) => facts.name == *name,
             Tool::NameGlob(pattern) => {
                 pattern.is_match(&peer_name(call)) || pattern.is_match(facts.name)
@@ -1002,6 +1020,8 @@ fn peer_operation_name(name: &str) -> &str {
         "mkdir" | "edit" | "delete" | "move" | "apply_changeset" => "Edit",
         "multiedit" => "MultiEdit",
         "skill" => "Skill",
+        "web_fetch" => "WebFetch",
+        "web_search" => "WebSearch",
         _ => name,
     }
 }

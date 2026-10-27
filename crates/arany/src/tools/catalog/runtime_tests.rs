@@ -164,6 +164,10 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
             path: path(),
             limit: 1,
         },
+        ToolCall::WebFetch {
+            url: "https://example.com/".into(),
+        },
+        ToolCall::WebSearch { query: "q".into() },
     ];
 
     let expected = [
@@ -196,6 +200,8 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
         ("PR view", "github.com/o/r", vec![]),
         ("Rewind publication", "", vec![]),
         ("Glob", "**/*.rs", vec!["src"]),
+        ("Fetch", "https://example.com/", vec![]),
+        ("Web search", "q", vec![]),
     ];
     assert_eq!(calls.len(), expected.len());
     let mut operations = std::collections::BTreeSet::new();

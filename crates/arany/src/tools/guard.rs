@@ -124,6 +124,8 @@ struct Task {
     cache: Option<BuildCacheTransfer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_stdin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -423,7 +425,7 @@ pub(super) fn intent_enforcement_digest(
             )
         }
     }?;
-    let profile = if is_process && limits.network == super::types::NetworkGrant::Proxy {
+    let profile = if limits.network == super::types::NetworkGrant::Proxy {
         network::bind(profile)?
     } else {
         profile
@@ -833,6 +835,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+                secret: None,
                 hidden: runtime.hidden_paths(&intent.call),
                 definition: None,
                 worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
@@ -1739,6 +1742,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) hook_stdin: Option<&'a str>,
+    pub(super) secret: Option<String>,
     pub(super) hidden: &'a HiddenPaths,
     pub(super) worker_paths: Option<&'a [String]>,
     pub(super) definition: Option<Vec<u8>>,
@@ -2160,6 +2164,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             hook_stdin: task.hook_stdin.as_deref(),
+            secret: task.secret.clone(),
             hidden: &task.hidden,
             worker_paths: task
                 .worker
@@ -2199,6 +2204,7 @@ pub(super) fn unit_main() -> ExitCode {
 fn parser_config(config: &Config) -> Config {
     Config {
         child_unguarded: super::UnguardedGrant::Denied,
+        child_web: false,
         commands: Vec::new(),
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -2737,6 +2743,7 @@ mod tests {
             intent: intent(call),
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             worker: None,
@@ -2798,6 +2805,7 @@ mod tests {
             intent: intent(call.clone()),
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             worker: None,
@@ -2833,6 +2841,7 @@ mod tests {
             }),
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             definition: None,
             worker: None,
@@ -3527,6 +3536,7 @@ mod tests {
             workspace_paths: vec![".".into()],
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
+            child_web: false,
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -3534,6 +3544,7 @@ mod tests {
             git: None,
             git_identity: None,
             network: None,
+            web_search: None,
         }
     }
 
@@ -4391,6 +4402,7 @@ mod tests {
                 },
                 cache: None,
                 hook_stdin: None,
+                secret: None,
                 hidden: Default::default(),
                 #[cfg(target_os = "linux")]
                 parent_namespaces: profile::Namespaces::read().unwrap(),

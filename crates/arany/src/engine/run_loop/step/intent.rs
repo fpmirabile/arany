@@ -112,6 +112,9 @@ impl RunLoop<'_> {
             }
             runtime.bind_build_jobs(&mut intent)?;
         }
+        if actor == self.primary_id && intent.call.is_web() {
+            runtime.bind_web_network(&mut intent)?;
+        }
         let fixed_overhead_ms = duration_ms(
             runtime
                 .intent_reservation_overhead(&intent)
@@ -160,7 +163,10 @@ impl RunLoop<'_> {
         call: ToolCall,
         deadline: Instant,
     ) -> Option<EffectIntent> {
-        let intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        if intent.call.is_web() {
+            runtime.bind_web_network(&mut intent).ok()?;
+        }
         self.limit_child_intent(runtime, intent, deadline)
     }
 

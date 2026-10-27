@@ -21,6 +21,7 @@ pub(crate) const OPEN_CONNECTIONS: usize = 2 * MAX_NETWORK_CONNECTIONS as usize;
 pub(crate) const BRIDGE_OVERFLOW: &str = "ARANY-BRIDGE-OVERFLOW";
 #[cfg(target_os = "linux")]
 pub(crate) const PROXY_PORT: u16 = 3128;
+pub(crate) const WEB_CA_TARGET: &str = "/arany-ca.pem";
 pub(crate) const PROXY_ENDPOINT: &str = "http://127.0.0.1:3128";
 #[cfg(target_os = "linux")]
 pub(crate) const PROXY_SOCKET_TARGET: &str = "/arany-egress.sock";

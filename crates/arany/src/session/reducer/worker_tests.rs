@@ -485,6 +485,7 @@ fn fixture_with_grant(
             unguarded_rules_digest: None,
             unguarded: crate::tools::UnguardedGrant::HumanOnly,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
+            child_web: false,
         })),
     };
     let mut f = Fixture {

@@ -26,6 +26,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
             .await
         }
         Family::Git => git::run(site).await,
+        Family::Web => super::web::run(site, site.secret.as_deref()).await,
         Family::Preparation => {
             super::definitions::parse(site.definition.as_deref().ok_or(ToolError::Configuration)?)
         }
@@ -39,6 +40,9 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
             value().map_or(true, |value| value["exit_code"] != 0)
         }
         ToolCall::McpCall { .. } => value().map_or(true, |value| value["is_error"] == true),
+        ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => {
+            value().map_or(true, |value| value.get("error").is_some())
+        }
         _ if call.is_git() => value().map_or(true, |value| value.get("failed").is_some()),
         _ => false,
     }

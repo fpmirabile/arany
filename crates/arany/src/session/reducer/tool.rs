@@ -80,6 +80,20 @@ pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result
         })
 }
 
+// Every committed proposal counts, so the allowance is spent before any outbound request and survives resume.
+fn search_allowance_spent(view: &SessionView, call: &crate::tools::ToolCall) -> bool {
+    matches!(call, crate::tools::ToolCall::WebSearch { .. })
+        && view
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.tools.iter().chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            })
+            .filter(|tool| matches!(tool.intent.call, crate::tools::ToolCall::WebSearch { .. }))
+            .count()
+            >= crate::tools::MAX_SESSION_SEARCHES
+}
+
 pub(crate) fn validate_primary_tool_scope(
     view: &SessionView,
     run_id: crate::session::RunId,
@@ -88,6 +102,9 @@ pub(crate) fn validate_primary_tool_scope(
     use crate::session::ProposalRefusalCause::{Phase, PlanScopeExcludesCall};
     use crate::tools::ToolCall;
     let goal = active_run_goal(view, run_id).ok_or(Phase)?;
+    if search_allowance_spent(view, call) {
+        return Err(crate::session::ProposalRefusalCause::NotOffered);
+    }
     if goal.phase != crate::session::GoalPhase::Implementation && !call.is_goal_plan_prelude() {
         return Err(Phase);
     }

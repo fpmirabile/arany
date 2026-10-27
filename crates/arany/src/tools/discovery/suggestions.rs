@@ -45,6 +45,7 @@ impl FileSuggestionSource {
             workspace_paths: paths,
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
+            child_web: false,
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -52,6 +53,7 @@ impl FileSuggestionSource {
             git: None,
             git_identity: None,
             network: None,
+            web_search: None,
         })
     }
 

@@ -85,3 +85,7 @@ association or authorize deletion.
    secure media erasure.
 
 Remaining host cleanup is tracked in [next steps](../NEXT_STEPS.md#account-recovery-and-native-guard-follow-ups).
+
+## Web fetch and search
+
+The model may call `web_fetch` for one URL: a host on the [`network` grant](./specs/tools.md#network-grants-and-egress-proxy) runs directly and any other host asks you to approve it for that call. It returns text (HTML is reduced to text, never executed), cut at 100,000 characters and marked when cut. Redirects are refused. To add `web_search`, put `"web_search": {"endpoint": "https://api.search.brave.com/res/v1/web/search", "key": "ARANY_WEB_SEARCH_KEY"}` in `tools.json` and export that variable; it is read only when a search starts and is never stored. Both are Linux only and their results are untrusted data. To offer them to read-only researchers, set `"child_web": true`; researcher fetches remain inside the parent's listed domains and cannot request additional hosts. Details are in the [Tools contract](./specs/tools.md#web-fetch-and-web-search).
