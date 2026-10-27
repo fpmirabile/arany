@@ -290,14 +290,7 @@ fn agent_lines(
             "Worker: {}; cause: {:?}",
             worker.status, worker.cause
         ));
-        lines.push(format!(
-            "Publication: {:?}; integration: {:?}; discarded: {:?}",
-            worker.publication, worker.integration, worker.discarded
-        ));
-        lines.push(format!(
-            "Private outcome unknown: {}; cleanup confirmed: {}",
-            worker.private_outcome_unknown, worker.cleanup_confirmed
-        ));
+        lines.push(format!("Publication: {:?}", worker.publication));
         lines.push(format!(
             "Lease released: {}; verified: {}",
             worker.lease_released, worker.verified
@@ -454,7 +447,7 @@ impl AgentTranscript {
             .iter()
             .find(|agent| agent.id == agent_id && agent.role == AgentRole::Child)?;
         let label = agent_label(agent);
-        let status = agent_status_notice(run, agent, &label);
+        let status = agent_status_notice(agent, &label);
         // The status, the cue and up to two text replacements are reserved before any record.
         let reserved = [
             status.as_str(),
@@ -675,29 +668,20 @@ fn narrow_cost(text: &str) -> (usize, usize) {
     )
 }
 
-fn agent_status_notice(run: &RunView, agent: &AgentView, label: &str) -> String {
-    let unknown = run
-        .worker_history()
-        .iter()
-        .any(|worker| worker.assignment_id == agent.id && worker.private_outcome_unknown);
-    let qualification = if unknown {
-        "; private outcome unknown"
-    } else {
-        ""
-    };
+fn agent_status_notice(agent: &AgentView, label: &str) -> String {
     match agent.status {
         AgentStatus::Active => {
-            format!("{label} is working{qualification}; its committed activity appears here")
+            format!("{label} is working; its committed activity appears here")
         }
         AgentStatus::Failed => match agent
             .provider_calls
             .last()
             .and_then(provider_failure_notice)
         {
-            Some(reason) => format!("Error: {label} failed{qualification}: {reason}"),
-            None => format!("Error: {label} failed{qualification}"),
+            Some(reason) => format!("Error: {label} failed: {reason}"),
+            None => format!("Error: {label} failed"),
         },
-        status => format!("{label} {status}{qualification}"),
+        status => format!("{label} {status}"),
     }
 }
 

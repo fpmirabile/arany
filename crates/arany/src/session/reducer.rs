@@ -10,9 +10,8 @@ mod agent;
 mod worker;
 pub use worker::{WorkerState, WorkerView};
 pub(crate) use worker::{
-    coordination_ready, criterion_unmet_in_view, evidence_admitted, private_criterion_evidence,
-    private_failure, validate_request as validate_editor_request, verification_passed,
-    wave_settled,
+    coordination_ready, criterion_unmet_in_view, editor_tool_failed, evidence_admitted,
+    validate_request as validate_editor_request, verification_passed, wave_settled,
 };
 mod goal;
 mod rewind;
@@ -192,17 +191,8 @@ impl GoalView {
                         && run
                             .tools
                             .iter()
-                            .all(|t| (t.started_sequence.is_none() || t.settled_without_stop()) || matches!(&t.intent.call, crate::tools::ToolCall::PrepareWorker { preparation } if preparation.purpose == super::worker::WorkerDataPurpose::Base))
-                        && run.agents.iter().all(|agent| {
-                            agent.tools.iter().all(|t| {
-                                t.started_sequence.is_none() || t.settled_without_stop()
-                                    || agent.assignment.as_ref().is_some_and(|w| {
-                                        matches!(agent.grant, Some(super::ChildGrant::EditOnly { .. }))
-                                            && matches!(t.intent.target, super::worker::EffectTarget::WorkerView { assignment_id, base_digest, .. } if assignment_id == agent.id && base_digest == w.pins.base.sha256)
-                                            && t.hooks.iter().all(|h| h.outcome.as_ref().is_some_and(|o| !o.observation.stops_run()))
-                                    })
-                            })
-                        })
+                            .chain(run.agents.iter().flat_map(|a| &a.tools))
+                            .all(|t| t.started_sequence.is_none() || t.settled_without_stop())
                 })
         })
     }
@@ -1027,7 +1017,6 @@ impl RunView {
     fn interrupt(&mut self) {
         if !self.status.is_terminal() {
             self.status = RunStatus::Interrupted;
-            self.workers.clear_pending();
             for agent in &mut self.agents {
                 if let Some(w) = &mut agent.assignment {
                     w.interrupted = true;

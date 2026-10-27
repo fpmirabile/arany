@@ -4,7 +4,7 @@ use crate::session::{
         AgentDisposition, AgentRole, ChildGrant, MAX_ASSISTANT_MESSAGE_BYTES, RunDisposition,
         SpawnPayload,
     },
-    worker::{ChildAssignment, WORKER_DATA_BYTES},
+    worker::ChildAssignment,
 };
 
 impl Event {
@@ -62,12 +62,8 @@ impl Event {
                             })
                             .valid()
                                 || !p.grant.valid()
-                                || !p.base.valid()
                                 || p.policy_digest == [0; 32]
-                                || p.permissions_digest == Some([0; 32])
-                                || p.cache_generation == Some([0; 32])
-                                || p.data_bytes == 0
-                                || p.data_bytes as usize > WORKER_DATA_BYTES)
+                                || p.permissions_digest == Some([0; 32]))
                         {
                             return Err(ReplayError::InvalidPayload);
                         }
