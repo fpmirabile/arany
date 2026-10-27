@@ -470,10 +470,10 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
-    if registry.is_some() {
+    if rust_sysroot.is_some() {
         for line in String::from_utf8_lossy(&output.stdout)
             .lines()
-            .filter(|line| line.starts_with("repository "))
+            .filter(|line| line.starts_with("offline Cargo ") || line.starts_with("repository "))
         {
             println!("{line}");
         }
