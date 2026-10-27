@@ -492,7 +492,10 @@ fn native_journey_with_rust_sysroot(
             eprintln!("{line}");
         }
     } else {
-        assert!(output.stderr.is_empty(), "native journey stderr: {stderr:?}");
+        assert!(
+            output.stderr.is_empty(),
+            "native journey stderr: {stderr:?}"
+        );
     }
 }
 
