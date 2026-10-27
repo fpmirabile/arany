@@ -887,8 +887,7 @@ fn restore_allowance(
         &last,
         &format!(
             r#""max_tools":{},"data_bytes":{}}}"#,
-            policy.max_tools,
-            allowance
+            policy.max_tools, allowance
         ),
         1,
     )
@@ -908,11 +907,7 @@ fn downgrade_run_started(connection: &Connection, allowance: u32) {
                 "",
                 1,
             );
-            row.payload = restore_allowance(
-                payload,
-                config,
-                allowance,
-            );
+            row.payload = restore_allowance(payload, config, allowance);
             row.version = 19;
         }
     });
