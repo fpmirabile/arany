@@ -1489,10 +1489,24 @@ pub(super) fn draw_frame_with_history_and_chips(
     }
 }
 
-pub(super) fn draw_image_preview(frame: &mut Frame, area: Rect, title: &str) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PreviewInterior {
+    Repaint,
+    Graphics,
+}
+
+pub(super) fn draw_image_preview(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    interior: PreviewInterior,
+) {
     frame.render_widget(Clear, area);
     let title = safe_truncate(title, usize::from(area.width.saturating_sub(4)));
     frame.render_widget(Block::bordered().title(title), area);
+    if interior == PreviewInterior::Repaint {
+        return;
+    }
     let inner = Rect::new(
         area.x.saturating_add(1),
         area.y.saturating_add(1),

@@ -98,7 +98,7 @@ fn layout_line(
             (columns, bytes, row_start) = (0, 0, byte);
         }
         let available = width.saturating_sub(decoration.width());
-        let replacement = (size > available).then_some(if available == 0 { "" } else { "…" });
+        let replacement = overflow_replacement(size, available);
         columns += replacement.map_or(size, UnicodeWidthStr::width);
         bytes += match replacement {
             Some(value) => value.len(),
@@ -122,6 +122,13 @@ fn layout_line(
     }
     decorate(&mut cells, &decoration, line, row_start, capture);
     record(&mut cells, row_start, bytes + decoration.len())
+}
+fn overflow_replacement(size: usize, available: usize) -> Option<&'static str> {
+    match (size > available, available) {
+        (false, _) => None,
+        (true, 0) => Some(""),
+        (true, _) => Some("…"),
+    }
 }
 fn prefix(line: Option<&BlockLine>, continuation: bool, width: usize) -> String {
     let padding = line.map_or(0, |line| if continuation { 0 } else { line.padding });
