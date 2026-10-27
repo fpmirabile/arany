@@ -14,6 +14,8 @@ pub(super) use archive::{
     valid_archive_name,
 };
 mod build_cache;
+#[cfg(target_os = "linux")]
+pub(crate) use build_cache::CacheGuardRecovery;
 pub(crate) mod checkpoints;
 #[cfg(unix)]
 mod inventory;
