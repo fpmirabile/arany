@@ -481,7 +481,9 @@ fn native_journey_with_rust_sysroot(
     // The offline Cargo journey reports its own timing lines on stderr; anything else is a failure.
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.lines().all(|line| line.starts_with("offline Cargo ")),
+        stderr
+            .lines()
+            .all(|line| line.starts_with("offline Cargo ")),
         "native journey stderr: {stderr:?}"
     );
     for line in stderr.lines() {
