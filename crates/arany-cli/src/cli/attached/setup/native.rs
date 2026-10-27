@@ -494,14 +494,9 @@ async fn read_api_key_hidden(
     let mut key = String::new();
     let mut rejected = 0u16;
     let mut notice = None::<&str>;
+    let instruction = format!("Hidden input; up to {MAX_NATIVE_API_KEY_BYTES} ASCII characters");
     loop {
-        terminal.draw_setup(
-            3,
-            "Enter API key",
-            "Hidden input; up to 512 ASCII characters",
-            key.len(),
-            notice.take(),
-        )?;
+        terminal.draw_setup(3, "Enter API key", &instruction, key.len(), notice.take())?;
         match terminal.next_input().await? {
             TerminalInput::Character(character)
                 if rejected == 0
@@ -571,13 +566,11 @@ async fn read_workspace_id(
     let mut draft = Composer::default();
     let mut rejected = 0u16;
     let mut notice = None;
+    let instruction = format!(
+        "From Claude Console; wrkspc_ followed by letters or digits, up to {MAX_ANTHROPIC_WORKSPACE_ID_BYTES} characters"
+    );
     loop {
-        terminal.draw_setup_text_input(
-            "API workspace ID",
-            "From Claude Console; wrkspc_ followed by letters or digits, up to 128 characters",
-            &draft,
-            notice.take(),
-        )?;
+        terminal.draw_setup_text_input("API workspace ID", &instruction, &draft, notice.take())?;
         match terminal.next_input().await? {
             TerminalInput::Character(character)
                 if rejected == 0
