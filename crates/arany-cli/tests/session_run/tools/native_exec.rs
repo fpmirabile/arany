@@ -1,5 +1,8 @@
 use super::*;
 #[cfg(target_os = "linux")]
+#[path = "native_exec/cache_overlay.rs"]
+mod cache_overlay;
+#[cfg(target_os = "linux")]
 #[path = "native_exec/overlay.rs"]
 mod overlay;
 #[cfg(target_os = "linux")]

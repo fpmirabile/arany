@@ -127,6 +127,7 @@ pub(in crate::tools::guard::linux) struct View {
     bytes: u64,
     directories: Vec<DirectoryView>,
     attestation: Attestation,
+    pub(in crate::tools::guard::linux) cache: Option<super::cache::View>,
 }
 
 impl View {
@@ -190,6 +191,7 @@ impl View {
             namespaces: profile::Namespaces::read()?,
             masks,
             roots: grant.roots.clone(),
+            cache_bytes: None,
         };
         let view = Self {
             root: root.to_owned(),
@@ -197,6 +199,7 @@ impl View {
             bytes,
             directories,
             attestation,
+            cache: None,
         };
         view.verify()?;
         Ok(view)
@@ -206,7 +209,15 @@ impl View {
         &self.attestation
     }
 
+    pub(in crate::tools::guard::linux) fn install_cache(&mut self, cache: super::cache::View) {
+        self.attestation.cache_bytes = Some(cache.bytes());
+        self.cache = Some(cache);
+    }
+
     fn verify(&self) -> Result<(), ToolError> {
+        if let Some(cache) = &self.cache {
+            cache.verify()?;
+        }
         self.grant.verify()?;
         supervisor::verify_tmpfs(&self.root, self.bytes)?;
         for directory in &self.directories {
@@ -255,10 +266,18 @@ impl View {
         if task.intent.digest() != self.grant.digest || !selected(&task.intent, &task.config) {
             return Err(ToolError::Configuration);
         }
+        if let Some(cache) = &self.cache {
+            let mut output = std::io::stdout().lock();
+            output
+                .write_all(b"CACHE_HANDLE_READY\n")
+                .and_then(|()| output.flush())
+                .map_err(|_| ToolError::Operation)?;
+            cache.handoff(&mut input, &mut output)?;
+        }
         child
             .write_all(&encode_task(&task)?)
             .map_err(|_| ToolError::Operation)?;
-        if let Some(cache) = task.cache {
+        if let Some(cache) = task.cache.filter(|_| self.cache.is_none()) {
             let mut length = [0; 8];
             input
                 .read_exact(&mut length)
@@ -338,7 +357,11 @@ impl View {
         output
             .write_all(b"\n")
             .and_then(|()| output.flush())
-            .map_err(|_| ToolError::Operation)
+            .map_err(|_| ToolError::Operation)?;
+        if let Some(cache) = &self.cache {
+            cache.handoff(&mut input, &mut output)?;
+        }
+        Ok(())
     }
 }
 

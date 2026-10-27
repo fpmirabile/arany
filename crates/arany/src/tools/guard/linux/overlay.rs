@@ -8,6 +8,7 @@ mod masks;
 pub(super) use masks::MASK_ARGUMENT_BYTES;
 mod scope;
 pub(super) use scope::{Grant, View};
+pub(in crate::tools::guard) mod cache;
 #[cfg(test)]
 mod tests;
 
@@ -25,6 +26,7 @@ pub(in crate::tools::guard) struct Attestation {
     namespaces: profile::Namespaces,
     masks: Vec<PathBuf>,
     roots: Vec<scope::Root>,
+    cache_bytes: Option<u64>,
 }
 
 struct DirectoryView {
@@ -99,22 +101,7 @@ impl DirectoryView {
             return Err(ToolError::ProtectionUnavailable);
         }
         let merged = self.merged();
-        let overlay = mounts
-            .iter()
-            .find(|entry| entry.path == merged && entry.filesystem == b"overlay")
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        for (name, path) in [
-            ("lowerdir", &lower),
-            ("upperdir", &self.root.join("upper")),
-            ("workdir", &self.root.join("work")),
-        ] {
-            if !option(
-                &overlay.super_options,
-                format!("{name}={}", path.display()).as_bytes(),
-            ) {
-                return Err(ToolError::ProtectionUnavailable);
-            }
-        }
+        verify_layers(&mounts, &self.root)?;
         if mounts.iter().any(|entry| {
             entry.path.starts_with(&self.root)
                 && entry.path != lower
@@ -131,6 +118,26 @@ impl DirectoryView {
         verify_overlay(&mounts, &self.merged(), &self.masks, &mask_root)?;
         Ok(())
     }
+}
+
+fn verify_layers(mounts: &[MountInfoEntry], root: &Path) -> Result<(), ToolError> {
+    let entry = mounts
+        .iter()
+        .find(|entry| entry.path == root.join("merged") && entry.filesystem == b"overlay")
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    for (option_name, name) in [
+        ("lowerdir", "lower"),
+        ("upperdir", "upper"),
+        ("workdir", "work"),
+    ] {
+        if !option(
+            &entry.super_options,
+            format!("{option_name}={}", root.join(name).display()).as_bytes(),
+        ) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    Ok(())
 }
 
 fn clone_lower(
@@ -332,6 +339,7 @@ pub(in crate::tools::guard) fn verify_helper(
     attestation: &Attestation,
     task: &Task,
 ) -> Result<(), ToolError> {
+    cache::verify_helper(attestation.cache_bytes, task)?;
     if attestation.digest != task.intent.digest()
         || !attestation
             .namespaces
