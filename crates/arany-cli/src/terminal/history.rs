@@ -3480,3 +3480,6 @@ mod link_tests;
 
 #[cfg(test)]
 mod reference_tests;
+
+#[cfg(test)]
+mod fence_tests;

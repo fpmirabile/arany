@@ -1248,6 +1248,8 @@ fn publish(
         copy_objects(&git_dir, plan)?;
         for mut lock in [reference, index, head].into_iter().flatten() {
             lock.commit()?;
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            crate::fault::git_write::published(intent);
         }
         Ok::<_, ToolError>(())
     })();

@@ -17,6 +17,12 @@ pub(super) struct Flow {
 pub(super) struct Lines {
     cells: Vec<Cell>,
     breaks: Vec<(usize, Range<usize>)>,
+    wrap: Wrap,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wrap {
+    Word,
+    Grapheme,
 }
 impl Flow {
     pub(super) fn new(base: Modifier) -> Self {
@@ -120,6 +126,7 @@ impl Flow {
         Lines {
             cells: self.take(),
             breaks: std::mem::take(&mut self.breaks),
+            wrap: Wrap::Word,
         }
     }
     fn style(&self) -> Modifier {
@@ -369,6 +376,31 @@ impl Origin {
     }
 }
 impl Lines {
+    pub(super) fn label(
+        source: &str,
+        text: &str,
+        content: Range<usize>,
+        outer: Range<usize>,
+    ) -> Result<Self, ()> {
+        let mut flow = Flow::new(Modifier::BOLD);
+        flow.append(
+            source,
+            text,
+            Origin {
+                outer: content.clone(),
+                content,
+                atomic: false,
+                entities: true,
+            },
+            Modifier::BOLD,
+        )?;
+        let mut lines = flow.finish(outer);
+        lines.wrap = Wrap::Grapheme;
+        Ok(lines)
+    }
+    pub(super) fn enclose(&mut self, range: Range<usize>) {
+        envelope(&mut self.cells, range);
+    }
     fn lines(&self) -> impl Iterator<Item = (&[Cell], usize)> {
         let mut start = 0;
         self.breaks
@@ -425,7 +457,7 @@ pub(super) fn widen_end(cells: &mut [Cell], end: usize) {
         }
     }
 }
-pub(super) fn chunks(cells: &[Cell], width: usize) -> Vec<Range<usize>> {
+pub(super) fn chunks(cells: &[Cell], width: usize, wrap: Wrap) -> Vec<Range<usize>> {
     let (mut start, mut columns, mut space) = (0, 0, None);
     let mut rows = Vec::new();
     if width == 0 {
@@ -444,7 +476,7 @@ pub(super) fn chunks(cells: &[Cell], width: usize) -> Vec<Range<usize>> {
             space = None;
         }
         columns += cell.text.width().min(width);
-        if cell.text == " " {
+        if wrap == Wrap::Word && cell.text == " " {
             space = Some(index + 1);
         }
     }
@@ -482,7 +514,7 @@ pub(super) fn layout(
             record(&mut Vec::new(), anchor, 0)?;
             continue;
         }
-        for range in chunks(line, width) {
+        for range in chunks(line, width, lines.wrap) {
             let mut output = Vec::new();
             let (_, bytes) = place(&line[range.clone()], width, capture, &mut output);
             record(&mut output, line[range.start].source.start, bytes)?;

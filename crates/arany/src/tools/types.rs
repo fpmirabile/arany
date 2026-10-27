@@ -217,7 +217,6 @@ impl CommandSelectionSummary {
 #[serde(rename_all = "snake_case")]
 pub enum CacheUpdate {
     NotApplicable,
-    Discarded,
     NotAttempted,
     Published,
     Rejected,
@@ -1495,14 +1494,6 @@ impl ToolObservation {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
     pub(crate) fn stops_run(&self) -> bool {
-        if matches!(self.intent.target, EffectTarget::WorkerView { .. })
-            && matches!(self.intent.call, ToolCall::Command { .. })
-        {
-            return matches!(
-                self.disposition,
-                ToolDisposition::Uncertain | ToolDisposition::Cancelled
-            ) || self.cache_update == CacheUpdate::Uncertain;
-        }
         matches!(
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
@@ -1518,8 +1509,6 @@ impl ToolObservation {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
-            && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
             && self.spill.as_ref().is_none_or(|spill| spill.valid(self))
             && (self.guard_stage.is_none()
@@ -1537,41 +1526,18 @@ impl ToolObservation {
             && (self.disposition != ToolDisposition::Limit
                 || self.attestation.is_some()
                 || self.cache_update == CacheUpdate::NotApplicable)
-            && (private_command
-                || !matches!(
-                    self.intent.call,
-                    ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
-                )
-                || !(self.disposition == ToolDisposition::Succeeded
-                    || serde_json::from_str::<Value>(&self.output)
-                        .is_ok_and(|v| v.get("exit_code").is_some()))
+            && (!matches!(
+                self.intent.call,
+                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+            ) || !(self.disposition == ToolDisposition::Succeeded
+                || serde_json::from_str::<Value>(&self.output)
+                    .is_ok_and(|v| v.get("exit_code").is_some()))
                 || serde_json::from_str::<CommandResult>(&self.output).is_ok_and(|r| r.valid()))
             && (!matches!(
                 self.intent.call,
                 ToolCall::McpCall { .. } | ToolCall::McpList { .. }
             ) || self.disposition != ToolDisposition::Succeeded
                 || super::output::valid_mcp(&self.output))
-            && (!private_command
-                || matches!(
-                    self.cache_update,
-                    CacheUpdate::Discarded | CacheUpdate::NotApplicable | CacheUpdate::NotAttempted
-                ))
-            && (!private_command
-                || self.attestation.is_none()
-                || self.cache_update == CacheUpdate::Discarded)
-            && (!private_command
-                || self.attestation.is_none()
-                || serde_json::from_str::<crate::session::worker::WorkerCommandResult>(
-                    &self.output,
-                )
-                .is_ok_and(|r| {
-                    r.valid()
-                        && (self.disposition == ToolDisposition::Succeeded
-                            || matches!(
-                                r.private_capture,
-                                crate::session::worker::PrivateCapture::None {}
-                            ))
-                }))
             && self.output.len() <= self.intent.limits.result_bytes as usize
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_OBSERVATION_BYTES)
             && self
@@ -1648,7 +1614,6 @@ impl ToolObservation {
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
             && match self.cache_update {
-                CacheUpdate::Discarded => private_command && self.attestation.is_some(),
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
                 CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
@@ -2009,10 +1974,7 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
         o.remove("before");
         o.remove("executable");
     }
-    let private = matches!(observation.intent.target, EffectTarget::WorkerView { .. });
-    let effect = if private {
-        "none"
-    } else if observation.intent.call.is_host() {
+    let effect = if observation.intent.call.is_host() {
         match observation.disposition {
             ToolDisposition::Uncertain => "uncertain",
             ToolDisposition::Succeeded => "host",
@@ -2047,23 +2009,6 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
         effect,
         observation.cache_update,
     );
-    if private {
-        value["target"] = json!(observation.intent.target);
-        let command_capture =
-            serde_json::from_str::<crate::worker::WorkerCommandResult>(&observation.output).ok();
-        value["private_effect"] = json!(match observation.disposition {
-            ToolDisposition::Succeeded
-                if (observation.intent.call.mutates()
-                    || command_capture.as_ref().is_some_and(|r| matches!(
-                        r.private_capture,
-                        crate::worker::PrivateCapture::Sealed { .. }
-                    )))
-                    && observation.attested_for(&observation.intent) =>
-                "applied",
-            ToolDisposition::Uncertain => "uncertain",
-            _ => "none",
-        });
-    }
     if let Some(spill) = &observation.spill {
         value["spill"] = json!(spill);
     }

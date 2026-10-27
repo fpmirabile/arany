@@ -516,11 +516,7 @@ async fn run_live(
         ApprovalMode::Request
     });
     let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
-    let mut cache_publication = None::<(
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-        crate::store::BuildCacheIdentity,
-    )>;
+    let mut cache_failure: Option<commands::CacheFailure> = None;
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -549,24 +545,16 @@ async fn run_live(
                 commands::overlay::dispatched(&state, &workspace, case);
                 overlay_dispatch = None;
             }
-            publishing = async {
-                match &mut cache_publication {
-                    Some((entered, _, _)) => entered.await,
+            () = async {
+                match &mut cache_failure {
+                    Some(failure) => failure.inject().await,
                     None => std::future::pending().await,
                 }
-            } => {
-                publishing.expect("editor cache reached publication");
-                let (_, release, identity) = cache_publication.take().unwrap();
-                commands::fail_cache_publication(&identity);
-                release.send(()).unwrap();
-            }
+            } => cache_failure = None,
             Some(approval) = inbox.next() => {
                 commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
-                    let identity = crate::store::BuildCacheIdentity::new(&workspace, approval.intent.workspace_device, approval.intent.workspace_inode).unwrap();
-                    commands::prepare_cache_publication(&state, &identity);
-                    let (entered, release) = FaultPlan::gate_guard_cache_publication(approval.intent.id);
-                    cache_publication = Some((entered, release, identity));
+                    cache_failure = Some(commands::CacheFailure::new(&state, &workspace, &approval.intent));
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);
@@ -584,8 +572,12 @@ async fn run_live(
     }
     if case == "command_cache_unknown" {
         assert!(
+            cache_failure.is_none(),
+            "cache publication gate was reached"
+        );
+        assert!(
             matches!(&result, Err(EngineError::Tool(ToolError::Uncertain))),
-            "uncertain command cache must stop the Run with Tool(Uncertain)"
+            "uncertain command cache must stop the Run with Tool(Uncertain): {result:?}"
         );
     }
     if case == "command_overlay_uncertain" {

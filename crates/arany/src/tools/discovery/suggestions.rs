@@ -120,7 +120,6 @@ impl FileSuggestionSource {
             result_bytes: super::INDEX_BYTES,
             deadline,
             output: Output::Suggestions,
-            private_image: false,
             cancellation: Some(&cancellation),
         })?;
         if cancellation.is_cancelled() {
