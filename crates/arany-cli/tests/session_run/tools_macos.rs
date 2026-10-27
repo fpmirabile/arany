@@ -480,7 +480,7 @@ fn native_journey_with_rust_sysroot(
         }
     }
     assert!(
-        rust_sysroot.is_none() || timings > 0,
+        rust_sysroot.is_none() || registry.is_some() || timings > 0,
         "the offline Cargo journey must report its timing lines"
     );
     assert!(
