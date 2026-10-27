@@ -4,7 +4,10 @@ const RETIRED_EVENTS: &str = include_str!("retired-worker-events.json");
 
 fn current_source(kind: &str) -> (i64, &'static str) {
     let version = match kind {
+        "ToolProposed" => 2,
+        "ToolStarted" => 24,
         "ToolFinished" => 30,
+        "HookStarted" => 13,
         "HookFinished" => 19,
         _ => payload_version(kind).unwrap() - 1,
     };
