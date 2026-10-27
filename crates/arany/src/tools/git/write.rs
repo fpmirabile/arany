@@ -10,9 +10,13 @@ use super::{
     failure, inspect, object_id, owned, pathspecs_of, read_optional, records, resolve,
     valid_branch, verify_pin, write_view_base,
 };
-use crate::validate::{hex_digest, valid_relative};
+use crate::validate::{digest, hex_digest, valid_relative};
+
+mod frame;
+mod plan;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
+use plan::Plan;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -183,78 +187,20 @@ pub(super) async fn execute(
     hidden: &HiddenPaths,
     runtime: Duration,
 ) -> Result<String, ToolError> {
-    let (call, max_bytes) = (&intent.call, intent.limits.result_bytes as usize);
-    if max_bytes < RECEIPT_BYTES {
-        return Err(ToolError::Limit);
-    }
-    let deadline = tokio::time::Instant::now() + runtime.min(MAX_GIT_RUNTIME);
-    verify_pin(git)?;
-    let repository = match inspect(workspace)? {
-        Ok(repository) => repository,
-        Err(message) => return Ok(failure(message, &[], max_bytes, hidden)),
-    };
-    if !matches!(call, ToolCall::GitBranch { .. })
-        && IN_PROGRESS
-            .iter()
-            .any(|name| repository.git_dir.symlink_metadata(name).is_ok())
-    {
-        return Ok(failure(IN_PROGRESS_MESSAGE, &[], max_bytes, hidden));
-    }
-    let view = scratch.join(VIEW);
-    let snapshot = match prepare(&repository, workspace, &view)? {
-        Ok(snapshot) => snapshot,
-        Err(message) => return Ok(failure(message, &[], max_bytes, hidden)),
-    };
-    #[cfg(all(test, target_os = "linux"))]
-    tests::race(workspace, tests::Stage::Snapshot);
-    let mut env = environment(&view, workspace, scratch);
-    for (key, value) in [
-        ("GIT_AUTHOR_NAME", &identity.name),
-        ("GIT_AUTHOR_EMAIL", &identity.email),
-        ("GIT_COMMITTER_NAME", &identity.name),
-        ("GIT_COMMITTER_EMAIL", &identity.email),
-    ] {
-        env.push((key, value.into()));
-    }
-    let git = Git {
-        executable: Path::new(&git.executable),
-        env,
-        workspace,
-        scratch,
-        hidden,
-        view: Dir::open_ambient_dir(&view, cap_std::ambient_authority())
-            .map_err(|_| ToolError::Operation)?,
-        deadline,
-        max_bytes,
-    };
-    let planned = match call {
-        ToolCall::GitCommit {
-            message,
-            paths,
-            staged,
-        } => commit(&git, &repository, message, paths, *staged).await?,
-        ToolCall::GitBranch {
-            name: Some(name),
-            start_point,
-            ..
-        } => branch(&git, &repository, &snapshot, name, start_point.as_deref()).await?,
-        ToolCall::GitSwitch { branch } => switch(&git, &repository, branch).await?,
-        _ => return Err(ToolError::Configuration),
-    };
-    let (publication, mut result) = match planned {
-        Ok(planned) => planned,
-        Err(failure) => return Ok(failure),
-    };
+    let (plan, mut result) =
+        match plan::plan(workspace, scratch, git, identity, intent, hidden, runtime).await? {
+            Ok(planned) => planned,
+            Err(failure) => return Ok(failure),
+        };
+    let mut bytes = Vec::new();
+    frame::write(&mut bytes, &plan)?;
+    drop(plan);
+    let plan = frame::read(&mut bytes.as_slice())?;
+    drop(bytes);
     #[cfg(all(test, target_os = "linux"))]
     tests::race(workspace, tests::Stage::Planned);
-    result["publication"] = match publish(
-        workspace,
-        &git.view,
-        &repository,
-        &snapshot,
-        &publication,
-        intent.id,
-    )? {
+    let max_bytes = intent.limits.result_bytes as usize;
+    result["publication"] = match publish(workspace, &plan, intent.id)? {
         Ok(receipt) => receipt,
         Err(message) => return Ok(failure(message, &[], max_bytes, hidden)),
     };
@@ -1193,23 +1139,19 @@ fn sync_directory(directory: &Dir) -> Result<(), ToolError> {
 // After the first effect any failure is Uncertain.
 fn publish(
     workspace: &Path,
-    view: &Dir,
-    repository: &Repository,
-    snapshot: &RefState,
-    publication: &Publication,
+    plan: &Plan,
     intent: uuid::Uuid,
 ) -> Result<Result<Value, &'static str>, ToolError> {
+    let publication = &plan.publication;
     let root = super::super::fs::open_directory(workspace)?;
     let Ok(git_dir) = root.open_dir_nofollow(".git") else {
         return Ok(Err(DRIFT));
     };
-    if super::super::fs::identity(&git_dir)? != repository.identity {
+    if super::super::fs::identity(&git_dir)? != plan.identity {
         return Ok(Err(DRIFT));
     }
-    let index_before = repository
-        .index
-        .as_ref()
-        .map(|(bytes, _)| hex_digest(bytes));
+    let index_before = plan.index_before.map(plan::hex);
+    let mut head_before = Vec::new();
     // Declared before the locks so it outlives them: its record goes only once they are gone.
     let mut ledger = Ledger::create(&git_dir, intent)?;
     let locked = (|| {
@@ -1244,7 +1186,8 @@ fn publish(
         let live_head =
             read_optional(&git_dir, "HEAD", super::HEAD_BYTES)?.ok_or(ToolError::Conflict)?;
         let live_index = read_optional(&git_dir, "index", MAX_SNAPSHOT_BYTES)?;
-        if !matches!(ref_state(&git_dir, live_head)?, Ok(live) if live == *snapshot)
+        head_before = live_head.clone();
+        if !matches!(ref_state(&git_dir, live_head)?, Ok(live) if plan.refs == plan::RefDigests::from(&live))
             || live_index.as_deref().map(hex_digest) != index_before
         {
             return Err(ToolError::Conflict);
@@ -1274,7 +1217,7 @@ fn publish(
         }
     }
     let effects = (|| {
-        copy_objects(view, &git_dir, &publication.objects)?;
+        copy_objects(&git_dir, plan)?;
         for mut lock in [reference, index, head].into_iter().flatten() {
             lock.commit()?;
         }
@@ -1302,22 +1245,19 @@ fn publish(
     }
     if let Some(bytes) = &publication.head {
         let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim_end().to_owned();
-        receipt["head"] = json!({"before": text(&repository.head), "after": text(bytes)});
+        receipt["head"] = json!({"before": text(&head_before), "after": text(bytes)});
     }
     Ok(Ok(receipt))
 }
 
-fn copy_objects(view: &Dir, git_dir: &Dir, names: &[String]) -> Result<(), ToolError> {
-    if names.is_empty() {
+fn copy_objects(git_dir: &Dir, plan: &Plan) -> Result<(), ToolError> {
+    if plan.publication.objects.is_empty() {
         return Ok(());
     }
-    let source = view
-        .open_dir_nofollow("objects")
-        .map_err(|_| ToolError::Operation)?;
     let objects = git_dir
         .open_dir_nofollow("objects")
         .map_err(|_| ToolError::Operation)?;
-    for name in names {
+    for (name, bytes) in plan.publication.objects.iter().zip(&plan.objects) {
         let (prefix, rest) = name.split_once('/').ok_or(ToolError::Operation)?;
         let directory = match objects.open_dir_nofollow(prefix) {
             Ok(directory) => directory,
@@ -1336,16 +1276,6 @@ fn copy_objects(view: &Dir, git_dir: &Dir, names: &[String]) -> Result<(), ToolE
         if directory.symlink_metadata(rest).is_ok() {
             continue;
         }
-        let bytes = super::super::fs::read_regular(
-            source
-                .open_with(
-                    name,
-                    OpenOptions::new().read(true).follow(FollowSymlinks::No),
-                )
-                .map_err(|_| ToolError::Operation)?
-                .into_std(),
-            MAX_SNAPSHOT_BYTES,
-        )?;
         let temporary = format!("tmp_obj_arany_{}", uuid::Uuid::now_v7());
         let mut options = OpenOptions::new();
         options
@@ -1358,7 +1288,7 @@ fn copy_objects(view: &Dir, git_dir: &Dir, names: &[String]) -> Result<(), ToolE
         }
         let written = directory
             .open_with(&temporary, &options)
-            .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()))
+            .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
             .map_err(|_| ToolError::Operation)
             .and_then(|()| {
                 match rustix::fs::renameat_with(

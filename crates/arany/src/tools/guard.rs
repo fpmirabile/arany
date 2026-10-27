@@ -70,6 +70,10 @@ pub(super) use macos::{
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
+#[cfg(target_os = "linux")]
+mod cache_directory;
+mod cache_recovery;
+pub use cache_recovery::recover_build_cache;
 pub(super) mod selection_phase;
 pub(super) mod transfer;
 
@@ -179,6 +183,8 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
+    #[cfg(target_os = "linux")]
+    pub(super) directory: Option<cap_std::fs::Dir>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
 }
@@ -220,6 +226,8 @@ pub(super) fn build_cache_session(
             return Err(ToolError::ChangedInput);
         }
         return Ok(Some(BuildCacheSession {
+            #[cfg(target_os = "linux")]
+            directory: None,
             lease: Arc::new(lease),
             transfer: BuildCacheTransfer {
                 identity,
@@ -235,6 +243,10 @@ pub(super) fn build_cache_session(
         intent.limits.cache_candidate_bytes,
     ) {
         Ok(lease) => lease,
+        #[cfg(target_os = "linux")]
+        Err(StoreError::StorageFull) if cache_directory::selected(intent) => {
+            return Err(ToolError::Limit);
+        }
         Err(StoreError::StorageFull) if intent.limits.cache_candidate_bytes > 0 => {
             match state.begin_build_cache_with_limits(
                 identity.clone(),
@@ -251,6 +263,8 @@ pub(super) fn build_cache_session(
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
+        #[cfg(target_os = "linux")]
+        directory: None,
         lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
             identity,
@@ -1829,7 +1843,7 @@ fn receive_bulk(
         .write_all(b"WORKER_READY\n")
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
-    let bytes = transfer::read_frame(stdin)?;
+    let bytes = transfer::read_frame(stdin, crate::session::worker::WORKER_DATA_BYTES)?;
     if !stdin.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
@@ -1982,7 +1996,7 @@ fn send_result(
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
     if let Some(bytes) = candidate {
-        transfer::write_frame(stdout, &bytes)?;
+        transfer::write_frame(stdout, &bytes, crate::session::worker::WORKER_DATA_BYTES)?;
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
     #[cfg(target_os = "linux")]
@@ -3618,6 +3632,8 @@ mod tests {
         let lease = state.begin_build_cache(identity.clone()).unwrap();
         let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
+            #[cfg(target_os = "linux")]
+            directory: None,
             lease: Arc::new(lease),
             transfer: BuildCacheTransfer {
                 identity: identity.clone(),
