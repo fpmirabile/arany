@@ -282,7 +282,6 @@ fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() 
         let view = f.view();
         assert_eq!(view.runs[0].agents[1].tools[0].outcome_unknown(), unknown);
         if unknown {
-            assert!(!wave_settled(&view.runs[0]));
             let count = f.events.len();
             f.call(
                 f.child,
@@ -308,6 +307,25 @@ fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() 
             "uncertain: {unknown}"
         );
     }
+}
+
+#[test]
+fn uncertain_command_cache_blocks_an_otherwise_settled_editor_wave() {
+    let mut f = command_fixture();
+    command(&mut f, &[]);
+    f.mutation();
+    let cause = f.finish_worker();
+    f.release(cause);
+    f.verify();
+    let mut view = f.view();
+    let run = &mut view.runs[0];
+    assert!(wave_settled(run));
+    run.agents[1].tools[0]
+        .observation
+        .as_mut()
+        .unwrap()
+        .cache_update = CacheUpdate::Uncertain;
+    assert!(!wave_settled(run));
 }
 
 #[test]
