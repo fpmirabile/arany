@@ -408,14 +408,39 @@ impl StateRoot {
     }
 
     fn history_records(&self) -> Result<[Option<cap_std::fs::Metadata>; 4], StoreError> {
+        let limit = MAX_DATABASE_BYTES as usize;
         let mut records = std::array::from_fn(|_| None);
         for (name, record) in HISTORY_FILES.iter().zip(&mut records) {
-            *record = self
-                .open_private_record(name, MAX_DATABASE_BYTES as usize)?
-                .map(|file| file.metadata())
-                .transpose()?;
+            *record = if *name == DATABASE_FILE {
+                let file = self.open_private_record(name, limit)?;
+                file.map(|file| file.metadata()).transpose()?
+            } else {
+                self.history_sidecar(name, limit)?
+            };
         }
         Ok(records)
+    }
+
+    fn history_sidecar(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Option<cap_std::fs::Metadata>, StoreError> {
+        #[cfg(unix)]
+        {
+            let Some(file) = self.open_record_file(name)? else {
+                return Ok(None);
+            };
+            crate::private_fs::check_acl(&file, true)?;
+            let metadata = file.metadata()?;
+            crate::fault::private_record_admission(&self.path, name);
+            sidecar_metadata(metadata, limit)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (name, limit);
+            Err(StoreError::InvalidStateDirectory)
+        }
     }
 
     pub(crate) fn append_development_diagnostic(&self, record: &[u8]) -> Result<(), StoreError> {
@@ -544,15 +569,10 @@ impl StateRoot {
     ) -> Result<Option<cap_std::fs::File>, StoreError> {
         #[cfg(unix)]
         {
-            let mut options = OpenOptions::new();
-            options.read(true);
-            options.follow(FollowSymlinks::No);
-            nonblocking(&mut options);
-            let file = match self.dir.open_with(name, &options) {
-                Ok(file) => file,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(StoreError::Io(error)),
+            let Some(file) = self.open_record_file(name)? else {
+                return Ok(None);
             };
+            crate::fault::private_record_admission(&self.path, name);
             check_private_record_file(&file, limit)?;
             Ok(Some(file))
         }
@@ -560,6 +580,19 @@ impl StateRoot {
         {
             let _ = (name, limit);
             Err(StoreError::InvalidStateDirectory)
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_record_file(&self, name: &str) -> Result<Option<cap_std::fs::File>, StoreError> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.follow(FollowSymlinks::No);
+        nonblocking(&mut options);
+        match self.dir.open_with(name, &options) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(StoreError::Io(error)),
         }
     }
 
@@ -620,14 +653,34 @@ impl StateRoot {
 }
 
 #[cfg(unix)]
+fn sidecar_metadata(
+    metadata: cap_std::fs::Metadata,
+    limit: usize,
+) -> Result<Option<cap_std::fs::Metadata>, StoreError> {
+    use cap_std::fs::MetadataExt;
+    // A concurrent SQLite commit unlinks its journal; an inode unlinked after open is absent.
+    if metadata.nlink() == 0 {
+        return Ok(None);
+    }
+    check_private_metadata(&metadata, limit)?;
+    Ok(Some(metadata))
+}
+
+#[cfg(unix)]
 pub(super) fn check_private_record_file(
     file: &cap_std::fs::File,
     limit: usize,
 ) -> Result<(), StoreError> {
     crate::private_fs::check_acl(file, true)?;
-    use cap_std::fs::MetadataExt;
+    check_private_metadata(&file.metadata()?, limit)
+}
 
-    let metadata = file.metadata()?;
+#[cfg(unix)]
+fn check_private_metadata(
+    metadata: &cap_std::fs::Metadata,
+    limit: usize,
+) -> Result<(), StoreError> {
+    use cap_std::fs::MetadataExt;
     if !metadata.is_file()
         || metadata.len() > limit as u64
         || metadata.nlink() != 1
@@ -735,6 +788,115 @@ mod tests {
         assert!(
             matches!(state.readmit(), Err(StoreError::InvalidStateDirectory)),
             "a swapped directory at the State path fails closed"
+        );
+    }
+
+    // Holds `operation` at the record's admission gate and applies `change` in flight.
+    fn with_held_admission<T: Send>(
+        state: &StateRoot,
+        record: &'static str,
+        operation: impl FnOnce() -> T + Send,
+        change: impl FnOnce(),
+    ) -> T {
+        use crate::fault::{FaultPlan, PRIVATE_RECORD_GATE_DEADLINE};
+        // A finished or panicking worker cancels an unreached gate, disconnecting its waiter.
+        struct Cancel<'a>(&'a StateRoot, &'static str);
+        impl Drop for Cancel<'_> {
+            fn drop(&mut self) {
+                FaultPlan::clear_private_record_admission(self.0.path(), self.1);
+            }
+        }
+        let (entered, release) =
+            FaultPlan::gate_private_record_admission(state.path().to_path_buf(), record);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _cancel = Cancel(state, record);
+                operation()
+            });
+            let held = entered.recv_timeout(PRIVATE_RECORD_GATE_DEADLINE);
+            if held.is_ok() {
+                change();
+                // A worker whose gate already expired reports its failure at the join.
+                let _ = release.send(());
+            }
+            // The closure owns the release, so a panicking change still resumes the worker.
+            drop(release);
+            let result = worker.join().expect("admission worker");
+            held.expect("admission reached its gate");
+            result
+        })
+    }
+
+    #[test]
+    fn shared_history_admission_survives_a_journal_unlinked_in_flight() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let path = temp.path().join("state");
+        let state = StateRoot::admit(&path).expect("private State");
+        let name = HISTORY_FILES[0];
+        let journal = path.join(name);
+        let write_journal = || {
+            std::fs::write(&journal, b"journal").expect("rollback journal");
+            std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600))
+                .expect("private journal");
+        };
+        write_journal();
+        // A commit unlinks the journal after admission's metadata snapshot and before validation.
+        let admitted = with_held_admission(
+            &state,
+            name,
+            || state.lock_history(false).map(drop),
+            || std::fs::remove_file(&journal).expect("commit unlinks the journal"),
+        );
+        admitted.expect("shared admission");
+
+        write_journal();
+        let limit = MAX_DATABASE_BYTES as usize;
+        let file = state
+            .open_record_file(name)
+            .unwrap()
+            .expect("open the journal");
+        std::fs::remove_file(&journal).expect("commit unlinks the journal");
+        let unlinked = file.metadata().expect("unlinked journal metadata");
+        assert!(
+            sidecar_metadata(unlinked, limit).unwrap().is_none(),
+            "a journal unlinked before the snapshot is absent, not unsafe"
+        );
+
+        write_journal();
+        std::fs::hard_link(&journal, path.join("journal-alias")).expect("journal hard link");
+        assert!(matches!(
+            state.lock_history(false),
+            Err(StoreError::StateNotPrivate)
+        ));
+    }
+
+    #[test]
+    fn a_configuration_record_replaced_during_admission_fails_closed() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let path = temp.path().join("state");
+        let state = StateRoot::admit(&path).expect("private State");
+        let kind = RecordKind::Permissions;
+        let record = path.join(kind.file());
+        let pending = path.join("permissions.edit");
+        for (file, bytes) in [(&record, "{}"), (&pending, r#"{"v":2}"#)] {
+            std::fs::write(file, bytes).expect("permissions record");
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
+                .expect("private permissions record");
+        }
+        // An atomic replacement unlinks the opened inode before its privacy validation.
+        let read = with_held_admission(
+            &state,
+            kind.file(),
+            || state.record(kind).read(),
+            || std::fs::rename(&pending, &record).expect("atomic replacement"),
+        );
+        assert!(
+            matches!(read, Err(StoreError::StateNotPrivate)),
+            "a replaced configuration record is never missing: {read:?}"
+        );
+        assert_eq!(
+            state.record(kind).read().unwrap().as_deref(),
+            Some(&br#"{"v":2}"#[..])
         );
     }
 
