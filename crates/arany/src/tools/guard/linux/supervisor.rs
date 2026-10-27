@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::types::BYTES_PER_MEBIBYTE;
 use nix::sched::{CloneFlags, unshare};
 use rustix::mount::{MountFlags, MountPropagationFlags};
 use rustix::thread::{self, CapabilitySet, CapabilitySets};
@@ -253,6 +254,7 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
         !probe.root.is_absolute()
             || probe.bytes == 0
             || probe.bytes > crate::tools::types::MAX_BUILD_PROJECT_BYTES
+            || !probe.bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
     }) {
         return Err(ToolError::Configuration);
     }
