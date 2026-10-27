@@ -52,12 +52,19 @@ fn command_changeset_limits_cover_content_serialization_and_internal_context() {
         "serialized overflow rejects"
     );
 
+    let expected_paths: Vec<_> = admitted
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
     let integration = ToolCall::ApplyChangeset {
         source: ChangesetSource::CommandReceipt {
             source_intent_digest: [1; 32],
             changeset: admitted,
         },
     };
+    assert_eq!(integration.display_facts().paths, expected_paths);
+    assert_eq!(integration.display_facts().paths.len(), MAX_CHANGESET_FILES);
     assert_eq!(
         integration.argument_limit(),
         MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES
