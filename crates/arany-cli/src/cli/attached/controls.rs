@@ -19,6 +19,7 @@ use serde_json::Value;
 use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
+const CACHE_BUSY: &str = "Build cache is in use; retry after its command finishes";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
 mod build_jobs;
 
@@ -1185,7 +1186,7 @@ pub(super) async fn handle_command(
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
         }
-        InteractiveCommand::Cache => return Ok(cache_command(admission, argument)),
+        InteractiveCommand::Cache => return Ok(cache_command(admission, argument).await),
         _ => "Command is not available in this build".into(),
     };
     Ok(notice)
@@ -1348,26 +1349,40 @@ async fn provider_command(
     })
 }
 
-fn cache_command(admission: &Admission, argument: Option<&str>) -> String {
+async fn cache_command(admission: &Admission, argument: Option<&str>) -> String {
     let Ok(root) = StateRoot::open_existing(&admission.state_dir) else {
         return CACHE_CLEAR_FAILED.into();
     };
-    let (result, cleared) = match argument {
-        Some("clear") => (
-            root.clear_workspace_build_cache(&admission.workspace),
+    let workspace = match argument {
+        Some("clear") => Some(admission.workspace.as_path()),
+        Some("clear all") => None,
+        _ => return format!("Error: {CACHE_USAGE}"),
+    };
+    if let Err(error) = arany::recover_build_cache(&root, workspace).await {
+        return if matches!(error, arany::StoreError::BuildCacheBusy) {
+            CACHE_BUSY.into()
+        } else {
+            CACHE_CLEAR_FAILED.into()
+        };
+    }
+    let workspace = workspace.map(std::path::Path::to_path_buf);
+    let cleared = tokio::task::spawn_blocking(move || match workspace {
+        Some(path) => (
+            root.clear_workspace_build_cache(&path),
             "Cleared this Workspace's private build cache",
         ),
-        Some("clear all") => (
+        None => (
             root.clear_all_build_caches(),
             "Cleared all private build caches",
         ),
-        _ => return format!("Error: {CACHE_USAGE}"),
+    })
+    .await;
+    let Ok((result, cleared)) = cleared else {
+        return CACHE_CLEAR_FAILED.into();
     };
     match result {
         Ok(()) => cleared.into(),
-        Err(arany::StoreError::BuildCacheBusy) => {
-            "Build cache is in use; retry after its command finishes".into()
-        }
+        Err(arany::StoreError::BuildCacheBusy) => CACHE_BUSY.into(),
         Err(_) => CACHE_CLEAR_FAILED.into(),
     }
 }

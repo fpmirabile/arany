@@ -213,7 +213,7 @@ writes its bounded text report to stdout; stderr carries fixed failures. A
 complete report succeeds, including explicitly absent roots. A partial/refused
 report exits unsuccessfully with any known subtotal clearly labelled; cancellation
 emits no complete report. Coverage, byte semantics, exclusions, bounds and cleanup
-non-effects belong to [Tools](./tools.md#local-storage-inventory).
+non-effects belong to [Tools](./tools.md#local-storage-inventory), including the [cache recovery contract](./tools.md#persistent-workspace-build-cache).
 
 Idle `/storage` has no arguments and displays the same local report without
 creating a Run or inserting it into context. It is locked during a Run. Classic
