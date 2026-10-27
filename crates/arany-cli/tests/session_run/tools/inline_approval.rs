@@ -9,25 +9,30 @@ use std::{
     time::{Duration, Instant},
 };
 
+const CASES: [&str; 11] = [
+    "yes",
+    "escape",
+    "mouse-digits",
+    "early-digit",
+    "typeahead",
+    "linear-yes",
+    "linear-no",
+    "cancel",
+    "unguarded",
+    "unguarded-page-up",
+    "unguarded-pages",
+];
+const CASE_CAPTURE_WAIT: Duration = Duration::from_secs(60);
+
 #[test]
 #[cfg_attr(not(arany_ci), ignore = "native Linux inline approval PTY and Guard")]
 fn numbered_tool_approval_dispatches_only_after_review_and_an_explicit_choice() {
-    if !crate::isolation::enter_native_account_isolated_test() {
+    let corpus_seconds =
+        crate::isolation::NATIVE_TEST_TIMEOUT_SECONDS * u32::try_from(CASES.len()).unwrap();
+    if !crate::isolation::enter_native_account_isolated_test_with_timeout(corpus_seconds) {
         return;
     }
-    for case in [
-        "yes",
-        "escape",
-        "mouse-digits",
-        "early-digit",
-        "typeahead",
-        "linear-yes",
-        "linear-no",
-        "cancel",
-        "unguarded",
-        "unguarded-page-up",
-        "unguarded-pages",
-    ] {
+    for case in CASES {
         run_case(case);
     }
 }
@@ -154,7 +159,7 @@ fn run_case(case: &'static str) {
         crate::process::capture_terminal(
             child.child(),
             std::fs::File::from(pipe),
-            Duration::from_secs(60),
+            CASE_CAPTURE_WAIT,
             256 * 1024,
             |bytes| driver.advance(case, bytes, &input, &state, &workspace),
         )

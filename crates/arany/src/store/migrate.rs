@@ -171,6 +171,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("AgentFinished", 11, crate::session::live_editor_payload),
         variant_step!("ToolProposed", 1, crate::session::retired_worker_payload),
         variant_step!("ToolStarted", 23, crate::session::retired_worker_payload),
         variant_step!("ToolFinished", 29, crate::session::retired_worker_payload),

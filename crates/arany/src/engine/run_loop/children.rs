@@ -1818,6 +1818,9 @@ impl RunLoop<'_> {
             failure,
             step_stop,
         } = completion;
+        if let Some(s) = wave.segments.take() {
+            self.settle_active_segment(s)?;
+        }
         {
             let _active_work = self.ledger().active_work();
             let completion = self
@@ -1834,9 +1837,6 @@ impl RunLoop<'_> {
             if let WorkerCompletion::Uncertain = completion {
                 wave.queue.stop = Some(StopCause::Uncertain);
             }
-        }
-        if let Some(s) = wave.segments.take() {
-            self.settle_active_segment(s)?;
         }
         self.resume_delegation(wave)?;
         Ok(Admission::Reserved(

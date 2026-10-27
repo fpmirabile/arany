@@ -610,6 +610,7 @@ async fn run_live(
                 .released
                 .is_some()
         );
+        assert_ne!(view.goals[0].status, GoalStatus::Completed);
     }
     assert_live_editor_evidence(case, session, &events, &view);
     bounds::assert_stopped(case, &events, &view, &provider);

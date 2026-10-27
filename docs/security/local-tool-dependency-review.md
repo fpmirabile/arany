@@ -31,6 +31,39 @@ macOS also selects the previously inspected `num-traits 0.2.19` compiler probe. 
 
 The selected procedural-macro totals are 25 Linux and 19 macOS; this review covers the added `ref-cast-impl 1.0.27`. It enters through `jsonschema → referencing → fluent-uri → ref-cast`. Source inspection identified generated unsafe reference casts and the representation/field checks around their emitters; the complete macro implementation and exact release-feature expansion are not cleared. Selected `fluent-uri 0.4.1` sources use `RefCastCustom`/`ref_cast_custom` on transparent `Scheme(str)` and `EStr` with `PhantomData` plus `str`. This identifies invariant/expansion review targets, not proof of soundness. [Published macro source](https://docs.rs/crate/ref-cast-impl/1.0.27/source/src/lib.rs), [selected URI types](https://docs.rs/crate/fluent-uri/0.4.1/source/src/component.rs). Existing macro findings remain in the [macro review](./beta-proc-macro-source-review.md).
 
+## Linux namespace supervisor features
+
+The Linux [supervisor](../../crates/arany/src/tools/guard/linux/supervisor.rs)
+enables the existing locked `nix 0.31.3` `sched` and `rustix 1.1.5` `mount`/`thread`
+features in production. No package version, build script or application unsafe
+block is added. Cached published sources were inspected for the selected entrypoints:
+`nix::sched::unshare` checks the libc syscall result; rustix owns initialized
+mount/xattr/capability arguments and outputs, pidfds, wait status and the
+explicit descriptor inheritance flags for bwrap setup. The supervisor
+runs before any Tokio runtime or payload thread, maps only the invoking IDs,
+clears all capability sets and sets NNP before fork, and uses owned pidfds with
+`waitid(EXITED | NOWAIT)` followed by the standard child reap. No new `pre_exec`
+hook, FFI wrapper or privilege launcher is used. Dependency-internal unsafe is
+not an application soundness proof.
+
+The existing `seccompiler` package is also a Linux CLI dev dependency for
+subprocess-only namespace/xattr denial filters. It adds no production filter
+permission or runtime failure switch. The [supervisor corpus](../../crates/arany/src/tools/guard/linux/supervisor/tests.rs)
+and [process journeys](../../crates/arany-cli/tests/session_run/tools/native_exec/supervisor.rs)
+own drift, replacement after pinning through systemd launch and the helper
+data import, capability, refusal and teardown checks. The installed bwrap
+[descriptor-data implementation](https://github.com/containers/bubblewrap/blob/v0.9.0/bubblewrap.c)
+was inspected for bounded admitted-source copying, read-only import and source
+descriptor closure; the Tool contract below owns the resulting executable
+identity and digest checks.
+Executable-specific AppArmor
+profiles supply namespace authorization, never host-command authority. The
+[Tool contract](../specs/tools.md#linux-enforcement-and-compatibility) owns bounds
+and failure semantics; [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first) retains
+profile-enabled Ubuntu, distribution-profile compatibility and unrestricted-host
+native evidence gaps. Source inspection and compiled tests establish none of those
+native claims.
+
 ## Native macOS dependency selection
 
 The locked `nix` dependency is selected on Unix: production enables user lookup; tests also enable safe FIFO and PTY wrappers. Its cached published manifest declares MIT, a Rust minimum below Arany's and the existing `cfg_aliases` build dependency. The full build script emits fixed platform aliases without process execution, network access or generated source.

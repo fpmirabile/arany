@@ -106,6 +106,14 @@ opentelemetry-proto = { version = "=0.33.0", default-features = false, features 
 prost = "=0.14.4"
 tempfile = "3.27.0"
 
+[profile.dev]
+# Reduce Guard bootstrap hashing and import work while retaining full debug information.
+split-debuginfo = "packed"
+
+# Self-image hashing must fit the native bootstrap deadline under the Tool CPU quota.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(arany_ci)',

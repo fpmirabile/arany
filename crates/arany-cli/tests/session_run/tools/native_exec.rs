@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(target_os = "linux")]
+#[path = "native_exec/supervisor.rs"]
+mod supervisor;
 use crate::{loopback::ChildGuard, process::BoundedOutput};
 use sha2::{Digest, Sha256};
 use std::{

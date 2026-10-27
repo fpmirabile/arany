@@ -18,7 +18,13 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 75] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
+    (
+        "AgentFinished",
+        11,
+        include_str!("agentfinished-v11.json"),
+        include_str!("agentfinished-v11.json"),
+    ),
     (
         "AgentSpawned",
         15,
