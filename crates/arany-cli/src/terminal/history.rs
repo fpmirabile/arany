@@ -787,7 +787,20 @@ impl History {
             .iter()
             .find(|message| message.source == point.source)?;
         let text = message_text(view, message, &self.notices);
-        let (line_start, line_end) = line_bounds(&text, point.byte);
+        let (mut line_start, mut line_end) = line_bounds(&text, point.byte);
+        if matches!(
+            message.kind,
+            MessageKind::Assistant | MessageKind::AgentResult
+        ) && let Some(content) = super::markdown::content_at(
+            &text,
+            point.byte,
+            self.width
+                .min(MAX_ROW_CELLS)
+                .saturating_sub(row_indent(message.kind)),
+        ) {
+            line_start = line_start.max(content.start);
+            line_end = line_end.min(content.end);
+        }
         let graphemes = text[line_start..line_end]
             .grapheme_indices(true)
             .map(|(byte, grapheme)| (line_start + byte, grapheme))
