@@ -203,11 +203,12 @@ async fn admit_pair(
     intent: &EffectIntent,
     cancellation: &mut Cancellation,
 ) -> Result<((Unit, Unit), Option<crate::tools::ActiveToolWindow>), ToolError> {
+    let ids = [intent.id, uuid::Uuid::now_v7()];
     let reserved = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ToolError::Operation),
         permits = super::super::admission::acquire_all(
-            &[intent.id, uuid::Uuid::now_v7()],
+            &ids,
             intent.limits.runtime_ms,
             |queued| runtime.queue_changed(intent.id, queued),
         ) => permits?,
