@@ -7,10 +7,7 @@ use serde_json::{Value, json};
 
 impl ToolRuntime {
     pub(crate) fn grant_network(&self, intent: &mut EffectIntent) {
-        if self.config.network.is_some()
-            && self.worker.is_none()
-            && matches!(intent.call, ToolCall::Command { .. })
-        {
+        if self.config.network.is_some() && matches!(intent.call, ToolCall::Command { .. }) {
             intent.limits.network = NetworkGrant::Proxy;
         }
     }

@@ -2,12 +2,23 @@ use super::*;
 
 const RETIRED_EVENTS: &str = include_str!("retired-worker-events.json");
 
-fn current_source(kind: &str) -> (i64, &'static str) {
+fn retirement_source(kind: &str) -> (i64, &'static str) {
+    let version = match kind {
+        "ToolProposed" => 2,
+        "ToolStarted" => 24,
+        "ToolFinished" => 30,
+        "HookStarted" => 13,
+        "HookFinished" => 19,
+        "GoalPlanContractRecorded" => 13,
+        "ProviderCallRecorded" => 24,
+        "AgentSpawned" => 16,
+        "SupervisorVerdictRecorded" => 1,
+        _ => panic!("no worker retirement step for {kind}"),
+    };
     EVENT_FIXTURES
         .iter()
         .find_map(|(name, from, source, _)| {
-            (*name == kind && *from + 1 == payload_version(kind).unwrap())
-                .then_some((*from, *source))
+            (*name == kind && *from == version).then_some((*from, *source))
         })
         .unwrap()
 }
@@ -83,7 +94,7 @@ fn supported_worker_retirement_edges_preserve_canonical_bytes() {
         "AgentSpawned",
         "SupervisorVerdictRecorded",
     ] {
-        let (from, source) = current_source(kind);
+        let (from, source) = retirement_source(kind);
         let step = REGISTRY.event_step(kind, from).unwrap();
         assert_eq!((step.canonical)(source).as_deref(), Some(source), "{kind}");
         let value: Value = serde_json::from_str(source).unwrap();
@@ -95,7 +106,7 @@ fn supported_worker_retirement_edges_preserve_canonical_bytes() {
 fn retired_vocabulary_inside_untrusted_text_is_preserved() {
     let marker = "prepare_worker/worker_handover/worker_data/worker_capture";
     let kind = "ProviderCallRecorded";
-    let (from, source) = current_source(kind);
+    let (from, source) = retirement_source(kind);
     let mut value: Value = serde_json::from_str(source).unwrap();
     value["response_id"] = marker.into();
     let step = REGISTRY.event_step(kind, from).unwrap();
@@ -104,7 +115,7 @@ fn retired_vocabulary_inside_untrusted_text_is_preserved() {
     let canonical = (step.canonical)(&transformed.to_string()).unwrap();
     let event = Event::decode(
         kind,
-        from + 1,
+        payload_version(kind).unwrap(),
         &canonical,
         Some(RunId::new()),
         Some(AgentRunId::new()),
@@ -135,7 +146,7 @@ fn retired_call_payloads() -> Vec<(&'static str, Value)> {
         "HookFinished",
     ] {
         for call in [&call, &handover] {
-            let mut value: Value = serde_json::from_str(current_source(kind).1).unwrap();
+            let mut value: Value = serde_json::from_str(retirement_source(kind).1).unwrap();
             let pointer = if kind == "HookFinished" {
                 "/observation/intent/call"
             } else {
@@ -146,7 +157,7 @@ fn retired_call_payloads() -> Vec<(&'static str, Value)> {
         }
     }
     for call in [&call, &handover] {
-        let mut value: Value = serde_json::from_str(current_source("HookFinished").1).unwrap();
+        let mut value: Value = serde_json::from_str(retirement_source("HookFinished").1).unwrap();
         value["result"] = serde_json::json!({"narrowed":{"call":call}});
         cases.push(("HookFinished", value));
     }
@@ -165,15 +176,15 @@ fn retired_call_payloads() -> Vec<(&'static str, Value)> {
     for call in [call, handover] {
         let criterion = serde_json::json!({"kind":"tool_call_succeeded","call":call});
         let mut contract: Value =
-            serde_json::from_str(current_source("GoalPlanContractRecorded").1).unwrap();
+            serde_json::from_str(retirement_source("GoalPlanContractRecorded").1).unwrap();
         contract["contract"]["success_criterion"] = criterion.clone();
         cases.push(("GoalPlanContractRecorded", contract));
-        let mut spawn: Value = serde_json::from_str(current_source("AgentSpawned").1).unwrap();
+        let mut spawn: Value = serde_json::from_str(retirement_source("AgentSpawned").1).unwrap();
         spawn["assignment"] = serde_json::to_value(pins).unwrap();
         spawn["assignment"]["request"]["criterion"] = criterion.clone();
         cases.push(("AgentSpawned", spawn));
         let mut provider: Value =
-            serde_json::from_str(current_source("ProviderCallRecorded").1).unwrap();
+            serde_json::from_str(retirement_source("ProviderCallRecorded").1).unwrap();
         let mut request = serde_json::to_value(&pins.request).unwrap();
         request["criterion"] = criterion;
         provider["delegation"] = serde_json::json!([{"kind":"editor","assignment":request}]);
@@ -194,7 +205,7 @@ fn retired_attestation_payloads() -> Vec<(&'static str, Value)> {
             serde_json::json!({"worker_mutation":{"receipt":receipt,"mutation":{"previous_revision":0,"next_revision":1,"data":data[1]["payload"]["data"]}}}),
             serde_json::json!({"worker_data":{"guard":null,"intent_digest":vec![1;32],"data":data[1]["payload"]["data"]}}),
         ] {
-            let mut value: Value = serde_json::from_str(current_source(kind).1).unwrap();
+            let mut value: Value = serde_json::from_str(retirement_source(kind).1).unwrap();
             let pointer = if kind == "HookFinished" {
                 "/observation/attestation"
             } else {
@@ -206,7 +217,7 @@ fn retired_attestation_payloads() -> Vec<(&'static str, Value)> {
     }
     for site in ["worker_capture", "handover"] {
         let mut value: Value =
-            serde_json::from_str(current_source("SupervisorVerdictRecorded").1).unwrap();
+            serde_json::from_str(retirement_source("SupervisorVerdictRecorded").1).unwrap();
         value["site"] = site.into();
         cases.push(("SupervisorVerdictRecorded", value));
     }
@@ -219,7 +230,7 @@ fn enclosing_payloads_refuse_removed_calls_attestations_and_supervisor_subjects(
         .into_iter()
         .chain(retired_attestation_payloads())
     {
-        let (from, _) = current_source(kind);
+        let (from, _) = retirement_source(kind);
         let step = REGISTRY.event_step(kind, from).unwrap();
         assert!((step.canonical)(&value.to_string()).is_none(), "{kind}");
         assert!((step.transform)(value.clone()).is_none(), "{kind}");
@@ -227,7 +238,7 @@ fn enclosing_payloads_refuse_removed_calls_attestations_and_supervisor_subjects(
         assert!(
             Event::decode(
                 kind,
-                from + 1,
+                payload_version(kind).unwrap(),
                 &value.to_string(),
                 Some(scope.0),
                 Some(scope.1)
@@ -267,7 +278,7 @@ fn live_editor_history_migrates_and_reopens_without_changing_effects_or_receipts
                 "GoalPlanContractRecorded",
             ]
             .contains(&kind)
-                && payload_version(kind) == Some(from + 1)
+                && retirement_source(kind).0 == from
             {
                 changed += connection
                     .execute(
@@ -320,7 +331,7 @@ fn enclosing_payloads_refuse_the_removed_private_target_and_cache_outcome() {
         "HookStarted",
         "HookFinished",
     ] {
-        let (from, source) = current_source(kind);
+        let (from, source) = retirement_source(kind);
         let observation = if kind == "HookFinished" {
             "/observation"
         } else {
@@ -347,7 +358,7 @@ fn enclosing_payloads_refuse_the_removed_private_target_and_cache_outcome() {
             assert!(
                 Event::decode(
                     kind,
-                    from + 1,
+                    payload_version(kind).unwrap(),
                     &value.to_string(),
                     Some(scope.0),
                     Some(scope.1)

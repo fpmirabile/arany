@@ -110,9 +110,6 @@ impl super::ToolRuntime {
     // Web calls carry the proxy class like commands; their digest binds it without any process profile.
     // A remote MCP call keeps its process-class digest, since it runs as an MCP effect.
     pub(crate) fn bind_egress(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
-        if self.worker.is_some() {
-            return Ok(());
-        }
         if self.config.admits_web(&intent.call) {
             intent.limits.network = NetworkGrant::Proxy;
             intent.enforcement_digest = self.web_digest(intent)?;

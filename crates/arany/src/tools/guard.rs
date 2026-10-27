@@ -3507,7 +3507,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_task_requires_a_command_grant_and_no_worker() {
+    fn proxy_task_requires_an_admitted_call_and_no_private_target() {
         let mut command = intent(ToolCall::Command {
             program: "node".into(),
             args: Vec::new(),
@@ -3532,14 +3532,15 @@ mod tests {
                 matches!(other.call, ToolCall::Command { .. })
             );
         }
-        let mut private = command.clone();
-        private.target = crate::session::worker::EffectTarget::WorkerView {
-            assignment_id: crate::session::AgentRunId::new(),
-            base_digest: [1; 32],
-            revision: 1,
-            cache_generation: None,
-        };
-        assert!(!private.valid());
+        let mut private = serde_json::to_value(&command).unwrap();
+        private["target"] = serde_json::json!({
+            "kind": "worker_view",
+            "assignment_id": crate::session::AgentRunId::new(),
+            "base_digest": vec![1_u8; 32],
+            "revision": 1,
+            "cache_generation": null,
+        });
+        assert!(serde_json::from_value::<EffectIntent>(private).is_err());
     }
 
     #[test]

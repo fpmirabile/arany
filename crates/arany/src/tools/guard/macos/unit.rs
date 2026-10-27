@@ -2572,6 +2572,7 @@ done
                 git: None,
                 git_identity: None,
                 network: None,
+                web_search: None,
             },
             workspace: workspace.to_path_buf(),
             reads: None,
@@ -4080,6 +4081,7 @@ int main(int argc, char **argv) {
                     config: runtime.config.clone(),
                     cache: None,
                     hook_stdin: None,
+                    secret: None,
                     hidden: Default::default(),
                     intent: EffectIntent {
                         host: None,
