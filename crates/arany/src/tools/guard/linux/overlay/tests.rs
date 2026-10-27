@@ -81,6 +81,7 @@ fn ignored_controls_do_not_exhaust_publication_budgets() {
         let (changeset, _) = crate::tools::fs::command::overlay::capture_roots(
             &[(&inventory.baseline, source, target, prefix)],
             std::time::Instant::now() + PHASE_TIME,
+            crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES,
         )
         .unwrap();
         assert_eq!(changeset.files.len(), 1, "{directory}");
