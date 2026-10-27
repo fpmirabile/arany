@@ -262,9 +262,41 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
 fn bind_helper(target: &Path) -> Result<(), ToolError> {
     rustix::mount::mount_bind("/proc/self/exe", target)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
-    rustix::mount::mount_remount(target, MountFlags::BIND | MountFlags::RDONLY, "")
+    let flags = helper_mount_flags(target)? | MountFlags::RDONLY;
+    // Bind remounts replace per-mount flags, including restrictions locked by user namespaces.
+    rustix::mount::mount_remount(target, MountFlags::BIND | flags, "")
         .map_err(|_| ToolError::ProtectionUnavailable)?;
-    verify_mount_entries(&read_mountinfo()?, &[target.to_owned()])
+    if helper_mount_flags(target)? != flags {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn helper_mount_flags(target: &Path) -> Result<MountFlags, ToolError> {
+    let mounts = read_mountinfo()?;
+    verify_mount_entries(&mounts, &[target.to_owned()])?;
+    let entry = mounts
+        .iter()
+        .find(|entry| entry.path == target)
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    entry
+        .options
+        .split(|byte| *byte == b',')
+        .try_fold(MountFlags::empty(), |flags, option| {
+            Ok(flags
+                | match option {
+                    b"rw" => MountFlags::empty(),
+                    b"ro" => MountFlags::RDONLY,
+                    b"nosuid" => MountFlags::NOSUID,
+                    b"nodev" => MountFlags::NODEV,
+                    b"noexec" => MountFlags::NOEXEC,
+                    b"noatime" => MountFlags::NOATIME,
+                    b"nodiratime" => MountFlags::NODIRATIME,
+                    b"relatime" => MountFlags::RELATIME,
+                    b"nosymfollow" => MountFlags::NOSYMFOLLOW,
+                    _ => return Err(ToolError::ProtectionUnavailable),
+                })
+        })
 }
 
 fn enter() -> Result<(), ToolError> {
