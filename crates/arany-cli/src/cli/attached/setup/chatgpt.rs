@@ -1,17 +1,17 @@
 use super::{
     SavedDefaults, SetupError, SetupJournal, SetupSelection, await_operation, await_setup_ack,
-    choose, configure_chatgpt,
+    choose,
     error::{chatgpt_edit_is_uncertain, chatgpt_keyring_available},
-    native, review_chatgpt_risk, review_warning,
+    native, review_warning,
 };
 use crate::accounts::{
-    chatgpt::{self, CallbackListener, RiskAcknowledgment, registration::Registration},
+    chatgpt::{self, CallbackListener, RiskAcknowledgment, RiskPrompt, registration::Registration},
     credentials::{self, AccountStorage},
 };
 use crate::terminal::AttachedTerminal;
 use arany::{
-    CollaborationPolicy, ProviderKind, ProviderSetupDisposition, ProviderSetupTargetKind,
-    SessionDefaults,
+    CollaborationPolicy, Effort, ModelEntry, ProviderKind, ProviderSetupDisposition,
+    ProviderSetupTargetKind, SessionDefaults,
 };
 use sha2::{Digest, Sha256};
 use std::future::Future;
@@ -265,7 +265,7 @@ pub(super) fn selected_chatgpt_defaults() -> Result<SavedDefaults, SetupError> {
     }
 }
 
-pub(super) fn chatgpt_defaults(account_id: uuid::Uuid) -> SessionDefaults {
+fn chatgpt_defaults(account_id: uuid::Uuid) -> SessionDefaults {
     SessionDefaults {
         provider: Some(
             ProviderKind::ChatGpt
@@ -706,7 +706,7 @@ async fn save_chatgpt_authorization(
     .map_err(SetupError::chatgpt_authorization)
 }
 
-pub(super) async fn await_chatgpt_step<T>(
+async fn await_chatgpt_step<T>(
     terminal: &mut AttachedTerminal,
     title: &str,
     instruction: &str,
@@ -716,6 +716,126 @@ pub(super) async fn await_chatgpt_step<T>(
         .await?
         .transpose()
         .map_err(SetupError::chatgpt_authorization)
+}
+
+fn catalog_chatgpt_defaults(
+    account_id: uuid::Uuid,
+    selected_id: uuid::Uuid,
+    models: &[chatgpt::ChatGptModel],
+) -> Result<SessionDefaults, String> {
+    if selected_id != account_id {
+        return Err("ChatGPT account changed during setup; use /setup again".into());
+    }
+    let model = models
+        .iter()
+        .find(|model| model.slug == "gpt-5.6-luna")
+        .or_else(|| models.first())
+        .ok_or("selected account has no visible ChatGPT models")?;
+    let mut defaults = chatgpt_defaults(account_id);
+    defaults.model = Some(model.slug.clone());
+    defaults.effort = Some(Effort::Low);
+    Ok(defaults)
+}
+
+async fn configure_chatgpt(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+    account: &ChatGptSetupAccount,
+) -> Result<(SessionDefaults, Option<String>, Vec<ModelEntry>), SetupError> {
+    let account_id = account.id();
+    let defaults = chatgpt_defaults(account_id);
+    if let ChatGptSetupAccount::PermissionDisabled { local_cleared, .. } = account {
+        let cleanup = if *local_cleared {
+            ""
+        } else {
+            "; removal of the previous keyring token was not confirmed"
+        };
+        return Ok((
+            defaults,
+            Some(format!(
+                "Verified ChatGPT sign-in saved; plan usage is disabled{cleanup}. Use /setup to enable the plan or explicitly choose an API account; no model check or Run started"
+            )),
+            Vec::new(),
+        ));
+    }
+    let catalog = await_chatgpt_step(
+        terminal,
+        "Loading ChatGPT models",
+        "Reading visible models; Esc keeps the account",
+        async { Ok(chatgpt::selected_models(workspace.to_path_buf(), Some(account_id)).await) },
+    )
+    .await?;
+    let Some(catalog) = catalog else {
+        return Ok((defaults, None, Vec::new()));
+    };
+    let (selected_id, rows) = match catalog {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return Ok((
+                defaults,
+                Some(format!(
+                    "Model catalog failed; {}. Use /provider chatgpt then /model to retry: {error}",
+                    account.status()
+                )),
+                Vec::new(),
+            ));
+        }
+    };
+    if selected_id != account_id {
+        return Err("ChatGPT account changed during setup; use /setup again".into());
+    }
+    if rows.is_empty() {
+        return Ok((
+            defaults,
+            Some(format!(
+                "No visible ChatGPT models; {}. Use /model later",
+                account.status()
+            )),
+            Vec::new(),
+        ));
+    }
+    let defaults = catalog_chatgpt_defaults(account_id, selected_id, &rows)?;
+    let model = defaults.model.as_deref().expect("nonempty visible catalog");
+    let notice = if model == "gpt-5.6-luna" {
+        format!("ChatGPT ready: {model} · low. Use /model to change.")
+    } else {
+        format!(
+            "ChatGPT ready: {model} · low. The catalog does not list prices; use /model to change."
+        )
+    };
+    let catalog_rows = rows
+        .into_iter()
+        .map(|row| ModelEntry {
+            id: row.slug,
+            context_window_tokens: None,
+            runnable: false,
+            efforts: Vec::new(),
+        })
+        .collect();
+    Ok((defaults, Some(notice), catalog_rows))
+}
+
+async fn review_chatgpt_risk(
+    terminal: &mut AttachedTerminal,
+    storage: AccountStorage,
+) -> Result<Option<RiskAcknowledgment>, SetupError> {
+    let prompt = RiskPrompt::new(storage);
+    let warning = prompt.text();
+    if review_warning(
+        terminal,
+        "ChatGPT plan consent",
+        &warning,
+        "Accept the plan and storage risks?",
+    )
+    .await?
+    {
+        prompt
+            .accept("Accept")
+            .map(Some)
+            .map_err(SetupError::recoverable)
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -731,5 +851,94 @@ mod tests {
             chatgpt_account_label(second, first)
         );
         assert!(chatgpt_account_label(second, first).contains(&second.to_string()));
+    }
+
+    #[test]
+    fn chatgpt_setup_selects_low_effort_from_the_matching_visible_catalog() {
+        let account_id = uuid::Uuid::now_v7();
+        let unverified = chatgpt_defaults(account_id);
+        assert_eq!(unverified.account_id, Some(account_id));
+        assert!(unverified.model.is_none());
+        assert!(unverified.effort.is_none());
+        assert!(
+            ChatGptSetupAccount::Existing(account_id)
+                .finish(chatgpt_defaults(account_id), None)
+                .expect("saved-account cancellation")
+                .is_none(),
+            "cancelling saved-account setup must preserve Session defaults"
+        );
+        assert!(matches!(
+            ChatGptSetupAccount::Connected(account_id).finish(unverified, None),
+            Ok(Some(SetupSelection::ChatGpt { defaults, notice: None, .. }))
+                if defaults.account_id == Some(account_id)
+                && defaults.model.is_none()
+        ));
+        assert!(matches!(
+            ChatGptSetupAccount::Switched(account_id)
+                .finish(chatgpt_defaults(account_id), None),
+            Ok(Some(SetupSelection::ChatGpt { defaults, notice: None, .. }))
+                if defaults.account_id == Some(account_id)
+                && defaults.model.is_none()
+        ));
+
+        let failed_catalog = "Model catalog failed; retry /model".to_owned();
+        for account in [
+            ChatGptSetupAccount::Switched(account_id),
+            ChatGptSetupAccount::Connected(account_id),
+            ChatGptSetupAccount::Reauthorized(account_id),
+            ChatGptSetupAccount::PermissionDisabled {
+                id: account_id,
+                local_cleared: true,
+            },
+            ChatGptSetupAccount::PermissionDisabled {
+                id: account_id,
+                local_cleared: false,
+            },
+        ] {
+            assert!(matches!(
+                account.finish(chatgpt_defaults(account_id), Some(failed_catalog.clone())),
+                Ok(Some(SetupSelection::ChatGpt { defaults, notice: Some(notice), .. }))
+                    if defaults.account_id == Some(account_id)
+                    && defaults.model.is_none()
+                    && notice == failed_catalog
+            ));
+        }
+        assert_eq!(
+            ChatGptSetupAccount::Existing(account_id)
+                .finish(chatgpt_defaults(account_id), Some(failed_catalog.clone()))
+                .err(),
+            Some(failed_catalog),
+            "a failed saved-account reuse must preserve prior Session defaults"
+        );
+
+        let mut models = vec![chatgpt::ChatGptModel {
+            slug: "model-one".into(),
+            display_name: "First visible model".into(),
+            context_window_tokens: None,
+        }];
+        let selected = catalog_chatgpt_defaults(account_id, account_id, &models)
+            .expect("matching account catalog");
+        assert_eq!(selected.model.as_deref(), Some("model-one"));
+        assert_eq!(selected.effort, Some(Effort::Low));
+        assert!(matches!(
+            ChatGptSetupAccount::Existing(account_id).finish(selected, None),
+            Ok(Some(SetupSelection::ChatGpt { defaults, notice: None, .. }))
+                if defaults.model.as_deref() == Some("model-one")
+                && defaults.effort == Some(Effort::Low)
+        ));
+        models.push(chatgpt::ChatGptModel {
+            slug: "gpt-5.6-luna".into(),
+            display_name: "GPT-5.6 Luna".into(),
+            context_window_tokens: None,
+        });
+        let selected = catalog_chatgpt_defaults(account_id, account_id, &models).unwrap();
+        assert_eq!(selected.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(selected.effort, Some(Effort::Low));
+        assert_eq!(
+            models[0].slug, "model-one",
+            "selection must not reorder catalog rows"
+        );
+        assert!(catalog_chatgpt_defaults(account_id, account_id, &[]).is_err());
+        assert!(catalog_chatgpt_defaults(account_id, uuid::Uuid::now_v7(), &models,).is_err());
     }
 }

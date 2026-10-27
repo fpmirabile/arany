@@ -145,7 +145,7 @@ and appends no Events. A later plain prompt starts a new Goal in the same Sessio
 with fresh Run admission, as on serve; it never resumes an interrupted Goal
 implicitly. Resume attaches without replaying any messages.
 
-Serve validates the entire resume result against its 1 MiB line bound before
+Serve validates the entire resume result against its 1 MiB<!-- unrelated-bound: Serve protocol line cap --> line bound before
 loading the thread or returning history. Overflow maps to `-32603 contextTooLarge`
 with no partial replay or newly loaded Session. The translator retains that one
 bounded result and projects at most two updates per item through the existing
@@ -330,19 +330,19 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 
 | ACP boundary | Bound and overflow |
 |---|---|
-| Incoming/outgoing line including newline | Serve's 1 MiB. Incoming overflow is discarded through newline, then null-ID `-32600 messageTooLarge`; malformed JSON gets `-32700`. The next line remains usable. |
-| Reader buffer / serve inbound | 64 KiB / 64 messages with backpressure. JSON depth uses serde_json's recursion bound. |
+| Incoming/outgoing line including newline | Serve's 1 MiB<!-- unrelated-bound: Serve protocol line cap -->. Incoming overflow is discarded through newline, then null-ID `-32600 messageTooLarge`; malformed JSON gets `-32700`. The next line remains usable. |
+| Reader buffer / serve inbound | 64 KiB<!-- unrelated-bound: protocol reader buffer --> / 64 messages with backpressure. JSON depth uses serde_json's recursion bound. |
 | Serve outbound / ACP outbound | 256 messages each, plus at most 256 deferred serve messages while a projection waits. Deferred-message overflow fails the connection with Session-history recovery guidance. Permission requests bypass that deferred queue and immediately resolve unavailable if ACP output is full or closed. Server permission withdrawals also bypass the queue: the old reply ID is retired immediately, with at most one cancellation notification waiting for output capacity before a new permission can be delivered. Projection waits for ACP capacity independently of input/cancel. If immediate replies fill ACP output, input fails closed and starts shutdown rather than holding cancellation behind stdout. |
 | Pending translations | 64, with 61 available to client requests and three reserved for control, plan subscription and reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Close frees a slot after cancellation settles. |
-| Prompt blocks / aggregate text after rich-content conversion | 64 / 64 KiB UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
+| Prompt blocks / aggregate text after rich-content conversion | 64 / [64 KiB](./limits.md#max_user_message_bytes) UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
 | Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal.md#paste-and-attachments) image limits; reject overflow without truncation. |
 | Session list | Serve default page size and cursor/line bounds; no client page-size option is advertised. |
 | Mode selectors | One config selector and exactly three mode values; no client-supplied selector list is retained. Setters share the 61 client-request slots, 64 Sessions and line cap; invalid values refuse without changing state. |
-| Tool content / title | 64 KiB / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
+| Tool content / title | 64 KiB<!-- unrelated-bound: ACP Tool content projection --> / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
 | Goal plan | Two entries and one retained revision per active prompt; each entry has 2,048 UTF-8 bytes of escaped content plus a history marker; overflow truncates at a UTF-8 boundary. Event paging and live forwarding reuse serve bounds. |
 | Pending permissions | One; no primary wall-clock expiry. Oversize or full/closed output resolves unavailable without sending. |
-| Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
+| Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB<!-- unrelated-bound: ACP answer projection --> text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
 | Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer, at most 10,000 deduplication entries for Tool phases per prompt, and one cursor plus original cwd per Session; deduplication overflow suppresses further Tool projections and marks incompleteUpdates. |
 | Load/resume history | [Stored history and continuation](#stored-history-and-continuation) and [serve's Session Event cap](./serve.md#limits-and-compatibility). |
 | Shutdown | Serve's total three-second grace includes both output queues and cancellation/Engine closure. Timeout reports `Run may be interrupted; check Session history`. |
@@ -376,7 +376,7 @@ State storage and all per-action resource limits remain unchanged.
 | Permission correlation and withdrawal | Only allow_once/reject_once offered; a late reply to a live primary request remains answerable; unknown, duplicate, withdrawn or invalid/error replies cannot authorize a Tool; client cancellation and server withdrawal remain effective under output backpressure | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Rich prompt and inert Tool data | Oversized resources, blobs, image MIME/base64/count/byte overflow reject; context closing tags neutralized; PNG and image-only conversion, original cwd spelling, uncertain metadata, escaped titles, longer fences and truncation markers validate against the pinned schema | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Host-prefix H1 policy | Existing eligible rules execute only in default/dontAsk without a permission request; auto/acceptEdits, explicit ask/deny and absent rules dispatch nothing; forged client approvals add no authority; closed replay retains the host receipt | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
-| Human-only Asks unavailable | Hook Ask under Auto and unguarded proposals, even with exact project rules, make no client request, dispatch nothing and replay unavailable_approval | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [Guard permission corpus](../../crates/arany-cli/tests/guard_runs/permissions.rs), [unguarded corpus](../../crates/arany-cli/tests/guard_runs/unguarded.rs) |
+| Human-only Asks unavailable | Hook Ask under Auto and unguarded proposals, even with exact project rules, make no client request, dispatch nothing and replay unavailable_approval | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [Guard permission corpus](../../crates/arany-cli/tests/guard_runs/permissions/hooks.rs), [unguarded corpus](../../crates/arany-cli/tests/guard_runs/unguarded.rs) |
 
 The ACP corpus also owns `guarded_acp_permissions_publish_once_and_refuse_hook_asks`,
 a CI native gate using Cargo's built Guard executable. It checks one allowed edit,
