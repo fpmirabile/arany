@@ -20,7 +20,7 @@ lossy observer.
 
 This is reliability work on existing paths, not a new Guard, reporting command,
 credential backend or macOS feature. The related Linux overlay implementation
-remains with its [own plan](../command-workspace-overlay/README.md). Measure the
+is owned by the [Tools contract](../../docs/specs/tools.md#linux-enforcement-and-compatibility). Measure the
 implementation actually present at the selected revision, including its overlay
 and cache profile; do not restore a retired copy path for comparison.
 
@@ -255,7 +255,7 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   no-op executable on the selected host using ordinary executable pinning; record
   its canonical identity as a prerequisite and refuse absence. Update the corpus
   notes' owner procedure to require the selected revision's native namespace
-  bootstrap and host authorization ([D7′](../command-workspace-overlay/README.md#research));
+  bootstrap and host authorization ([Ubuntu namespace prerequisite](../../docs/specs/tools.md#ubuntu-namespace-entry-diagnosis));
   stock-policy refusal is failed evidence, never a host/fake-Guard fallback.
   Read/Edit alone did not exercise that prerequisite. Use explicit argv,
   no interpreter, no network, no MCP and no approval wait, with a matching admitted
@@ -351,6 +351,7 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   running. Retain every attempt and current intent-correlated stage/check capture.
   No recurrence closes VR4 as evidence plus row removal (≤150 changed lines),
   without source changes or a claim that the historical cause is known.
+- **R2 result:** N=5 sequential Focused CI `macos-release` runs at `e6d33c30b954c4e819cb220945d35b5f52fdf7fb` all succeeded with nonzero test counts and no execution- or storage-cleanup-unconfirmed failure: [40514236959](https://github.com/fpmirabile/arany/actions/runs/40514236959), [40519063160](https://github.com/fpmirabile/arany/actions/runs/40519063160), [40534470573](https://github.com/fpmirabile/arany/actions/runs/40534470573), [40538385142](https://github.com/fpmirabile/arany/actions/runs/40538385142), [40544264386](https://github.com/fpmirabile/arany/actions/runs/40544264386). The family is closed without a cause claim.
 - On recurrence, bind mode/rule/operation, intent identity, GO state and first
   closed stage/check before teardown overwrites a snapshot. Reuse the bounded
   release recorder/debug stages; distinguish execution unconfirmed

@@ -248,6 +248,7 @@ fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
     };
     let payload = proposed.payload().unwrap();
     assert!(!payload.contains("build_jobs"));
+    assert!(!payload.contains("build_cpu_cores"));
     let mut build = proposed.clone();
     if let Event::ToolProposed { intent, .. } = &mut build {
         intent.call = crate::tools::ToolCall::Command {
@@ -257,6 +258,7 @@ fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = 2;
+        intent.limits.build_cpu_cores = 8;
         intent.limits.cache_bytes = 0;
         intent.limits.cache_candidate_bytes = 0;
     }
