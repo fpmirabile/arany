@@ -59,6 +59,25 @@ fn trace_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
     }
 }
 
+fn answer_trace(stream: &mut std::net::TcpStream, response: CollectorResponse) {
+    match response {
+        CollectorResponse::Complete => stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .expect("Collector acknowledgment"),
+        CollectorResponse::Incomplete => {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
+                .expect("incomplete Collector response");
+            let mut byte = [0];
+            match stream.read(&mut byte) {
+                Ok(0) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                other => panic!("Collector response read was not released: {other:?}"),
+            }
+        }
+    }
+}
+
 fn collect_trace_requests(
     listener: TcpListener,
     done: Receiver<()>,
@@ -78,22 +97,7 @@ fn collect_trace_requests(
                     .set_write_timeout(Some(COLLECTOR_IO_WAIT))
                     .expect("Collector response deadline");
                 bodies.push(trace_request(&mut stream));
-                match response {
-                    CollectorResponse::Complete => stream
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                        .expect("Collector acknowledgment"),
-                    CollectorResponse::Incomplete => {
-                        stream
-                            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
-                            .expect("incomplete Collector response");
-                        let mut byte = [0];
-                        match stream.read(&mut byte) {
-                            Ok(0) => {}
-                            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-                            other => panic!("Collector response read was not released: {other:?}"),
-                        }
-                    }
-                }
+                answer_trace(&mut stream, response);
                 if let Some(sender) = first_export.take() {
                     sender.send(()).expect("first trace batch gate");
                 }
