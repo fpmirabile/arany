@@ -16,6 +16,7 @@ fn selective_editor_steps_preserve_null_records_and_refuse_private_work() {
             "worker",
         ),
     ] {
+        assert_eq!(from + 1, crate::test_support::payload_version(kind));
         let source = source.trim();
         let step = REGISTRY.event_step(kind, from).unwrap();
         assert_eq!((step.canonical)(source).as_deref(), Some(source));
@@ -35,7 +36,10 @@ fn selective_editor_steps_preserve_null_records_and_refuse_private_work() {
     }
     assert_eq!(REGISTRY.event_floor("AgentSpawned"), Some(11));
     assert_eq!(REGISTRY.event_floor("AgentFinished"), Some(10));
-    assert_eq!(REGISTRY.event_floor("WorkerLeaseReleased"), Some(2));
+    assert_eq!(
+        REGISTRY.event_floor("WorkerLeaseReleased"),
+        Some(crate::test_support::payload_version("WorkerLeaseReleased"))
+    );
     assert!(REGISTRY.event_step("WorkerLeaseReleased", 1).is_none());
 }
 

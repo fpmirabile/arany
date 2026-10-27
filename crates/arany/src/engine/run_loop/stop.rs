@@ -170,16 +170,7 @@ fn uncertain_tool_outcomes(run: &crate::session::RunView) -> bool {
     run.tools
         .iter()
         .chain(run.agents.iter().flat_map(|agent| &agent.tools))
-        .any(|tool| {
-            tool.observation
-                .iter()
-                .chain(
-                    tool.hooks.iter().filter_map(|hook| {
-                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
-                    }),
-                )
-                .any(|observation| observation.disposition == ToolDisposition::Uncertain)
-        })
+        .any(crate::session::ToolView::outcome_unknown)
 }
 
 impl RunFacts {
@@ -422,30 +413,80 @@ impl RunFacts {
 mod tests {
     use super::*;
 
+    fn open_tool_hook(tool: &crate::session::ToolView) -> crate::session::HookView {
+        crate::session::HookView {
+            sequence: 1,
+            invocation: crate::tools::permissions::HookInvocation {
+                event: crate::tools::permissions::HookEvent::PostToolUse,
+                group: 0,
+                handler: 0,
+                subject_digest: tool.intent.digest(),
+                intent: tool.intent.clone(),
+                input_digest: [0; 32],
+                active_ceiling_ms: None,
+            },
+            outcome: None,
+            idle: false,
+        }
+    }
+
     #[test]
-    fn uncertain_editor_observation_overrides_every_primary_stop_without_settlement() {
+    fn unknown_tools_override_every_primary_stop_without_settlement() {
         let fixture = crate::session::worker_protocol_fixture();
-        let mut run = crate::SessionView::replay_open(fixture.session, &fixture.envelopes())
+        let original = crate::SessionView::replay_open(fixture.session, &fixture.envelopes())
             .unwrap()
             .unwrap()
             .runs
             .remove(0);
-        assert!(!uncertain_tool_outcomes(&run));
-        let child = run
-            .agents
-            .iter_mut()
-            .find(|agent| agent.id == fixture.child)
-            .unwrap();
-        child.tools[0].observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
-        assert!(uncertain_tool_outcomes(&run));
-        let mut facts = RunFacts::ready();
-        facts.uncertain = uncertain_tool_outcomes(&run);
-        facts.settleable = false;
-        for cause in CAUSES {
-            assert_eq!(
-                settle(PrimaryEnd::Stopped(cause), &facts),
-                Settlement::Unknown
-            );
+        assert!(!uncertain_tool_outcomes(&original));
+        for primary in [false, true] {
+            for case in ["uncertain", "cache", "missing", "hook", "proposed"] {
+                let mut run = original.clone();
+                let tool = if primary {
+                    &mut run.tools[0]
+                } else {
+                    &mut run
+                        .agents
+                        .iter_mut()
+                        .find(|agent| agent.id == fixture.child)
+                        .unwrap()
+                        .tools[0]
+                };
+                match case {
+                    "uncertain" => {
+                        tool.observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain
+                    }
+                    "cache" => {
+                        tool.observation.as_mut().unwrap().cache_update =
+                            crate::tools::CacheUpdate::Uncertain
+                    }
+                    "missing" => tool.observation = None,
+                    "hook" => tool.hooks.push(open_tool_hook(tool)),
+                    "proposed" => {
+                        tool.observation = None;
+                        tool.started_sequence = None;
+                    }
+                    _ => panic!("unknown uncertainty case"),
+                }
+                assert_eq!(
+                    uncertain_tool_outcomes(&run),
+                    case != "proposed",
+                    "{primary}: {case}"
+                );
+                if case == "proposed" {
+                    continue;
+                }
+                let mut facts = RunFacts::ready();
+                facts.uncertain = uncertain_tool_outcomes(&run);
+                facts.settleable = false;
+                for cause in CAUSES {
+                    assert_eq!(
+                        settle(PrimaryEnd::Stopped(cause), &facts),
+                        Settlement::Unknown,
+                        "{primary}: {case}: {cause:?}"
+                    );
+                }
+            }
         }
     }
 

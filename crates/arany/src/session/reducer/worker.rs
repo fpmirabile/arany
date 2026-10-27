@@ -214,15 +214,6 @@ pub(crate) fn validate_request(
     if request.max_turns > definition.max_turns || request.max_turns > policy.max_turns {
         return Err(EditorTurns);
     }
-    if !valid_commands(&request.commands)
-        || request.commands.iter().any(|c| {
-            !policy.parent_grant.commands.contains(c)
-                || !plan.commands.contains(c)
-                || !definition.allows_worker_tool(WorkerTool::Command)
-        })
-    {
-        return Err(EditorCommands);
-    }
     if request
         .lease
         .iter()

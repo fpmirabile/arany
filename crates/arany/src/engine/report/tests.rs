@@ -1287,8 +1287,8 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     assert!(!view.runs[0].worker_history()[0].verified);
 
     let mut template = view.rewinds.operations[0].clone();
-    // Long paths and resumed interruption facts exercise the report byte limit.
-    template.files[0].path = format!("src/{}file.rs", "directory/".repeat(35));
+    // Quotes add JSON byte pressure without truncating the rewind history line.
+    template.files[0].path = format!("src/{}file.rs", "\"".repeat(175));
     for index in 1..10 {
         let mut operation = template.clone();
         operation.started.rewind_id = Uuid::now_v7();

@@ -134,14 +134,14 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             _ => None,
         })
         .collect();
-    let workers: std::collections::HashMap<_, _> = events
+    let workers: std::collections::HashSet<_> = events
         .iter()
         .filter_map(|envelope| match &envelope.event {
             Event::AgentSpawned {
                 agent_run_id,
                 assignment: Some(_),
                 ..
-            } => Some((*agent_run_id, 0)),
+            } => Some(*agent_run_id),
             _ => None,
         })
         .collect();
@@ -166,7 +166,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     Action::Review
                 } else if primaries.contains(agent_run_id) {
                     Action::ProviderCall { previews, steering }
-                } else if workers.contains_key(agent_run_id) {
+                } else if workers.contains(agent_run_id) {
                     Action::Worker
                 } else {
                     Action::Child {
@@ -270,7 +270,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     Action::Child {
                         in_flight: in_flight(index),
                         research: researchers.contains(agent_run_id)
-                            || workers.contains_key(agent_run_id),
+                            || workers.contains(agent_run_id),
                     }
                 };
                 points.push((index, action, None));

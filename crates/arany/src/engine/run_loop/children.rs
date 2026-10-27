@@ -895,15 +895,7 @@ impl RunLoop<'_> {
                     root_request,
                     &mut children,
                     pending,
-                    WorkerEnd {
-                        answer: None,
-                        torn_down: !matches!(
-                            stop,
-                            WaveStop::BUDGET | WaveStop::Boundary(StopCause::Capacity)
-                        ),
-                        failure: WorkerCause::ToolFailed,
-                        step_stop: None,
-                    },
+                    WorkerEnd::stopped(stop),
                 )
                 .await?
             else {
@@ -1153,16 +1145,13 @@ impl RunLoop<'_> {
             }
             let _active_work = self.ledger().active_work();
             let mut child = match self.begin_worker(root, editor).await? {
-                WorkerAdmission::Admitted(child) => Some(*child),
-                WorkerAdmission::Refused => None,
+                WorkerAdmission::Admitted(child) => *child,
                 WorkerAdmission::Exhausted => {
                     return Ok(RunProgress::Stopped(RunRefusal::Budget));
                 }
             };
-            if let Some(child) = &mut child {
-                child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
-                child.active_deadline = queue.active_deadline.clone();
-            }
+            child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
+            child.active_deadline = queue.active_deadline.clone();
             *segments = match self
                 .reserve_active_segment(
                     deadline.saturating_duration_since(Instant::now()),
@@ -1177,7 +1166,7 @@ impl RunLoop<'_> {
                     None
                 }
             };
-            return Ok(RunProgress::Ready(child));
+            return Ok(RunProgress::Ready(Some(child)));
         }
         self.spawn_researcher(queue, assignment)
             .await
