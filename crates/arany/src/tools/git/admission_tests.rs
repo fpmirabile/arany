@@ -1,12 +1,12 @@
 use crate::tools::config::Config;
 use crate::tools::tests::config_value;
-use crate::tools::types::{ToolCall, model_call};
+use crate::tools::types::{MAX_GIT_LOG_COMMITS, ToolCall, model_call};
 use crate::validate::{MAX_REVISION_BYTES, valid_revision};
 use serde_json::{Value, json};
 
 #[test]
 fn revision_grammar_admits_names_and_ancestry_only() {
-    let long = "a".repeat(128);
+    let long = "a".repeat(MAX_REVISION_BYTES);
     for value in [
         "HEAD",
         "main",
@@ -20,7 +20,7 @@ fn revision_grammar_admits_names_and_ancestry_only() {
     ] {
         assert!(valid_revision(value), "{value}");
     }
-    let too_long = "a".repeat(129);
+    let too_long = "a".repeat(MAX_REVISION_BYTES + 1);
     for value in [
         "",
         "-p",
@@ -83,12 +83,12 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
         ToolCall::GitLog {
             path: ".".into(),
             revision: Some("main".into()),
-            max_count: 50,
+            max_count: MAX_GIT_LOG_COMMITS,
         },
         ToolCall::GitLog {
             path: ".".into(),
             revision: Some("release..feature/topic".into()),
-            max_count: 50,
+            max_count: MAX_GIT_LOG_COMMITS,
         },
     ];
     for call in &valid {
@@ -135,7 +135,7 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
         ToolCall::GitLog {
             path: ".".into(),
             revision: None,
-            max_count: 51,
+            max_count: MAX_GIT_LOG_COMMITS + 1,
         },
         ToolCall::GitLog {
             path: ".".into(),
