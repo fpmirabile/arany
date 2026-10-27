@@ -42,11 +42,13 @@ fn masks_keep_dependencies_and_large_inputs_but_refuse_known_protected_aliases()
 #[test]
 fn ignored_controls_do_not_exhaust_publication_budgets() {
     use crate::tools::selection::{CONTROL_FILES, PHASE_TIME};
-    for (directory, controls, accepted) in [
-        ("node_modules", CONTROL_FILES + 1, true),
-        ("ignored", CONTROL_FILES + 1, true),
-        ("visible", 1, true),
-        ("visible", CONTROL_FILES + 1, false),
+    for (prefix, directory, controls, accepted) in [
+        ("", "node_modules", CONTROL_FILES + 1, true),
+        ("", "ignored", CONTROL_FILES + 1, true),
+        ("", "visible", 1, true),
+        ("", "visible", CONTROL_FILES + 1, false),
+        ("src", "ignored", CONTROL_FILES + 1, true),
+        ("src", "visible", CONTROL_FILES + 1, false),
     ] {
         let lower = tempfile::tempdir().unwrap();
         let upper = tempfile::tempdir().unwrap();
@@ -57,7 +59,14 @@ fn ignored_controls_do_not_exhaust_publication_budgets() {
             std::fs::write(path.join(".gitignore"), b"generated\n").unwrap();
         }
         let source = crate::tools::fs::open_directory(lower.path()).unwrap();
-        let inventory = masks::Inventory::read(&source, std::time::Instant::now() + PHASE_TIME);
+        let deadline = std::time::Instant::now() + PHASE_TIME;
+        let inventory = masks::Inventory::read_shared(
+            &source,
+            (prefix, MASK_ARGUMENT_BYTES),
+            &mut Default::default(),
+            &mut crate::tools::selection::Selector::new(0, deadline),
+            deadline,
+        );
         if !accepted {
             assert!(matches!(inventory, Err(ToolError::Limit)), "{directory}");
             continue;
@@ -69,12 +78,17 @@ fn ignored_controls_do_not_exhaust_publication_budgets() {
         std::fs::write(generated.join("generated"), b"discarded").unwrap();
         std::fs::write(upper.path().join("created"), b"published").unwrap();
         let target = crate::tools::fs::open_directory(upper.path()).unwrap();
-        let (changeset, _) = inventory
-            .baseline
-            .capture(&source, &target, std::time::Instant::now() + PHASE_TIME)
-            .unwrap();
+        let (changeset, _) = crate::tools::fs::command::overlay::capture_roots(
+            &[(&inventory.baseline, source, target, prefix)],
+            std::time::Instant::now() + PHASE_TIME,
+        )
+        .unwrap();
         assert_eq!(changeset.files.len(), 1, "{directory}");
-        assert_eq!(changeset.files[0].path, "created", "{directory}");
+        assert_eq!(
+            Path::new(&changeset.files[0].path),
+            Path::new(prefix).join("created"),
+            "{directory}"
+        );
     }
 }
 
@@ -119,7 +133,8 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
         verify_overlay(
             &parse_mountinfo(topology).unwrap(),
             Path::new("/workspace"),
-            &masks
+            &masks,
+            Path::new("/"),
         )
         .is_ok()
     );
@@ -127,6 +142,7 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
     for invalid in [
         text.replace("overlay overlay", "tmpfs tmpfs"),
         text.replace("ro,nosuid", "rw,nosuid"),
+        text.replace("/empty-file", "/other-grant/empty-file"),
         text.replace(",userxattr", ""),
         format!("{text}4 2 0:4 / /workspace/extra rw - tmpfs tmpfs rw\n"),
     ] {
@@ -134,7 +150,8 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
             verify_overlay(
                 &parse_mountinfo(invalid.as_bytes()).unwrap(),
                 Path::new("/workspace"),
-                &masks
+                &masks,
+                Path::new("/"),
             )
             .is_err()
         );
@@ -144,7 +161,7 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
 #[test]
 fn overflowing_mask_arguments_replace_the_entire_enclosing_view() {
     let root = tempfile::tempdir().unwrap();
-    for index in 0..crate::tools::config::MAX_WORKSPACE_PATHS * 4 {
+    for index in 0..masks::MASK_ARGUMENT_BYTES / ".env.protected-variable-".len() + 1 {
         std::fs::write(
             root.path().join(format!(".env.protected-variable-{index}")),
             b"protected",
@@ -158,6 +175,18 @@ fn overflowing_mask_arguments_replace_the_entire_enclosing_view() {
     )
     .unwrap();
     assert_eq!(inventory.paths(), vec![PathBuf::new()]);
+    let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+    let allowance = serde_json::to_vec(&["narrow/"]).unwrap().len();
+    let inventory = masks::Inventory::read_shared(
+        &lower,
+        ("narrow", allowance),
+        &mut Default::default(),
+        &mut crate::tools::selection::Selector::new(0, deadline),
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(inventory.paths(), vec![PathBuf::new()]);
+    assert!(inventory.argument_bytes().unwrap() <= allowance);
 }
 
 #[tokio::test]

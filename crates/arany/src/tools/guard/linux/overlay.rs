@@ -5,34 +5,17 @@ use serde::{Deserialize, Serialize};
 pub(super) const SETUP_INODES: usize = 16;
 
 mod masks;
+pub(super) use masks::MASK_ARGUMENT_BYTES;
+mod scope;
+pub(super) use scope::{Grant, View};
 #[cfg(test)]
 mod tests;
 
 pub(in crate::tools::guard) fn selected(
     intent: &EffectIntent,
-    config: &crate::tools::config::Config,
+    _config: &crate::tools::config::Config,
 ) -> bool {
-    primary_command(intent) && config.workspace_paths == ["."]
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Grant {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    digest: [u8; 32],
-}
-
-impl Grant {
-    pub(super) fn new(runtime: &ToolRuntime, intent: &EffectIntent) -> Self {
-        Self {
-            path: runtime.workspace.clone(),
-            device: intent.workspace_device,
-            inode: intent.workspace_inode,
-            digest: intent.digest(),
-        }
-    }
+    primary_command(intent)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,14 +24,14 @@ pub(in crate::tools::guard) struct Attestation {
     digest: [u8; 32],
     namespaces: profile::Namespaces,
     masks: Vec<PathBuf>,
+    roots: Vec<scope::Root>,
 }
 
-pub(super) struct View {
+struct DirectoryView {
     root: PathBuf,
-    grant: Grant,
-    bytes: u64,
+    grant: scope::Root,
     inventory: masks::Inventory,
-    attestation: Attestation,
+    masks: Vec<PathBuf>,
 }
 
 fn unavailable<T>(result: Result<T, impl Sized>) -> Result<T, ToolError> {
@@ -65,75 +48,32 @@ pub(super) fn no_submounts(mounts: &[MountInfoEntry], path: &Path) -> Result<(),
     Ok(())
 }
 
-impl View {
-    pub(super) fn mount(root: &Path, grant: Grant, bytes: u64) -> Result<Self, ToolError> {
-        if root.starts_with(&grant.path) {
+impl DirectoryView {
+    fn mount(
+        root: &Path,
+        (source_path, grant, mask_bytes): (&Path, scope::Root, usize),
+        budget: &mut crate::tools::fs::CommandScanBudget,
+        selector: &mut crate::tools::selection::Selector,
+        deadline: std::time::Instant,
+    ) -> Result<Self, ToolError> {
+        if root.starts_with(source_path) {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
-        let source = crate::tools::fs::open_directory(&grant.path)?;
-        if crate::tools::fs::identity(&source)? != (grant.device, grant.inode) {
-            return Err(ToolError::ChangedInput);
-        }
-        let source_path = unavailable(std::fs::read_link(format!(
-            "/proc/self/fd/{}",
-            std::os::fd::AsRawFd::as_raw_fd(&source)
-        )))?;
-        if source_path != grant.path {
-            return Err(ToolError::ChangedInput);
-        }
-        no_submounts(&read_mountinfo()?, &source_path)?;
-        for name in [
-            "lower",
-            "upper",
-            "work",
-            "merged",
-            "empty-directory",
-            "probe-lower",
-            "probe-upper",
-            "probe-work",
-            "probe-merged",
-        ] {
-            unavailable(std::fs::create_dir(root.join(name)))?;
-        }
-        unavailable(std::fs::File::create_new(root.join("empty-file")))?;
-        let clone = unavailable(rustix::mount::open_tree(
-            &source,
-            "",
-            OpenTreeFlags::OPEN_TREE_CLONE
-                | OpenTreeFlags::OPEN_TREE_CLOEXEC
-                | OpenTreeFlags::AT_EMPTY_PATH,
-        ))?;
-        unavailable(rustix::mount::move_mount(
-            &clone,
-            "",
-            rustix::fs::CWD,
-            root.join("lower"),
-            MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-        ))?;
-        unavailable(rustix::mount::mount_remount(
-            root.join("lower"),
-            MountFlags::BIND | MountFlags::RDONLY | MountFlags::NOSUID | MountFlags::NODEV,
-            "",
-        ))?;
-        let lower = crate::tools::fs::open_directory(&root.join("lower"))?;
-        if crate::tools::fs::identity(&lower)? != (grant.device, grant.inode) {
-            return Err(ToolError::ChangedInput);
-        }
-        verify_mount_entries(&read_mountinfo()?, &[root.join("lower")])?;
+        let lower = clone_lower(root, source_path, &grant)?;
         overlay_probe(root)?;
-        let inventory = masks::Inventory::read(&lower, deadline)?;
+        let inventory = masks::Inventory::read_shared(
+            &lower,
+            (&grant.relative, mask_bytes),
+            budget,
+            selector,
+            deadline,
+        )?;
         mount_overlay(root, "")?;
         let masks = inventory.install(root)?;
         let view = Self {
             root: root.to_owned(),
-            attestation: Attestation {
-                digest: grant.digest,
-                namespaces: profile::Namespaces::read()?,
-                masks,
-            },
+            masks,
             grant,
-            bytes,
             inventory,
         };
         view.verify()?;
@@ -144,12 +84,7 @@ impl View {
         self.root.join("merged")
     }
 
-    pub(super) fn attestation(&self) -> &Attestation {
-        &self.attestation
-    }
-
     pub(super) fn verify(&self) -> Result<(), ToolError> {
-        supervisor::verify_tmpfs(&self.root, self.bytes)?;
         let mounts = read_mountinfo()?;
         let lower = self.root.join("lower");
         verify_mount_entries(&mounts, std::slice::from_ref(&lower))?;
@@ -182,11 +117,9 @@ impl View {
         }
         if mounts.iter().any(|entry| {
             entry.path.starts_with(&self.root)
-                && entry.path != self.root
                 && entry.path != lower
                 && entry.path != merged
                 && !self
-                    .attestation
                     .masks
                     .iter()
                     .any(|mask| merged.join(mask) == entry.path)
@@ -194,93 +127,69 @@ impl View {
             return Err(ToolError::ProtectionUnavailable);
         }
         self.inventory.verify(&lower)?;
-        verify_overlay(&mounts, &self.merged(), &self.attestation.masks)?;
+        let mask_root = Path::new("/").join(self.root.file_name().ok_or(ToolError::Path)?);
+        verify_overlay(&mounts, &self.merged(), &self.masks, &mask_root)?;
         Ok(())
     }
+}
 
-    pub(super) fn relay(&self, child: &mut impl Write) -> Result<(), ToolError> {
-        let mut input = std::io::BufReader::new(std::io::stdin().lock());
-        let task = super::super::read_task(&mut input)?;
-        if task.intent.digest() != self.grant.digest
-            || !selected(&task.intent, &task.config)
-            || task.preparation
-        {
-            return Err(ToolError::Configuration);
-        }
-        child
-            .write_all(&encode_task(&task)?)
-            .map_err(|_| ToolError::Operation)?;
-        if let Some(cache) = task.cache {
-            let mut length = [0; 8];
-            input
-                .read_exact(&mut length)
-                .map_err(|_| ToolError::Operation)?;
-            let bytes = u64::from_le_bytes(length);
-            if bytes > cache.view_bytes {
-                return Err(ToolError::Limit);
-            }
-            child.write_all(&length).map_err(|_| ToolError::Operation)?;
-            if std::io::copy(&mut input.by_ref().take(bytes), child)
-                .map_err(|_| ToolError::Operation)?
-                != bytes
-            {
-                return Err(ToolError::Operation);
-            }
-        }
-        let mut go = [0; 3];
-        input
-            .read_exact(&mut go)
-            .map_err(|_| ToolError::Operation)?;
-        if go != *b"GO\n" {
-            return Err(ToolError::Configuration);
-        }
-        self.verify()?;
-        child.write_all(&go).map_err(|_| ToolError::Operation)
+fn clone_lower(
+    root: &Path,
+    source_path: &Path,
+    grant: &scope::Root,
+) -> Result<cap_std::fs::Dir, ToolError> {
+    let source = crate::tools::fs::open_directory(source_path)?;
+    if crate::tools::fs::identity(&source)? != (grant.device, grant.inode) {
+        return Err(ToolError::ChangedInput);
     }
-
-    pub(super) fn finish(&self) -> Result<(), ToolError> {
-        let mut output = std::io::stdout().lock();
-        output
-            .write_all(b"CAPTURE_READY\n")
-            .and_then(|()| output.flush())
-            .map_err(|_| ToolError::Operation)?;
-        drop(output);
-        let mut input = std::io::stdin().lock();
-        let mut acknowledgement = [0; 8];
-        input
-            .read_exact(&mut acknowledgement)
-            .map_err(|_| ToolError::Operation)?;
-        if acknowledgement != *b"CAPTURE\n" {
-            return Err(ToolError::Configuration);
-        }
-        let mut frame = [0; 8];
-        input
-            .read_exact(&mut frame)
-            .map_err(|_| ToolError::Operation)?;
-        let deadline = super::super::selection_phase::decode_deadline(frame)?;
-        let capture = (|| {
-            let lower = crate::tools::fs::open_directory(&self.root.join("lower"))?;
-            let upper = crate::tools::fs::open_directory(&self.root.join("upper"))?;
-            self.inventory.baseline.capture(&lower, &upper, deadline)
-        })();
-        let report = Completion {
-            digest: self.grant.digest,
-            namespaces: profile::Namespaces::read()?,
-            capture: capture.map_err(|error| match error {
-                ToolError::Limit => CaptureFailure::Limit,
-                ToolError::Timeout(_) => CaptureFailure::Timeout,
-                ToolError::FilesystemDenied => CaptureFailure::Filesystem,
-                ToolError::Conflict | ToolError::ChangedInput => CaptureFailure::Conflict,
-                _ => CaptureFailure::Rejected,
-            }),
-        };
-        let mut output = std::io::stdout().lock();
-        serde_json::to_writer(&mut output, &report).map_err(|_| ToolError::Operation)?;
-        output
-            .write_all(b"\n")
-            .and_then(|()| output.flush())
-            .map_err(|_| ToolError::Operation)
+    let source_path_requested = source_path;
+    let source_path = unavailable(std::fs::read_link(format!(
+        "/proc/self/fd/{}",
+        std::os::fd::AsRawFd::as_raw_fd(&source)
+    )))?;
+    if source_path != source_path_requested {
+        return Err(ToolError::ChangedInput);
     }
+    no_submounts(&read_mountinfo()?, &source_path)?;
+    for name in [
+        "lower",
+        "upper",
+        "work",
+        "merged",
+        "empty-directory",
+        "probe-lower",
+        "probe-upper",
+        "probe-work",
+        "probe-merged",
+    ] {
+        unavailable(std::fs::create_dir(root.join(name)))?;
+    }
+    unavailable(std::fs::File::create_new(root.join("empty-file")))?;
+    let clone = unavailable(rustix::mount::open_tree(
+        &source,
+        "",
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC
+            | OpenTreeFlags::AT_EMPTY_PATH,
+    ))?;
+    unavailable(rustix::mount::move_mount(
+        &clone,
+        "",
+        rustix::fs::CWD,
+        root.join("lower"),
+        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+    ))?;
+    unavailable(rustix::mount::mount_remount(
+        root.join("lower"),
+        MountFlags::BIND | MountFlags::RDONLY | MountFlags::NOSUID | MountFlags::NODEV,
+        "",
+    ))?;
+    let lower = crate::tools::fs::open_directory(&root.join("lower"))?;
+    if crate::tools::fs::identity(&lower)? != (grant.device, grant.inode) {
+        return Err(ToolError::ChangedInput);
+    }
+    verify_mount_entries(&read_mountinfo()?, &[root.join("lower")])?;
+    Ok(lower)
 }
 
 fn mount_overlay(root: &Path, prefix: &str) -> Result<(), ToolError> {
@@ -356,6 +265,7 @@ fn verify_overlay(
     mounts: &[MountInfoEntry],
     target: &Path,
     masks: &[PathBuf],
+    mask_root: &Path,
 ) -> Result<(), ToolError> {
     if masks.iter().any(|path| path.as_os_str().is_empty()) {
         let entries: Vec<_> = mounts.iter().filter(|entry| entry.path == target).collect();
@@ -364,7 +274,7 @@ fn verify_overlay(
             .filter(|entry| {
                 entry.filesystem == b"tmpfs"
                     && entry.source == b"tmpfs"
-                    && entry.root == Path::new("/empty-directory")
+                    && entry.root == mask_root.join("empty-directory")
                     && option(&entry.options, b"ro")
                     && entry.optional_fields == 0
             })
@@ -403,8 +313,9 @@ fn verify_overlay(
         if !option(&entry.options, b"ro")
             || entry.filesystem != b"tmpfs"
             || entry.source != b"tmpfs"
-            || ![Path::new("/empty-file"), Path::new("/empty-directory")]
-                .contains(&entry.root.as_path())
+            || !["empty-file", "empty-directory"]
+                .iter()
+                .any(|name| entry.root == mask_root.join(name))
         {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -429,16 +340,12 @@ pub(in crate::tools::guard) fn verify_helper(
     {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mounts = read_mountinfo()?;
-    if mounts
-        .iter()
-        .filter(|entry| entry.path == Path::new("/workspace"))
-        .count()
-        != 1
-    {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    verify_overlay(&mounts, Path::new("/workspace"), &attestation.masks)
+    scope::verify_workspace(
+        &read_mountinfo()?,
+        attestation,
+        &task.config.workspace_paths,
+        Path::new("/workspace"),
+    )
 }
 
 #[derive(Serialize, Deserialize)]

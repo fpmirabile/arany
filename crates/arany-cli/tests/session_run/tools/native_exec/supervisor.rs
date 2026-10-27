@@ -264,7 +264,7 @@ fn entry_launch(root: &Path, mode: SupervisorMode) -> (PathBuf, std::fs::File, V
             let workspace = root.join("workspace");
             std::fs::create_dir(&workspace).unwrap();
             let metadata = std::fs::metadata(&workspace).unwrap();
-            launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32]});
+            launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32],"roots":[{"relative":"","device":metadata.dev(),"inode":metadata.ino(),"directory":true}]});
         }
         UnalignedProbe | NamespaceDenied | ProbeDenied | Success | Replacement | MountFlags => {}
     }
