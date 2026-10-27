@@ -895,9 +895,6 @@ fn action_deadlines(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-const FILL_CHUNK_BYTES: usize = 1 << 20;
-
-#[cfg(any(test, feature = "test-support"))]
 fn git_storage_fault(
     root: &Path,
     volumes: &[cap_std::fs::Dir],
@@ -933,26 +930,8 @@ fn git_storage_fault(
             Err(ToolError::ProtectionUnavailable)
         }
         GitStorageFault::Exhaust => {
-            let mut file = volumes
-                .first()
-                .ok_or(ToolError::Operation)?
-                .create("fill")
+            super::storage::exhaust_git_storage(volumes.first().ok_or(ToolError::Operation)?)
                 .map_err(|_| ToolError::Operation)?;
-            let chunk = [0_u8; FILL_CHUNK_BYTES];
-            let mut full = false;
-            for _ in 0..=crate::tools::types::SCRATCH_BYTES / FILL_CHUNK_BYTES as u64 {
-                match file.write_all(&chunk).and_then(|()| file.sync_all()) {
-                    Ok(()) => {}
-                    Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
-                        full = true;
-                        break;
-                    }
-                    Err(_) => return Err(ToolError::Operation),
-                }
-            }
-            if !full {
-                return Err(ToolError::Operation);
-            }
             canary()
         }
     }
@@ -1894,7 +1873,9 @@ mod tests {
         crate::tools::guard::selection_phase::tests::protocol_outcomes().await;
     }
 
-    use super::super::storage::{STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage};
+    use super::super::storage::{
+        FILL_CHUNK_BYTES, STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage,
+    };
     use super::super::{ProfileKind, SYS_COALITION_INFO, SYS_PERSONA, SeatbeltProfile};
     use super::*;
     use crate::tools::ToolCall;
@@ -2965,8 +2946,9 @@ int main(int argc, char **argv) {
     }
 
     async fn verify_git_storage_exits(fixture: &Path) {
-        use super::super::storage::{GIT_VOLUME, prepare_git_storage, verify_git_storage};
-        use std::io::Write as _;
+        use super::super::storage::{
+            GIT_VOLUME, exhaust_git_storage, prepare_git_storage, verify_git_storage,
+        };
         for exit in ["success", "exhaustion", "cancellation", "refusal"] {
             let mut unit = Unit::new(fixture).await.unwrap();
             std::fs::write(unit.root.join("canary"), b"control").unwrap();
@@ -3000,12 +2982,7 @@ int main(int argc, char **argv) {
             match exit {
                 "success" => std::fs::write(view.join("probe"), b"view").unwrap(),
                 "exhaustion" => {
-                    let mut file = std::fs::File::create(view.join("fill")).unwrap();
-                    let chunk = [0_u8; FILL_CHUNK_BYTES];
-                    let full = (0..=crate::tools::types::SCRATCH_BYTES / FILL_CHUNK_BYTES as u64)
-                        .find_map(|_| file.write_all(&chunk).and_then(|()| file.sync_all()).err())
-                        .expect("the view volume must be bounded");
-                    assert_eq!(full.raw_os_error(), Some(nix::libc::ENOSPC));
+                    exhaust_git_storage(&volume.as_ref().unwrap()[0]).unwrap();
                 }
                 _ => {}
             }

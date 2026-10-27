@@ -1707,18 +1707,13 @@ mod tests {
         let before = control_root();
         let refused = run("bare", bare.path());
         let read = run("read", root.path());
-        let mut fill =
-            std::fs::File::create(root.path().join(storage::GIT_VOLUME).join("fill")).unwrap();
-        let chunk = [0_u8; 1 << 20];
-        let filled = (0..=crate::tools::types::SCRATCH_BYTES / chunk.len() as u64)
-            .find_map(|_| std::io::Write::write_all(&mut fill, &chunk).err())
-            .expect("the view volume must be bounded");
-        drop(fill);
+        let filled = storage::exhaust_git_storage(&volume[0]);
         let exhausted = run("full", root.path());
         let after = control_root();
         drop(volume);
         let detached = reactor.block_on(storage::cleanup_storage(root.path()));
         let mounted = storage::storage_mounted(root.path());
+        filled.expect("the Git view volume must be exhausted before the read");
         for (phase, output) in [("bare", &refused), ("read", &read), ("full", &exhausted)] {
             assert!(
                 output.status.success(),
@@ -1730,7 +1725,6 @@ mod tests {
             crate::test_process::assert_single_test_completed(&output.stdout, "native git profile");
             assert!(output.stderr.is_empty());
         }
-        assert_eq!(filled.raw_os_error(), Some(nix::libc::ENOSPC));
         assert_eq!(before, after, "the control root must stay unchanged");
         detached.unwrap();
         assert!(!mounted.unwrap());
