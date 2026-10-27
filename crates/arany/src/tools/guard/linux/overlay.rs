@@ -511,7 +511,12 @@ pub(super) async fn complete(
     if report.digest != intent.digest() || !report.namespaces.supervisor_isolated_from(parent) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    if observation.disposition != crate::tools::ToolDisposition::Succeeded {
+    let nonzero_exit = observation.disposition == crate::tools::ToolDisposition::Failed
+        && serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+            .is_ok_and(|result| result.valid() && result.exit_code.is_some_and(|code| code != 0));
+    if observation.disposition != crate::tools::ToolDisposition::Succeeded
+        && (!nonzero_exit || report.capture.is_err())
+    {
         if !report
             .capture
             .as_ref()

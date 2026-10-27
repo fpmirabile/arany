@@ -224,18 +224,25 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         case,
         "deletion" | "recreation" | "host-edit" | "host-create"
     );
-    assert_eq!(
-        observation.disposition,
-        if matches!(case, "host-edit" | "host-create") {
-            ToolDisposition::Conflict
-        } else if refused {
-            ToolDisposition::Denied
-        } else {
-            ToolDisposition::Succeeded
-        },
-        "{case}: {}",
-        observation.output
-    );
+    let expected = if matches!(case, "host-edit" | "host-create") {
+        ToolDisposition::Conflict
+    } else if refused {
+        ToolDisposition::Denied
+    } else if case == "no-space" {
+        ToolDisposition::Failed
+    } else {
+        ToolDisposition::Succeeded
+    };
+    if observation.disposition != expected {
+        let exit = serde_json::from_str::<Value>(&observation.output)
+            .ok()
+            .and_then(|result| result["exit_code"].as_i64());
+        crate::process::annotate_native_fixture(&format!(
+            "fixture=command_overlay; case={case}; expected={expected:?}; observed={:?}; exit={exit:?}; limit={:?}; enforcement={:?}",
+            observation.disposition, observation.limit_cause, observation.enforcement_cause
+        ));
+    }
+    assert_eq!(observation.disposition, expected, "{case}");
     let publishes = matches!(case, "writes" | "mode-zero" | "no-space" | "spill-merge");
     if !refused {
         let result: Value = serde_json::from_str(&observation.output).unwrap();
