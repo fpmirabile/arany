@@ -543,7 +543,13 @@ async fn run_live(
             "{result:?}"
         );
     }
-    let result = if matches!(case, "uncertain" | "capacity") {
+    if case == "command_cache_unknown" {
+        assert!(
+            matches!(&result, Err(EngineError::Tool(ToolError::Uncertain))),
+            "uncertain command cache must stop the Run with Tool(Uncertain)"
+        );
+    }
+    let result = if matches!(case, "uncertain" | "capacity" | "command_cache_unknown") {
         result.ok()
     } else {
         Some(result.unwrap())
