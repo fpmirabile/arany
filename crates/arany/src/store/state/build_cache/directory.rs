@@ -4,10 +4,6 @@ pub(crate) use guard::CacheGuardRecovery;
 #[cfg(test)]
 mod tests;
 
-pub(super) const TREE_PREFIX: &str = "directory-";
-pub(super) const DIRTY_PREFIX: &str = "unavailable-";
-pub(super) const STAMP_PREFIX: &str = "generation-";
-
 impl BuildCacheLease {
     pub(crate) fn prepare_directory(&self) -> Result<Dir, StoreError> {
         let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
