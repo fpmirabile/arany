@@ -1124,7 +1124,7 @@ pub(super) async fn execute_inner(
             None
         };
         let mut stdin = overlay::selected(intent, &runtime.config).then_some(stdin);
-        let capture = async {
+        let capture = Box::pin(async {
             let (mut observation, mut candidate) = receive_result(
                 &mut stdout,
                 runtime,
@@ -1160,7 +1160,7 @@ pub(super) async fn execute_inner(
                 return Err(ToolError::Operation);
             }
             Ok((observation, candidate))
-        };
+        });
         super::discovery_work(intent, capture).await
     });
     let result = tokio::select! {

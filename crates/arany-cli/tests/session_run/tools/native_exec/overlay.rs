@@ -22,12 +22,8 @@ enum OverlayCase {
     HostCreate,
 }
 
-const OVERLAY_CASES: [OverlayCase; 16] = [
+const OVERLAY_CASES: [OverlayCase; 12] = [
     OverlayCase::Reads,
-    OverlayCase::Narrow,
-    OverlayCase::FileOnly,
-    OverlayCase::NarrowReplacement,
-    OverlayCase::NarrowNoSpace,
     OverlayCase::Writes,
     OverlayCase::SpillMerge,
     OverlayCase::IgnoredClean,
@@ -40,8 +36,12 @@ const OVERLAY_CASES: [OverlayCase; 16] = [
     OverlayCase::HostEdit,
     OverlayCase::HostCreate,
 ];
-const OVERLAY_JOURNEY_WAIT: Duration =
-    SPILL_JOURNEY_WAIT.saturating_mul(OVERLAY_CASES.len() as u32);
+const NARROW_OVERLAY_CASES: [OverlayCase; 4] = [
+    OverlayCase::Narrow,
+    OverlayCase::FileOnly,
+    OverlayCase::NarrowReplacement,
+    OverlayCase::NarrowNoSpace,
+];
 
 impl OverlayCase {
     fn publishes(self) -> bool {
@@ -154,8 +154,23 @@ impl std::fmt::Display for OverlayCase {
     ignore = "native Linux overlay publication and closed replay"
 )]
 fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
+    overlay_journey(&OVERLAY_CASES);
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux narrow overlay publication and closed replay"
+)]
+fn narrow_overlay_publication_and_refusals_reopen_without_execution() {
+    overlay_journey(&NARROW_OVERLAY_CASES);
+}
+
+fn overlay_journey(cases: &[OverlayCase]) {
+    let journey_wait = SPILL_JOURNEY_WAIT
+        .saturating_mul(u32::try_from(cases.len()).expect("bounded overlay case count"));
     if !crate::isolation::enter_native_account_isolated_test_with_timeout(
-        OVERLAY_JOURNEY_WAIT
+        journey_wait
             .as_secs()
             .try_into()
             .expect("bounded overlay journey timeout"),
@@ -165,15 +180,14 @@ fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _deadline =
-        arany::test_support::engine::deadline("whole-root overlay", OVERLAY_JOURNEY_WAIT);
+    let _deadline = arany::test_support::engine::deadline("Workspace overlay", journey_wait);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            for case in OVERLAY_CASES {
-                let name = format!("whole-root overlay {case}");
+            for &case in cases {
+                let name = format!("Workspace overlay {case}");
                 let _case_deadline =
                     arany::test_support::engine::deadline(&name, SPILL_JOURNEY_WAIT);
                 overlay_case(case).await;
