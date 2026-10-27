@@ -16,6 +16,8 @@ use std::time::Duration;
 
 #[path = "tools_macos/repository.rs"]
 mod repository;
+#[path = "tools_macos/shell.rs"]
+mod shell;
 
 const MCP_SCRIPT: &str = r#"set -eu
 while IFS= read -r request; do
@@ -998,6 +1000,7 @@ async fn native_file_journey_helper() {
         .expect("recorded Guard discovery intent");
     guard_refuses_before_go(root, &workspace, &discovery.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
+    shell::refuse_options(root, &workspace, &config).await;
 }
 
 #[tokio::test]
