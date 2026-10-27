@@ -62,6 +62,17 @@ pub(super) fn git_writes_available() -> bool {
     }
 }
 
+// macOS offers branch creation alone until its executor and publisher units cover the other verbs.
+pub(super) fn git_branch_creation_available() -> bool {
+    cfg!(target_os = "macos") || git_writes_available()
+}
+
+#[cfg(target_os = "macos")]
+mod git_stage;
+#[cfg(target_os = "macos")]
+pub(super) use git_stage::GitStage;
+#[cfg(target_os = "macos")]
+use git_stage::{GitWork, read_plan_report, receive_git_input};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -142,6 +153,9 @@ struct Task {
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     system_programs: Option<SystemPrograms>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_stage: Option<GitStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1746,15 +1760,24 @@ pub(super) struct GuardContext<'a> {
     pub(super) hidden: &'a HiddenPaths,
     pub(super) worker_paths: Option<&'a [String]>,
     pub(super) definition: Option<Vec<u8>>,
+    pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
+    #[cfg(target_os = "macos")]
+    pub(super) git: GitWork,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
+    async fn dispatch(
+        self,
+    ) -> (
+        (Result<String, ToolError>, Option<Vec<u8>>),
+        Option<Vec<u8>>,
+    ) {
         let result = super::dispatch::run(&self).await;
-        (result, self.captured.into_inner().ok().flatten())
+        let plan = self.git_plan.into_inner().ok().flatten();
+        ((result, self.captured.into_inner().ok().flatten()), plan)
     }
 
     pub(super) fn remaining_runtime(&self) -> Duration {
@@ -1807,6 +1830,10 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         return Err(ToolError::Configuration);
     }
     network::validate(task)?;
+    #[cfg(target_os = "macos")]
+    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
+        return Err(ToolError::Configuration);
+    }
     if task.worker.is_none()
         && task.intent.target != crate::session::worker::EffectTarget::Workspace
         || !task.intent.valid()
@@ -1895,6 +1922,14 @@ fn receive_bulk(
         )?;
         Ok((None, Some(changeset)))
     }
+}
+
+fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
+    if let Some(plan) = plan {
+        transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
+        stdout.flush().map_err(|_| ToolError::Operation)?;
+    }
+    Ok(())
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
@@ -2113,6 +2148,9 @@ pub(super) fn helper_main() -> ExitCode {
             .write_all(b"\n")
             .and_then(|()| stdout.flush())
             .map_err(|_| ToolError::Operation)?;
+        drop(stdout);
+        #[cfg(target_os = "macos")]
+        let git = receive_git_input(&task, &mut stdin)?;
         let mut go = [0; 3];
         stdin
             .read_exact(&mut go)
@@ -2171,18 +2209,24 @@ pub(super) fn helper_main() -> ExitCode {
                 .as_ref()
                 .map(|worker| worker.grant.read_paths.as_slice()),
             definition,
+            git_plan: Default::default(),
+            #[cfg(target_os = "macos")]
+            git,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
-        // Capture handshakes acquire stdout from a blocking worker during dispatch.
-        drop(stdout);
-        let result = runtime.block_on(site.dispatch());
+        let (result, plan) = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
         send_result(task, workspace, result, &mut stdout, image.as_ref())?;
+        send_plan(plan, &mut stdout)?;
         Ok(())
     })();
+    bootstrap_exit(stage, result)
+}
+
+fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -2756,6 +2800,8 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2854,6 +2900,8 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -4412,6 +4460,8 @@ mod tests {
                 guard_executable: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]
                 system_programs: None,
+                #[cfg(target_os = "macos")]
+                git_stage: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;

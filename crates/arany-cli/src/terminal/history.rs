@@ -3475,3 +3475,6 @@ mod find_tests;
 
 #[cfg(test)]
 mod inline_tests;
+
+#[cfg(test)]
+mod link_tests;

@@ -22,7 +22,7 @@ use crate::{
     tools::{
         FRAME_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
         MAX_QUERY_BYTES, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES,
-        WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
+        WEB_FETCH_CHARS, WEB_SEARCH_RESULTS, WRITE_FRAME_BYTES,
         permissions::MAX_CONFIG_BYTES,
         toolchains::MAX_RUNTIME_GRANTS,
         types::{
@@ -520,6 +520,12 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: FRAME_BYTES as u64,
             unit: "bytes",
             owner: "crates/arany/src/tools/mcp.rs",
+        },
+        Limit {
+            name: "WRITE_FRAME_BYTES",
+            value: WRITE_FRAME_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/git.rs",
         },
         Limit {
             name: "MCP_TIMEOUT_MS",
