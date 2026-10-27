@@ -571,7 +571,10 @@ async fn run_live(
         );
     }
     if case == "command_cache_unknown" {
-        assert!(cache_failure.is_none(), "cache publication gate was reached");
+        assert!(
+            cache_failure.is_none(),
+            "cache publication gate was reached"
+        );
         assert!(
             matches!(&result, Err(EngineError::Tool(ToolError::Uncertain))),
             "uncertain command cache must stop the Run with Tool(Uncertain): {result:?}"
