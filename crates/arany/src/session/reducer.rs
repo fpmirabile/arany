@@ -755,15 +755,7 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
         })
         && run.hooks_settled()
         && run.tools.iter().all(|tool| {
-            tool.settled_without_stop()
-                && tool.observation.as_ref().is_some_and(|observation| {
-                    observed_command_changeset(observation)
-                        .is_none_or(|changeset| changeset.files.is_empty() || run.tools.iter().any(|integration| {
-                            matches!(&integration.intent.call, crate::tools::ToolCall::ApplyChangeset {
-                                source: crate::session::worker::ChangesetSource::CommandReceipt { source_intent_digest, .. }
-                            } if *source_intent_digest == observation.intent.digest()) && integration.settled_without_stop()
-                        }))
-                })
+            tool.settled_without_stop() && tool::command_publication_settled(&run.tools, tool)
         })
         && requested_tool_total(agent).checked_sub(model_tool_count(run)) == Some(0)
 }

@@ -2363,6 +2363,8 @@ mod cache_tests;
 mod tests {
     use super::*;
 
+    mod editor_cache_tests;
+
     pub(super) fn assert_enforcement_prose(selection: &[u8], worker: &[u8]) {
         use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
         use crate::tools::selection::{CONTROL_BYTES, CONTROL_FILES, CONTROL_TOTAL_BYTES, RULES};

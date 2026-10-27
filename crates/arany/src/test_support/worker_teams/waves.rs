@@ -48,7 +48,7 @@ impl LiveProvider {
         ProviderOutcome::Delegate(delegate)
     }
 
-    fn wave_write(&self, path: &str, content: &str) -> ProviderOutcome {
+    pub(super) fn wave_write(&self, path: &str, content: &str) -> ProviderOutcome {
         tool_outcome(ToolCall::Write {
             path: path.into(),
             content: content.into(),
@@ -59,7 +59,7 @@ impl LiveProvider {
     }
 }
 
-fn read(path: &str) -> ProviderOutcome {
+pub(super) fn read(path: &str) -> ProviderOutcome {
     tool_outcome(ToolCall::Read {
         path: path.into(),
         offset: None,

@@ -295,6 +295,7 @@ fn agent_lines(
             "Lease released: {}; verified: {}",
             worker.lease_released, worker.verified
         ));
+        lines.extend(worker.changed_paths.lines().map(str::to_owned));
         if let Some(source) = worker.resumes {
             lines.push(format!("Resumes: {source}"));
         }

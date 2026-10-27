@@ -64,7 +64,7 @@ Each [editor](./execution.md#worker-journal-protocol) requires Implementation, a
 
 The Goal and editor criteria are distinct. Satisfying the Goal criterion does not waive the [worker journal protocol's verification requirements](./execution.md#worker-journal-protocol). That protocol also owns the rules for worker stops, cancellation and retained effects.
 
-Goal receipts derive changes from observations, including the child's effects. An unfinished editor intent is subject to the same recovery refusal as an unfinished primary effect. No private cleanup or containment record can waive that refusal.
+Goal receipts derive changes from observations, including the child's effects; the bounded [editor path/digest report](./session.md#worker-replay) retains landed effects after completion, cancellation or pause. A command criterion requires a successful command and its successful Workspace publication when it produces changes. An unfinished editor intent is subject to the same recovery refusal as an unfinished primary effect. No private cleanup or containment record can waive that refusal.
 
 Evidence owners: [Engine team corpus](../../crates/arany/tests/engine_run/team.rs), [native live-editor journeys](../../crates/arany-cli/tests/guard_runs/worker.rs), [shared team scenarios](../../crates/arany/src/test_support/worker_teams.rs), [live replay](../../crates/arany/src/session/reducer/worker/workspace_tests.rs), [Engine parent-grant refusal](../../crates/arany/tests/engine_run/shared_editors.rs), and shared `assert_action_bounds`.
 
