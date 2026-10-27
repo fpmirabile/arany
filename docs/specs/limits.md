@@ -93,6 +93,7 @@
 | <a id="max_session_searches"></a>[`MAX_SESSION_SEARCHES`](#max_session_searches) | 200 | web_search calls per Session | `crates/arany/src/tools/web.rs` |
 | <a id="max_url_bytes"></a>[`MAX_URL_BYTES`](#max_url_bytes) | 2048 | bytes | `crates/arany/src/tools/web.rs` |
 | <a id="max_query_bytes"></a>[`MAX_QUERY_BYTES`](#max_query_bytes) | 512 | bytes | `crates/arany/src/tools/web.rs` |
+| <a id="max_search_field_chars"></a>[`MAX_SEARCH_FIELD_CHARS`](#max_search_field_chars) | 512 | characters per search result field | `crates/arany/src/tools/web.rs` |
 | <a id="max_markdown_parse_bytes"></a>[`MAX_MARKDOWN_PARSE_BYTES`](#max_markdown_parse_bytes) | 32768 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_depth"></a>[`MAX_MARKDOWN_DEPTH`](#max_markdown_depth) | 32 | containers | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_events"></a>[`MAX_MARKDOWN_EVENTS`](#max_markdown_events) | 65536 | events | `crates/arany-cli/src/terminal/markdown.rs` |

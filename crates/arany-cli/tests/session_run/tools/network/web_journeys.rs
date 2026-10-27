@@ -418,8 +418,7 @@ async fn fetch_policy_journeys(root: &Path) {
     }
     let server = page_upstream("text/plain", b"must never be fetched".to_vec());
     let mut case = WebCase::fetch(format!("http://127.0.0.1:{}/page", server.port));
-    case.config["network"] = json!({"allow":["127.0.0.1"],"deny":["127.0.0.1"]});
-    case.permissions = json!({"permissions":{"allow":["WebFetch"]}});
+    case.permissions = json!({"permissions":{"allow":["WebFetch"],"deny":["WebFetch(domain:127.0.0.1)"]}});
     let outcome = web_case(&root.join("network-deny"), case).await;
     assert_eq!(first_result(&outcome).disposition, Denied);
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
