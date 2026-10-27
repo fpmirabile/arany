@@ -10,6 +10,8 @@ pub mod rewind;
 mod stop;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use reducer::HookView;
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub use reducer::selection_failure_session;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod worker;

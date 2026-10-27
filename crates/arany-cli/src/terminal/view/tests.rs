@@ -1418,9 +1418,12 @@ fn approval_chrome_never_shares_history_cells_and_too_small_stays_blocked() {
                     area,
                     &["Read file".into()],
                     &[Yes, No],
-                    0,
-                    Some(0),
-                    true,
+                    super::ToolApprovalFrameState {
+                        page: 0,
+                        focus: Some(0),
+                        review_notice: true,
+                        palette: Palette { color: false },
+                    },
                 );
             })
             .unwrap();

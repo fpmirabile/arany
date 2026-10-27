@@ -41,6 +41,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             })
             .unwrap(),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotAttempted,
         }
     }

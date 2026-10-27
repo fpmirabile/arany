@@ -1513,6 +1513,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
         output: "x".into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));

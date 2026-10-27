@@ -196,6 +196,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         output: "observed".into(),
         attestation: Some(Attestation::Guard(guard)),
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
@@ -304,6 +305,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             .into(),
         attestation: Some(Attestation::Guard(command_guard)),
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::Uncertain,
     };
     assert!(uncertain_cache.valid());
@@ -446,4 +448,54 @@ fn host_pin_requires_explicit_nullable_permissions_digest() {
     );
     value.as_object_mut().unwrap().remove("permissions_digest");
     assert!(serde_json::from_value::<super::types::HostCommandPin>(value).is_err());
+}
+
+#[test]
+fn guard_stage_is_valid_only_on_unattested_guard_failures() {
+    let fact = GuardStageFact {
+        stage: FailureStage::SelectionTimedOut,
+        check: None,
+    };
+    let observation = |call: ToolCall, disposition| {
+        let intent = EffectIntent {
+            host: None,
+            host_command: None,
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            use_count: 1,
+        };
+        ToolObservation {
+            spill: None,
+            intent,
+            disposition,
+            enforcement_cause: None,
+            limit_cause: None,
+            output: "x".into(),
+            attestation: None,
+            approval_cause: None,
+            cache_update: CacheUpdate::NotApplicable,
+            guard_stage: Some(fact),
+        }
+    };
+    let command = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![],
+        cwd: String::new(),
+    };
+    assert!(observation(command.clone(), ToolDisposition::Failed).valid());
+    assert!(!observation(command, ToolDisposition::Succeeded).valid());
+    let read = ToolCall::Read {
+        path: "a".into(),
+        offset: None,
+        limit: None,
+    };
+    assert!(!observation(read, ToolDisposition::Failed).valid());
 }

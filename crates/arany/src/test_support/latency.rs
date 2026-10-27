@@ -7,7 +7,15 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
 
-const MAX_SAMPLES: usize = 330;
+pub const CORPUS_ROWS: [(Operation, usize); 4] = [
+    (Operation::Read, 1),
+    (Operation::Read, 4),
+    (Operation::Edit, 1),
+    (Operation::Command, 1),
+];
+pub const WARMUPS: usize = 10;
+pub const MEASURED: usize = 100;
+pub const MAX_SAMPLES: usize = CORPUS_ROWS.len() * (WARMUPS + MEASURED);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operation {
@@ -611,6 +619,7 @@ mod tests {
                 output: String::new(),
                 attestation: Some(crate::Attestation::for_site(intent)),
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: crate::CacheUpdate::NotApplicable,
                 enforcement_cause: None,
                 limit_cause: None,
@@ -618,19 +627,19 @@ mod tests {
         }
     }
 
-    fn read_step_recorder(events: &[EventEnvelope; 5]) -> (Recorder, Instant) {
+    fn read_step_recorder(events: &[EventEnvelope]) -> (Recorder, Instant) {
         let recorder = Recorder::default();
         let received = Instant::now();
-        let requests = events[1..3]
+        let requests = events
             .iter()
-            .map(|event| {
+            .filter_map(|event| {
                 let Event::ToolStarted { intent, .. } = &event.event else {
-                    unreachable!()
+                    return None;
                 };
-                crate::ToolRequest {
+                Some(crate::ToolRequest {
                     id: crate::ToolUseId::new(intent.id.to_string()).unwrap(),
                     call: intent.call.clone(),
-                }
+                })
             })
             .collect();
         Receipt {
@@ -651,6 +660,77 @@ mod tests {
             received,
         );
         (recorder, received)
+    }
+
+    #[test]
+    fn edit_and_command_capture_require_acknowledged_success() {
+        for call in [
+            ToolCall::Edit {
+                path: "src/main.rs".into(),
+                expected_digest: "0".repeat(64),
+                old: "before".into(),
+                new: "after".into(),
+            },
+            ToolCall::Command {
+                program: "noop".into(),
+                args: Vec::new(),
+                cwd: "src".into(),
+            },
+        ] {
+            for disposition in [
+                ToolDisposition::Succeeded,
+                ToolDisposition::Denied,
+                ToolDisposition::Failed,
+                ToolDisposition::Conflict,
+                ToolDisposition::Limit,
+                ToolDisposition::Cancelled,
+                ToolDisposition::Uncertain,
+            ] {
+                let source = read_step_history();
+                let mut events = [source[0].clone(), source[1].clone(), source[4].clone()];
+                let Event::ProviderCallRecorded { record, .. } = &mut events[0].event else {
+                    unreachable!();
+                };
+                record.requested_tools = 1;
+                let Event::ToolStarted { intent, .. } = &events[1].event else {
+                    unreachable!();
+                };
+                let mut intent = crate::EffectIntent::from(intent.clone());
+                intent.call = call.clone();
+                events[1].event = read_start(&intent);
+                events[2].event = read_finish(&intent);
+                let Event::ToolFinished { observation, .. } = &mut events[2].event else {
+                    unreachable!();
+                };
+                observation.disposition = disposition;
+                for acknowledged in [false, true] {
+                    let (recorder, received) = read_step_recorder(&events);
+                    for event in &events[..2] {
+                        recorder.committed(event, received);
+                    }
+                    assert!(recorder.has_pending());
+                    assert!(recorder.samples().unwrap().is_empty());
+                    if acknowledged {
+                        recorder.committed(&events[2], received);
+                    } else {
+                        recorder.dispose(intent.run_id);
+                    }
+                    let samples = recorder.samples().unwrap();
+                    assert_eq!(samples.len(), 1);
+                    let sample = &samples[0];
+                    let successful = acknowledged && disposition == ToolDisposition::Succeeded;
+                    assert_eq!(sample.operation, operation(&call));
+                    assert_eq!(sample.successful(), successful);
+                    assert_eq!(sample.tool_receipt_to_commit_us, successful.then_some(0));
+                    assert_eq!(
+                        sample.finished_sequence,
+                        acknowledged.then_some(events[2].sequence)
+                    );
+                    sample.audit(&events).unwrap();
+                    assert!(!recorder.has_pending());
+                }
+            }
+        }
     }
 
     #[test]
