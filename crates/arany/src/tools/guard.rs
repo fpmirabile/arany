@@ -43,6 +43,7 @@ pub(super) fn payload_report_deadline(
 mod landlock;
 #[cfg(target_os = "linux")]
 mod linux;
+mod network;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
 #[cfg(target_os = "linux")]
@@ -61,6 +62,17 @@ pub(super) fn git_writes_available() -> bool {
     }
 }
 
+// macOS offers branch creation alone until its executor and publisher units cover the other verbs.
+pub(super) fn git_branch_creation_available() -> bool {
+    cfg!(target_os = "macos") || git_writes_available()
+}
+
+#[cfg(target_os = "macos")]
+mod git_stage;
+#[cfg(target_os = "macos")]
+pub(super) use git_stage::GitStage;
+#[cfg(target_os = "macos")]
+use git_stage::{GitWork, read_plan_report, receive_git_input};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -128,8 +140,6 @@ struct Task {
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
-    worker: Option<transfer::Transfer>,
-    #[serde(deserialize_with = "Option::deserialize")]
     handover: Option<transfer::PublicationTransfer>,
     #[serde(default, skip_serializing_if = "HiddenPaths::is_empty")]
     hidden: HiddenPaths,
@@ -141,6 +151,12 @@ struct Task {
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     system_programs: Option<SystemPrograms>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_stage: Option<GitStage>,
+    #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -160,6 +176,7 @@ pub(super) enum CacheCandidate {
     Uncertain,
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn cache_transfer_deadline(
     intent: &EffectIntent,
     ceiling: Option<tokio::time::Instant>,
@@ -204,12 +221,6 @@ pub(super) fn build_cache_session(
         return Ok(None);
     }
     let Some(state) = runtime.cache_state.as_ref() else {
-        if matches!(
-            intent.target,
-            crate::session::worker::EffectTarget::WorkerView { .. }
-        ) {
-            return Err(ToolError::Configuration);
-        }
         return Ok(None);
     };
     let identity = BuildCacheIdentity::new(
@@ -219,28 +230,6 @@ pub(super) fn build_cache_session(
     )
     .map_err(map_cache_error)?;
     let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
-    if let crate::session::worker::EffectTarget::WorkerView {
-        cache_generation, ..
-    } = intent.target
-    {
-        let lease = state
-            .read_build_cache(identity.clone(), intent.limits.cache_bytes)
-            .map_err(map_cache_error)?;
-        if lease.generation().map_err(map_cache_error)? != cache_generation {
-            return Err(ToolError::ChangedInput);
-        }
-        return Ok(Some(BuildCacheSession {
-            #[cfg(target_os = "linux")]
-            directory: None,
-            lease: Arc::new(lease),
-            transfer: BuildCacheTransfer {
-                identity,
-                exclusions,
-                view_bytes: intent.limits.cache_bytes,
-                candidate_bytes: 0,
-            },
-        }));
-    }
     let lease = match state.begin_build_cache_with_limits(
         identity.clone(),
         intent.limits.cache_bytes,
@@ -401,7 +390,7 @@ impl Task {
         intent_enforcement_digest(
             self.intent.call.is_process(),
             &self.config.runtime_grants,
-            self.intent.limits.build_jobs,
+            &self.intent.limits,
             #[cfg(target_os = "macos")]
             self.system_programs.as_ref(),
         )
@@ -411,29 +400,43 @@ impl Task {
 pub(super) fn intent_enforcement_digest(
     is_process: bool,
     runtime_grants: &[RuntimeGrant],
-    build_jobs: u32,
+    limits: &ToolLimits,
     #[cfg(target_os = "macos")] programs: Option<&SystemPrograms>,
 ) -> Result<[u8; 32], ToolError> {
-    #[cfg(target_os = "macos")]
-    {
-        if is_process {
-            bind_runtime_grants(
-                macos_enforcement_digest(programs)?,
-                runtime_grants,
-                build_jobs,
-            )
-        } else {
-            enforcement_digest(&[])
+    let profile = {
+        #[cfg(target_os = "macos")]
+        {
+            if is_process {
+                bind_runtime_grants(
+                    macos_enforcement_digest(programs)?,
+                    runtime_grants,
+                    limits.build_jobs,
+                )
+            } else {
+                enforcement_digest(&[])
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bind_runtime_grants(
+                enforcement_digest(&[])?,
+                if is_process { runtime_grants } else { &[] },
+                limits.build_jobs,
+            )
+        }
+    }?;
+    let profile = if is_process && limits.network == super::types::NetworkGrant::Proxy {
+        network::bind(profile)?
+    } else {
+        profile
+    };
+    if !is_process || limits.build_cpu_cores == ToolLimits::default().build_cpu_cores {
+        return Ok(profile);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        bind_runtime_grants(
-            enforcement_digest(&[])?,
-            if is_process { runtime_grants } else { &[] },
-            build_jobs,
-        )
-    }
+    let mut bytes = b"arany-build-cpu-cores-v1".to_vec();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(&limits.build_cpu_cores.to_le_bytes());
+    Ok(digest(&bytes))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -476,7 +479,22 @@ impl GuardCheck {
             Self::SelectionTimedOut => Some(SelectionCause::TimedOut),
             Self::SelectionInputVanished => Some(SelectionCause::InputVanished),
             Self::SelectionInputConflict => Some(SelectionCause::InputConflict),
-            _ => None,
+            Self::Inspection
+            | Self::ListingUnavailable
+            | Self::DeviceUnlisted
+            | Self::DetachFailed
+            | Self::ImageStillListed
+            | Self::MountStillPresent
+            | Self::WorkerClosed
+            | Self::WorkerPanicked
+            | Self::ReportMalformed
+            | Self::ReportUnattested
+            | Self::ReportTrailing
+            | Self::Cancelled
+            | Self::ControllerFailed
+            | Self::PayloadTimeout
+            | Self::PayloadLimit
+            | Self::PayloadFailed => None,
         }
     }
 
@@ -801,7 +819,7 @@ fn attest_task_mounts(
         stage,
     )?;
     #[cfg(target_os = "linux")]
-    if matches!(task.intent.call, ToolCall::Command { .. }) && task.worker.is_none() {
+    if matches!(task.intent.call, ToolCall::Command { .. }) {
         *stage = BootstrapStage::RuntimeMounts;
         if linux::overlay::selected(&task.intent, &task.config) {
             linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
@@ -825,7 +843,6 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
                 hidden: runtime.hidden_paths(&intent.call),
                 definition: None,
-                worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
                 handover: runtime
                     .handover
                     .as_ref()
@@ -1333,49 +1350,6 @@ pub(super) async fn read_worker_report<R: tokio::io::AsyncBufRead + Unpin>(
         .map_err(|(error, check)| check.map_or(error, execution_failure))
 }
 
-pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    runtime: &ToolRuntime,
-    intent: &EffectIntent,
-    receipt_budget: Duration,
-) -> Result<ToolObservation, ToolError> {
-    let action = runtime.worker.as_ref().ok_or(ToolError::Configuration)?;
-    let bytes = tokio::time::timeout(
-        receipt_budget,
-        read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES),
-    )
-    .await
-    .map_err(|_| ToolError::Limit)??;
-    let observation = parse_observation(&bytes)?;
-    if !transfer::wire_valid(&observation, intent) {
-        return Err(ToolError::Operation);
-    }
-    if super::discovery::possible(&intent.call) {
-        if !read_capped(reader, 1).await?.is_empty() {
-            return Err(ToolError::Operation);
-        }
-        return Ok(observation);
-    }
-    tokio::time::timeout(transfer::transfer_time(intent), async {
-        let bytes = transfer::receive_frame(reader).await?;
-        let image = transfer::Image::decode(&bytes, &action.transfer.grant)?;
-        if observation.disposition == ToolDisposition::Succeeded
-            && !matches!(intent.call, ToolCall::Command { .. })
-        {
-            let before = action.transfer.decode(&action.input)?;
-            transfer::validate_edit(&before, &image, &intent.call, &action.transfer.grant)?;
-        }
-        *action.output.lock().map_err(|_| ToolError::Operation)? = Some(bytes);
-        if !read_capped(reader, 1).await?.is_empty() {
-            return Err(ToolError::Operation);
-        }
-        Ok::<(), ToolError>(())
-    })
-    .await
-    .map_err(|_| ToolError::Limit)??;
-    Ok(observation)
-}
-
 fn parse_observation(bytes: &[u8]) -> Result<ToolObservation, ToolError> {
     super::spill::decode_report(bytes).map_err(|_| {
         serde_json::from_slice::<BootstrapFailure>(bytes)
@@ -1396,6 +1370,7 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(observation)
 }
 
+#[cfg(target_os = "macos")]
 pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     lease: &BuildCacheLease,
@@ -1691,6 +1666,30 @@ fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolErr
     Ok(task)
 }
 
+fn send_ready(task: &Task) -> Result<(), ToolError> {
+    let ready = Ready {
+        digest: task.intent.digest(),
+        pid: std::process::id(),
+        #[cfg(target_os = "linux")]
+        namespaces: profile::Namespaces::read()?,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        profile_digest: task.enforcement_digest()?,
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        profile_digest: [0; 32],
+    };
+    #[cfg(target_os = "linux")]
+    if !ready.namespaces.isolated_from(&task.parent_namespaces) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &ready).map_err(|_| ToolError::Operation)?;
+    stdout
+        .write_all(b"\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)?;
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn bootstrap_locations(
     task: &Task,
@@ -1698,14 +1697,7 @@ fn bootstrap_locations(
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
     *stage = BootstrapStage::Capabilities;
     let root = macos::install(task, stage)?;
-    let workspace = if task.worker.is_some() {
-        // A fresh HFS+ volume gains root metadata, so the image gets its own owner-only directory.
-        let tree = root.join("workspace/tree");
-        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
-            .create(&tree)
-            .map_err(|_| ToolError::Path)?;
-        tree
-    } else if task.intent.call.is_process() {
+    let workspace = if task.intent.call.is_process() {
         root.join("workspace")
     } else {
         task.workspace.clone()
@@ -1734,17 +1726,25 @@ pub(super) struct GuardContext<'a> {
     pub(super) workspace: &'a Path,
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) hidden: &'a HiddenPaths,
-    pub(super) worker_paths: Option<&'a [String]>,
     pub(super) definition: Option<Vec<u8>>,
+    pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
+    #[cfg(target_os = "macos")]
+    pub(super) git: GitWork,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
+    async fn dispatch(
+        self,
+    ) -> (
+        (Result<String, ToolError>, Option<Vec<u8>>),
+        Option<Vec<u8>>,
+    ) {
         let result = super::dispatch::run(&self).await;
-        (result, self.captured.into_inner().ok().flatten())
+        let plan = self.git_plan.into_inner().ok().flatten();
+        ((result, self.captured.into_inner().ok().flatten()), plan)
     }
 
     pub(super) fn remaining_runtime(&self) -> Duration {
@@ -1790,23 +1790,20 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         cache.validate(&task.intent, &task.config)?;
     }
     verify_intent_runtime_grants(&task.intent, &task.config)?;
-    if let Some(worker) = &task.worker {
-        worker.validate(&task.intent, &task.config)?;
-    }
     if task
         .handover
         .as_ref()
         .is_some_and(|data| Some(data.clone()) != transfer::handover_ref(&task.intent))
-        || task.worker.is_some() && task.handover.is_some()
     {
         return Err(ToolError::Configuration);
     }
-    if task.worker.is_none()
-        && task.intent.target != crate::session::worker::EffectTarget::Workspace
-        || !task.intent.valid()
+    network::validate(task)?;
+    #[cfg(target_os = "macos")]
+    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
+        return Err(ToolError::Configuration);
+    }
+    if !task.intent.valid()
         || !(task.intent.call.facts().site == Site::Guard
-            || task.worker.is_some()
-                && task.intent.call.facts().family == super::catalog::Family::File
             || super::discovery::possible(&task.intent.call))
         || task.intent.policy_digest != task.config.digest()
         || !(task.config.allows(&task.intent.call) || task.handover.is_some() && task.config.write)
@@ -1822,53 +1819,13 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn restore_cache(
-    cache: &BuildCacheTransfer,
-    stdin: &mut impl Read,
-    root: &Path,
-) -> Result<(), ToolError> {
-    let mut stdout = std::io::stdout().lock();
-    stdout
-        .write_all(b"CACHE_READY\n")
-        .and_then(|()| stdout.flush())
-        .map_err(|_| ToolError::Operation)?;
-    let mut length = [0; 8];
-    stdin
-        .read_exact(&mut length)
-        .map_err(|_| ToolError::Operation)?;
-    let length = u64::from_le_bytes(length);
-    if length > cache.view_bytes {
-        return Err(ToolError::Limit);
-    }
-    if length > 0 {
-        let cache_dir = super::fs::open_directory(&root.join("cache"))?;
-        let mut archive = Read::take(&mut *stdin, length);
-        crate::store::restore_archive_with_limit(
-            &mut archive,
-            &cache_dir,
-            &cache.identity,
-            &cache.exclusions,
-            cache.view_bytes,
-        )
-        .map_err(map_cache_error)?;
-    }
-    Ok(())
-}
-
-fn receive_bulk(
+fn receive_handover(
     task: &Task,
     stdin: &mut std::io::BufReader<impl Read>,
     workspace: &Path,
-) -> Result<
-    (
-        Option<transfer::Image>,
-        Option<crate::session::worker::WorkerChangeset>,
-    ),
-    ToolError,
-> {
-    if task.worker.is_none() && task.handover.is_none() {
-        return Ok((None, None));
+) -> Result<Option<crate::session::worker::WorkerChangeset>, ToolError> {
+    if task.handover.is_none() {
+        return Ok(None);
     }
     let mut stdout = std::io::stdout().lock();
     stdout
@@ -1879,30 +1836,26 @@ fn receive_bulk(
     if !stdin.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
-    if let Some(transfer) = &task.worker {
-        Ok((Some(transfer.decode(&bytes)?), None))
-    } else {
-        let changeset = transfer::decode_handover(&task.intent, &bytes, &task.config)?;
-        super::fs::worker_publication_paths(
-            &super::fs::open_directory(workspace)?,
-            &changeset.files,
-        )?;
-        Ok((None, Some(changeset)))
-    }
+    let changeset = transfer::decode_handover(&task.intent, &bytes, &task.config)?;
+    super::fs::worker_publication_paths(&super::fs::open_directory(workspace)?, &changeset.files)?;
+    Ok(Some(changeset))
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
+    if let Some(plan) = plan {
+        transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
+        stdout.flush().map_err(|_| ToolError::Operation)?;
+    }
+    Ok(())
+}
+
 fn send_result(
     task: Task,
-    workspace: &Path,
     result: (Result<String, ToolError>, Option<Vec<u8>>),
     stdout: &mut impl Write,
-    before: Option<&transfer::Image>,
 ) -> Result<(), ToolError> {
     let (disposition, output, enforcement_cause, limit_cause) =
         super::dispatch::outcome(&task.intent, result.0);
-    let private_command =
-        task.worker.is_some() && matches!(task.intent.call, ToolCall::Command { .. });
     let receipt = GuardReceipt {
         contract_version: 1,
         intent_digest: task.intent.digest(),
@@ -1919,9 +1872,7 @@ fn send_result(
         attestation: Some(Attestation::Guard(receipt)),
         approval_cause: None,
         guard_stage: None,
-        cache_update: if private_command {
-            crate::tools::CacheUpdate::Discarded
-        } else if task.cache.is_some() {
+        cache_update: if task.cache.is_some() {
             crate::tools::CacheUpdate::NotAttempted
         } else {
             crate::tools::CacheUpdate::NotApplicable
@@ -1937,89 +1888,16 @@ fn send_result(
         #[cfg(not(target_os = "linux"))]
         super::spill::OutputSpill::captured(&observation, result.1)
     };
-    if private_command
-        && serde_json::from_str::<crate::session::worker::WorkerCommandResult>(&observation.output)
-            .is_err()
-    {
-        observation.output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            stdout_total: Default::default(),
-            stderr_total: Default::default(),
-            private_capture: crate::session::worker::PrivateCapture::None {},
-        })
-        .map_err(|_| ToolError::Operation)?;
-    }
-    if private_command && observation.output.len() > observation.intent.limits.result_bytes as usize
-    {
-        observation.disposition = ToolDisposition::Limit;
-        observation.limit_cause = Some(crate::tools::LimitCause::Resource);
-        observation.enforcement_cause = None;
-        observation.output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            stdout_total: Default::default(),
-            stderr_total: Default::default(),
-            private_capture: crate::session::worker::PrivateCapture::None {},
-        })
-        .map_err(|_| ToolError::Operation)?;
-    }
-    if task.worker.is_none() && !observation.valid() {
+    if !observation.valid() {
         observation.spill = None;
         observation.disposition = ToolDisposition::Limit;
         observation.limit_cause = Some(crate::tools::LimitCause::Resource);
         observation.enforcement_cause = None;
         observation.output = "Tool result exceeded its reserved serialized capacity".into();
     }
-    if task.worker.is_none() && !observation.valid() {
+    if !observation.valid() {
         return Err(ToolError::Limit);
     }
-    let candidate = if let Some(worker) = &task.worker
-        && !super::discovery::possible(&observation.intent.call)
-    {
-        let image = if matches!(observation.intent.call, ToolCall::Command { .. }) {
-            let before = before.ok_or(ToolError::Configuration)?;
-            #[cfg(target_os = "linux")]
-            let (image, private_capture) = if observation.disposition == ToolDisposition::Succeeded
-            {
-                transfer::command_capture(
-                    before,
-                    &super::fs::open_directory(workspace)?,
-                    &worker.grant,
-                )
-            } else {
-                (
-                    before.clone(),
-                    crate::session::worker::PrivateCapture::None {},
-                )
-            };
-            #[cfg(not(target_os = "linux"))]
-            let (image, private_capture) = (
-                before.clone(),
-                crate::session::worker::PrivateCapture::None {},
-            );
-            if let Ok(mut result) = serde_json::from_str::<
-                crate::session::worker::WorkerCommandResult,
-            >(&observation.output)
-            {
-                result.private_capture = private_capture;
-                observation.output =
-                    serde_json::to_string(&result).map_err(|_| ToolError::Operation)?;
-            }
-            image
-        } else {
-            super::fs::worker_image(
-                &super::fs::open_directory(workspace)?,
-                &transfer::capture_paths(&worker.grant),
-            )?
-        };
-        image.validate(&worker.grant)?;
-        Some(image.encode()?)
-    } else {
-        None
-    };
     stdout
         .write_all(&super::spill::encode_report(&observation)?)
         .map_err(|_| ToolError::Operation)?;
@@ -2027,17 +1905,13 @@ fn send_result(
         .write_all(b"\n")
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
-    if let Some(bytes) = candidate {
-        transfer::write_frame(stdout, &bytes, crate::session::worker::WORKER_DATA_BYTES)?;
-        stdout.flush().map_err(|_| ToolError::Operation)?;
-    }
     Ok(())
 }
 
 pub(super) fn helper_main() -> ExitCode {
     #[cfg(target_os = "linux")]
-    if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--supervisor")) {
-        return linux::supervisor::main();
+    if let Some(code) = network::internal_mode() {
+        return code;
     }
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -2055,29 +1929,22 @@ pub(super) fn helper_main() -> ExitCode {
             #[cfg(target_os = "linux")]
             overlay.as_ref(),
         )?;
-        #[cfg(target_os = "linux")]
-        if let Some(cache) = &task.cache
-            && task.worker.is_some()
-        {
-            restore_cache(cache, &mut stdin, &root)?;
-        }
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
         let family = task.intent.call.facts().family;
-        if task.worker.is_none()
-            && matches!(family, Family::File | Family::Git)
+        if matches!(family, Family::File | Family::Git)
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
         let definition = definition_bytes(&task)?;
-        let (image, handover) = receive_bulk(&task, &mut stdin, workspace)?;
+        let handover = receive_handover(&task, &mut stdin, workspace)?;
         #[cfg(target_os = "linux")]
         {
             stage = BootstrapStage::Capabilities;
-            linux::harden()?;
-            if (image.is_some() || handover.is_some()) && !task.intent.call.is_process() {
+            network::harden(&task)?;
+            if handover.is_some() && !task.intent.call.is_process() {
                 profile::install_non_spawning()?;
             }
         }
@@ -2087,26 +1954,9 @@ pub(super) fn helper_main() -> ExitCode {
             prepare_command_baseline(&task, workspace, &mut stdin)?
         };
         stage = BootstrapStage::Handshake;
-        let ready = Ready {
-            digest: task.intent.digest(),
-            pid: std::process::id(),
-            #[cfg(target_os = "linux")]
-            namespaces: profile::Namespaces::read()?,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            profile_digest: task.enforcement_digest()?,
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            profile_digest: [0; 32],
-        };
-        #[cfg(target_os = "linux")]
-        if !ready.namespaces.isolated_from(&task.parent_namespaces) {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let mut stdout = std::io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &ready).map_err(|_| ToolError::Operation)?;
-        stdout
-            .write_all(b"\n")
-            .and_then(|()| stdout.flush())
-            .map_err(|_| ToolError::Operation)?;
+        send_ready(&task)?;
+        #[cfg(target_os = "macos")]
+        let git = receive_git_input(&task, &mut stdin)?;
         let mut go = [0; 3];
         stdin
             .read_exact(&mut go)
@@ -2123,7 +1973,7 @@ pub(super) fn helper_main() -> ExitCode {
             #[cfg(target_os = "linux")]
             overlay.as_ref(),
         )?;
-        if image.is_some() || handover.is_some() {
+        if handover.is_some() {
             let mut trailing = [0; 1];
             if stdin
                 .read(&mut trailing)
@@ -2135,14 +1985,8 @@ pub(super) fn helper_main() -> ExitCode {
         }
         drop(stdin);
         stage = BootstrapStage::Payload;
-        if let Some(image) = &image {
-            transfer::materialize(image, &super::fs::open_directory(workspace)?)?;
-        }
         #[cfg(not(target_os = "macos"))]
-        if task.intent.call.is_process()
-            && task.worker.is_none()
-            && !matches!(task.intent.call, ToolCall::Command { .. })
-        {
+        if task.intent.call.is_process() && !matches!(task.intent.call, ToolCall::Command { .. }) {
             super::fs::copy_seed()?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2159,23 +2003,25 @@ pub(super) fn helper_main() -> ExitCode {
             workspace,
             hook_stdin: task.hook_stdin.as_deref(),
             hidden: &task.hidden,
-            worker_paths: task
-                .worker
-                .as_ref()
-                .map(|worker| worker.grant.read_paths.as_slice()),
             definition,
+            git_plan: Default::default(),
+            #[cfg(target_os = "macos")]
+            git,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
-        // Capture handshakes acquire stdout from a blocking worker during dispatch.
-        drop(stdout);
-        let result = runtime.block_on(site.dispatch());
+        let (result, plan) = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
-        send_result(task, workspace, result, &mut stdout, image.as_ref())?;
+        send_result(task, result, &mut stdout)?;
+        send_plan(plan, &mut stdout)?;
         Ok(())
     })();
+    bootstrap_exit(stage, result)
+}
+
+fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -2204,6 +2050,7 @@ fn parser_config(config: &Config) -> Config {
         git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
+        network: None,
         runtime_grants: Vec::new(),
         ..config.clone()
     }
@@ -2342,6 +2189,7 @@ pub(super) fn payload(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    network::set_environment(&mut command, limits);
     #[cfg(target_os = "macos")]
     let payload_args = {
         let mut args = payload_args;
@@ -2386,19 +2234,18 @@ fn prepare_command_baseline(
     if linux::overlay::selected(&task.intent, &task.config) {
         return Ok(None);
     }
-    let command_before =
-        if task.worker.is_none() && matches!(task.intent.call, ToolCall::Command { .. }) {
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(b"SELECTION_READY\n")
-                .and_then(|()| stdout.flush())
-                .map_err(|_| ToolError::Operation)?;
-            let selection = super::fs::CommandSelection::receive(stdin)?;
-            super::fs::copy_command_seed()?;
-            Some((super::fs::command_snapshot(workspace)?, selection))
-        } else {
-            None
-        };
+    let command_before = if matches!(task.intent.call, ToolCall::Command { .. }) {
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(b"SELECTION_READY\n")
+            .and_then(|()| stdout.flush())
+            .map_err(|_| ToolError::Operation)?;
+        let selection = super::fs::CommandSelection::receive(stdin)?;
+        super::fs::copy_command_seed()?;
+        Some((super::fs::command_snapshot(workspace)?, selection))
+    } else {
+        None
+    };
 
     Ok(command_before)
 }
@@ -2745,7 +2592,6 @@ mod tests {
             hook_stdin: None,
             hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
-            worker: None,
             handover: None,
             #[cfg(target_os = "linux")]
             parent_namespaces: profile::Namespaces::read().unwrap(),
@@ -2755,6 +2601,10 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            git_fault: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2807,7 +2657,6 @@ mod tests {
             hook_stdin: None,
             hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
-            worker: None,
             handover: None,
             parent_namespaces: profile::Namespaces::read().unwrap(),
         };
@@ -2843,7 +2692,6 @@ mod tests {
             hook_stdin: None,
             hidden: Default::default(),
             definition: None,
-            worker: None,
             handover: None,
             #[cfg(target_os = "linux")]
             parent_namespaces: profile::Namespaces::read().unwrap(),
@@ -2853,6 +2701,10 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            git_fault: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -3555,6 +3407,7 @@ mod tests {
             git_identity: None,
             locale: Default::default(),
             environment_sha256: None,
+            network: None,
         }
     }
 
@@ -3621,7 +3474,7 @@ mod tests {
         let non_process_profile = intent_enforcement_digest(
             false,
             &grants,
-            1,
+            &ToolLimits::default(),
             #[cfg(target_os = "macos")]
             None,
         )
@@ -3629,13 +3482,109 @@ mod tests {
         let process_profile = intent_enforcement_digest(
             true,
             &grants,
-            1,
+            &ToolLimits::default(),
             #[cfg(target_os = "macos")]
             None,
         )
         .unwrap();
         assert_eq!(non_process_profile, enforcement_digest(&[]).unwrap());
         assert_ne!(non_process_profile, process_profile);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capture_refusal_keeps_its_disposition_and_the_recorded_domains() {
+        let mut observation = ToolObservation {
+            spill: None,
+            intent: intent(ToolCall::Command {
+                program: "node".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            }),
+            disposition: ToolDisposition::Denied,
+            enforcement_cause: None,
+            limit_cause: None,
+            output: "Command overlay capture refused; nothing was published".into(),
+            attestation: None,
+            approval_cause: None,
+            guard_stage: None,
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+        };
+        crate::tools::network::annotate(
+            &mut observation,
+            ["evil.example", "[::1]"]
+                .map(|host| crate::tools::types::NetworkRefusal {
+                    host: host.into(),
+                    reason: crate::tools::types::NetworkRefusalReason::Unlisted,
+                    count: 2,
+                })
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Denied);
+        assert!(
+            observation
+                .output
+                .starts_with("Command overlay capture refused")
+        );
+        assert_eq!(observation.refused_domains(), ["evil.example", "::1"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proxy_routing_binds_a_distinct_enforcement_profile() {
+        let offline = ToolLimits::default();
+        let proxy = ToolLimits {
+            network: crate::NetworkGrant::Proxy,
+            ..ToolLimits::default()
+        };
+        let digest = |is_process, limits: &ToolLimits| {
+            intent_enforcement_digest(is_process, &[], limits).unwrap()
+        };
+        assert_eq!(digest(true, &offline), enforcement_digest(&[]).unwrap());
+        assert_ne!(digest(true, &offline), digest(true, &proxy));
+        assert_eq!(digest(false, &offline), digest(false, &proxy));
+        assert_ne!(
+            profile::profile_digest(profile::Routing::Offline).unwrap(),
+            profile::profile_digest(profile::Routing::Proxy).unwrap()
+        );
+    }
+
+    #[test]
+    fn proxy_task_requires_a_command_grant_and_no_worker() {
+        let mut command = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        command.policy_digest = [1; 32];
+        command.enforcement_digest = [2; 32];
+        command.limits.network = crate::NetworkGrant::Proxy;
+        assert!(command.valid());
+        for call in [
+            ToolCall::List { path: ".".into() },
+            ToolCall::Command {
+                program: "node".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        ] {
+            let mut other = command.clone();
+            other.call = call;
+            assert_eq!(
+                other.valid(),
+                matches!(other.call, ToolCall::Command { .. })
+            );
+        }
+        let mut private = serde_json::to_value(&command).unwrap();
+        private["target"] = serde_json::json!({
+            "kind": "worker_view",
+            "assignment_id": crate::session::AgentRunId::new(),
+            "base_digest": vec![1_u8; 32],
+            "revision": 1,
+            "cache_generation": null,
+        });
+        assert!(serde_json::from_value::<EffectIntent>(private).is_err());
     }
 
     #[test]
@@ -4301,7 +4250,6 @@ mod tests {
             let probe = Task {
                 command_deadline: None,
                 definition: None,
-                worker: None,
                 handover: None,
                 config: config.clone(),
                 intent: EffectIntent {
@@ -4330,6 +4278,10 @@ mod tests {
                 guard_executable: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]
                 system_programs: None,
+                #[cfg(target_os = "macos")]
+                git_stage: None,
+                #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+                git_fault: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;

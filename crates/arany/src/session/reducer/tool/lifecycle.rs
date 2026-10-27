@@ -275,11 +275,16 @@ pub(super) fn proposed(
         let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
         if !matches!(intent.call, crate::tools::ToolCall::Command { .. })
             || goal.resource_settings.build_jobs != Some(intent.limits.build_jobs)
+            || goal.resource_settings.build_cpu_cores != Some(intent.limits.build_cpu_cores)
         {
             return Err(ReplayError::InvalidTransition);
         }
     }
-    if names_child(current, run_id, agent_run_id) {
+    let child = names_child(current, run_id, agent_run_id);
+    if child && intent.limits.network == crate::tools::NetworkGrant::Proxy {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if child {
         current.start_child_tool(run_id, agent_run_id, intent)?;
     } else {
         start_primary_tool(current, run_id, agent_run_id, intent)?;

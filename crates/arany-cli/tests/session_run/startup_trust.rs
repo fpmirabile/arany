@@ -824,7 +824,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 &mut transcript,
                 &mut answered,
                 from,
-                b"Choose what to manage",
+                b"Network domains",
             );
             let from = transcript.len();
             input
@@ -896,7 +896,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                     from,
-                    b"Choose what to manage",
+                    b"Network domains",
                 );
                 let from = transcript.len();
                 input
@@ -959,7 +959,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                     from,
-                    b"Choose what to manage",
+                    b"Network domains",
                 );
                 let from = transcript.len();
                 input
@@ -1168,7 +1168,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "Choose what to manage",
+        "Network domains",
     );
     input.write_all(b"\r").unwrap();
     wait(
@@ -1957,7 +1957,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     assert!(!file.exists());
     input.write_all(b"\x1b[B\x1b[B\r").unwrap();
@@ -2019,7 +2019,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "typed area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     input.write_all(b"\x1b[B\r").unwrap();
     until(
@@ -2168,7 +2168,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "host area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     input.write_all(b"\x1b[B\x1b[B\r").unwrap();
     until(

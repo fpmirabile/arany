@@ -14,9 +14,20 @@ pub(in crate::tools) fn capture(
     deadline: Instant,
     limit: u64,
 ) -> Result<Vec<CacheChange>, ToolError> {
-    let mut budget = CommandScanBudget::default();
-    let before = inventory(lower, Layer::Lower, exclusions, &mut budget, deadline)?;
-    let after = inventory(upper, Layer::Upper, exclusions, &mut budget, deadline)?;
+    let before = inventory(
+        lower,
+        Layer::Lower,
+        exclusions,
+        &mut CommandScanBudget::default(),
+        deadline,
+    )?;
+    let after = inventory(
+        upper,
+        Layer::Upper,
+        exclusions,
+        &mut CommandScanBudget::default(),
+        deadline,
+    )?;
     let mut removals = BTreeSet::new();
     let mut additions = Vec::new();
     let mut sizes = before

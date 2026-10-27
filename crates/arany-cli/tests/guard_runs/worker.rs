@@ -185,3 +185,30 @@ async fn editor_commands_publish_whole_leased_changesets_with_checkpoints_and_re
         worker_case(case).await;
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux editor overlay commands and closed replay"
+)]
+fn editor_overlay_commands_bind_child_grants_baselines_cache_and_stops() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for case in [
+                "command_overlay",
+                "command_outside",
+                "command_overlay_conflict",
+                "command_overlay_cancel",
+                "command_overlay_uncertain",
+            ] {
+                worker_case(case).await;
+            }
+        });
+}

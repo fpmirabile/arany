@@ -23,7 +23,12 @@ mod guard;
 pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
+mod network;
+pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
+pub(crate) use network::{
+    MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, NETWORK_IDLE_MS,
+};
 mod output;
 pub(crate) mod spill;
 pub use spill::OutputSpill;
@@ -359,7 +364,6 @@ pub(crate) struct ToolRuntime {
     config: Config,
     git_writes_available: bool,
     host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
-    worker: Option<std::sync::Arc<guard::transfer::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -466,6 +470,25 @@ fn admission_resources(
         fs::reject_overlap(Path::new(path), state.path())?;
         fs::reject_overlap(Path::new(path), account)?;
     }
+    Ok(())
+}
+
+// The pinned configuration digest covers the effective domain set, so every admission and re-admission merges the same way.
+fn merge_network(
+    config: &mut Config,
+    permissions: Option<&PermissionSnapshot>,
+) -> Result<(), ToolError> {
+    let Some(network) = config.network.take() else {
+        return Ok(());
+    };
+    let (allow, restrict) = permissions.map_or_else(Default::default, |snapshot| {
+        snapshot.config.network_domains()
+    });
+    let network = network.merged(&allow, &restrict);
+    if !network.valid() {
+        return Err(ToolError::Configuration);
+    }
+    config.network = Some(network);
     Ok(())
 }
 
@@ -957,6 +980,7 @@ impl ToolRuntime {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
                 config.bind_environment(&environment);
+                merge_network(&mut config, Some(&snapshot))?;
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -972,6 +996,7 @@ impl ToolRuntime {
         };
         config.discover_skills(workspace)?;
         config.bind_environment(&environment);
+        merge_network(&mut config, Some(&snapshot))?;
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1047,6 +1072,7 @@ impl ToolRuntime {
                 Ok(snapshot)
             })
             .transpose()?;
+        merge_network(&mut config, permissions.as_ref())?;
         let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
@@ -1118,7 +1144,6 @@ impl ToolRuntime {
             config,
             git_writes_available: guard::git_writes_available(),
             host_authentication,
-            worker: None,
             handover: None,
             permissions,
             result_filter: None,
@@ -1310,7 +1335,7 @@ impl ToolRuntime {
     }
 
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
-        let catalog = serde_json::json!({
+        let mut catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write && self.guard_available,
@@ -1321,10 +1346,12 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.guard_available && self.config.git_available() {
-                let write = self.config.write && self.git_writes_available;
+                let write = self.config.write
+                    && (self.git_writes_available || guard::git_branch_creation_available());
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
+                        "git_commit" | "git_switch" => self.git_writes_available,
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
@@ -1338,6 +1365,18 @@ impl ToolRuntime {
                 serde_json::json!("unavailable")
             },
         });
+        if let Some(network) = self
+            .config
+            .network
+            .as_ref()
+            .filter(|_| self.guard_available)
+        {
+            catalog["network"] = serde_json::json!({
+                "allow": network.allow,
+                "deny": network.deny,
+                "contract": catalog::NETWORK_CONTRACT,
+            });
+        }
         let context = ToolContext::new(catalog);
         if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
@@ -1390,7 +1429,6 @@ impl ToolRuntime {
                 concurrency: 4,
                 max_turns: 17,
                 max_tools: 16,
-                data_bytes: WORKER_DATA_BYTES as u32,
             })
             .filter(WorkerPolicy::valid)
     }
@@ -1566,25 +1604,6 @@ impl ToolRuntime {
         .unwrap_or(false)
     }
 
-    pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call)
-            || call.facts().family == catalog::Family::File && call.facts().mutates
-        {
-            guard::RESERVATION_OVERHEAD
-        } else {
-            self.reservation_overhead(call)
-        }
-    }
-
-    pub(crate) fn intent_reservation_overhead(&self, intent: &EffectIntent) -> Duration {
-        match intent.target {
-            crate::worker::EffectTarget::WorkerView { .. } => {
-                self.worker_reservation_overhead(&intent.call)
-            }
-            crate::worker::EffectTarget::Workspace => self.reservation_overhead(&intent.call),
-        }
-    }
-
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         if discovery::possible(call) {
             let exact = self
@@ -1627,24 +1646,6 @@ impl ToolRuntime {
             && !self.guard_available
         {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
-        }
-        if matches!(
-            intent.target,
-            crate::worker::EffectTarget::WorkerView { .. }
-        ) && matches!(intent.call, ToolCall::Command { .. })
-        {
-            return ToolObservation {
-                spill: None,
-                enforcement_cause: None,
-                limit_cause: None,
-                intent,
-                disposition: ToolDisposition::Denied,
-                output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
-                attestation: None,
-                approval_cause: None,
-                guard_stage: None,
-                cache_update: CacheUpdate::NotApplicable,
-            };
         }
         if matches!(
             intent.call,
@@ -2086,8 +2087,6 @@ struct InProcessReads {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-pub(crate) const PRIVATE_IMAGE_REQUIRED: &str =
-    "Worker commands require an admitted private image; no operation was dispatched";
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {

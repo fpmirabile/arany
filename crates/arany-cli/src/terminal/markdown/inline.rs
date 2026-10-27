@@ -1,5 +1,5 @@
 use super::*;
-use pulldown_cmark::{Event, Tag, TagEnd};
+use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
 
 #[derive(Default)]
 pub(super) struct Flow {
@@ -8,6 +8,7 @@ pub(super) struct Flow {
     breaks: Vec<(usize, Range<usize>)>,
     styles: Vec<(Modifier, Range<usize>, usize)>,
     literal: Option<Range<usize>>,
+    link: Option<super::links::Link>,
     bytes: usize,
     source_end: usize,
     #[cfg(test)]
@@ -16,6 +17,12 @@ pub(super) struct Flow {
 pub(super) struct Lines {
     cells: Vec<Cell>,
     breaks: Vec<(usize, Range<usize>)>,
+    wrap: Wrap,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wrap {
+    Word,
+    Grapheme,
 }
 impl Flow {
     pub(super) fn new(base: Modifier) -> Self {
@@ -29,6 +36,7 @@ impl Flow {
         source: &str,
         event: &Event<'_>,
         range: Range<usize>,
+        definition: Option<Range<usize>>,
     ) -> Result<(), ()> {
         if self
             .literal
@@ -41,6 +49,12 @@ impl Flow {
         // Opening tags span future content, so they do not consume it yet.
         if !matches!(event, Event::Start(_)) {
             self.source_end = range.end;
+        }
+        if matches!(
+            event,
+            Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link)
+        ) {
+            return self.link_event(source, event, range, definition);
         }
         match event {
             Event::Start(Tag::Emphasis | Tag::Strong) => {
@@ -55,7 +69,8 @@ impl Flow {
                 let (_, range, start) = self.styles.pop().ok_or(())?;
                 self.enclose(start, range);
             }
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
+            Event::Start(Tag::Image { link_type, .. }) => {
+                let range = super::links::literal_range(source, range, *link_type);
                 self.source_end = range.end;
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);
@@ -80,6 +95,7 @@ impl Flow {
                     content: range,
                     outer,
                     atomic,
+                    entities: false,
                 };
                 self.append(source, text, origin, self.style())?;
             }
@@ -110,12 +126,153 @@ impl Flow {
         Lines {
             cells: self.take(),
             breaks: std::mem::take(&mut self.breaks),
+            wrap: Wrap::Word,
         }
     }
     fn style(&self) -> Modifier {
         self.styles
             .iter()
             .fold(self.base, |style, (next, _, _)| style | *next)
+            | if self.link.is_some() {
+                Modifier::UNDERLINED
+            } else {
+                Modifier::empty()
+            }
+    }
+    fn link_event(
+        &mut self,
+        source: &str,
+        event: &Event<'_>,
+        range: Range<usize>,
+        definition: Option<Range<usize>>,
+    ) -> Result<(), ()> {
+        match event {
+            Event::Start(Tag::Link {
+                link_type:
+                    link_type @ (LinkType::Inline
+                    | LinkType::Reference
+                    | LinkType::Collapsed
+                    | LinkType::Shortcut),
+                dest_url,
+                ..
+            }) => {
+                let range = super::links::literal_range(source, range, *link_type);
+                self.link = Some(super::links::Link {
+                    range,
+                    start: self.cells.len(),
+                    breaks: self.breaks.len(),
+                    destination: dest_url.to_string(),
+                    definition,
+                });
+            }
+            Event::Start(Tag::Link {
+                link_type: LinkType::Autolink | LinkType::Email,
+                ..
+            }) => {
+                self.source_end = range.end;
+                let inner = range.start + 1..range.end - 1;
+                let style = self.style() | Modifier::UNDERLINED;
+                self.append(
+                    source,
+                    &source[inner.clone()],
+                    Origin::plain(inner, range.clone()),
+                    style,
+                )?;
+                self.literal = Some(range);
+            }
+            Event::Start(Tag::Link { link_type, .. }) => {
+                let range = super::links::literal_range(source, range, *link_type);
+                self.source_end = range.end;
+                self.literal_source(source, range.clone(), self.style())?;
+                self.literal = Some(range);
+            }
+            Event::End(_) => self.finish_link(source)?,
+            _ => unreachable!("link events only"),
+        }
+        Ok(())
+    }
+    fn finish_link(&mut self, source: &str) -> Result<(), ()> {
+        let link = self.link.take().ok_or(())?;
+        let label_end = self.cells[link.start..]
+            .last()
+            .map_or(link.range.start + 1, |cell| cell.source.end)
+            .max(
+                self.breaks[link.breaks..]
+                    .last()
+                    .map_or(0, |(_, range)| range.end),
+            );
+        let destination = link.destination_range(source, label_end).ok_or(())?;
+        let style = self.style() | Modifier::UNDERLINED;
+        for (offset, cell) in self.cells[link.start..].iter_mut().enumerate() {
+            cell.coordinate = Coordinate {
+                site: link.range.start,
+                fragment: Fragment::Label,
+                offset,
+            };
+        }
+        let separator = if link.definition.is_some() {
+            link.range.clone()
+        } else {
+            label_end..destination.start
+        };
+        self.link_fragment(source, (" (", separator, Fragment::Separator), &link)?;
+        let first = self.cells.len();
+        self.append(
+            source,
+            &link.destination,
+            Origin {
+                content: destination.clone(),
+                outer: destination.clone(),
+                atomic: false,
+                entities: true,
+            },
+            style,
+        )?;
+        for (offset, cell) in self.cells[first..].iter_mut().enumerate() {
+            cell.coordinate = Coordinate {
+                site: link.range.start,
+                fragment: Fragment::Destination,
+                offset,
+            };
+            cell.envelope = link.definition.as_ref().map(|_| link.range.clone());
+            cell.definition = link.definition.clone();
+        }
+        let closing = if link.definition.is_some() {
+            link.range.clone()
+        } else {
+            destination.end..link.range.end
+        };
+        self.link_fragment(source, (")", closing, Fragment::Marker), &link)?;
+        self.enclose(link.start, link.range);
+        Ok(())
+    }
+    fn link_fragment(
+        &mut self,
+        source: &str,
+        (text, range, fragment): (&str, Range<usize>, Fragment),
+        link: &super::links::Link,
+    ) -> Result<(), ()> {
+        let first = self.cells.len();
+        self.append(
+            source,
+            text,
+            Origin {
+                content: range.clone(),
+                outer: range,
+                atomic: link.definition.is_some(),
+                entities: false,
+            },
+            self.style() | Modifier::UNDERLINED,
+        )?;
+        for (offset, cell) in self.cells[first..].iter_mut().enumerate() {
+            cell.coordinate = Coordinate {
+                site: link.range.start,
+                fragment,
+                offset,
+            };
+            cell.definition = link.definition.clone();
+        }
+        Ok(())
     }
     fn enclose(&mut self, start: usize, mut range: Range<usize>) {
         let end = self.breaks.partition_point(|(index, _)| *index <= start);
@@ -156,6 +313,7 @@ impl Flow {
             content,
             outer,
             atomic,
+            entities,
         }: Origin,
         style: Modifier,
     ) -> Result<(), ()> {
@@ -165,15 +323,32 @@ impl Flow {
         }
         let first = self.cells.len();
         let mut cursor = content.start;
+        let mut atomic_offset = 0;
+        let mut previous = None;
+        let mut decoded = super::links::Origins::new(source, content.clone());
         for grapheme in text.graphemes(true) {
             let origin = if atomic {
                 content.clone()
+            } else if entities {
+                decoded.next(grapheme)?
             } else {
                 origin(source, grapheme, cursor, content.end)
             };
             cursor = origin.end;
+            if previous == Some(origin.start) {
+                atomic_offset += 1;
+            } else {
+                atomic_offset = 0;
+            }
+            previous = Some(origin.start);
             self.cells.push(Cell {
                 byte: origin.start,
+                coordinate: Coordinate {
+                    offset: atomic_offset,
+                    ..Coordinate::source(origin.start)
+                },
+                envelope: None,
+                definition: None,
                 source: origin,
                 text: escape_terminal(grapheme),
                 style,
@@ -188,6 +363,7 @@ struct Origin {
     content: Range<usize>,
     outer: Range<usize>,
     atomic: bool,
+    entities: bool,
 }
 impl Origin {
     fn plain(content: Range<usize>, outer: Range<usize>) -> Self {
@@ -195,10 +371,36 @@ impl Origin {
             content,
             outer,
             atomic: false,
+            entities: false,
         }
     }
 }
 impl Lines {
+    pub(super) fn label(
+        source: &str,
+        text: &str,
+        content: Range<usize>,
+        outer: Range<usize>,
+    ) -> Result<Self, ()> {
+        let mut flow = Flow::new(Modifier::BOLD);
+        flow.append(
+            source,
+            text,
+            Origin {
+                outer: content.clone(),
+                content,
+                atomic: false,
+                entities: true,
+            },
+            Modifier::BOLD,
+        )?;
+        let mut lines = flow.finish(outer);
+        lines.wrap = Wrap::Grapheme;
+        Ok(lines)
+    }
+    pub(super) fn enclose(&mut self, range: Range<usize>) {
+        envelope(&mut self.cells, range);
+    }
     fn lines(&self) -> impl Iterator<Item = (&[Cell], usize)> {
         let mut start = 0;
         self.breaks
@@ -211,10 +413,10 @@ impl Lines {
                 (!line.is_empty() || anchor.is_some()).then(|| (line, anchor.unwrap_or(0)))
             })
     }
-    pub(super) fn line_at(&self, byte: usize) -> Option<&[Cell]> {
+    pub(super) fn line_at(&self, coordinate: Coordinate) -> Option<&[Cell]> {
         self.lines()
             .map(|(line, _)| line)
-            .find(|line| line.iter().any(|cell| cell.byte == byte))
+            .find(|line| line.iter().any(|cell| cell.coordinate == coordinate))
     }
 }
 // A decoded grapheme maps to the next source bytes that show it; one with no counterpart (a joined line break) takes the bytes it replaces.
@@ -255,7 +457,7 @@ pub(super) fn widen_end(cells: &mut [Cell], end: usize) {
         }
     }
 }
-pub(super) fn chunks(cells: &[Cell], width: usize) -> Vec<Range<usize>> {
+pub(super) fn chunks(cells: &[Cell], width: usize, wrap: Wrap) -> Vec<Range<usize>> {
     let (mut start, mut columns, mut space) = (0, 0, None);
     let mut rows = Vec::new();
     if width == 0 {
@@ -274,7 +476,7 @@ pub(super) fn chunks(cells: &[Cell], width: usize) -> Vec<Range<usize>> {
             space = None;
         }
         columns += cell.text.width().min(width);
-        if cell.text == " " {
+        if wrap == Wrap::Word && cell.text == " " {
             space = Some(index + 1);
         }
     }
@@ -312,7 +514,7 @@ pub(super) fn layout(
             record(&mut Vec::new(), anchor, 0)?;
             continue;
         }
-        for range in chunks(line, width) {
+        for range in chunks(line, width, lines.wrap) {
             let mut output = Vec::new();
             let (_, bytes) = place(&line[range.clone()], width, capture, &mut output);
             record(&mut output, line[range.start].source.start, bytes)?;

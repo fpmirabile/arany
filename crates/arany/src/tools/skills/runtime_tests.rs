@@ -37,6 +37,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
+        network: None,
     };
     let runtime = ToolRuntime {
         host_settings_admitted: true,
@@ -44,7 +45,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),
-        worker: None,
         handover: None,
         definitions: Default::default(),
         permissions: None,
