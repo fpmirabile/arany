@@ -1,6 +1,8 @@
 use super::ToolError;
 #[cfg(any(test, target_os = "macos"))]
 use super::{Cancellation, read_line_capped};
+#[cfg(any(test, target_os = "macos"))]
+use crate::tools::SelectionCause;
 #[cfg(test)]
 use crate::tools::selection::TEST_RUNTIME;
 use crate::tools::{EffectIntent, ToolCall, ToolLimits, ToolResourceClass};
@@ -156,11 +158,18 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
     match result {
         Ok(_) => b"SELECT_DONE\n",
         Err(ToolError::Limit) => b"SELECT_LIMIT\n",
-        Err(ToolError::Timeout(_)) => b"SELECT_TIMEOUT\n",
+        Err(ToolError::Timeout(_) | ToolError::ProjectSelection(SelectionCause::TimedOut)) => {
+            b"SELECT_TIMEOUT\n"
+        }
         Err(ToolError::ChangedInput) => b"SELECT_CHANGED\n",
         Err(ToolError::Configuration) => b"SELECT_CONFIGURATION\n",
         Err(ToolError::Cancelled | ToolError::Operation) => b"SELECT_OPERATION\n",
-        Err(ToolError::NotFound) => b"SELECT_NOT_FOUND\n",
+        Err(ToolError::NotFound | ToolError::ProjectSelection(SelectionCause::InputVanished)) => {
+            b"SELECT_NOT_FOUND\n"
+        }
+        Err(ToolError::Conflict | ToolError::ProjectSelection(SelectionCause::InputConflict)) => {
+            b"SELECT_CONFLICT\n"
+        }
         Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
         Err(
             ToolError::SpillUnavailable
@@ -168,6 +177,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::HostPrefixConflict { .. }
             | ToolError::InactiveHostArchiveUnconfirmed
             | ToolError::InactiveHostArchiveConflict
+            | ToolError::CommandEnvironmentUnconfirmed
             | ToolError::AccountBusy
             | ToolError::ProtectionUnavailable
             | ToolError::QueueFull
@@ -180,7 +190,6 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::NotDirectory
             | ToolError::UnterminatedQuotedPath
             | ToolError::OutputCeiling
-            | ToolError::Conflict
             | ToolError::Pattern(_)
             | ToolError::Uncertain
             | ToolError::StaleGitLocks(_)
@@ -198,22 +207,23 @@ pub(super) async fn receive(
     deadline: tokio::time::Instant,
 ) -> Result<(), ToolError> {
     if tokio::time::Instant::now() >= deadline {
-        return Err(ToolError::Timeout(String::new()));
+        return Err(ToolError::ProjectSelection(SelectionCause::TimedOut));
     }
     let response = tokio::time::timeout_at(deadline, read_line_capped(reader, 64))
         .await
-        .map_err(|_| ToolError::Timeout(String::new()))??;
+        .map_err(|_| ToolError::ProjectSelection(SelectionCause::TimedOut))??;
     if tokio::time::Instant::now() >= deadline {
-        return Err(ToolError::Timeout(String::new()));
+        return Err(ToolError::ProjectSelection(SelectionCause::TimedOut));
     }
     match response.as_slice() {
         b"SELECT_DONE\n" => Ok(()),
         b"SELECT_LIMIT\n" => Err(ToolError::Limit),
-        b"SELECT_TIMEOUT\n" => Err(ToolError::Timeout(String::new())),
+        b"SELECT_TIMEOUT\n" => Err(ToolError::ProjectSelection(SelectionCause::TimedOut)),
         b"SELECT_CHANGED\n" => Err(ToolError::ChangedInput),
         b"SELECT_CONFIGURATION\n" => Err(ToolError::Configuration),
         b"SELECT_OPERATION\n" => Err(ToolError::Operation),
-        b"SELECT_NOT_FOUND\n" => Err(ToolError::NotFound),
+        b"SELECT_NOT_FOUND\n" => Err(ToolError::ProjectSelection(SelectionCause::InputVanished)),
+        b"SELECT_CONFLICT\n" => Err(ToolError::ProjectSelection(SelectionCause::InputConflict)),
         b"SELECT_FILESYSTEM_DENIED\n" => Err(ToolError::FilesystemDenied),
         _ => Err(ToolError::Path),
     }
@@ -228,12 +238,12 @@ pub(super) async fn wait<T>(
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Operation),
-        result = tokio::time::timeout_at(deadline, operation) => result.unwrap_or(Err(ToolError::Timeout(String::new()))),
+        result = tokio::time::timeout_at(deadline, operation) => result.unwrap_or(Err(ToolError::ProjectSelection(SelectionCause::TimedOut))),
     };
     if cancellation.is_cancelled() {
         Err(ToolError::Operation)
     } else if tokio::time::Instant::now() >= deadline {
-        Err(ToolError::Timeout(String::new()))
+        Err(ToolError::ProjectSelection(SelectionCause::TimedOut))
     } else {
         result
     }
@@ -367,6 +377,13 @@ pub(in crate::tools::guard) mod tests {
             (Err(ToolError::Configuration), "configuration"),
             (Err(ToolError::Operation), "operation"),
             (Err(ToolError::NotFound), "not-found"),
+            (Err(ToolError::Conflict), "conflict"),
+            (
+                Err(ToolError::Timeout(String::new()).in_selection()),
+                "timeout",
+            ),
+            (Err(ToolError::NotFound.in_selection()), "not-found"),
+            (Err(ToolError::Conflict.in_selection()), "conflict"),
             (Err(ToolError::FilesystemDenied), "filesystem-denied"),
         ] {
             let mut bytes = response(&result);
@@ -377,12 +394,22 @@ pub(in crate::tools::guard) mod tests {
             assert!(match expected {
                 "done" => result.is_ok(),
                 "limit" => matches!(result, Err(ToolError::Limit)),
-                "timeout" => matches!(result, Err(ToolError::Timeout(_))),
+                "timeout" => matches!(
+                    result,
+                    Err(ToolError::ProjectSelection(SelectionCause::TimedOut))
+                ),
                 "rejected" => matches!(result, Err(ToolError::Path)),
                 "changed" => matches!(result, Err(ToolError::ChangedInput)),
                 "configuration" => matches!(result, Err(ToolError::Configuration)),
                 "operation" => matches!(result, Err(ToolError::Operation)),
-                "not-found" => matches!(result, Err(ToolError::NotFound)),
+                "not-found" => matches!(
+                    result,
+                    Err(ToolError::ProjectSelection(SelectionCause::InputVanished))
+                ),
+                "conflict" => matches!(
+                    result,
+                    Err(ToolError::ProjectSelection(SelectionCause::InputConflict))
+                ),
                 "filesystem-denied" => matches!(result, Err(ToolError::FilesystemDenied)),
                 _ => unreachable!(),
             });
@@ -408,14 +435,14 @@ pub(in crate::tools::guard) mod tests {
                 tokio::time::Instant::now()
             )
             .await,
-            Err(ToolError::Timeout(_))
+            Err(ToolError::ProjectSelection(SelectionCause::TimedOut))
         ));
         let (peer, stream) = tokio::io::duplex(64);
         let mut stream = tokio::io::BufReader::new(stream);
         let deadline = tokio::time::Instant::now();
         assert!(matches!(
             receive(&mut stream, deadline).await,
-            Err(ToolError::Timeout(_))
+            Err(ToolError::ProjectSelection(SelectionCause::TimedOut))
         ));
         drop(peer);
         assert!(matches!(

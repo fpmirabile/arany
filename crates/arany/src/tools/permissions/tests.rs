@@ -1513,6 +1513,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
         output: "x".into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
@@ -2467,8 +2468,9 @@ fn remembered_host_prefix_revalidates_executable_bytes_before_saving() {
     let identity = crate::tools::workspace_identity(&workspace).unwrap();
     intent.workspace_device = identity.device;
     intent.workspace_inode = identity.inode;
-    let mut pin =
-        crate::tools::unguarded::pin("inspect", &workspace, root.to_str().unwrap()).unwrap();
+    let environment = crate::tools::CommandEnvironment::for_path(root.to_str().unwrap());
+    environment.save(&state).unwrap();
+    let mut pin = crate::tools::unguarded::pin("inspect", &workspace, &environment).unwrap();
     pin.state_roots = [
         state.path().to_str().unwrap().into(),
         root.join("account").to_str().unwrap().into(),

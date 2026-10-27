@@ -44,7 +44,7 @@ pub use engine::{
     start_provider_setup_edit, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
-pub use fault::FaultPlan;
+pub use fault::{FaultPlan, GitStorageFault};
 pub(crate) use journal::check::CheckJournal;
 pub use journal::check::{
     CHECK_FORMATS, ChatGptCheck, ChatGptCheckError, ChatGptCheckRequest, CheckCallKind,
@@ -106,9 +106,10 @@ pub use store::{
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalCause, ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate,
-    CommandChangeset, DEFAULT_PR_LIMIT, DefinitionFilePin, DefinitionRegistryPin, DisplayFacts,
-    EffectIntent, EnforcementCause, FileChange, FileReceipt, FileSuggestionSource, FileVersion,
-    GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
+    CommandChangeset, CommandEnvironment, CommandEnvironmentError, DEFAULT_PR_LIMIT,
+    DefinitionFilePin, DefinitionRegistryPin, DisplayFacts, EffectIntent, EnforcementCause,
+    FailureStage, FileChange, FileReceipt, FileSuggestionSource, FileVersion, GuardReceipt,
+    GuardStageFact, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
     OutputSpill, OutputTotal, PrState, ProjectSkills, RuntimeProfileOption, SUGGESTION_LIFETIME,
     SUGGESTION_QUERY_TIME, SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext,
     ToolDisposition, ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,

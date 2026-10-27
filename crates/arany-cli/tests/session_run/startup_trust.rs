@@ -1561,6 +1561,153 @@ fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
     }
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "native Linux PTY consent for independent user program directories"]
+fn consent_selects_several_user_directories_independently_and_remembers_their_order() {
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    consent_user_programs(temp.path(), false);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
+    use rustix::process::{Pid, Signal, kill_process};
+    use std::io::Write;
+    use std::os::unix::fs::DirBuilderExt;
+    for name in ["account-home", "home", "workspace"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join(name))
+            .unwrap();
+    }
+    let workspace = root.join("workspace");
+    let state = root.join("state");
+    let home = root.join("home");
+    let local = home.join(".local/bin");
+    let pyenv = home.join(".pyenv/shims");
+    let volta = home.join(".volta/bin");
+    arany::test_support::scenario::user_programs_fixture(&home);
+    let record_path = root.join("account-home/.local/state/arany/workspace-permissions.json");
+    if homebrew {
+        arany::test_support::scenario::homebrew_programs_fixture(root);
+    }
+    let brew_path = if homebrew {
+        ":/opt/homebrew/bin:/opt/homebrew/opt/rustup/bin"
+    } else {
+        ""
+    };
+    let search = format!(
+        "PATH={}:{}{brew_path}:/usr/bin:/bin",
+        local.display(),
+        pyenv.display()
+    );
+    let probe = |expect_prompt: bool, choice: Option<&[u8]>| {
+        let (master, slave) = crate::process::cloexec_pty(None);
+        let mut input = master.try_clone().unwrap();
+        // The helper creates its passwd file exclusively, so each launch needs a fresh one.
+        let _ = std::fs::remove_file(root.join("passwd"));
+        let mut command = crate::isolation::native_account_isolated_test_command_with_timeout(
+            root,
+            std::path::Path::new("/usr/bin/env"),
+            std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
+            60,
+        );
+        command
+            .arg(if choice.is_some() {
+                "PATH=/usr/bin:/bin"
+            } else {
+                &search
+            })
+            .arg("TERM=dumb")
+            .arg(env!("CARGO_BIN_EXE_arany"))
+            .args(["--screen-reader", "--no-color", "--workspace"])
+            .arg(&workspace)
+            .arg("--state-dir")
+            .arg(&state)
+            .arg("--setup")
+            .env_clear()
+            .current_dir(&workspace)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(slave));
+        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+        drop(command);
+        let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+        let mut consent_seen = false;
+        let mut stopped = false;
+        let mut transcript = String::new();
+        process::capture_terminal(
+            child.child(),
+            master,
+            Duration::from_secs(30),
+            64 * 1024,
+            |bytes| {
+                let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+                if !consent_seen && text.contains(crate::process::READ_ONLY_CONSENT_PROMPT) {
+                    assert!(expect_prompt, "remembered trust must skip consent");
+                    consent_seen = true;
+                    transcript = text.clone();
+                    match choice {
+                        Some(choice) => input.write_all(choice).unwrap(),
+                        None => {
+                            kill_process(pid, Signal::INT).unwrap();
+                            stopped = true;
+                        }
+                    }
+                }
+                if !stopped
+                    && text.contains("Setup: Provider setup\n")
+                    && text.ends_with("Input:\n")
+                {
+                    assert_eq!(consent_seen, expect_prompt);
+                    kill_process(pid, Signal::INT).unwrap();
+                    stopped = true;
+                }
+            },
+        );
+        assert!(stopped, "expected startup boundary was not reached");
+        transcript
+    };
+
+    let transcript = probe(true, None);
+    assert!(!record_path.exists(), "Ctrl+C must save no choice");
+    for row in ["3. ", "4. ", "5. "] {
+        assert!(transcript.contains(row), "{transcript}");
+    }
+    assert!(transcript.contains("runs whatever the directory currently holds"));
+
+    probe(
+        true,
+        Some(if homebrew {
+            b"trust 3 4 5 6 7\n"
+        } else {
+            b"trust 3 4 5\n"
+        }),
+    );
+    let trusted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let grants = trusted["workspaces"][0]["runtime_grants"]
+        .as_array()
+        .unwrap();
+    let selected = grants
+        .iter()
+        .map(|grant| grant["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let mut expected = vec![local.to_str().unwrap(), pyenv.to_str().unwrap()];
+    if homebrew {
+        expected.extend(["/opt/homebrew/bin", "/opt/homebrew/Cellar/rustup/1.0/bin"]);
+    }
+    expected.push(volta.to_str().unwrap());
+    assert_eq!(selected, expected);
+    assert_eq!(trusted["version"], 2);
+    let remembered = std::fs::read(&record_path).unwrap();
+    probe(false, None);
+    assert_eq!(std::fs::read(&record_path).unwrap(), remembered);
+}
+
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[test]
 fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory() {
@@ -1838,6 +1985,33 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &shows("Host command rules unchanged"),
     );
     assert!(!file.exists());
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "environment area menu",
+        &shows("Choose what to manage"),
+    );
+    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "command environment page",
+        &shows("Select a name from the Arany process"),
+    );
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "command environment cancellation",
+        &shows("Command environment unchanged"),
+    );
     input.write_all(b"/permissions\r").unwrap();
     until(
         &mut output,

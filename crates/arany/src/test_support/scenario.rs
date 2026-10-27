@@ -799,6 +799,238 @@ exec "$@"
     std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+pub fn user_programs_fixture(home: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for (directory, name, output) in [
+        (".local/bin", "arany-local-tool", "ran-local"),
+        (".local/bin", "arany-collide", "collide-local"),
+        (".pyenv/shims", "arany-pyenv-tool", "ran-pyenv"),
+        (".pyenv/shims", "arany-collide", "collide-pyenv"),
+        (".volta/bin", "arany-volta-tool", "ran-volta"),
+    ] {
+        let directory = home.join(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let tool = directory.join(name);
+        std::fs::write(&tool, format!("#!/bin/sh\nprintf '{output}'\n")).unwrap();
+        std::fs::set_permissions(tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn homebrew_programs_fixture(root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let prefix = root.join("homebrew");
+    for directory in ["bin", "lib", "opt", "Cellar/rustup/1.0/bin"] {
+        std::fs::create_dir_all(prefix.join(directory)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("home/.rustup")).unwrap();
+    std::fs::write(prefix.join("lib/tool-data"), b"ran-brew").unwrap();
+    std::fs::write(root.join("home/.rustup/tool-data"), b"ran-rustup").unwrap();
+    for (path, body) in [
+        ("bin/arany-brew-tool", "cat /opt/homebrew/lib/tool-data"),
+        ("bin/arany-collide", "printf collide-brew"),
+        (
+            "Cellar/rustup/1.0/bin/arany-rustup-tool",
+            "cat \"$RUSTUP_HOME/tool-data\"",
+        ),
+    ] {
+        let path = prefix.join(path);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::os::unix::fs::symlink("../Cellar/rustup/1.0", prefix.join("opt/rustup")).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn user_programs_script(home: &Path) -> String {
+    let (local, pyenv, volta) = (
+        home.join(".local/bin"),
+        home.join(".pyenv/shims"),
+        home.join(".volta/bin"),
+    );
+    format!(
+        r#"set -eu
+test "$(arany-local-tool)" = ran-local
+test "$(arany-pyenv-tool)" = ran-pyenv
+test "$(arany-volta-tool)" = ran-volta
+test "$(arany-brew-tool)" = ran-brew
+test "$(arany-rustup-tool)" = ran-rustup
+test "$(arany-collide)" = collide-local
+test "$PYENV_ROOT" = "{home}/.pyenv"
+test "$VOLTA_HOME" = "{home}/.volta"
+test "$RUSTUP_HOME" = "{home}/.rustup"
+test "$PATH" = "{local}:{pyenv}:/opt/homebrew/bin:/opt/homebrew/Cellar/rustup/1.0/bin:{volta}:/usr/bin:/bin"
+case "$HOME" in /scratch*) ;; *) exit 91 ;; esac
+test "$HOME" = "$TMPDIR"
+if (printf changed > "{local}/arany-local-tool") 2>/dev/null; then exit 92; fi
+if (printf new > "{volta}/arany-new-file") 2>/dev/null; then exit 93; fi
+if (printf changed > /opt/homebrew/lib/tool-data) 2>/dev/null; then exit 94; fi
+if (printf changed > /opt/homebrew/Cellar/rustup/1.0/bin/arany-rustup-tool) 2>/dev/null; then exit 95; fi
+if (printf changed > "{home}/.rustup/new-file") 2>/dev/null; then exit 96; fi
+printf user-programs-ok
+"#,
+        home = home.display(),
+        local = local.display(),
+        pyenv = pyenv.display(),
+        volta = volta.display(),
+    )
+}
+
+// Runs one approved command; a drifted pin may be refused before the approval prompt.
+#[cfg(target_os = "linux")]
+async fn run_user_program_command(
+    workspace: &Path,
+    guard: &Path,
+    state: &Path,
+    call: &crate::ToolCall,
+) -> (
+    Result<crate::RunOutcome, crate::EngineError>,
+    Arc<ScriptedProvider>,
+) {
+    use crate::{
+        ApprovalMode, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion, RunControls,
+        StateRoot, ToolApprovals, ToolGrant, ToolResourceClass, WorkspacePermissions,
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        plan_outcome(GoalPlanContract {
+            mission: "Run selected user programs inside the Guard".into(),
+            paths: Vec::new(),
+            commands: vec!["sh".into()],
+            resource_class: ToolResourceClass::Default,
+            command_timeout_ms: Some(60_000),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(call.clone()),
+            },
+            budget: crate::GoalBudget::default(),
+        }),
+        tool_outcome(call.clone()),
+        ProviderOutcome::Answer(Answer {
+            text: "Observed the user program result.".into(),
+        }),
+    ]));
+    let engine = Engine::open(
+        StateRoot::admit(state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(guard.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let mut request = request(workspace, "Run the selected user programs");
+    request.include_paths.clear();
+    request.goal.phase = Some(crate::GoalPhase::Implementation);
+    let run = super::engine::run_with(
+        &engine,
+        &provider,
+        request,
+        RunControls {
+            tools: ToolGrant::Trusted(WorkspacePermissions::open(workspace).unwrap()),
+            approvals: Some(approvals),
+            ..Default::default()
+        },
+    );
+    let approve = async {
+        if let Ok(Some(approval)) =
+            tokio::time::timeout(Duration::from_secs(20), inbox.next()).await
+        {
+            assert_eq!(&approval.intent.call, call);
+            approval.decide(true);
+        }
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(100), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded user program journey");
+    engine.close().await.unwrap();
+    (outcome, provider)
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_user_programs_ran(
+    state: &Path,
+    provider: &ScriptedProvider,
+    outcome: Result<crate::RunOutcome, crate::EngineError>,
+) {
+    use crate::{RunStatus, SessionView, StateRoot, Store};
+    let session_id = provider.requests.lock().unwrap()[0].session_id;
+    let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+    let events = store.load_session(session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(session_id, &events).unwrap().unwrap();
+    let run = &replay.runs[0];
+    assert_eq!(run, &outcome.unwrap().run);
+    let observation = run.tools[0]
+        .observation
+        .as_ref()
+        .expect("command observation");
+    let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(result["exit_code"], 0, "{result}");
+    assert_eq!(result["stdout"], "user-programs-ok", "{result}");
+    assert_eq!(run.status, RunStatus::Finished);
+    assert!(
+        observation
+            .attestation
+            .as_ref()
+            .and_then(crate::Attestation::guard)
+            .is_some()
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn assert_user_programs_refused(outcome: Result<crate::RunOutcome, crate::EngineError>) {
+    let outcome = match outcome {
+        Err(crate::EngineError::Tool(crate::ToolError::ChangedInput)) => return,
+        other => other.unwrap(),
+    };
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    assert_ne!(observation.disposition, crate::ToolDisposition::Succeeded);
+    assert!(observation.attestation.is_none());
+    assert!(
+        observation
+            .output
+            .starts_with("Guard pinned input unavailable before dispatch;"),
+        "{}",
+        observation.output
+    );
+}
+
+#[cfg(target_os = "linux")]
+pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard: &Path) {
+    let home = root.join("home");
+    let call = crate::ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), user_programs_script(&home)],
+        cwd: String::new(),
+    };
+    let state = root.join("state");
+    let (outcome, provider) = run_user_program_command(workspace, guard, &state, &call).await;
+    assert_user_programs_ran(&state, &provider, outcome).await;
+
+    for directory in [
+        home.join(".local/bin"),
+        root.join("homebrew/bin"),
+        root.join("homebrew/Cellar/rustup/1.0/bin"),
+        home.join(".rustup"),
+    ] {
+        let moved = directory.with_extension("old");
+        std::fs::rename(&directory, &moved).unwrap();
+        let (outcome, _) = run_user_program_command(workspace, guard, &state, &call).await;
+        assert_user_programs_refused(outcome);
+        std::fs::create_dir(&directory).unwrap();
+        let stale = crate::WorkspacePermissions::open(workspace).unwrap();
+        assert_eq!(stale.stale_runtime_notices().len(), 1);
+        let (outcome, _) = run_user_program_command(workspace, guard, &state, &call).await;
+        assert_user_programs_refused(outcome);
+        std::fs::remove_dir(&directory).unwrap();
+        std::fs::rename(moved, directory).unwrap();
+    }
+}
+
 #[cfg(unix)]
 pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
     use crate::{
@@ -817,7 +1049,7 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
     let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
     let mut permissions = WorkspacePermissions::open(workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let choices = permissions.runtime_profile_choices();
     let tokens: Vec<_> = choices
         .iter()

@@ -205,6 +205,9 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
+            "/usr/bin:/bin",
+        )),
         spill_access: None,
         config: serde_json::from_value(config.clone()).unwrap(),
         workspace: workspace.to_owned(),
@@ -283,6 +286,7 @@ pub(super) async fn inspect_read(
         enforcement_cause,
         limit_cause,
         approval_cause: None,
+        guard_stage: None,
         cache_update: super::CacheUpdate::NotApplicable,
     }
 }
@@ -477,6 +481,125 @@ fn undispatched_guard_failures_explain_safe_causes_and_recovery() {
 }
 
 #[test]
+fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
+    use super::{FailureStage, SelectionCause, ToolError};
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    let command = || {
+        runtime.intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "script".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        )
+    };
+    for (error, stage, label) in [
+        (
+            ToolError::Timeout(String::new()).in_selection(),
+            FailureStage::SelectionTimedOut,
+            "project selection timed out",
+        ),
+        (
+            ToolError::NotFound.in_selection(),
+            FailureStage::SelectionInputVanished,
+            "project input vanished",
+        ),
+        (
+            ToolError::Conflict.in_selection(),
+            FailureStage::SelectionInputConflict,
+            "project input conflict",
+        ),
+    ] {
+        assert!(matches!(
+            error,
+            ToolError::ProjectSelection(
+                SelectionCause::TimedOut
+                    | SelectionCause::InputVanished
+                    | SelectionCause::InputConflict
+            )
+        ));
+        let observation = super::unstarted_observation(command(), error);
+        assert_eq!(
+            observation.guard_stage,
+            Some(super::GuardStageFact { stage, check: None })
+        );
+        assert_eq!(
+            observation.guard_stage_diagnostic().as_deref(),
+            Some(format!("Guard stage: {label}").as_str())
+        );
+        assert!(observation.valid() && observation.stops_run());
+        assert!(
+            observation
+                .output
+                .starts_with(&format!("Guard {label} before dispatch;"))
+        );
+        assert!(
+            observation.output.contains("Cause: ")
+                && observation.output.contains(&format!(
+                    "Cause: {label}. Resend your message; the Guard executable is not involved."
+                ))
+        );
+        assert!(!observation.output.contains("native sandbox prerequisites"));
+        let json = serde_json::to_string(&observation).unwrap();
+        assert!(json.contains("\"guard_stage\":{\"stage\":\"selection_"));
+        assert_eq!(
+            serde_json::from_str::<super::ToolObservation>(&json).unwrap(),
+            observation
+        );
+    }
+    for (error, stage) in [
+        (ToolError::Timeout(String::new()), FailureStage::Execution),
+        (ToolError::NotFound, FailureStage::Execution),
+        (ToolError::Conflict, FailureStage::Execution),
+        (ToolError::Cancelled, FailureStage::Cancelled),
+    ] {
+        assert_eq!(super::failure_stage(&error), stage);
+    }
+    for error in [
+        ToolError::Timeout(String::new()),
+        ToolError::NotFound,
+        ToolError::Conflict,
+    ] {
+        let observation = super::unstarted_observation(command(), error);
+        assert!(
+            observation
+                .output
+                .starts_with("Guard execution unavailable before dispatch;")
+        );
+        assert!(
+            observation
+                .output
+                .contains("Check the Guard executable and native sandbox prerequisites")
+        );
+        assert_eq!(
+            observation.guard_stage.map(|fact| fact.stage),
+            Some(FailureStage::Execution)
+        );
+    }
+    let read = super::unstarted_observation(
+        runtime.intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Read {
+                path: "a".into(),
+                offset: Some(0),
+                limit: Some(10),
+            },
+        ),
+        ToolError::NotFound,
+    );
+    assert_eq!(read.guard_stage, None);
+    assert!(
+        !serde_json::to_string(&read)
+            .unwrap()
+            .contains("guard_stage")
+    );
+}
+
+#[test]
 fn undispatched_resource_limit_remains_a_stopping_limit() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = in_process_runtime(temp.path(), config_value());
@@ -531,4 +654,79 @@ fn command_reservations_have_no_separate_selection_allowance() {
             super::guard::RESERVATION_OVERHEAD
         );
     }
+}
+
+#[test]
+fn compaction_readmission_accepts_a_recorded_locale() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    super::CommandEnvironment::for_path("/usr/bin:/bin")
+        .with_name("LANG", "C.UTF-8")
+        .save(&state)
+        .unwrap();
+    let tools = state.path().join("tools.json");
+    std::fs::write(
+        &tools,
+        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    state
+        .record(crate::store::RecordKind::Permissions)
+        .replace(
+            br#"{"hooks":{"PreCompact":[{"matcher":"manual|auto","hooks":[{"type":"command","command":"check"}]}]}}"#,
+        )
+        .unwrap();
+    let snapshot = super::load_permissions(&state).unwrap().unwrap();
+    let mut config = Config::load(&state).unwrap();
+    config.discover_skills(&workspace).unwrap();
+    config.bind_environment(&super::CommandEnvironment::load(&state).unwrap());
+    assert_eq!(config.locale.len(), 1);
+    let mut pin = config.receipt();
+    pin.permissions_digest = Some(snapshot.digest);
+    let runtime = super::ToolRuntime::readmit_compaction_hooks(
+        &state,
+        &workspace,
+        Some(std::env::current_exe().unwrap()),
+        &pin,
+    )
+    .unwrap();
+    assert!(runtime.is_some());
+}
+
+#[test]
+fn a_changed_environment_record_changes_the_process_policy_digest() {
+    let digest = |path: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+        super::CommandEnvironment::for_path(path)
+            .save(&state)
+            .unwrap();
+        let tools = state.path().join("tools.json");
+        std::fs::write(
+            &tools,
+            br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let config = Config::load(&state).unwrap();
+        super::ToolRuntime::admit(
+            config,
+            None,
+            None,
+            &workspace,
+            &state,
+            std::env::current_exe().unwrap(),
+        )
+        .unwrap()
+        .receipt()
+        .config_digest
+    };
+    assert_eq!(digest("/usr/bin"), digest("/usr/bin"));
+    assert_ne!(digest("/usr/bin"), digest("/usr/bin:/bin"));
 }

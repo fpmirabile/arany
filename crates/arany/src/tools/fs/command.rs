@@ -154,6 +154,17 @@ pub(in crate::tools) fn prepare_command(
     config: &Config,
     deadline: Instant,
 ) -> Result<CommandSelection, ToolError> {
+    select_command(source, target, resources, config, deadline).map_err(ToolError::in_selection)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn select_command(
+    source: &Dir,
+    target: &Dir,
+    resources: &Dir,
+    config: &Config,
+    deadline: Instant,
+) -> Result<CommandSelection, ToolError> {
     config.validate()?;
     let started = Instant::now();
     let mut input = Inputs {

@@ -208,7 +208,7 @@ impl StateRoot {
     }
 
     // Record upgrades serialize with every harness record writer under the account lock.
-    pub(in crate::store) fn with_record_upgrade_lock<T>(
+    pub(crate) fn with_record_upgrade_lock<T>(
         &self,
         operation: impl FnOnce() -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {

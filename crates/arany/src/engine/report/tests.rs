@@ -52,6 +52,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         })
         .to_string(),
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::Failed,
     };
     let mut tools = vec![ToolView {
@@ -99,6 +100,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             })
             .to_string(),
             approval_cause: None,
+            guard_stage: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         };
         ToolView {
@@ -614,6 +616,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             .output
             .clone(),
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::Uncertain,
     };
     assert!(uncertain_observation.valid());
@@ -709,6 +712,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         output: String::new(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     };
     assert!(failed_observation.valid());
@@ -810,6 +814,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 output: String::new(),
                 attestation: None,
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: CacheUpdate::NotApplicable,
             };
             assert!(observation.valid());
@@ -889,6 +894,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         output: crate::tools::types::command_timeout_limit_message(2_000, 1_000),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     };
     assert!(timeout_observation.valid());
@@ -994,6 +1000,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     };
     assert_eq!(
@@ -1201,6 +1208,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
             disposition: ToolDisposition::Succeeded,
             output: serde_json::json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         }),
         intent,

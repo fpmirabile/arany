@@ -223,19 +223,24 @@ pub(in crate::tools::guard) fn verify_helper() -> Result<Option<overlay::Attesta
     Ok(helper.overlay)
 }
 
+pub(in crate::tools::guard) fn failure_report(
+    stage: super::super::BootstrapStage,
+    error: &ToolError,
+) -> super::super::BootstrapFailure {
+    super::super::BootstrapFailure::at(stage).caused_by(error)
+}
+
 pub(in crate::tools::guard) fn main() -> std::process::ExitCode {
     let mut stage = super::super::BootstrapStage::Admission;
-    let result = run(&mut stage);
-    if result.is_ok() {
-        std::process::ExitCode::SUCCESS
-    } else if !matches!(stage, super::super::BootstrapStage::LauncherReap) {
-        let _ = serde_json::to_writer(
-            std::io::stderr().lock(),
-            &super::super::BootstrapFailure::at(stage),
-        );
-        std::process::ExitCode::FAILURE
-    } else {
-        std::process::ExitCode::FAILURE
+    match run(&mut stage) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            if !matches!(stage, super::super::BootstrapStage::LauncherReap) {
+                let _ =
+                    serde_json::to_writer(std::io::stderr().lock(), &failure_report(stage, &error));
+            }
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 

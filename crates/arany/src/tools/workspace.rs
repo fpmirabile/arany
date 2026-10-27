@@ -2,7 +2,7 @@ use super::approval::ApprovalMode;
 use super::config::{Config, Program};
 use super::toolchains::{
     Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, default_profile_selection, discover,
-    profile_order, validate_selection,
+    discover_user_environment, profile_order, validate_selection,
 };
 use super::types::MAX_SNAPSHOT_BYTES;
 use super::{ToolError, fs};
@@ -81,6 +81,7 @@ pub struct RuntimeProfileOption {
     pub path: PathBuf,
     pub detected: bool,
     pub selected: bool,
+    pub exclusive: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -243,7 +244,17 @@ impl WorkspacePermissions {
             let detected = grant.verify_host().is_ok();
             profiles.push((grant, token, detected, saved_profile_label(grant, detected)));
         }
-        profiles.sort_by(|left, right| profile_order((left.0, &left.1), (right.0, &right.1)));
+        // Saved independent grants keep their saved order so a changed PATH cannot reorder them.
+        let saved = |grant: &RuntimeGrant| {
+            self.runtime_grants
+                .iter()
+                .position(|candidate| candidate.path == grant.path && candidate.kind == grant.kind)
+                .unwrap_or(usize::MAX)
+        };
+        profiles.sort_by(|left, right| {
+            profile_order((left.0, &left.1), (right.0, &right.1))
+                .then_with(|| saved(left.0).cmp(&saved(right.0)))
+        });
         profiles
             .into_iter()
             .map(|(grant, token, detected, label)| RuntimeProfileOption {
@@ -254,6 +265,7 @@ impl WorkspacePermissions {
                 version: grant.version.clone(),
                 path: grant.path.clone(),
                 detected,
+                exclusive: !grant.kind.is_multi(),
             })
             .collect()
     }
@@ -311,13 +323,25 @@ impl WorkspacePermissions {
     }
 
     /// Discovery failure keeps the saved profiles listed and is reported with the chooser.
-    pub fn prepare_profile_selection(self) -> Self {
-        self.with_candidates(discover_home_candidates())
+    pub fn prepare_profile_selection(self, state_dir: &Path) -> Self {
+        let discovered = StateRoot::admit(state_dir)
+            .map_err(|_| ToolError::Configuration)
+            .and_then(|state| discover_home_candidates(&state));
+        self.with_candidates(discovered)
     }
 
     fn with_candidates(mut self, discovered: Result<Vec<Candidate>, ToolError>) -> Self {
         match discovered {
-            Ok(candidates) => self.candidates = candidates,
+            Ok(mut candidates) => {
+                candidates.retain(|candidate| {
+                    !candidate.grant.kind.is_multi()
+                        || candidate
+                            .grant
+                            .reject_overlap(&[self.path.as_path()])
+                            .is_ok()
+                });
+                self.candidates = candidates;
+            }
             Err(error) => self.discovery_error = Some(error.to_string()),
         }
         self
@@ -486,6 +510,8 @@ impl WorkspacePermissions {
             runtime_grants: self.runtime_grants.clone(),
             git: super::git::discover(),
             git_identity: super::git::user_identity(),
+            locale: Default::default(),
+            environment_sha256: None,
         };
         config.validate()?;
         Ok(config)
@@ -545,14 +571,24 @@ fn saved_profile_label(grant: &RuntimeGrant, detected: bool) -> String {
     }
 }
 
-fn discover_home_candidates() -> Result<Vec<Candidate>, ToolError> {
+fn discover_home_candidates(state: &StateRoot) -> Result<Vec<Candidate>, ToolError> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(Vec::new());
     };
     if !home.is_absolute() {
         return Ok(Vec::new());
     }
-    discover(&home)
+    let environment = super::CommandEnvironment::load(state)?;
+    let path = environment.path_string();
+    let mut candidates = discover(&home)?;
+    candidates.extend(discover_user_environment(
+        &home,
+        Some(std::ffi::OsStr::new(&path)),
+    )?);
+    candidates.sort_by(|left, right| {
+        profile_order((&left.grant, &left.token), (&right.grant, &right.token))
+    });
+    Ok(candidates)
 }
 
 #[cfg(test)]
@@ -585,6 +621,7 @@ mod tests {
                 path: path.into(),
                 device: 1,
                 inode: 2,
+                root: None,
             };
             Candidate {
                 label: grant.profile_label(),
@@ -932,6 +969,7 @@ channel = "stable"
             path: PathBuf::from(path),
             device: 1,
             inode: 1,
+            root: None,
         };
         let compiler = grant(compiler, None, "/Library/Developer/CommandLineTools/usr");
         let sdk = grant(
@@ -1143,11 +1181,14 @@ channel = "stable"
             path: cache,
             device,
             inode,
+            root: None,
         };
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         access
             .save(&root, true, ApprovalMode::AutoEdits, vec![grant])
             .unwrap();
+        let saved = String::from_utf8(read_bytes(&root).unwrap().unwrap()).unwrap();
+        assert!(!saved.contains("\"root\""));
         assert_eq!(access.config(&path).unwrap().runtime_grants.len(), 1);
 
         std::fs::remove_dir_all(temp.path().join(".cargo")).unwrap();
@@ -1178,6 +1219,7 @@ channel = "stable"
                 path: path.to_owned(),
                 device,
                 inode,
+                root: None,
             }
         };
         let original = grant_at(&cache);
@@ -1225,6 +1267,7 @@ channel = "stable"
                     path: cache.clone(),
                     device,
                     inode,
+                    root: None,
                 }],
             )
             .unwrap();
@@ -1263,6 +1306,7 @@ channel = "stable"
             path: cache.clone(),
             device,
             inode,
+            root: None,
         };
         let token = grant.token().unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
@@ -1311,6 +1355,7 @@ channel = "stable"
             path: cache,
             device,
             inode,
+            root: None,
         };
         let token = grant.token().unwrap();
         let mut access = WorkspacePermissions::load(&workspace, &root).unwrap();

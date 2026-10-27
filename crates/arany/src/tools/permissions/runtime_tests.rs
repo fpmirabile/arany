@@ -253,7 +253,10 @@ async fn conflicting_host_rules_name_the_saved_entry_and_remain_removable() {
         error,
         super::ToolError::HostPrefixConflict { rule: 2 }
     ));
-    assert_eq!(super::failure_stage(&error), "admission");
+    assert_eq!(
+        super::failure_stage(&error),
+        crate::tools::FailureStage::Admission
+    );
     assert_eq!(
         error.to_string(),
         "Saved host command rule 2 conflicts with a declared interpreter or Git executable; open /permissions > Host command rules to review and remove it"
@@ -291,7 +294,9 @@ fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path:
     let executable = root.join("inspect");
     std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut pin = super::unguarded::pin("inspect", workspace, root.to_str().unwrap()).unwrap();
+    let environment = super::CommandEnvironment::for_path(root.to_str().unwrap());
+    environment.save(state).unwrap();
+    let mut pin = super::unguarded::pin("inspect", workspace, &environment).unwrap();
     pin.state_roots = [
         state.path().to_str().unwrap().into(),
         root.join("account").to_str().unwrap().into(),

@@ -151,6 +151,28 @@ async fn setup_edit_recovers_crash_prefixes_under_the_session_lock() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_selection_failure_survives_the_store_and_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let root = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let session = selection_failure_session(&root, &workspace).await;
+    let store = crate::Store::open_read_only(root).unwrap();
+    let committed = store.load_session(session).await.unwrap();
+    let view = SessionView::replay_open(session, &committed)
+        .unwrap()
+        .unwrap();
+    store.close().await.unwrap();
+    let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.guard_stage_diagnostic().as_deref(),
+        Some("Guard stage: project selection timed out")
+    );
+    assert!(!observation.output.contains("runtime mount topology"));
+}
+
 fn supervisor_session() -> (SessionView, Vec<EventEnvelope>, GoalId, RunId, AgentRunId) {
     let session = SessionId::new();
     let (goal, run, actor) = (GoalId::new(), RunId::new(), AgentRunId::new());
@@ -569,6 +591,7 @@ fn invoked_skill_origin_requires_acceptance_and_observation_before_egress() {
         output: "pinned guidance".into(),
         attestation: Some(crate::tools::Attestation::for_site(&intent)),
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
         enforcement_cause: None,
         limit_cause: None,

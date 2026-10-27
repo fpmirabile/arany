@@ -464,7 +464,7 @@ async fn choose_inline(
     }
 }
 
-pub(super) async fn read_setup_value(
+pub(in super::super) async fn read_setup_value(
     terminal: &mut AttachedTerminal,
     title: &str,
     instruction: &str,

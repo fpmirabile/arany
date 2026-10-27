@@ -1215,23 +1215,42 @@ fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
 
 type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
 
+fn mount_plan(
+    grants: &[super::super::toolchains::RuntimeGrant],
+    cache_enabled: bool,
+) -> Result<Vec<(PathBuf, PathBuf, bool)>, ToolError> {
+    let mut plan: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    for grant in grants {
+        for (source, target) in grant.mounts(cache_enabled)? {
+            match plan.iter().find(|(_, existing, _)| *existing == target) {
+                Some((existing, _, _)) if *existing == source => {}
+                Some(_) => return Err(ToolError::Configuration),
+                None => plan.push((source, target, grant.kind.is_host_mounted())),
+            }
+        }
+    }
+    plan.sort_by_key(|(_, target, _)| target.components().count());
+    Ok(plan)
+}
+
 fn runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
     cache_enabled: bool,
 ) -> Result<RuntimeMounts, ToolError> {
-    let mut directories = Vec::new();
-    let mut mounts = Vec::new();
     for grant in grants {
         grant.verify_host()?;
-        let target = grant.mounted_path(cache_enabled)?;
-        let root = if grant.kind.is_toolchain() {
+    }
+    let mut directories = Vec::new();
+    let mut mounts = Vec::new();
+    for (source, target, host_mounted) in mount_plan(grants, cache_enabled)? {
+        let root = if host_mounted {
             reject_profile_overlap(&target)?;
             Path::new("/")
         } else {
             Path::new(super::super::toolchains::sandbox_cache_root(cache_enabled))
         };
         directories.extend(mount_directories(&target, root));
-        mounts.push((grant.path.clone(), target));
+        mounts.push((source, target));
     }
     directories.sort_by_key(|path| (path.components().count(), path.clone()));
     directories.dedup();
@@ -1327,10 +1346,10 @@ pub(super) fn verify_runtime_mounts(
     cache_enabled: bool,
 ) -> Result<(), ToolError> {
     let mounts = read_mountinfo()?;
-    let targets = grants
-        .iter()
-        .map(|grant| grant.mounted_path(cache_enabled))
-        .collect::<Result<Vec<_>, _>>()?;
+    let targets = mount_plan(grants, cache_enabled)?
+        .into_iter()
+        .map(|(_, target, _)| target)
+        .collect::<Vec<_>>();
     verify_mount_entries(&mounts, &targets)
 }
 
@@ -1405,7 +1424,9 @@ fn verify_mount_entries(
             .ok_or(ToolError::ProtectionUnavailable)?;
         if selected.optional_fields != 0
             || mounts.iter().any(|mount| {
-                mount.path.as_path() != target.as_path() && mount.path.starts_with(target.as_path())
+                mount.path.as_path() != target.as_path()
+                    && mount.path.starts_with(target.as_path())
+                    && !targets.contains(&mount.path)
             })
         {
             return Err(ToolError::ProtectionUnavailable);
@@ -2413,6 +2434,66 @@ mod tests {
     }
 
     #[test]
+    fn runtime_mount_attestation_accepts_descendants_that_are_selected_targets() {
+        let nested = mountinfo_with_runtime("", &["/opt/toolchains/rust/nested"]);
+        let entries = parse_mountinfo(&nested).unwrap();
+        let targets = [
+            Path::new("/opt/toolchains/rust").to_owned(),
+            Path::new("/opt/toolchains/rust/nested").to_owned(),
+        ];
+        assert!(verify_mount_entries(&entries, &targets).is_ok());
+        assert!(verify_mount_entries(&entries, &targets[..1]).is_err());
+    }
+
+    #[test]
+    fn system_prefix_shims_plan_only_their_manager_root() {
+        use crate::tools::toolchains::{GrantRoot, RuntimeGrant, RuntimeKind, RuntimeManager};
+
+        let root = PathBuf::from("/home/user/.rustup");
+        let shim = RuntimeGrant {
+            kind: RuntimeKind::ManagerShims,
+            manager: RuntimeManager::Rustup,
+            version: None,
+            path: PathBuf::from("/usr/local/Cellar/rustup/1.0/bin"),
+            device: 1,
+            inode: 1,
+            root: Some(GrantRoot {
+                path: root.clone(),
+                device: 1,
+                inode: 2,
+            }),
+        };
+        assert_eq!(
+            mount_plan(&[shim], false).unwrap(),
+            [(root.clone(), root, true)]
+        );
+    }
+
+    #[test]
+    fn overlapping_user_directory_and_manager_root_mount_once() {
+        use crate::tools::toolchains::discover_user_programs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".pyenv/shims")).unwrap();
+        let path = std::env::join_paths([home.join(".pyenv"), home.join(".pyenv/shims")]).unwrap();
+        let grants = discover_user_programs(&home, Some(&path), &[])
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.grant)
+            .collect::<Vec<_>>();
+        assert_eq!(grants.len(), 2);
+        let (_, mounts) = runtime_mounts(&grants, false).unwrap();
+        assert_eq!(
+            mounts,
+            [
+                (home.join(".pyenv"), home.join(".pyenv")),
+                (home.join(".pyenv/shims"), home.join(".pyenv/shims")),
+            ]
+        );
+    }
+
+    #[test]
     fn mountinfo_decodes_only_kernel_path_escapes_and_rejects_ambiguous_records() {
         let target = Path::new("/opt/toolchains/a b").to_owned();
         let escaped = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\040b /opt/toolchains/a\\040b ro - ext4 /dev/root ro\n";
@@ -3135,6 +3216,7 @@ mod tests {
             path: source.clone(),
             device: metadata.dev(),
             inode: metadata.ino(),
+            root: None,
         };
         grant.validate_shape().unwrap();
         let grant_path = fixture.path().join("grant.json");

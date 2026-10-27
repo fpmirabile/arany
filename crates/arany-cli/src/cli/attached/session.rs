@@ -886,6 +886,18 @@ impl AttachedSession {
                 }
                 return Ok(IdleAction::Handled);
             }
+            Some(permissions::PermissionArea::CommandEnvironment) => {
+                let outcome = permissions::manage_command_environment(
+                    &mut self.terminal,
+                    &self.admission.state_dir,
+                )
+                .await?;
+                self.terminal
+                    .restore_draft_input(self.composer.input_capacity())
+                    .map_err(|error| error.to_string())?;
+                self.ui.notice = Some(Feedback::History(outcome.summary()));
+                return Ok(IdleAction::Handled);
+            }
             Some(permissions::PermissionArea::FolderTrust) => {}
         }
 
@@ -933,7 +945,9 @@ impl AttachedSession {
         )
         .await?
         {
-            permissions::TrustAdmission::Loaded(access) => access.prepare_profile_selection(),
+            permissions::TrustAdmission::Loaded(access) => {
+                access.prepare_profile_selection(&self.admission.state_dir)
+            }
             permissions::TrustAdmission::Exit => {
                 self.ui.notice = Some(Feedback::History(
                     "Folder trust could not be loaded; existing permissions unchanged".into(),

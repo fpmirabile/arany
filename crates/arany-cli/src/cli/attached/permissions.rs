@@ -4,7 +4,8 @@ use arany::permissions::{
     Decision, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
 };
 use arany::{
-    ApprovalMode, ProviderKind, StateRoot, WorkspacePermissions, native_protection_supported,
+    ApprovalMode, CommandEnvironment, CommandEnvironmentError, ProviderKind, StateRoot,
+    WorkspacePermissions, native_protection_supported,
 };
 use std::path::Path;
 
@@ -47,6 +48,7 @@ pub(super) fn refresh_mode(
 pub(super) async fn admit(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
+    state_dir: &Path,
     composer: &mut Composer,
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
@@ -61,7 +63,7 @@ pub(super) async fn admit(
     } else {
         choose(
             terminal,
-            access.prepare_profile_selection(),
+            access.prepare_profile_selection(state_dir),
             composer,
             configured,
         )
@@ -82,6 +84,7 @@ pub(super) enum PermissionArea {
     FolderTrust,
     TypedGitRules,
     HostRules,
+    CommandEnvironment,
 }
 
 pub(super) async fn choose_area(
@@ -97,6 +100,7 @@ pub(super) async fn choose_area(
                 (b'1', "Folder trust"),
                 (b'2', "Typed Git rules"),
                 (b'3', "Host command rules"),
+                (b'4', "Command environment"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -106,6 +110,7 @@ pub(super) async fn choose_area(
             Some(b'1') => Some(PermissionArea::FolderTrust),
             Some(b'2') => Some(PermissionArea::TypedGitRules),
             Some(b'3') => Some(PermissionArea::HostRules),
+            Some(b'4') => Some(PermissionArea::CommandEnvironment),
             _ => None,
         },
     )
@@ -261,6 +266,204 @@ pub(super) async fn manage_rules(
             }
         }
     }
+}
+
+pub(super) enum EnvironmentOutcome {
+    Confirmed(String),
+    Uncertain,
+}
+
+enum EnvironmentAction {
+    Select(String),
+    Reveal(String),
+    Remove(String),
+}
+
+enum EnvironmentStep {
+    Act(EnvironmentAction),
+    Again,
+    Leave,
+}
+
+pub(super) async fn manage_command_environment(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+) -> Result<EnvironmentOutcome, SetupError> {
+    let mut notice = None::<String>;
+    let mut saved = false;
+    loop {
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(EnvironmentOutcome::Confirmed(
+                "Error: state directory unavailable or unsafe; command environment unchanged"
+                    .into(),
+            ));
+        };
+        let environment = match open_environment(&state) {
+            Ok(environment) => environment,
+            Err(outcome) => return Ok(outcome),
+        };
+        let names: Vec<String> = environment
+            .names()
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        let choice = choose_environment(
+            terminal,
+            &environment,
+            &names,
+            notice.take().unwrap_or_default(),
+        )
+        .await?;
+        let action = match environment_step(terminal, choice, &names).await? {
+            EnvironmentStep::Act(action) => action,
+            EnvironmentStep::Again => continue,
+            EnvironmentStep::Leave => {
+                return Ok(EnvironmentOutcome::Confirmed(if saved {
+                    "Command environment saved; it applies from the next Run".into()
+                } else {
+                    "Command environment unchanged".into()
+                }));
+            }
+        };
+        let outcome = match action {
+            EnvironmentAction::Select(name) => {
+                CommandEnvironment::edit(&state, |record| record.select(&name)).map(|_| "Selected.")
+            }
+            EnvironmentAction::Remove(name) => {
+                CommandEnvironment::edit(&state, |record| record.deselect(&name))
+                    .map(|_| "Removed.")
+            }
+            EnvironmentAction::Reveal(name) => {
+                let value = environment
+                    .names()
+                    .find_map(|(candidate, value)| (candidate == name).then_some(value))
+                    .unwrap_or_default();
+                notice = Some(format!(
+                    "{name}={}.",
+                    crate::presentation::escape_terminal(value)
+                ));
+                continue;
+            }
+        };
+        match settle_environment(outcome) {
+            Ok(done) => {
+                saved |= done.saved;
+                notice = Some(done.notice);
+            }
+            Err(outcome) => return Ok(outcome),
+        }
+    }
+}
+
+struct EnvironmentSettled {
+    saved: bool,
+    notice: String,
+}
+
+fn open_environment(state: &StateRoot) -> Result<CommandEnvironment, EnvironmentOutcome> {
+    CommandEnvironment::load(state).map_err(|error| match error {
+        arany::ToolError::CommandEnvironmentUnconfirmed => EnvironmentOutcome::Uncertain,
+        error => {
+            EnvironmentOutcome::Confirmed(format!("Error: {error}; command environment unchanged"))
+        }
+    })
+}
+
+fn settle_environment(
+    outcome: Result<&'static str, CommandEnvironmentError>,
+) -> Result<EnvironmentSettled, EnvironmentOutcome> {
+    match outcome {
+        Ok(done) => Ok(EnvironmentSettled {
+            saved: true,
+            notice: done.to_owned(),
+        }),
+        Err(CommandEnvironmentError::Unconfirmed) => Err(EnvironmentOutcome::Uncertain),
+        Err(error) => Ok(EnvironmentSettled {
+            saved: false,
+            notice: format!("Error: {error}."),
+        }),
+    }
+}
+
+impl EnvironmentOutcome {
+    pub(super) fn summary(self) -> String {
+        match self {
+            Self::Confirmed(summary) => summary,
+            Self::Uncertain => {
+                "Command environment save is uncertain; reopen /permissions to verify.".into()
+            }
+        }
+    }
+}
+
+async fn choose_environment(
+    terminal: &mut AttachedTerminal,
+    environment: &CommandEnvironment,
+    names: &[String],
+    notice: String,
+) -> Result<Option<u8>, SetupError> {
+    let mut rows = vec![(
+        ADD,
+        "Select a name from the Arany process environment".to_owned(),
+    )];
+    rows.extend(names.iter().enumerate().map(|(index, name)| {
+        let index = u8::try_from(index).expect("selected names are capped");
+        (ENTRY_BASE + index, format!("{name} · value hidden"))
+    }));
+    rows.push((BACK, "Back".to_owned()));
+    let labels = rows
+        .iter()
+        .map(|(value, label)| (*value, label.as_str()))
+        .collect::<Vec<_>>();
+    let instruction = format!(
+        "{notice} Source {}. PATH {}. Names matching *KEY*, *SECRET* or *TOKEN* are never selectable. Changes apply from the next Run.",
+        environment.source(),
+        crate::presentation::escape_terminal(&environment.path().join(", ")),
+    );
+    super::setup::choose_focused(
+        terminal,
+        2,
+        "Command environment",
+        &instruction,
+        &labels,
+        None,
+    )
+    .await
+}
+
+async fn environment_step(
+    terminal: &mut AttachedTerminal,
+    choice: Option<u8>,
+    names: &[String],
+) -> Result<EnvironmentStep, SetupError> {
+    Ok(match choice {
+        Some(ADD) => {
+            match super::setup::read_setup_value(
+                terminal,
+                "Command environment",
+                "Variable name",
+                "",
+                CommandEnvironment::NAME_LIMIT,
+            )
+            .await?
+            {
+                Some(name) => EnvironmentStep::Act(EnvironmentAction::Select(name)),
+                None => EnvironmentStep::Again,
+            }
+        }
+        Some(value) if value >= ENTRY_BASE => {
+            let name = names[usize::from(value - ENTRY_BASE)].clone();
+            let options = [
+                (true, "Reveal value".to_owned()),
+                (false, "Remove name".to_owned()),
+            ];
+            match pick(terminal, "Variable", "Reveal or remove this name", &options).await? {
+                Some(true) => EnvironmentStep::Act(EnvironmentAction::Reveal(name)),
+                Some(false) => EnvironmentStep::Act(EnvironmentAction::Remove(name)),
+                None => EnvironmentStep::Again,
+            }
+        }
+        _ => EnvironmentStep::Leave,
+    })
 }
 
 pub(super) enum HostRuleEditOutcome {
@@ -846,10 +1049,11 @@ fn parse_linear_selection(
             for number in numbers {
                 let index = number.parse::<usize>().ok()?.checked_sub(3)?;
                 let option = options.get(index)?;
-                if selected
-                    .iter()
-                    .zip(options)
-                    .any(|(chosen, other)| *chosen && other.group == option.group)
+                if option.exclusive
+                    && selected
+                        .iter()
+                        .zip(options)
+                        .any(|(chosen, other)| *chosen && other.group == option.group)
                 {
                     return None;
                 }
@@ -863,10 +1067,12 @@ fn parse_linear_selection(
 
 fn toggle_profile(selected: &mut [bool], options: &[arany::RuntimeProfileOption], index: usize) {
     let check = !selected[index];
-    let group = options[index].group;
-    for (chosen, option) in selected.iter_mut().zip(options) {
-        if option.group == group {
-            *chosen = false;
+    if options[index].exclusive {
+        let group = options[index].group;
+        for (chosen, option) in selected.iter_mut().zip(options) {
+            if option.group == group {
+                *chosen = false;
+            }
         }
     }
     selected[index] = check;
@@ -890,6 +1096,33 @@ pub(super) fn cycle(composer: &mut Composer) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unconfirmed_first_creation_or_edit_is_uncertain_never_unchanged() {
+        use super::{
+            CommandEnvironment, CommandEnvironmentError, EnvironmentOutcome, open_environment,
+            settle_environment,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let state = arany::StateRoot::admit(&path).unwrap();
+        arany::FaultPlan::fail_record_sync(path.clone(), "command-environment.json");
+        let Err(outcome) = open_environment(&state) else {
+            panic!("an unconfirmed creation must not open the editor");
+        };
+        assert!(matches!(outcome, EnvironmentOutcome::Uncertain));
+        let summary = outcome.summary();
+        assert!(summary.contains("reopen /permissions to verify"));
+        assert!(!summary.contains("unchanged"));
+        assert!(path.join("command-environment.json").is_file());
+        assert!(open_environment(&state).is_ok());
+        let edit = CommandEnvironment::edit(&state, |_| Ok(())).map(|_| "Saved.");
+        assert!(settle_environment(edit).is_ok());
+        let Err(outcome) = settle_environment(Err(CommandEnvironmentError::Unconfirmed)) else {
+            panic!("an unconfirmed edit must stop the editor");
+        };
+        assert!(matches!(outcome, EnvironmentOutcome::Uncertain));
+    }
+
     use super::{
         HOST_READ_DISCLOSURE, parse_linear_selection, requires_host_read_disclosure, toggle_profile,
     };
@@ -1089,7 +1322,7 @@ mod tests {
             let mut composer = Composer::default();
             let access = WorkspacePermissions::open(&workspace)
                 .unwrap()
-                .prepare_profile_selection();
+                .prepare_profile_selection(&arany::StateRoot::account_path().unwrap());
             let cache = workspace.join(".cargo/registry/cache");
             let index = access
                 .runtime_profile_choices()
@@ -1153,7 +1386,39 @@ mod tests {
             path: std::path::PathBuf::from("/opt/profile"),
             detected: true,
             selected: false,
+            exclusive: true,
         }
+    }
+
+    #[test]
+    fn independent_profiles_toggle_alone_while_toolchain_kinds_keep_one_choice() {
+        let independent = |token, group| arany::RuntimeProfileOption {
+            exclusive: false,
+            ..option(token, group)
+        };
+        let options = [
+            option("rust-a", "Rust"),
+            option("rust-b", "Rust"),
+            independent("user-a", "User programs"),
+            independent("user-b", "User programs"),
+        ];
+        let mut selected = [true, false, false, false];
+        toggle_profile(&mut selected, &options, 1);
+        assert_eq!(selected, [false, true, false, false]);
+        toggle_profile(&mut selected, &options, 2);
+        toggle_profile(&mut selected, &options, 3);
+        assert_eq!(selected, [false, true, true, true]);
+        toggle_profile(&mut selected, &options, 2);
+        assert_eq!(selected, [false, true, false, true]);
+
+        assert_eq!(
+            parse_linear_selection("trust 5 6", &options, &selected),
+            Some((1, vec![false, false, true, true]))
+        );
+        assert_eq!(
+            parse_linear_selection("trust 3 4", &options, &selected),
+            None
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::ToolError;
 use super::cancel::Cancellation;
+use super::command_environment::{CommandEnvironment, PATH_LIMIT_BYTES};
 use super::config::Program;
 use super::fs::{identity, open_directory, open_file};
 use super::guard::reap_owned_child;
@@ -116,6 +117,7 @@ pub(crate) fn wrapper(program: &str) -> bool {
 pub(super) fn wrapper_interpreters_admitted(
     intent: &super::EffectIntent,
     commands: &[Program],
+    environment: &CommandEnvironment,
 ) -> bool {
     let super::ToolCall::CommandUnguarded { args, cwd, .. } = &intent.call else {
         return false;
@@ -154,7 +156,7 @@ pub(super) fn wrapper_interpreters_admitted(
         if !checked.insert(candidate.to_owned()) {
             return true;
         }
-        pin(candidate, workspace, &host.path).is_ok_and(|pin| {
+        pin(candidate, workspace, environment).is_ok_and(|pin| {
             commands.iter().any(|command| {
                 command.interpreter
                     && command.executable == pin.executable
@@ -281,7 +283,7 @@ fn live_prohibited(program: &str, args: &[String], cwd: &Path, path: &str) -> bo
     if identities.is_empty() {
         return false;
     }
-    if path.len() > 16 * 1024 {
+    if path.len() > PATH_LIMIT_BYTES {
         return true;
     }
     let administrator = administrator(args);
@@ -327,13 +329,17 @@ impl super::types::HostCommandPin {
             && self.inode != 0
             && crate::validate::valid_digest(&self.sha256)
             && !self.path.is_empty()
-            && self.path.len() <= 16 * 1024
+            && self.path.len() <= PATH_LIMIT_BYTES
             && std::env::split_paths(&self.path).all(|path| path.is_absolute())
             && self.environment_digest != [0; 32]
     }
 
-    pub(crate) fn verify(&self, workspace: &Path) -> Result<(), ToolError> {
-        let mut current = pin(&self.executable, workspace, &self.path)?;
+    pub(crate) fn verify(
+        &self,
+        workspace: &Path,
+        environment: &CommandEnvironment,
+    ) -> Result<(), ToolError> {
+        let mut current = pin(&self.executable, workspace, environment)?;
         current.state_roots.clone_from(&self.state_roots);
         current.permissions_digest = self.permissions_digest;
         if &current != self {
@@ -427,25 +433,22 @@ pub(crate) fn same_approval(prior: &super::EffectIntent, next: &super::EffectInt
         && right.cache_candidate_bytes <= left.cache_candidate_bytes
 }
 
-pub(crate) fn environment_digest(path: &str) -> [u8; 32] {
-    let values = ["HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"].map(|name| {
-        (
-            name,
-            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned()),
-        )
-    });
+pub(crate) fn environment_digest(environment: &CommandEnvironment) -> [u8; 32] {
     crate::validate::digest(
-        &serde_json::to_vec(&(HOST_POLICY_VERSION, path, values)).expect("host environment"),
+        &serde_json::to_vec(&(HOST_POLICY_VERSION, environment.digest()))
+            .expect("host environment"),
     )
 }
 
 pub(crate) fn pin(
     program: &str,
     workspace: &Path,
-    path: &str,
+    environment: &CommandEnvironment,
 ) -> Result<super::types::HostCommandPin, ToolError> {
     use std::os::unix::fs::MetadataExt;
-    if path.is_empty() || path.len() > 16 * 1024 {
+    let path = environment.path_string();
+    let path = path.as_str();
+    if path.is_empty() || path.len() > PATH_LIMIT_BYTES {
         return Err(ToolError::Configuration);
     }
     let workspace = workspace.canonicalize().map_err(|_| ToolError::Path)?;
@@ -504,7 +507,7 @@ pub(crate) fn pin(
         inode: metadata.ino(),
         sha256: crate::validate::hex_digest(&bytes),
         path: path.into(),
-        environment_digest: environment_digest(path),
+        environment_digest: environment_digest(environment),
     })
 }
 
@@ -570,6 +573,7 @@ pub(super) struct Request<'a> {
     pub(super) launcher: &'a Path,
     pub(super) program: &'a Program,
     pub(super) host: Option<&'a super::types::HostCommandPin>,
+    pub(super) environment: &'a CommandEnvironment,
     pub(super) args: &'a [String],
     pub(super) cwd: &'a str,
     pub(super) workspace: &'a Path,
@@ -635,6 +639,7 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
     let launcher = request.launcher.to_owned();
     let program = request.program.clone();
     let host = request.host.cloned();
+    let environment = request.environment.clone();
     let args = request.args.to_vec();
     let cwd = request.cwd.to_owned();
     let workspace = request.workspace.to_owned();
@@ -644,6 +649,7 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
             launcher: &launcher,
             program: &program,
             host: host.as_ref(),
+            environment: &environment,
             args: &args,
             cwd: &cwd,
             workspace: &workspace,
@@ -852,17 +858,16 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
         .map_err(|_| ToolError::ChangedInput)?;
     let executable = Path::new(&request.program.executable);
     let cwd_path = request.workspace.join(request.cwd);
-    let path = request.host.map_or_else(
-        || std::env::var("PATH").unwrap_or_default(),
-        |pin| pin.path.clone(),
-    );
+    let path = request
+        .host
+        .map_or_else(|| request.environment.path_string(), |pin| pin.path.clone());
     if live_prohibited(&request.program.name, request.args, &cwd_path, &path)
         || live_prohibited(&request.program.executable, request.args, &cwd_path, &path)
     {
         return Err(ToolError::Configuration);
     }
     if let Some(pin) = request.host {
-        pin.verify(request.workspace)?;
+        pin.verify(request.workspace, request.environment)?;
     }
     let workspace = open_directory(request.workspace).map_err(|_| ToolError::ChangedInput)?;
     let found = identity(&workspace).map_err(|_| ToolError::ChangedInput)?;
@@ -892,6 +897,7 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
         .ok_or(ToolError::Configuration)?;
     let mut command = Command::new(request.launcher);
     command.env_clear();
+    command.envs(request.environment.names());
     #[cfg(not(test))]
     command
         .arg("--internal-host-command")
@@ -923,11 +929,6 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
         .env("NO_COLOR", "1")
         .env("ARANY_TOOL_WORKSPACE", request.workspace)
         .env("ARANY_UNGUARDED", "1");
-    for name in ["LANG", "LC_ALL", "TERM"] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -956,6 +957,7 @@ mod tests {
     fn wrappers_require_the_nested_interpreters_own_path_and_digest() {
         let fixture = fixture();
         let root = fixture._dir.path().canonicalize().unwrap();
+        let environment = CommandEnvironment::for_path(root.to_str().unwrap());
         let mut host = pin("sh", &fixture.workspace, root.to_str().unwrap()).unwrap();
         host.executable = "/usr/bin/env".into();
         let mut intent = crate::tools::EffectIntent {
@@ -1019,7 +1021,7 @@ mod tests {
             ] {
                 let commands: Vec<_> = command.into_iter().collect();
                 assert_eq!(
-                    wrapper_interpreters_admitted(&intent, &commands),
+                    wrapper_interpreters_admitted(&intent, &commands, &environment),
                     expected,
                     "{candidate}"
                 );
@@ -1031,7 +1033,11 @@ mod tests {
         *args = vec!["sh".into()];
         let mut command = fixture.program.clone();
         command.executable = root.join("other/sh").to_string_lossy().into_owned();
-        assert!(!wrapper_interpreters_admitted(&intent, &[command]));
+        assert!(!wrapper_interpreters_admitted(
+            &intent,
+            &[command],
+            &environment
+        ));
     }
 
     #[test]
@@ -1296,7 +1302,8 @@ mod tests {
         let path = fixture._dir.path().to_str().unwrap();
         let pinned = pin("sh", &fixture.workspace, path).unwrap();
         assert_eq!(pinned.executable, fixture.program.executable);
-        assert!(pinned.verify(&fixture.workspace).is_ok());
+        let environment = CommandEnvironment::for_path(path);
+        assert!(pinned.verify(&fixture.workspace, &environment).is_ok());
         for bad in [
             String::new(),
             ".".into(),
@@ -1311,7 +1318,7 @@ mod tests {
         let replacement = fixture._dir.path().join("replacement");
         std::fs::copy(&fixture.program.executable, &replacement).unwrap();
         std::fs::rename(replacement, &fixture.program.executable).unwrap();
-        assert!(pinned.verify(&fixture.workspace).is_err());
+        assert!(pinned.verify(&fixture.workspace, &environment).is_err());
     }
 
     #[test]
@@ -1343,7 +1350,11 @@ mod tests {
         std::os::unix::fs::symlink(&fixture.workspace, &alias).unwrap();
         let pinned = pin("sh", &alias, allowed).unwrap();
         assert_eq!(pinned.workspace, fixture.workspace.to_str().unwrap());
-        assert!(pinned.verify(&alias).is_ok());
+        assert!(
+            pinned
+                .verify(&alias, &CommandEnvironment::for_path(allowed))
+                .is_ok()
+        );
         std::fs::copy(&fixture.program.executable, fixture.workspace.join("sh")).unwrap();
         for path in [&alias, &fixture.workspace] {
             assert!(pin("sh", &alias, path.to_str().unwrap()).is_err());
@@ -1410,6 +1421,15 @@ mod tests {
         workspace: std::path::PathBuf,
         program: Program,
         identity: WorkspaceIdentity,
+        environment: CommandEnvironment,
+    }
+
+    fn pin(
+        program: &str,
+        workspace: &Path,
+        path: &str,
+    ) -> Result<crate::tools::types::HostCommandPin, ToolError> {
+        super::pin(program, workspace, &CommandEnvironment::for_path(path))
     }
 
     fn fixture() -> Fixture {
@@ -1434,6 +1454,7 @@ mod tests {
             workspace,
             program,
             identity,
+            environment: CommandEnvironment::for_path("/usr/bin:/bin"),
         }
     }
 
@@ -1443,6 +1464,7 @@ mod tests {
                 launcher: &self.launcher,
                 program: &self.program,
                 host: None,
+                environment: &self.environment,
                 args,
                 cwd,
                 workspace: &self.workspace,
@@ -1513,6 +1535,22 @@ mod tests {
         )));
         assert!(real.join("made").is_file());
         assert!(outcome.descendants_stopped);
+    }
+
+    #[tokio::test]
+    async fn unguarded_run_carries_only_record_names_and_keeps_real_home() {
+        let mut fixture = fixture();
+        fixture.environment = CommandEnvironment::for_path("/usr/bin:/bin")
+            .with_name("HOME", "/recorded/home")
+            .with_name("LANG", "C.UTF-8")
+            .with_name("EDITOR", "ed");
+        let outcome = fixture.sh("env", "", 10_000).await;
+        assert_eq!(outcome.disposition, ToolDisposition::Succeeded);
+        let text = stdout(&outcome);
+        let home = directories::BaseDirs::new().unwrap();
+        assert!(text.contains(&format!("HOME={}\n", home.home_dir().display())));
+        assert!(text.contains("LANG=C.UTF-8\n") && text.contains("EDITOR=ed\n"));
+        assert!(!text.contains("TERM="));
     }
 
     #[tokio::test]

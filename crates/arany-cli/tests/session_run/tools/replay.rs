@@ -110,6 +110,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             limits: intent.limits.clone(),
         })),
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     let record = |disposition| Event::ProviderCallRecorded {
@@ -961,6 +962,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
             })),
             intent,
             approval_cause: None,
+            guard_stage: None,
             cache_update: arany::CacheUpdate::NotApplicable,
         },
     };

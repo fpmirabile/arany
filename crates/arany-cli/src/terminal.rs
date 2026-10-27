@@ -1622,7 +1622,12 @@ impl AttachedTerminal {
                     } else {
                         " · no longer detected"
                     };
-                    format!("{head} · {path}{suffix}")
+                    let warning = if option.exclusive {
+                        ""
+                    } else {
+                        " · runs whatever the directory currently holds"
+                    };
+                    format!("{head} · {path}{warning}{suffix}")
                 };
                 format!(
                     "{marker} [{}] {number}. {}",
