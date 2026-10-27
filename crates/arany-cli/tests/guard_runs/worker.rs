@@ -92,11 +92,14 @@ async fn cancelled_editor_keeps_landed_workspace_effects_and_causal_release() {
 
 #[tokio::test]
 async fn unsupported_editor_modes_and_invalid_assignments_refuse_before_spawn() {
-    for case in ["background", "command"].into_iter().chain(
-        arany::test_support::worker_teams::INVALID_EDITOR_CASES
-            .iter()
-            .map(|(case, _)| *case),
-    ) {
+    for case in ["background", "command", "catalog_overflow"]
+        .into_iter()
+        .chain(
+            arany::test_support::worker_teams::INVALID_EDITOR_CASES
+                .iter()
+                .map(|(case, _)| *case),
+        )
+    {
         worker_case(case).await;
     }
 }

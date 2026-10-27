@@ -44,6 +44,28 @@ pub fn invalidate_editor(request: &mut EditorAssignment, case: &str) {
     }
 }
 
+fn overflow_editor_catalog(assignment: &mut EditorAssignment) {
+    assignment.lease = (0..64)
+        .map(|index| {
+            if index == 0 {
+                "notes/0".into()
+            } else {
+                format!(
+                    "notes/{index:02}-{}/{}.txt",
+                    "directory".repeat(20),
+                    "file".repeat(25)
+                )
+            }
+        })
+        .collect();
+    assert!(
+        crate::worker::ChildAssignment::Editor {
+            assignment: Box::new(assignment.clone()),
+        }
+        .valid()
+    );
+}
+
 struct LiveProvider {
     identity: ProviderIdentity,
     workspace: PathBuf,
@@ -123,6 +145,9 @@ impl LiveProvider {
         };
         if self.case.starts_with("invalid_") {
             invalidate_editor(&mut assignment, self.case);
+        }
+        if self.case == "catalog_overflow" {
+            overflow_editor_catalog(&mut assignment);
         }
         if self.case == "background" {
             assignment.mode = WorkerMode::Background;
@@ -590,12 +615,13 @@ async fn run_live(
                     && hook.outcome.is_some())
         );
     }
-    if matches!(case, "background" | "command") || case.starts_with("invalid_") {
+    if matches!(case, "background" | "command" | "catalog_overflow") || case.starts_with("invalid_")
+    {
         assert_eq!(run.agents.len(), 1, "{case}: no child spawn");
         let expected = INVALID_EDITOR_CASES
             .iter()
             .find_map(|(name, cause)| (*name == case).then_some(*cause))
-            .unwrap_or(if case == "background" {
+            .unwrap_or(if matches!(case, "background" | "catalog_overflow") {
                 ProposalRefusalCause::DelegateInvalid
             } else {
                 ProposalRefusalCause::EditorCommands
@@ -606,6 +632,21 @@ async fn run_live(
                     if record.refusal.as_ref().is_some_and(|refusal| refusal.cause == expected)
             )),
             "{case}: expected {expected:?}"
+        );
+    }
+    if case == "catalog_overflow" {
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            Event::ProviderCallRecorded { record, .. }
+                if record.disposition == ProviderCallDisposition::Delegated
+        )));
+        assert!(
+            provider
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(phase, _)| *phase != AgentPhase::ChildWork)
         );
     }
     assert!(!events.iter().any(|e| matches!(

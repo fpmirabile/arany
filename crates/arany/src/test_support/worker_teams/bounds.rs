@@ -126,6 +126,7 @@ pub(super) fn assert_stopped(
             .all(|(phase, _)| *phase != AgentPhase::RootSynthesis)
     );
     if case == "active_time" {
+        assert_eq!(outcome.cause, WorkerCause::Budget);
         assert_active_time(view);
     } else {
         assert_eq!(run.failure, Some(RunFailure::ToolStopped));
