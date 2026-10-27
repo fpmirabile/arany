@@ -98,7 +98,7 @@ impl super::ToolRuntime {
 
     // Web calls carry the proxy class like commands; their digest binds it without any process profile.
     pub(crate) fn bind_web_network(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
-        if self.worker.is_none() && self.config.admits_web(&intent.call) {
+        if self.config.admits_web(&intent.call) {
             intent.limits.network = NetworkGrant::Proxy;
             intent.enforcement_digest = self.web_digest(intent)?;
         }

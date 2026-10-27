@@ -18,14 +18,23 @@ fn old_worker_policies_and_assignments_cannot_acquire_web_tools() {
         "skills":[],"mcp_servers":[],"commands":[],"permission_mode":null
     });
     source["config"]["worker_policy"] = serde_json::json!({
-        "parent_grant":grant,"concurrency":1,"max_turns":4,"max_tools":3,"data_bytes":1024
+        "parent_grant":grant,"concurrency":1,"max_turns":4,"max_tools":3
     });
-    let step = REGISTRY.event_step("RunStarted", 24).unwrap();
+    let mut legacy = source.clone();
+    legacy["config"]["worker_policy"]["data_bytes"] = 1024.into();
+    let retirement = REGISTRY.event_step("RunStarted", 24).unwrap();
+    assert_eq!((retirement.transform)(legacy.clone()), Some(source.clone()));
+    let migrated = REGISTRY
+        .upgrade_payload("RunStarted", 24, &legacy.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&migrated).unwrap(), source);
+    let step = REGISTRY.event_step("RunStarted", 25).unwrap();
     let upgraded = (step.transform)(source.clone()).unwrap();
     assert_eq!(upgraded, source);
     let event = Event::decode(
         "RunStarted",
-        25,
+        payload_version("RunStarted").unwrap(),
         &upgraded.to_string(),
         Some(RunId::new()),
         None,
