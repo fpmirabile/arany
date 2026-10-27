@@ -224,6 +224,7 @@ fn read_ready(
             Some(ReaderEvent::CursorPosition(column, row)) => context.queries.respond(column, row),
             Some(ReaderEvent::KeyboardReply(reply)) => context.queries.keyboard_reply(reply),
             Some(ReaderEvent::GraphicsReply) => context.queries.graphics_reply(),
+            Some(ReaderEvent::CellPixels(cell)) => context.queries.cell_pixels_reply(cell),
             Some(event) => {
                 if !outbox.push(event, context.epoch)? {
                     return Ok(ReadProgress::Stop);
@@ -662,6 +663,25 @@ fn reply_or_mouse(text: &str, end: u8) -> Option<ReaderEvent> {
         };
         return Some(ReaderEvent::KeyboardReply(reply));
     }
+    if end == b't' {
+        if !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b';')
+        {
+            return None;
+        }
+        let mut parts = text.split(';');
+        if parts.next()? != "6" {
+            return None;
+        }
+        let height = parts.next()?.parse::<u16>().ok()?;
+        let width = parts.next()?.parse::<u16>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        return super::super::graphics::sixel::CellPixels::new(width, height)
+            .map(ReaderEvent::CellPixels);
+    }
     if end == b'R' {
         let (row, column) = text.split_once(';')?;
         if !row.bytes().all(|byte| byte.is_ascii_digit())
@@ -697,7 +717,7 @@ fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
             KeyEventKind::Press,
         );
     }
-    if bytes.starts_with(b"\x1b[") && (end == b'R' || text.starts_with(['<', '?'])) {
+    if bytes.starts_with(b"\x1b[") && (matches!(end, b'R' | b't') || text.starts_with(['<', '?'])) {
         return reply_or_mouse(text, end);
     }
     if !text
@@ -893,6 +913,8 @@ mod tests {
             (b"\x1b_Gi=32;OK\x1b\\", false, None),
             (b"\x1b_Xi=31;OK\x1b\\", false, None),
             (b"\x1b[?1;4c", false, Some([1, 4].as_slice())),
+            (b"\x1b[?64;1;4;22c", false, Some([64, 1, 4, 22].as_slice())),
+            (b"\x1b[?4;1c", false, Some([4, 1].as_slice())),
             (b"\x1b[?62;c", false, Some([62].as_slice())),
             (b"\x1b[?62;52;c", false, Some([62, 52].as_slice())),
         ] {
@@ -914,6 +936,72 @@ mod tests {
                     if attributes == expected_attributes
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn cell_size_replies_are_exact_bounded_and_do_not_become_keys() {
+        for (bytes, expected) in [
+            (b"\x1b[6;16;8t".as_slice(), Some((8, 16))),
+            (b"\x1b[6;0;8t", None),
+            (b"\x1b[6;16;0t", None),
+            (b"\x1b[6;65535;8t", None),
+            (b"\x1b[6;16;999999t", None),
+            (b"\x1b[6;16;8;1t", None),
+            (b"\x1b[4;16;8t", None),
+            (b"\x1b[6;+16;8t", None),
+        ] {
+            let mut decoder = Decoder::default();
+            let events: Vec<_> = bytes
+                .iter()
+                .filter_map(|&byte| decoder.feed(byte, Instant::now()))
+                .collect();
+            match expected {
+                Some((width, height)) => assert!(
+                    matches!(events.as_slice(), [ReaderEvent::CellPixels(cell)] if Some(*cell) == super::super::super::graphics::sixel::CellPixels::new(width, height))
+                ),
+                None => assert!(events.is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn sixel_requires_a_da1_feature_and_cell_reply_inside_the_probe() {
+        use super::super::super::graphics::sixel::CellPixels;
+        use super::super::{KeyboardProbe, KeyboardReply};
+        let cell = CellPixels::new(8, 16).expect("cell size");
+        for (attributes, receive_cell, live, expected) in [
+            (vec![64, 1, 4, 22], true, true, Some(cell)),
+            (vec![64, 1, 4, 22], false, true, None),
+            (vec![64, 1, 22], true, true, None),
+            (vec![4, 1], true, true, None),
+            (vec![64, 4], true, false, None),
+        ] {
+            let queries = TerminalQueries::default();
+            {
+                let mut state = queries.0.0.lock().expect("query state");
+                state.graphics = true;
+                state.keyboard = KeyboardProbe::Waiting(if live {
+                    Instant::now() + KEYBOARD_REPLY_TIMEOUT
+                } else {
+                    Instant::now()
+                });
+            }
+            if receive_cell {
+                queries.cell_pixels_reply(cell);
+            }
+            assert!(
+                queries.sixel_cell_pixels().is_none(),
+                "cell size alone grants no protocol"
+            );
+            queries.keyboard_reply(KeyboardReply::DeviceAttributes(attributes));
+            assert_eq!(queries.sixel_cell_pixels(), expected);
+            queries.cell_pixels_reply(CellPixels::new(16, 32).expect("late cell size"));
+            assert_eq!(
+                queries.sixel_cell_pixels(),
+                expected,
+                "late replies cannot replace probe evidence"
+            );
         }
     }
 
@@ -950,7 +1038,7 @@ mod tests {
         let queries = TerminalQueries::default();
         assert_eq!(
             queries
-                .probe_keyboard_within(&mut Vec::new(), Duration::ZERO, false)
+                .probe_keyboard_within(&mut Vec::new(), Duration::ZERO, false, None)
                 .unwrap(),
             Legacy
         );
@@ -1005,7 +1093,7 @@ mod tests {
         };
         assert_eq!(
             queries
-                .probe_keyboard_within(&mut output, KEYBOARD_REPLY_TIMEOUT, false)
+                .probe_keyboard_within(&mut output, KEYBOARD_REPLY_TIMEOUT, false, None)
                 .unwrap(),
             expected
         );

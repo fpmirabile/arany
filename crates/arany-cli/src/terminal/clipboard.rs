@@ -1073,6 +1073,7 @@ pub(super) mod cleanup_tests {
             graphics_hover_changed: false,
             graphics_placement: None,
             hovered_image_digest: None,
+            sixel_preview: crate::terminal::graphics::SixelPreview::default(),
             linear,
             secret_echo: None,
             agent_panel: None,
