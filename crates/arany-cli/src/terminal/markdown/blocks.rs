@@ -26,8 +26,18 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
     let mut flow = None::<Flow>;
     let parser = Parser::new_ext(source, Options::ENABLE_TABLES);
     for (_, definition) in parser.reference_definitions().iter() {
-        for line in covered(&mut lines, definition.span.clone()) {
-            line.hidden = true;
+        let span = definition.span.clone();
+        let covered_lines = covered(&mut lines, span.clone());
+        // Definitions nested in quotes or list items keep their visible marker line.
+        let starts_line = covered_lines.first().is_some_and(|line| {
+            source
+                .get(line.original.start..span.start)
+                .is_some_and(|prefix| prefix.trim_ascii().is_empty())
+        });
+        if starts_line {
+            for line in covered_lines {
+                line.hidden = true;
+            }
         }
     }
     let mut expanded = 0usize;

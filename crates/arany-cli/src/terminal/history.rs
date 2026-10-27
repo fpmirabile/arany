@@ -926,7 +926,12 @@ impl History {
         {
             return Some(((low.0, start), (high.0, end)));
         }
-        for index in low.0..=high.0 {
+        let endpoints: &[usize] = if low.0 == high.0 {
+            &[low.0]
+        } else {
+            &[low.0, high.0]
+        };
+        for &index in endpoints {
             let message = &self.messages[index];
             let text = message_text(view, message, &self.notices);
             let rows = message_rows(message.kind, &text, self.width);
