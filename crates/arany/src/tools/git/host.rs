@@ -3014,14 +3014,18 @@ mod tests {
         let scratch = parent.path().join("scratch");
         private_directory(&scratch).unwrap();
         let git = parser_git();
-        assert!(
+        assert_eq!(
             credential_config(
                 &git,
                 &[b"[credential]\nhelper=store\nuseHttpPath\n".to_vec()],
                 &scratch
             )
             .await
-            .is_ok()
+            .unwrap(),
+            vec![
+                ("credential.helper".into(), "store".into()),
+                ("credential.usehttppath".into(), "true".into()),
+            ]
         );
         let second = parent.path().join("second");
         private_directory(&second).unwrap();
