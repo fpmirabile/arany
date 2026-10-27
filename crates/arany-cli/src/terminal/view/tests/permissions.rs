@@ -335,6 +335,74 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
 }
 
 #[test]
+fn sensitive_host_warning_leads_and_wraps_with_the_color_policy() {
+    use crate::presentation::{
+        HOST_SENSITIVE_PATH_WARNING, ToolApprovalChoice, tool_fixture, unguarded_approval_lines,
+    };
+    let tool = tool_fixture(
+        arany::ToolCall::CommandUnguarded {
+            program: "cat".into(),
+            args: vec!["/private/credentials".into()],
+            cwd: String::new(),
+            justification: "Inspect the named credentials".into(),
+            prefix_rule: None,
+        },
+        "",
+    );
+    let lines = unguarded_approval_lines(
+        &tool.intent,
+        &arany::UnguardedPrompt {
+            executable: "/usr/bin/cat".into(),
+            attribution: None,
+            remember: false,
+            prefix: false,
+            sensitive: true,
+            inactive_rules: false,
+        },
+    );
+    for width in [120, 50, 16] {
+        for color in [true, false] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 50)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_tool_approval_frame(
+                        frame,
+                        frame.area(),
+                        &lines,
+                        &[ToolApprovalChoice::Yes, ToolApprovalChoice::No],
+                        ToolApprovalFrameState {
+                            page: 0,
+                            focus: Some(1),
+                            review_notice: false,
+                            palette: Palette { color },
+                        },
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let gutter = u16::from(width >= 40) * 2;
+            let wrapped = wrap_cells(
+                HOST_SENSITIVE_PATH_WARNING,
+                usize::from(width - gutter * 2),
+                0,
+            );
+            for (index, expected) in wrapped.iter().enumerate() {
+                let row = index as u16 + 1;
+                assert_eq!(buffer_row(buffer, row).trim(), expected);
+                for column in gutter..gutter + expected.len() as u16 {
+                    assert_eq!(
+                        buffer[(column, row)].fg,
+                        if color { Color::Yellow } else { Color::Reset },
+                        "warning style at width {width}, color {color}"
+                    );
+                }
+            }
+            assert!(buffer_row(buffer, wrapped.len() as u16 + 1).contains("Run outside"));
+        }
+    }
+}
+
+#[test]
 fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices() {
     use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
     for width in [120, 80, 50, 16] {
@@ -373,6 +441,12 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 2,
             ),
             (
+                "auto-edits-host",
+                vec![crate::presentation::HOST_SESSION_APPROVAL_HINT.into()],
+                vec![Yes, No],
+                1,
+            ),
+            (
                 "hostile",
                 vec![
                     crate::presentation::escape_terminal(
@@ -401,9 +475,12 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                             area,
                             &lines,
                             &choices,
-                            page,
-                            Some(focus),
-                            false,
+                            ToolApprovalFrameState {
+                                page,
+                                focus: Some(focus),
+                                review_notice: false,
+                                palette: Palette { color: false },
+                            },
                         );
                     })
                     .unwrap();
@@ -433,6 +510,25 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 page += 1;
             }
             let squashed = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+            if name == "auto-edits-host" {
+                let buffer = terminal.backend().buffer();
+                let dimmed = (0..50)
+                    .flat_map(|y| (0..width).map(move |x| &buffer[(x, y)]))
+                    .filter(|cell| cell.modifier.contains(Modifier::DIM))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert_eq!(
+                    dimmed
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>(),
+                    crate::presentation::HOST_SESSION_APPROVAL_HINT
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>(),
+                    "hint wraps in dim text at width {width}"
+                );
+            }
             if name == "multi-page" {
                 for line in body {
                     assert!(seen.contains(&line), "missing {line} at {width}");
@@ -441,7 +537,7 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
             }
             if name == "unguarded" {
                 assert!(
-                    squashed.contains("this identical command in this live session (unguarded)"),
+                    squashed.contains("2. Yes, for this session"),
                     "{width}: {squashed}"
                 );
             }
@@ -463,7 +559,16 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 .draw(|frame| {
                     let area = Rect::new(0, 50 - height, width, height);
                     crate::terminal::view::draw_tool_approval_frame(
-                        frame, area, &lines, &choices, 0, None, false,
+                        frame,
+                        area,
+                        &lines,
+                        &choices,
+                        ToolApprovalFrameState {
+                            page: 0,
+                            focus: None,
+                            review_notice: false,
+                            palette: Palette { color: false },
+                        },
                     );
                 })
                 .unwrap();

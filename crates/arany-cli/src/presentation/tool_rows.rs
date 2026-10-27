@@ -254,16 +254,28 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
                 if count == 1 { singular } else { plural }
             )
         };
-        if counts.iter().any(|count| *count > 0) {
-            format!(
-                " · {} ({}), {}, {}",
-                noun(counts[0], "ignored entry", "ignored entries"),
-                noun(counts[1], "pruned root", "pruned roots"),
-                noun(counts[2], "oversized input", "oversized inputs"),
-                noun(counts[3], "discarded output", "discarded outputs")
-            )
-        } else {
+        let [ignored, pruned, oversized, discarded] = counts;
+        let mut parts = Vec::new();
+        match (ignored, pruned) {
+            (0, 0) => {}
+            (0, _) => parts.push(noun(pruned, "pruned root", "pruned roots")),
+            (_, 0) => parts.push(noun(ignored, "ignored entry", "ignored entries")),
+            _ => parts.push(format!(
+                "{} ({})",
+                noun(ignored, "ignored entry", "ignored entries"),
+                noun(pruned, "pruned root", "pruned roots")
+            )),
+        }
+        if oversized > 0 {
+            parts.push(noun(oversized, "oversized input", "oversized inputs"));
+        }
+        if discarded > 0 {
+            parts.push(noun(discarded, "discarded output", "discarded outputs"));
+        }
+        if parts.is_empty() {
             String::new()
+        } else {
+            format!(" · {}", parts.join(", "))
         }
     };
     let diagnostic = if observation.disposition == arany::ToolDisposition::Failed
@@ -293,6 +305,8 @@ fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
     }
 }
 
+pub(crate) const HOST_SENSITIVE_PATH_WARNING: &str = "SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.";
+
 pub fn unguarded_approval_lines(
     intent: &arany::EffectIntent,
     prompt: &arany::UnguardedPrompt,
@@ -307,7 +321,11 @@ pub fn unguarded_approval_lines(
     else {
         return tool_approval_lines(intent);
     };
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    if prompt.sensitive {
+        lines.push(HOST_SENSITIVE_PATH_WARNING.into());
+    }
+    lines.extend([
         "Run outside the Guard? (unguarded)".to_owned(),
         "The primary asks to run this command on this machine with no sandbox.".into(),
         format!(
@@ -315,7 +333,7 @@ pub fn unguarded_approval_lines(
             escape_terminal(program),
             escape_terminal(&prompt.executable)
         ),
-    ];
+    ]);
     if args.is_empty() {
         lines.push("Args: none".into());
     } else {
@@ -347,9 +365,6 @@ pub fn unguarded_approval_lines(
         "Model's reason: {}",
         escape_terminal(justification)
     ));
-    if prompt.sensitive {
-        lines.push("SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.".into());
-    }
     if prompt.inactive_rules {
         lines.push(
             "Previous exact project approvals were archived intact under archive/inactive-host-commands; fresh approval is required.".into(),
@@ -684,11 +699,31 @@ pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>
     )
 }
 
+pub(crate) const HOST_SESSION_APPROVAL_HINT: &str =
+    "Shift+Tab to Request offers session approval for later eligible commands";
+// Linear input has no mode cycle, so it names the visual-mode route instead.
+pub(crate) const HOST_SESSION_APPROVAL_LINEAR_HINT: &str = "Session approval for later eligible commands needs Request approvals, selected with Shift+Tab in a visual mode";
+
+#[derive(Clone)]
 pub struct ToolApprovalPrompt {
     pub intent_id: uuid::Uuid,
     pub lines: Vec<String>,
     pub choices: Vec<ToolApprovalChoice>,
     pub unguarded: bool,
+}
+
+impl ToolApprovalPrompt {
+    pub fn for_mode(&self, mode: Option<arany::ApprovalMode>) -> Cow<'_, Self> {
+        if !self.unguarded
+            || mode != Some(arany::ApprovalMode::AutoEdits)
+            || self.choices.contains(&ToolApprovalChoice::ExactCommand)
+        {
+            return Cow::Borrowed(self);
+        }
+        let mut prompt = self.clone();
+        prompt.lines.push(HOST_SESSION_APPROVAL_HINT.into());
+        Cow::Owned(prompt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -706,9 +741,7 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes => "Yes",
             Self::AutoEdits => "Yes, and don't ask again for: file edits",
-            Self::ExactCommand => {
-                "Yes, and don't ask again for: this identical command in this live session (unguarded)"
-            }
+            Self::ExactCommand => "Yes, for this session",
             Self::HostPrefix => "Yes, and allow this host prefix in this folder from the next Run",
             Self::GitPrefix(prefix) => match prefix {
                 arany::permissions::TypedGitPrefix::Commit => {

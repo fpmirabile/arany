@@ -25,6 +25,16 @@ const PROBE_SLOT: &str = "credential-backend-probe";
 const EXIT_NOT_FOUND: u8 = 2;
 const EXIT_LOCKED: u8 = 3;
 const EXIT_IDENTITY_MISMATCH: u8 = 4;
+const LOCKED_CATEGORIES: [&str; 8] = [
+    "ERR_SEC_WR_PERM",
+    "ERR_SEC_INVALID_OWNER_EDIT",
+    "ERR_SEC_NOT_AVAILABLE",
+    "ERR_SEC_READ_ONLY",
+    "ERR_SEC_AUTH_FAILED",
+    "ERR_SEC_NO_SUCH_KEYCHAIN",
+    "ERR_SEC_INVALID_KEYCHAIN",
+    "ERR_SEC_INTERACTION_NOT_ALLOWED",
+];
 
 pub(super) fn probe_backend() -> Result<(), CredentialError> {
     invoke("probe", PROBE_SLOT, None).map(|_| ())
@@ -203,8 +213,12 @@ fn invoke_command(
         });
         let reader = scope.spawn(move || {
             let mut bytes = Vec::new();
+            let capture_limit = LOCKED_CATEGORIES
+                .iter()
+                .map(|category| category.len())
+                .fold(limit, usize::max);
             output
-                .take((limit + 1) as u64)
+                .take((capture_limit + 1) as u64)
                 .read_to_end(&mut bytes)
                 .map_err(|_| CredentialError::Unavailable)?;
             Ok::<_, CredentialError>(bytes)
@@ -275,7 +289,22 @@ fn helper_reply(
             }
         }
         Some(EXIT_NOT_FOUND) if matches!(operation, "read" | "probe" | "authorize") => Ok(None),
-        Some(EXIT_LOCKED) if output.is_empty() => Err(CredentialError::Locked),
+        Some(EXIT_LOCKED) => {
+            if output.is_empty() {
+                return Err(CredentialError::Locked);
+            }
+            let category = LOCKED_CATEGORIES
+                .iter()
+                .find(|category| category.as_bytes() == output)
+                .ok_or(CredentialError::Unavailable)?;
+            if cfg!(debug_assertions) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "credential store refused access: {category}"
+                );
+            }
+            Err(CredentialError::Locked)
+        }
         Some(EXIT_IDENTITY_MISMATCH) if operation == "authorize" => {
             Err(CredentialError::InvalidAccount)
         }
@@ -391,6 +420,86 @@ mod tests {
                 "A".repeat(43)
             )
         );
+    }
+
+    #[test]
+    fn locked_categories_cross_bounded_pipes_without_disclosing_other_output() {
+        const CHILD: &str = "ARANY_TEST_LOCKED_PROTOCOL";
+        const OPERATIONS: [&str; 5] = ["read", "probe", "authorize", "write", "delete"];
+        const CANARY: &str = "private-protocol-canary";
+        if std::env::var_os(CHILD).is_none() {
+            let test = std::thread::current().name().unwrap().to_owned();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", &test, "--nocapture"])
+                .env_clear()
+                .env(CHILD, "1")
+                .current_dir("/");
+            let output = crate::test_process::file_output(&mut command, None);
+            assert!(output.status.success(), "isolated Locked protocol failed");
+            crate::test_process::assert_single_test_completed(&output.stdout, &test);
+            let expected = LOCKED_CATEGORIES
+                .iter()
+                .filter(|_| cfg!(debug_assertions))
+                .map(|category| {
+                    format!("credential store refused access: {category}\n")
+                        .repeat(OPERATIONS.len())
+                })
+                .collect::<String>();
+            assert!(
+                output.stderr == expected.as_bytes(),
+                "closed diagnostics only"
+            );
+            assert!(
+                !output
+                    .stdout
+                    .windows(CANARY.len())
+                    .any(|part| part == CANARY.as_bytes()),
+                "rejected helper output must stay private"
+            );
+            return;
+        }
+        let malformed = [
+            CANARY.to_owned(),
+            format!("{}\n", LOCKED_CATEGORIES[0]),
+            LOCKED_CATEGORIES.concat(),
+        ];
+        for (payload, accepted) in LOCKED_CATEGORIES
+            .iter()
+            .copied()
+            .map(|category| (category, true))
+            .chain(malformed.iter().map(|payload| (payload.as_str(), false)))
+        {
+            for operation in OPERATIONS {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args([
+                        "-c",
+                        "/bin/cat >/dev/null; printf '%s' \"$1\"; exit 3",
+                        "helper",
+                        payload,
+                    ])
+                    .env_clear()
+                    .current_dir("/");
+                let expected = match (accepted, operation) {
+                    (true, _) => CredentialError::Locked,
+                    (false, "write") => CredentialError::WriteOutcomeUnknown,
+                    (false, "delete") => CredentialError::DeleteOutcomeUnknown,
+                    (false, _) => CredentialError::Unavailable,
+                };
+                assert!(
+                    invoke_command(
+                        command,
+                        operation,
+                        None,
+                        0,
+                        DEADLINE,
+                        &AtomicBool::new(false)
+                    ) == Err(expected),
+                    "closed Locked reply for {operation}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -756,6 +865,19 @@ fn valid_authorized_record(slot: &str, record: &str, expected: Option<(Uuid, Str
         }
 }
 
+fn locked_reply(_error: &(dyn std::error::Error + Send + Sync + 'static)) -> ExitCode {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(category) = macos::locked_category(_error) else {
+            return ExitCode::FAILURE;
+        };
+        if std::io::stdout().write_all(category.as_bytes()).is_err() {
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::from(EXIT_LOCKED)
+}
+
 pub(super) fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(2);
     let (Some(operation), Some(slot)) = (args.next(), args.next()) else {
@@ -804,12 +926,12 @@ pub(super) fn main() -> ExitCode {
                 }
             }
             Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
             Err(_) => ExitCode::FAILURE,
         },
         "probe" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
             Ok(_) | Err(Error::NoEntry) => ExitCode::SUCCESS,
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
             Err(_) => ExitCode::FAILURE,
         },
         "read" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
@@ -822,7 +944,7 @@ pub(super) fn main() -> ExitCode {
             }
             Ok(_) => ExitCode::FAILURE,
             Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
             Err(_) => ExitCode::FAILURE,
         },
         "write" => {
@@ -844,13 +966,13 @@ pub(super) fn main() -> ExitCode {
             }
             match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
+                Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
                 Err(_) => ExitCode::FAILURE,
             }
         }
         "delete" => match Entry::new(SERVICE, slot).and_then(|entry| entry.delete_credential()) {
             Ok(()) | Err(Error::NoEntry) => ExitCode::SUCCESS,
-            Err(Error::NoStorageAccess(_)) => ExitCode::from(EXIT_LOCKED),
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
             Err(_) => ExitCode::FAILURE,
         },
         _ => ExitCode::FAILURE,
