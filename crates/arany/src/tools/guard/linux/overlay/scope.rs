@@ -323,7 +323,7 @@ impl View {
                     ))
                 })
                 .collect::<Result<Vec<_>, ToolError>>()?;
-            crate::tools::fs::command::overlay::capture_roots(&roots, deadline)
+            crate::tools::fs::command::overlay::capture_roots(&roots, deadline, self.bytes)
         })();
         let report = Completion {
             digest: self.grant.digest,

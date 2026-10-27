@@ -15,22 +15,28 @@ enum OverlayCase {
     ModeZero,
     NoSpace,
     Deletion,
+    DeleteDrift,
+    CopyUps,
     Recreation,
     HostEdit,
     HostCreate,
 }
 
-const OVERLAY_CASES: [OverlayCase; 10] = [
+const OVERLAY_CASES: [OverlayCase; 9] = [
     OverlayCase::Reads,
     OverlayCase::Writes,
     OverlayCase::SpillMerge,
     OverlayCase::IgnoredClean,
     OverlayCase::ModeZero,
     OverlayCase::NoSpace,
-    OverlayCase::Deletion,
     OverlayCase::Recreation,
     OverlayCase::HostEdit,
     OverlayCase::HostCreate,
+];
+const PUBLICATION_OVERLAY_CASES: [OverlayCase; 3] = [
+    OverlayCase::Deletion,
+    OverlayCase::DeleteDrift,
+    OverlayCase::CopyUps,
 ];
 const NARROW_OVERLAY_CASES: [OverlayCase; 4] = [
     OverlayCase::Narrow,
@@ -47,12 +53,14 @@ impl OverlayCase {
             | Self::ModeZero
             | Self::NoSpace
             | Self::Narrow
-            | Self::NarrowNoSpace => true,
+            | Self::NarrowNoSpace
+            | Self::Deletion => true,
             Self::Reads
             | Self::FileOnly
             | Self::NarrowReplacement
             | Self::IgnoredClean
-            | Self::Deletion
+            | Self::DeleteDrift
+            | Self::CopyUps
             | Self::Recreation
             | Self::HostEdit
             | Self::HostCreate => false,
@@ -61,7 +69,7 @@ impl OverlayCase {
 
     fn refused(self) -> bool {
         match self {
-            Self::Deletion
+            Self::DeleteDrift
             | Self::Recreation
             | Self::HostEdit
             | Self::HostCreate
@@ -74,13 +82,15 @@ impl OverlayCase {
             | Self::SpillMerge
             | Self::IgnoredClean
             | Self::ModeZero
-            | Self::NoSpace => false,
+            | Self::NoSpace
+            | Self::Deletion
+            | Self::CopyUps => false,
         }
     }
 
     fn host_path(self) -> Option<&'static str> {
         match self {
-            Self::HostEdit | Self::NarrowReplacement => Some("src/current.txt"),
+            Self::HostEdit | Self::DeleteDrift | Self::NarrowReplacement => Some("src/current.txt"),
             Self::HostCreate => Some("created"),
             Self::Reads
             | Self::Narrow
@@ -92,6 +102,7 @@ impl OverlayCase {
             | Self::ModeZero
             | Self::NoSpace
             | Self::Deletion
+            | Self::CopyUps
             | Self::Recreation => None,
         }
     }
@@ -104,10 +115,12 @@ impl OverlayCase {
             | Self::IgnoredClean
             | Self::ModeZero
             | Self::Narrow
-            | Self::FileOnly => ToolDisposition::Succeeded,
+            | Self::FileOnly
+            | Self::Deletion
+            | Self::CopyUps => ToolDisposition::Succeeded,
             Self::NoSpace | Self::NarrowNoSpace => ToolDisposition::Failed,
-            Self::Deletion | Self::Recreation => ToolDisposition::Denied,
-            Self::HostEdit | Self::HostCreate | Self::NarrowReplacement => {
+            Self::Recreation => ToolDisposition::Denied,
+            Self::HostEdit | Self::HostCreate | Self::DeleteDrift | Self::NarrowReplacement => {
                 ToolDisposition::Conflict
             }
         }
@@ -128,6 +141,8 @@ impl std::fmt::Display for OverlayCase {
             Self::ModeZero => "mode-zero",
             Self::NoSpace => "no-space",
             Self::Deletion => "deletion",
+            Self::DeleteDrift => "delete-drift",
+            Self::CopyUps => "copy-ups",
             Self::Recreation => "recreation",
             Self::HostEdit => "host-edit",
             Self::HostCreate => "host-create",
@@ -142,6 +157,15 @@ impl std::fmt::Display for OverlayCase {
 )]
 fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
     overlay_journey(&OVERLAY_CASES);
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux overlay deletion and copy-up publication and closed replay"
+)]
+fn overlay_deletion_and_copyups_reopen_without_execution() {
+    overlay_journey(&PUBLICATION_OVERLAY_CASES);
 }
 
 #[test]
@@ -217,6 +241,18 @@ fn overlay_fixture(case: OverlayCase) -> SpillFixture {
     std::os::unix::fs::symlink("package/input", fixture.workspace.join("node_modules/link"))
         .unwrap();
     private_file(&fixture.workspace.join("released"), b"hold\n");
+    if case == OverlayCase::CopyUps {
+        private_file(
+            &fixture.workspace.join(".gitignore"),
+            b"node_modules/\ndist/\nsrc/gen/\n",
+        );
+        for index in 0..=arany::test_support::max_changeset_files() {
+            private_file(
+                &fixture.workspace.join(format!("src/copy-{index}")),
+                b"unchanged",
+            );
+        }
+    }
     if case == OverlayCase::Writes {
         let mut acl = 2u32.to_le_bytes().to_vec();
         for (tag, permissions) in [(1u16, 6u16), (4, 4), (16, 4), (32, 0)] {
@@ -253,6 +289,8 @@ fn configure_narrow_grants(fixture: &SpillFixture, config: &mut Value, case: Ove
         | OverlayCase::ModeZero
         | OverlayCase::NoSpace
         | OverlayCase::Deletion
+        | OverlayCase::DeleteDrift
+        | OverlayCase::CopyUps
         | OverlayCase::Recreation
         | OverlayCase::HostEdit
         | OverlayCase::HostCreate => return,
@@ -305,6 +343,12 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
             "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=node_modules/fill bs=1M count=300"
         }
         OverlayCase::Deletion => "rm src/current.txt",
+        OverlayCase::CopyUps => {
+            "set -eu; : >> large; for file in src/copy-*; do : >> \"$file\"; done; : >> src/current.txt"
+        }
+        OverlayCase::DeleteDrift => {
+            "while read -r signal < released && test \"$signal\" = hold; do :; done; rm src/current.txt"
+        }
         OverlayCase::Recreation => "rm -rf src; mkdir src; printf recreated > src/current.txt",
         OverlayCase::HostEdit | OverlayCase::HostCreate => {
             "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt; printf candidate > created"
@@ -385,7 +429,14 @@ async fn overlay_case(case: OverlayCase) {
             panic!("Workspace overlay {case} Engine failed: {error:?}");
         })
     };
-    let (outcome, ()) = tokio::join!(running, mutate);
+    let outcome = {
+        tokio::pin!(running);
+        tokio::pin!(mutate);
+        tokio::select! {
+            outcome = &mut running => outcome,
+            () = &mut mutate => (&mut running).await,
+        }
+    };
     check_overlay_case(fixture, &provider, outcome, case).await;
 }
 
@@ -403,6 +454,25 @@ async fn check_overlay_case(
     assert_eq!(view.runs[0], outcome.run);
     assert_eq!(events.iter().any(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))), publishes, "{case}");
     if publishes {
+        if case == OverlayCase::Deletion {
+            assert_eq!(
+                outcome.run.tools[1].checkpoint.as_ref().unwrap().status,
+                arany::CheckpointStatus::Captured
+            );
+            let ToolCall::ApplyChangeset {
+                source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            } = &outcome.run.tools[1].intent.call
+            else {
+                panic!("expected deletion integration")
+            };
+            assert_eq!(changeset.files.len(), 1);
+            assert_eq!(changeset.files[0].path, "src/current.txt");
+            assert_eq!(
+                changeset.files[0].before.as_ref().unwrap().bytes().unwrap(),
+                b"current"
+            );
+            assert!(changeset.files[0].after.is_none());
+        }
         assert!(
             outcome.run.tools[1]
                 .observation
@@ -497,6 +567,9 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
                     .exists()
             );
         }
+        if case == OverlayCase::CopyUps {
+            assert_eq!(result["selection"]["discarded_outputs"], 0);
+        }
         if matches!(case, OverlayCase::NoSpace | OverlayCase::NarrowNoSpace) {
             assert!(
                 result["stderr"]
@@ -521,21 +594,28 @@ fn check_overlay_files(workspace: &std::path::Path, case: OverlayCase) {
     let expected: &[u8] = match case {
         OverlayCase::Writes | OverlayCase::Narrow => b"private edit",
         OverlayCase::NoSpace | OverlayCase::NarrowNoSpace => b"partial",
-        OverlayCase::HostEdit | OverlayCase::NarrowReplacement => b"host",
+        OverlayCase::HostEdit | OverlayCase::DeleteDrift | OverlayCase::NarrowReplacement => {
+            b"host"
+        }
         OverlayCase::Reads
         | OverlayCase::FileOnly
         | OverlayCase::SpillMerge
         | OverlayCase::IgnoredClean
         | OverlayCase::ModeZero
         | OverlayCase::Deletion
+        | OverlayCase::CopyUps
         | OverlayCase::Recreation
         | OverlayCase::HostCreate => b"current",
     };
-    assert_eq!(
-        std::fs::read(workspace.join("src/current.txt")).unwrap(),
-        expected,
-        "{case}"
-    );
+    if case == OverlayCase::Deletion {
+        assert!(!workspace.join("src/current.txt").exists());
+    } else {
+        assert_eq!(
+            std::fs::read(workspace.join("src/current.txt")).unwrap(),
+            expected,
+            "{case}"
+        );
+    }
     if case == OverlayCase::NarrowReplacement {
         assert_eq!(
             std::fs::read(workspace.join("old-source/current.txt")).unwrap(),

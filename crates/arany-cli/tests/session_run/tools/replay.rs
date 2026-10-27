@@ -1666,11 +1666,7 @@ pub(super) async fn native_command_changeset_corpus(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
         );
-        let delete = if cfg!(target_os = "macos") {
-            "/usr/bin/find src/z-deleted -type f -delete"
-        } else {
-            ":"
-        };
+        let delete = "/usr/bin/find src/z-deleted -type f -delete";
         let suffix = if cfg!(target_os = "macos") {
             match case {
                 "directory-conversion" => {
@@ -1739,7 +1735,7 @@ pub(super) async fn native_command_changeset_corpus(
         if case == "nonzero" {
             calls.push(ToolCall::Command {
                 program: program.into(),
-                args: vec!["-c".into(), format!("set -eu; test -x src/a-created; printf '\\000\\377' | cmp - src/a-created; test \"$(cat src/m-modified)\" = modified; test {} src/z-deleted; printf fresh-binary-snapshot", if cfg!(target_os = "linux") { "-f" } else { "! -e" })],
+                args: vec!["-c".into(), "set -eu; test -x src/a-created; printf '\\000\\377' | cmp - src/a-created; test \"$(cat src/m-modified)\" = modified; test ! -e src/z-deleted; printf fresh-binary-snapshot".into()],
                 cwd: "".into(),
             });
         }
@@ -1814,11 +1810,7 @@ pub(super) async fn native_command_changeset_corpus(
                     .iter()
                     .map(|file| file.path.as_str())
                     .collect::<Vec<_>>(),
-                if cfg!(target_os = "linux") {
-                    vec!["src/a-created", "src/m-modified"]
-                } else {
-                    vec!["src/a-created", "src/m-modified", "src/z-deleted"]
-                }
+                vec!["src/a-created", "src/m-modified", "src/z-deleted"]
             );
             assert!(
                 !workspace.join("src/a-created").exists(),
@@ -1840,7 +1832,7 @@ pub(super) async fn native_command_changeset_corpus(
                     drop(action);
                 }
                 "conflict" => {
-                    crate::private_file(&workspace.join("src/m-modified"), b"concurrent\n");
+                    crate::private_file(&workspace.join("src/z-deleted"), b"concurrent\n");
                     action.decide(true);
                 }
                 _ => unreachable!(),
@@ -2313,10 +2305,9 @@ pub(super) async fn native_command_changeset_corpus(
                     16 * 1024
                 );
             }
-            assert_eq!(
-                workspace.join("src/z-deleted").exists(),
-                cfg!(target_os = "linux"),
-                "{case}: deletion support matches the platform contract: {:?}",
+            assert!(
+                !workspace.join("src/z-deleted").exists(),
+                "{case}: deletion was published: {:?}",
                 &tools[..2]
             );
         } else {
@@ -2326,16 +2317,16 @@ pub(super) async fn native_command_changeset_corpus(
             );
             assert_eq!(
                 std::fs::read(workspace.join("src/m-modified")).unwrap(),
-                if case == "conflict" {
-                    b"concurrent\n".as_slice()
-                } else {
-                    b"before\n".as_slice()
-                },
+                b"before\n".as_slice(),
                 "{case}"
             );
             assert_eq!(
                 std::fs::read(workspace.join("src/z-deleted")).unwrap(),
-                b"delete\n",
+                if case == "conflict" {
+                    b"concurrent\n".as_slice()
+                } else {
+                    b"delete\n".as_slice()
+                },
                 "{case}"
             );
             assert!(!workspace.join("src/hostile").exists());
