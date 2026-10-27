@@ -1748,9 +1748,14 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
     let account_home = temp.path().join("account-home");
     std::fs::create_dir(&account_home).unwrap();
     std::fs::set_permissions(&account_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for profile in [".profile", ".bash_profile", ".zprofile"] {
+        std::fs::write(account_home.join(profile), "export PATH=/bin:/usr/bin\nexport LANG=C\nexport CAPTURE_TOKEN=CAPTURE_SECRET_CANARY\n").unwrap();
+    }
     let account = account_home.join(".local/state/arany");
     super::isolation::remember_workspace_trust(&account, &workspace, &workspace);
     let state = temp.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":2,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"9cfab19c2eb7a19a3fad3ed741187ed439a24f3c2d0e76d04efe5c19298d4467"}"#).unwrap();
     let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
     let mut command = super::isolation::isolated_script(temp.path());
     command
@@ -1802,6 +1807,11 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut answered,
         "composer",
         &shows("Ask a question, or type / for commands"),
+    );
+    assert!(
+        super::session_picker::screen_rows(&transcript, 80, 24)
+            .join(" ")
+            .contains("Process PATH differs from the pinned")
     );
     input.write_all(b"/permissions\r").unwrap();
     until(
@@ -1856,15 +1866,101 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "command environment page",
         &shows("Select a name from the Arany process"),
     );
-    input.write_all(b"\x1b").unwrap();
+    macro_rules! review_capture {
+        () => {
+            loop {
+                until(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "capture approval review",
+                    &|screen| shows("Read all pages")(screen) || shows("Tab/Enter")(screen),
+                );
+                if shows("Tab/Enter")(&transcript) {
+                    break;
+                }
+                let page = super::session_picker::screen_rows(&transcript, 80, 24)
+                    .into_iter()
+                    .find(|line| line.contains("PgDn/Enter"));
+                input.write_all(b"\r").unwrap();
+                until(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "next capture review page",
+                    &|screen| {
+                        shows("Tab/Enter")(screen)
+                            || (shows("Read all pages")(screen)
+                                && super::session_picker::screen_rows(screen, 80, 24)
+                                    .into_iter()
+                                    .find(|line| line.contains("PgDn/Enter"))
+                                    != page)
+                    },
+                );
+            }
+        };
+    }
+    let environment_file = state.join("command-environment.json");
+    let previous = std::fs::read(&environment_file).unwrap();
+    input.write_all(b"\x1b[B\r").unwrap();
+    review_capture!();
+    input.write_all(b"\r").unwrap();
     until(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        "command environment cancellation",
-        &shows("Command environment unchanged"),
+        "capture declined",
+        &shows("Login-shell capture declined"),
     );
+    assert_eq!(std::fs::read(&environment_file).unwrap(), previous);
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "capture area",
+        &shows("Choose what to manage"),
+    );
+    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "capture page",
+        &shows("Select a name from the Arany process"),
+    );
+    input.write_all(b"\x1b[B\r").unwrap();
+    review_capture!();
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "capture saved",
+        &shows("Login-shell environment captured"),
+    );
+    let captured_bytes = std::fs::read(&environment_file).unwrap();
+    let captured: serde_json::Value = serde_json::from_slice(&captured_bytes).unwrap();
+    assert_eq!(captured["source"], "login-shell");
+    assert_eq!(captured["path"], serde_json::json!(["/bin", "/usr/bin"]));
+    assert!(captured["shell"]["sha256"].as_str().is_some());
+    for bytes in [
+        &captured_bytes,
+        &transcript,
+        &std::fs::read(state.join("events.sqlite3")).unwrap(),
+    ] {
+        assert!(
+            !bytes
+                .windows(b"CAPTURE_SECRET_CANARY".len())
+                .any(|part| part == b"CAPTURE_SECRET_CANARY")
+        );
+    }
     input.write_all(b"/permissions\r").unwrap();
     until(
         &mut output,

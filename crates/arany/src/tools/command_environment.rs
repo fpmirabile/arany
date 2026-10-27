@@ -1,11 +1,12 @@
 use super::ToolError;
-use crate::store::{RecordFormat, RecordKind, StateRoot};
+use crate::session::LoginShellIdentity;
+use crate::store::{RecordFormat, RecordKind, RecordStep, StateRoot};
 use crate::validate::{MAX_PATH_BYTES, digest, hex_digest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const MAX_NAMES: usize = 32;
 const MAX_PATH_ENTRIES: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -22,6 +23,7 @@ const SECRET_PATTERNS: [&str; 3] = ["KEY", "SECRET", "TOKEN"];
 #[serde(rename_all = "kebab-case")]
 enum Source {
     Process,
+    LoginShell,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -36,6 +38,7 @@ struct Variable {
 pub struct CommandEnvironment {
     version: u8,
     source: Source,
+    shell: Option<LoginShellIdentity>,
     captured_at: u64,
     path: Vec<String>,
     names: Vec<Variable>,
@@ -73,8 +76,11 @@ pub(crate) const COMMAND_ENVIRONMENT: RecordFormat = RecordFormat {
     kind: RecordKind::CommandEnvironment,
     field: "version",
     floor: 1,
-    current: 1,
-    steps: &[],
+    current: 2,
+    steps: &[RecordStep {
+        from: 1,
+        transform: upgrade_v1,
+    }],
     accepts: |bytes| CommandEnvironment::parse(bytes).is_ok(),
 };
 
@@ -182,7 +188,29 @@ impl CommandEnvironment {
     pub fn source(&self) -> &'static str {
         match self.source {
             Source::Process => "process",
+            Source::LoginShell => "login-shell",
         }
+    }
+
+    pub fn shell(&self) -> Option<&LoginShellIdentity> {
+        self.shell.as_ref()
+    }
+
+    pub fn process_path_differs(&self) -> bool {
+        std::env::var_os("PATH").unwrap_or_default() != std::ffi::OsString::from(self.path_string())
+    }
+
+    pub(crate) fn replace_captured(
+        &self,
+        state: &StateRoot,
+        expected: &str,
+    ) -> Result<(), CommandEnvironmentError> {
+        locked(state, || {
+            if Self::current_or_init(state)?.sha256 != expected {
+                return Err(CommandEnvironmentError::Invalid);
+            }
+            self.write(state)
+        })
     }
 
     pub fn path(&self) -> &[String] {
@@ -261,6 +289,7 @@ impl CommandEnvironment {
         serde_json::to_vec(&(
             self.version,
             self.source,
+            &self.shell,
             self.captured_at,
             &self.path,
             &self.names,
@@ -311,6 +340,7 @@ impl CommandEnvironment {
         let mut record = Self {
             version: VERSION,
             source: Source::Process,
+            shell: None,
             captured_at: super::now_ms(),
             path,
             names,
@@ -326,6 +356,7 @@ impl CommandEnvironment {
         let mut record = Self {
             version: VERSION,
             source: Source::Process,
+            shell: None,
             captured_at: 0,
             path: Vec::new(),
             names: Vec::new(),
@@ -337,12 +368,20 @@ impl CommandEnvironment {
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
+        if bytes.len() > RecordKind::CommandEnvironment.limit() {
+            return Err(ToolError::Configuration);
+        }
         let record: Self = serde_json::from_slice(bytes).map_err(|_| ToolError::Configuration)?;
         let sorted = |names: &mut dyn Iterator<Item = &str>| {
             let names: Vec<_> = names.collect();
             names.windows(2).all(|pair| pair[0] < pair[1])
         };
         if record.version != VERSION
+            || !match (&record.source, &record.shell) {
+                (Source::Process, None) => true,
+                (Source::LoginShell, Some(shell)) => shell.valid(),
+                _ => false,
+            }
             || record.path.len() > MAX_PATH_ENTRIES
             || !record.path.iter().all(|entry| valid_entry(entry))
             || record.path_string().len() > PATH_LIMIT_BYTES
@@ -360,6 +399,59 @@ impl CommandEnvironment {
             || record.sha256 != hex_digest(&record.canonical())
         {
             return Err(ToolError::Configuration);
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn capture_output(
+        &self,
+        shell: LoginShellIdentity,
+        bytes: &[u8],
+    ) -> Result<Self, CommandEnvironmentError> {
+        if !bytes.ends_with(&[0]) {
+            return Err(CommandEnvironmentError::Invalid);
+        }
+        let mut values = BTreeMap::new();
+        let mut excluded = Vec::new();
+        for entry in bytes[..bytes.len() - 1].split(|byte| *byte == 0) {
+            let split = entry
+                .iter()
+                .position(|byte| *byte == b'=')
+                .ok_or(CommandEnvironmentError::Invalid)?;
+            let name = std::str::from_utf8(&entry[..split])
+                .map_err(|_| CommandEnvironmentError::Invalid)?;
+            if !valid_name(name) {
+                return Err(CommandEnvironmentError::Invalid);
+            }
+            if secret(name) {
+                excluded.push(name.to_owned());
+            } else if name == "PATH" || self.names().any(|(selected, _)| selected == name) {
+                let value = std::str::from_utf8(&entry[split + 1..])
+                    .map_err(|_| CommandEnvironmentError::Invalid)?;
+                if values.insert(name.to_owned(), value.to_owned()).is_some() {
+                    return Err(CommandEnvironmentError::Invalid);
+                }
+            }
+        }
+        excluded.sort();
+        excluded.dedup();
+        if excluded.len() > MAX_NAMES || !values.contains_key("PATH") {
+            return Err(CommandEnvironmentError::Invalid);
+        }
+        let mut record = Self::derive(|name| values.get(name).cloned())?;
+        for (name, value) in &values {
+            if !CORE_NAMES.contains(&name.as_str()) {
+                record.select_from(name, |_| Some(value.clone()))?;
+            }
+        }
+        record.source = Source::LoginShell;
+        record.shell = Some(shell);
+        record.excluded = excluded;
+        record.seal();
+        if serde_json::to_vec(&record).expect("typed record").len()
+            > RecordKind::CommandEnvironment.limit()
+        {
+            return Err(CommandEnvironmentError::TooLarge("record"));
         }
         Ok(record)
     }
@@ -386,9 +478,103 @@ impl CommandEnvironment {
     }
 }
 
+fn upgrade_v1(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let fields = value.as_object()?;
+    if fields.len() != 7 || fields.get("source")?.as_str()? != "process" {
+        return None;
+    }
+    let canonical = serde_json::to_vec(&(
+        1_u8,
+        Source::Process,
+        fields.get("captured_at")?.as_u64()?,
+        fields.get("path")?,
+        fields.get("names")?,
+        fields.get("excluded")?,
+    ))
+    .ok()?;
+    if fields.get("sha256")?.as_str()? != hex_digest(&canonical) {
+        return None;
+    }
+    value["version"] = VERSION.into();
+    value["shell"] = serde_json::Value::Null;
+    let mut record: CommandEnvironment = serde_json::from_value(value).ok()?;
+    record.seal();
+    let bytes = serde_json::to_vec(&record).ok()?;
+    CommandEnvironment::parse(&bytes).ok()?;
+    serde_json::to_value(record).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shell() -> LoginShellIdentity {
+        LoginShellIdentity {
+            path: "/bin/sh".into(),
+            device: 1,
+            inode: 2,
+            sha256: "1".repeat(64),
+        }
+    }
+
+    #[test]
+    fn login_capture_filters_secrets_preserves_selection_and_rejects_malformed_output() {
+        let record = CommandEnvironment::for_path("/bin")
+            .with_name("LANG", "C")
+            .with_name("BUILD_MODE", "debug");
+        let captured = record.capture_output(shell(), b"PATH=/usr/bin:/bin\0LANG=en_US.UTF-8\0HOME=/private\0BUILD_MODE=release\0API_TOKEN=CAPTURE_SECRET_CANARY\0client_secret=CAPTURE_SECRET_CANARY\0UNSELECTED=hidden\0").unwrap();
+        assert_eq!(captured.source(), "login-shell");
+        assert_eq!(captured.shell(), Some(&shell()));
+        assert_eq!(
+            captured.names().collect::<Vec<_>>(),
+            [("BUILD_MODE", "release"), ("LANG", "en_US.UTF-8")]
+        );
+        assert_eq!(captured.excluded, ["API_TOKEN", "client_secret"]);
+        let bytes = serde_json::to_vec(&captured).unwrap();
+        assert!(
+            !bytes
+                .windows(b"CAPTURE_SECRET_CANARY".len())
+                .any(|part| part == b"CAPTURE_SECRET_CANARY")
+        );
+        assert_eq!(CommandEnvironment::parse(&bytes).unwrap(), captured);
+        for bytes in [
+            b"PATH=/bin".as_slice(),
+            b"startup banner\0PATH=/bin\0",
+            b"PATH=/bin\0PATH=/usr/bin\0",
+            b"LANG=C\0",
+            b"PATH=/bin\0LANG=\xff\0",
+        ] {
+            assert!(record.capture_output(shell(), bytes).is_err());
+        }
+        assert_ne!(record.digest(), captured.digest());
+    }
+
+    #[test]
+    fn capture_replacement_refuses_editor_drift_and_preserves_prior_bytes() {
+        let (_temp, state) = state();
+        let before = CommandEnvironment::load(&state).unwrap();
+        let captured = before
+            .capture_output(shell(), b"PATH=/bin\0LANG=C\0")
+            .unwrap();
+        CommandEnvironment::edit(&state, |record| {
+            record.captured_at += 1;
+            record.seal();
+            Ok(())
+        })
+        .unwrap();
+        let prior = state.record(RecordKind::CommandEnvironment).read().unwrap();
+        assert_eq!(
+            captured.replace_captured(&state, before.sha256()),
+            Err(CommandEnvironmentError::Invalid)
+        );
+        assert_eq!(
+            state.record(RecordKind::CommandEnvironment).read().unwrap(),
+            prior
+        );
+        let current = CommandEnvironment::load(&state).unwrap();
+        captured.replace_captured(&state, current.sha256()).unwrap();
+        assert_eq!(CommandEnvironment::load(&state).unwrap(), captured);
+    }
 
     fn state() -> (tempfile::TempDir, StateRoot) {
         let temp = tempfile::tempdir().unwrap();
@@ -477,7 +663,7 @@ mod tests {
         let good = serde_json::to_value(&record).unwrap();
         assert!(CommandEnvironment::parse(good.to_string().as_bytes()).is_ok());
         let mutations: [(&str, serde_json::Value); 5] = [
-            ("version", 2.into()),
+            ("version", 3.into()),
             ("path", serde_json::json!(["relative"])),
             ("path", serde_json::json!(["/a:b"])),
             (

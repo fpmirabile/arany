@@ -5352,6 +5352,7 @@ mod pointer_tests {
                     goals: Vec::new(),
                     pending_provider_setup_edit: None,
                     provider_setup_uncertain: false,
+                    environment_capture: None,
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
@@ -5430,6 +5431,7 @@ mod pointer_tests {
                     goals: Vec::new(),
                     pending_provider_setup_edit: None,
                     provider_setup_uncertain: false,
+                    environment_capture: None,
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;

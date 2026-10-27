@@ -889,7 +889,12 @@ impl AttachedSession {
             Some(permissions::PermissionArea::CommandEnvironment) => {
                 let outcome = permissions::manage_command_environment(
                     &mut self.terminal,
-                    &self.admission.state_dir,
+                    permissions::EnvironmentSession {
+                        engine: &self.engine,
+                        admission: &self.admission,
+                        id: &mut self.session_id,
+                        view: &mut self.view,
+                    },
                 )
                 .await?;
                 self.terminal

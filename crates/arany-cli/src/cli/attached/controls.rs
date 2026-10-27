@@ -1501,6 +1501,7 @@ mod tests {
             goals: Vec::new(),
             pending_provider_setup_edit: None,
             provider_setup_uncertain: false,
+            environment_capture: None,
             runs: Vec::new(),
             compactions: Vec::new(),
         };
@@ -2141,6 +2142,7 @@ mod tests {
             goals: Vec::new(),
             pending_provider_setup_edit: None,
             provider_setup_uncertain: false,
+            environment_capture: None,
             runs: Vec::new(),
             compactions: Vec::new(),
         };

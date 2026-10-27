@@ -97,6 +97,10 @@ pub use session::{
     UsageView, WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
+pub use session::{
+    EnvironmentCaptureEvent, EnvironmentCaptureIntent, EnvironmentCapturePhase,
+    EnvironmentCaptureStage, EnvironmentCaptureView, LoginShellIdentity,
+};
 pub use session::{rewind, worker};
 pub use store::{
     ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, InspectedEvent,
