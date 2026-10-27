@@ -34,7 +34,7 @@ fn supervisor_pin_rejects_same_path_content_and_identity_replacement() {
     std::fs::rename(replacement, &path).unwrap();
     assert!(matches!(pin.verify(&path), Err(ToolError::ChangedInput)));
     let large = std::fs::File::create(&path).unwrap();
-    large.set_len(MAX_EXECUTABLE_BYTES + 1).unwrap();
+    large.set_len(MAX_SUPERVISOR_EXECUTABLE_BYTES + 1).unwrap();
     assert!(Pin::read(&path).is_err());
     let fifo = root.path().join("pipe");
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();

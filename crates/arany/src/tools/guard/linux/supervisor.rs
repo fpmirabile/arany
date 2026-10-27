@@ -1,5 +1,4 @@
 use super::*;
-use crate::tools::config::MAX_EXECUTABLE_BYTES;
 use nix::sched::{CloneFlags, unshare};
 use rustix::mount::{MountFlags, MountPropagationFlags};
 use rustix::thread::{self, CapabilitySet, CapabilitySets};
@@ -15,6 +14,7 @@ const PROBE_NAME: &str = "user.arany_probe";
 const PROBE_VALUE: &[u8] = b"arany";
 const MAX_SUPERVISOR_ARGUMENTS: usize = 4096;
 const MAX_PIN_BYTES: usize = 4096;
+pub(super) const MAX_SUPERVISOR_EXECUTABLE_BYTES: u64 = crate::tools::types::MEMORY_BYTES;
 pub(super) const TMPFS_INODES: u64 = (crate::tools::types::COMMAND_SCAN_ENTRIES
     + crate::tools::config::MAX_WORKSPACE_PATHS * 2
     + 2) as u64;
@@ -40,12 +40,15 @@ impl Pin {
     fn from_file(file: &mut std::fs::File) -> Result<Self, ToolError> {
         use sha2::{Digest, Sha256};
         let before = file.metadata().map_err(|_| ToolError::ChangedInput)?;
-        if !before.is_file() || before.mode() & 0o6022 != 0 || before.len() > MAX_EXECUTABLE_BYTES {
+        if !before.is_file()
+            || before.mode() & 0o6022 != 0
+            || before.len() > MAX_SUPERVISOR_EXECUTABLE_BYTES
+        {
             return Err(ToolError::ChangedInput);
         }
         let mut hash = Sha256::new();
         let mut buffer = [0; 64 * 1024];
-        let mut reader = (&mut *file).take(MAX_EXECUTABLE_BYTES + 1);
+        let mut reader = (&mut *file).take(MAX_SUPERVISOR_EXECUTABLE_BYTES + 1);
         let mut total = 0;
         loop {
             let count = reader
@@ -55,7 +58,7 @@ impl Pin {
                 break;
             }
             total += count as u64;
-            if total > MAX_EXECUTABLE_BYTES {
+            if total > MAX_SUPERVISOR_EXECUTABLE_BYTES {
                 return Err(ToolError::Limit);
             }
             hash.update(&buffer[..count]);
@@ -91,7 +94,6 @@ impl Pin {
 pub(super) struct Launch {
     pin: Pin,
     probe: Option<ProjectProbe>,
-    helper: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,18 +120,7 @@ impl Launch {
         } else {
             None
         };
-        let helper = seed.join("supervisor-executable");
-        match std::fs::File::create_new(&helper) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(ToolError::ProtectionUnavailable),
-        }
-        let target = crate::tools::fs::open_absolute(helper.to_str().ok_or(ToolError::Path)?)?;
-        let metadata = target.metadata().map_err(|_| ToolError::ChangedInput)?;
-        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() != 0 {
-            return Err(ToolError::ChangedInput);
-        }
-        Ok((Self { pin, probe, helper }, executable))
+        Ok((Self { pin, probe }, executable))
     }
 
     pub(super) fn append(&self, command: &mut Command, guard: &Path) -> Result<(), ToolError> {
@@ -143,11 +134,7 @@ impl Launch {
     }
 
     pub(super) fn helper_pin(&self) -> Result<String, ToolError> {
-        serde_json::to_string(&self.pin).map_err(|_| ToolError::Configuration)
-    }
-
-    pub(super) fn helper_path(&self) -> &Path {
-        &self.helper
+        serde_json::to_string(&self.pin.sha256).map_err(|_| ToolError::Configuration)
     }
 }
 
@@ -186,9 +173,12 @@ pub(in crate::tools::guard) fn verify_helper() -> Result<(), ToolError> {
     if encoded.len() > MAX_PIN_BYTES {
         return Err(ToolError::Limit);
     }
-    let pin: Pin = serde_json::from_str(encoded.to_str().ok_or(ToolError::Configuration)?)
+    let sha256: [u8; 32] = serde_json::from_str(encoded.to_str().ok_or(ToolError::Configuration)?)
         .map_err(|_| ToolError::Configuration)?;
-    pin.verify(Path::new("/proc/self/exe"))
+    if Pin::read(Path::new("/proc/self/exe"))?.sha256 != sha256 {
+        return Err(ToolError::ChangedInput);
+    }
+    verify_helper_mount()
 }
 
 pub(in crate::tools::guard) fn main() -> std::process::ExitCode {
@@ -230,12 +220,12 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
         serde_json::from_str(arguments[0].to_str().ok_or(ToolError::Configuration)?)
             .map_err(|_| ToolError::Configuration)?;
     launch.pin.verify(Path::new("/proc/self/exe"))?;
+    let executable = std::fs::File::open("/proc/self/exe").map_err(|_| ToolError::ChangedInput)?;
     if launch.probe.as_ref().is_some_and(|probe| {
         !probe.root.is_absolute()
             || probe.bytes == 0
             || probe.bytes > crate::tools::types::MAX_BUILD_PROJECT_BYTES
-    }) || !launch.helper.is_absolute()
-    {
+    }) {
         return Err(ToolError::Configuration);
     }
     let parent = profile::Namespaces::read()?;
@@ -248,55 +238,37 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
         *stage = super::super::BootstrapStage::RuntimeMounts;
         mount_probe(probe)?;
     }
-    *stage = super::super::BootstrapStage::RuntimeMounts;
-    bind_helper(&launch.helper)?;
     *stage = super::super::BootstrapStage::Capabilities;
     clear_capabilities()?;
     verify_capabilities(
         &thread_status(Path::new("/proc/self/status"))?.ok_or(ToolError::ProtectionUnavailable)?,
     )?;
     *stage = super::super::BootstrapStage::LauncherReap;
-    wait_bwrap(&arguments[2..])
+    wait_bwrap(&arguments[2..], &executable)
 }
 
-fn bind_helper(target: &Path) -> Result<(), ToolError> {
-    rustix::mount::mount_bind("/proc/self/exe", target)
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let flags = helper_mount_flags(target)? | MountFlags::RDONLY;
-    // Bind remounts replace per-mount flags, including restrictions locked by user namespaces.
-    rustix::mount::mount_remount(target, MountFlags::BIND | flags, "")
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    if helper_mount_flags(target)? != flags {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    Ok(())
-}
-
-fn helper_mount_flags(target: &Path) -> Result<MountFlags, ToolError> {
+fn verify_helper_mount() -> Result<(), ToolError> {
+    let target = PathBuf::from("/arany");
     let mounts = read_mountinfo()?;
-    verify_mount_entries(&mounts, &[target.to_owned()])?;
+    verify_mount_entries(&mounts, std::slice::from_ref(&target))?;
     let entry = mounts
         .iter()
         .find(|entry| entry.path == target)
         .ok_or(ToolError::ProtectionUnavailable)?;
-    entry
-        .options
-        .split(|byte| *byte == b',')
-        .try_fold(MountFlags::empty(), |flags, option| {
-            Ok(flags
-                | match option {
-                    b"rw" => MountFlags::empty(),
-                    b"ro" => MountFlags::RDONLY,
-                    b"nosuid" => MountFlags::NOSUID,
-                    b"nodev" => MountFlags::NODEV,
-                    b"noexec" => MountFlags::NOEXEC,
-                    b"noatime" => MountFlags::NOATIME,
-                    b"nodiratime" => MountFlags::NODIRATIME,
-                    b"relatime" => MountFlags::RELATIME,
-                    b"nosymfollow" => MountFlags::NOSYMFOLLOW,
-                    _ => return Err(ToolError::ProtectionUnavailable),
-                })
-        })
+    if entry.filesystem != b"tmpfs"
+        || entry.source != b"tmpfs"
+        || ![b"ro".as_slice(), b"nosuid", b"nodev"]
+            .iter()
+            .all(|expected| {
+                entry
+                    .options
+                    .split(|byte| *byte == b',')
+                    .any(|option| option == *expected)
+            })
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
 }
 
 fn enter() -> Result<(), ToolError> {
@@ -437,9 +409,17 @@ fn verify_capabilities(status: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn wait_bwrap(arguments: &[std::ffi::OsString]) -> Result<(), ToolError> {
+fn wait_bwrap(
+    arguments: &[std::ffi::OsString],
+    executable: &std::fs::File,
+) -> Result<(), ToolError> {
     use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, pidfd_open, waitid};
+    rustix::io::fcntl_setfd(executable, rustix::io::FdFlags::empty())
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
     let mut child = std::process::Command::new("/usr/bin/bwrap")
+        .args(["--perms", "0500", "--ro-bind-data"])
+        .arg(executable.as_raw_fd().to_string())
+        .arg("/arany")
         .args(arguments)
         .env_clear()
         .current_dir("/")

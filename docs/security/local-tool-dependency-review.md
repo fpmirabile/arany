@@ -38,8 +38,8 @@ enables the existing locked `nix 0.31.3` `sched` and `rustix 1.1.5` `mount`/`thr
 features in production. No package version, build script or application unsafe
 block is added. Cached published sources were inspected for the selected entrypoints:
 `nix::sched::unshare` checks the libc syscall result; rustix owns initialized
-mount/xattr/capability arguments and outputs, pidfds and wait status, including
-the private executable bind and read-only remount. The supervisor
+mount/xattr/capability arguments and outputs, pidfds, wait status and the
+explicit descriptor inheritance flags for bwrap setup. The supervisor
 runs before any Tokio runtime or payload thread, maps only the invoking IDs,
 clears all capability sets and sets NNP before fork, and uses owned pidfds with
 `waitid(EXITED | NOWAIT)` followed by the standard child reap. No new `pre_exec`
@@ -50,10 +50,12 @@ The existing `seccompiler` package is also a Linux CLI dev dependency for
 subprocess-only namespace/xattr denial filters. It adds no production filter
 permission or runtime failure switch. The [supervisor corpus](../../crates/arany/src/tools/guard/linux/supervisor/tests.rs)
 and [process journeys](../../crates/arany-cli/tests/session_run/tools/native_exec/supervisor.rs)
-own drift, replacement after pinning through systemd launch and the private helper
-bind, capability, refusal and teardown checks. The retained executable handle
-selects the launched object; the supervisor binds its running object before
-capability removal so bwrap never resolves a proc-fd source back to a host path.
+own drift, replacement after pinning through systemd launch and the helper
+data import, capability, refusal and teardown checks. The installed bwrap
+[descriptor-data implementation](https://github.com/containers/bubblewrap/blob/v0.9.0/bubblewrap.c)
+was inspected for bounded admitted-source copying, read-only import and source
+descriptor closure; the Tool contract below owns the resulting executable
+identity and digest checks.
 Executable-specific AppArmor
 profiles supply namespace authorization, never host-command authority. The
 [Tool contract](../specs/tools.md#linux-enforcement-and-compatibility) owns bounds
