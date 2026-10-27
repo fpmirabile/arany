@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft` — Research and Plan gates remain open as listed below; implementation has not started.
+- Status: `Draft` — O1/O2 open; R1/R2 are recurrence checks scoped to VR3/VR4; VR1 and VR5 are implementable now; implementation has not started.
 - Owner: Arany owner; the team lead owns CI evidence collection and slice delivery.
 - Last updated: `2026-10-27`
 - Research baseline: `20b5dd02580959e89caeed02225d820db2a9c51f`.
@@ -44,7 +44,7 @@ to each implementation and review.
 | Timing starts at complete typed Provider receipt and ends after matching ToolFinished append acknowledgement. Journal wall time is a different measurement. | [`execution.md:17`](../../docs/specs/execution.md#L17), [`latency.md:10`](../../crates/arany-cli/tests/guard_runs/latency.md#L10), [`latency.rs:597`](../../crates/arany-cli/tests/guard_runs/latency.rs#L597). Keep the held/lost acknowledgement owner and scoped replay joins. |
 | Row count affects evidence allocation; single-call objective selection currently treats every operation alike. | [`latency.rs:475`](../../crates/arany-cli/tests/guard_runs/latency.rs#L475), [`latency.rs:572`](../../crates/arany-cli/tests/guard_runs/latency.rs#L572), [`test_support/latency.rs:10`](../../crates/arany/src/test_support/latency.rs#L10). Derive the four-row allocation and retained-attempt ceiling; select objectives by operation, not merely call count. |
 | Runtime topology refusal and fixture-image detachment are separate observations. | [`tools_macos.rs:1488`](../../crates/arany-cli/tests/session_run/tools_macos.rs#L1488) attaches a userspace-backed sparse image; [`tools_macos.rs:1661`](../../crates/arany-cli/tests/session_run/tools_macos.rs#L1661) proves pre-GO refusal/replay before cleanup at line 1683. A fixture detach failure cannot be repaired by accepting the mounted runtime. |
-| Shared fixture detach already retries within a bound, re-resolves the owned device and confirms absence after its final forced detach. Production images attach kernel-only. | [`test_support/process.rs:200`](../../crates/arany/src/test_support/process.rs#L200), [`macos/storage.rs:203`](../../crates/arany/src/tools/guard/macos/storage.rs#L203). Do not add a second retry loop. Align fixture attachment with the existing production mechanism, then verify the actual failure. |
+| Shared fixture detach already retries within a bound, re-resolves the owned device and confirms absence after its final forced detach. Production images attach kernel-only. | [`test_support/process.rs:200`](../../crates/arany/src/test_support/process.rs#L200), [`macos/storage.rs:203`](../../crates/arany/src/tools/guard/macos/storage.rs#L203). Do not add a second retry loop or change attachment without a current reproduction; kernel-only attachment is a candidate mitigation, not a demonstrated repair. |
 | Native cleanup already distinguishes storage checks and has one shared teardown deadline; a native disk command may outlast the remaining shared deadline. | [`tools.md:1115`](../../docs/specs/tools.md#L1115), [`macos/storage.rs:447`](../../crates/arany/src/tools/guard/macos/storage.rs#L447), [`macos/unit.rs:1690`](../../crates/arany/src/tools/guard/macos/unit.rs#L1690). An overrun is specified to remain Uncertain; increasing deadlines or accepting incomplete cleanup is not a fix. |
 | Current failure capture can identify the failing Tool in optimized test builds. Debug stage files are snapshots, not a complete timeline. | [`test_support.rs:166`](../../crates/arany/src/test_support.rs#L166), [`guard_runs.rs:49`](../../crates/arany-cli/tests/guard_runs.rs#L49), [`permissions.rs:226`](../../crates/arany-cli/tests/guard_runs/permissions.rs#L226), [`macos/fixture.rs:1`](../../crates/arany/src/tools/guard/macos/fixture.rs#L1). Reuse intent-correlated stage/check evidence rather than infer causality from a final generic message. |
 | Keychain denial is tested immediately before a helper-mediated authorized read of the same item. Several distinct native access errors map to Locked. | [`credentials/macos_tests.rs:185`](../../crates/arany-cli/src/accounts/credentials/macos_tests.rs#L185), [`keyring_helper/macos.rs:15`](../../crates/arany-cli/src/accounts/credentials/keyring_helper/macos.rs#L15), [`keyring_helper.rs:278`](../../crates/arany-cli/src/accounts/credentials/keyring_helper.rs#L278). Locked alone cannot identify actual keychain lock, item ACL refusal or store unavailability. |
@@ -55,28 +55,46 @@ to each implementation and review.
 
 ### CI history inspected and remaining diagnosis
 
-This planning task ran no `gh` command. It inspected previously downloaded
-`gh run` ZIP logs in the read-only CLI cache and saved CI logs in the team log
-directory. The run links below are portable citations; aggregate log entry names
-and line numbers identify the inspected evidence. They are historical failures,
-not verification of the research baseline. No raw native output, user identities,
-temporary paths or secret material need copying into the repository.
+Fable's validation reports a live `gh run view`/job-log scan of every failed
+macOS job (all attempts) of `ci.yml` from 2026-10-06 through 2026-10-27, plus
+rerun successes, PR #171's branch and the Focused CI lane: about 360 job logs.
+That broader scan reports no busy-detach recurrence after `572b46b3` and no
+permission-family recurrence after `8b3c653e` (#171); neither result proves a cause.
 
-| Failure family | Verified historical observation | Diagnosis and disposition |
+This revision independently checked run/attempt/job metadata through the GitHub
+REST API, the cited source changes, and 219 retained aggregate macOS job logs
+(110 debug) dated 2026-10-16–27. The available subset includes seven debug logs
+at known descendants of `572b46b3`, with no busy-detach failure; eleven logs
+(six debug) at known descendants of `8b3c653e` contain neither unconfirmed message.
+No scanned log contains `Locked` or the native-store round-trip failure. The
+subset is not the complete live-history scan: authenticated job-log downloads
+were unavailable, and the additional family members below remain attributed to
+Fable. Slice evidence must retain its exact inventory/count, attempts, checkout
+SHA and job links. No raw native output or private paths belong in this plan.
+
+| Failure family | Historical observation and attempt/job citation | Diagnosis and disposition |
 | --- | --- | --- |
-| Runtime mount busy-detach | [Run 39052525247](https://github.com/fpmirabile/arany/actions/runs/39052525247), checkout `1cced52beb7743cdee9716c994963aeeacf298c2`, `0_macOS Tests (debug).txt:1081`; [run 39069818405](https://github.com/fpmirabile/arany/actions/runs/39069818405), checkout `0c32ee4a19f49b15150d0f210b234cf3879796c8`, same entry at line 1098. Both fail at fixture `hdiutil detach`, exit 16, with `lsof` identifying `diskimage` holding the synthetic backing image. Product trace has no worker GO, and supervisor detach/controller storage completed. | Confirmed fixture cleanup failure after the topology rejection; the logs do not establish a product mount-check failure. The current shared detach helper already adds bounded recovery. VR2 aligns the remaining userspace attachment with kernel-only production attachment and requires a held-image/positive-absence regression plus native stability evidence. Do not claim that source alignment alone closes the historical flake. |
-| Native stores and clipboard | The exact authorized-read-after-denial Locked failure was not present in the inspected cache or saved CI logs. The pending item is the only report available here; current code identifies its boundary but not its cause. | **Research gate open, R1.** Lead supplies the failing run/job/attempt, checkout SHA and bounded failure block. Preserve the refusal and successful authorized-read controls. VR3's repair cannot be finalized from the generic Locked category. Clipboard stays a separately verified contract, not a guessed explanation. |
-| Permission readiness/load/cleanup early stop | [Run 39040295677](https://github.com/fpmirabile/arany/actions/runs/39040295677), checkout `08c9ae7572025875e03685cce091278ee32d38f2`, `1_macOS Tests (debug).txt:989`, stops with an unconsumed scripted call but no cause. [Run 39050001446](https://github.com/fpmirabile/arany/actions/runs/39050001446), checkout `dd4da9d27ec4aa6334e5baa40fdc0f987685273f`, `2_macOS Tests (release).txt:997`, identifies `default/allow/command`, Failed Run, Uncertain Tool, absent attestation and unconfirmed storage cleanup. | Continuation correctly stops after an unknown effect. These older logs do not distinguish listing, detachment, remaining mounts, process stop or an enclosing completion timeout. Current code has finer stage/check capture. **Research gate open, R2:** obtain intent-correlated current failure evidence before choosing the VR4 repair. |
-| Nearby permission failure with a different cause | [Run 39802154785](https://github.com/fpmirabile/arany/actions/runs/39802154785), checkout `916188a93e12974eae06f7ead128fc38cfa230f0`, `5_macOS Tests (release).txt:1868`, identifies `default/ask/command`, non-dispatched Limit, resource-limit stage and active-time exhaustion. | Keep this separate from unconfirmed cleanup. The current permission fixture advances paused time only inside the approval wait and resumes before dispatch ([`permissions.rs:211`](../../crates/arany-cli/tests/guard_runs/permissions.rs#L211)); do not reintroduce virtual-time advancement around native I/O or explain every early stop as host load. |
+| Runtime mount busy-detach | [39052525247, attempt 1, debug job 117453946130](https://github.com/fpmirabile/arany/actions/runs/39052525247/attempts/1#job-117453946130), checkout `1cced52b`; [39069818405, attempt 1, debug job 117505186398](https://github.com/fpmirabile/arany/actions/runs/39069818405/attempts/1#job-117505186398), checkout `0c32ee4a`. Both retained logs show fixture detach exit 16, only `diskimage` holding the backing image in current-user `lsof`, unknown worker GO and completed supervisor detach. The first run ultimately succeeded on attempt 2. | Both precede the shared bounded helper, `572b46b3` (#122, 18 Oct). `diskimage` normally holds a userspace attachment's backing file; this alone does not identify the busy holder. No current-user mountpoint holder was listed; system-user holders remain unverified candidates. VR2 first reproduces on the current focused debug lane; absent recurrence, close with stability evidence and no source change. |
+| Other topology assertions | [39166907834, attempt 1, debug job 117791757850](https://github.com/fpmirabile/arany/actions/runs/39166907834/attempts/1#job-117791757850), PR head `63b7c132`; [39163692991, attempt 1, debug job 117782166305](https://github.com/fpmirabile/arany/actions/runs/39163692991/attempts/1#job-117782166305), PR head `0dd6184c`. Fable identifies `tools_macos.rs:1115`, expected one call but observed two, in both; the first is independently confirmed in the retained log. | These are not detach failures and do not establish a surviving busy-detach defect. |
+| Native stores and clipboard | Fable found no `Locked` refusal or `native_store_round_trips_an_isolated_synthetic_account` failure in its retained-history scan, including every PR #171 attempt and the focused lane; the independent subset also has none. | #171 introduced the pending row and pinned a private helper copy. Identity replacement is a hypothesis: interaction-required access with interaction disabled can yield `ERR_SEC_INTERACTION_NOT_ALLOWED` (-25308), which current code maps through `NoStorageAccess` → `EXIT_LOCKED` → `CredentialError::Locked`. That chain matches the symptom, but does not demonstrate its cause. R1/VR3 add closed-category diagnostics and native stability closure; no request for a nonexistent retained failing log or speculative repair tree. Clipboard keeps its separate owner. |
+| Permission early-stop family | [39040295677, attempt 1, debug job 117418288627](https://github.com/fpmirabile/arany/actions/runs/39040295677/attempts/1#job-117418288627), checkout `08c9ae75`, has an unconsumed call without a cause. [39050001446, attempt 1, release job 117446474026](https://github.com/fpmirabile/arany/actions/runs/39050001446/attempts/1#job-117446474026), checkout `dd4da9d2`, shows both `default/allow/command` storage cleanup unconfirmed and `auto/mcp_list` execution unconfirmed in the children-inherit case. Both retained logs are independently confirmed. Fable's additional runs/cases are enumerated below. | Five tests across **eight distinct runs** on 17–18 Oct. The two closed stages are execution unconfirmed (`Guard stage=execution`) and storage cleanup unconfirmed. API head metadata/source history place all before #171; Fable reports neither message afterward. R2 first checks recurrence in full focused macOS release runs on one current head. A recurrence identifies the shared owner before any repair; no recurrence closes VR4 with evidence and row removal. |
+| PR-branch resource-limit regression | [39802154785, attempt 1, release job 119906807260](https://github.com/fpmirabile/arany/actions/runs/39802154785/attempts/1#job-119906807260) is a `pull_request` run of `ac29130f`, “wait for primary approvals without a wall-clock expiry”; `916188a9` is its tested merge ref. Its retained log has 12 permissions/unguarded failures and `Limit "Goal active-time budget exhausted; no operation was dispatched" [Guard stage=resource limit]`. | A PR-branch regression, not a main flake. Retained only to distinguish Limit from unconfirmed cleanup; this failed job does not establish when it was fixed. The current fixture pauses time only inside approval wait and resumes before dispatch ([`permissions.rs:211`](../../crates/arany-cli/tests/guard_runs/permissions.rs#L211)). |
 
-R1/R2 collection belongs to Research, before implementation, rather than a
-research-only PR masquerading as a vertical slice. The lead uses the preferred
-GitHub wrapper to list the exact workflow/job/attempt and obtain the corresponding
-`gh run` logs, records the tested checkout SHA and failing case, and compares the
-failure with intervening source changes. Read existing debug diagnostics and the
-bounded test-support stage/check first. Missing stages remain unknown. If the
-native failure cannot be reproduced, retain the gap and this Draft status; a
-passing rerun does not establish a cause.
+Fable's five-test early-stop inventory (all links select attempt 1; additional
+job identities/statuses were checked through the API):
+
+| Test, relative to `guard_runs` | Runs/jobs and closed observation |
+| --- | --- |
+| `permissions::permission_dispatch_modes_rules_command_mcp_and_edit` | 39040295677 and 39050001446 above; [39092399594 / release 117571730385](https://github.com/fpmirabile/arany/actions/runs/39092399594/attempts/1#job-117571730385). Unconsumed calls; the classified command case reports storage cleanup unconfirmed. |
+| `permissions::permission_dispatch_children_inherit_parent_restrictions_and_review` | 39050001446 above (execution unconfirmed); [39080542506 / release 117536426585](https://github.com/fpmirabile/arany/actions/runs/39080542506/attempts/1#job-117536426585) (storage cleanup unconfirmed). |
+| `permissions::guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it` | [39100777287 / release 117596447425](https://github.com/fpmirabile/arany/actions/runs/39100777287/attempts/1#job-117596447425), [39103185039 / release 117603495406](https://github.com/fpmirabile/arany/actions/runs/39103185039/attempts/1#job-117603495406), [39106833027 / release 117614425534](https://github.com/fpmirabile/arany/actions/runs/39106833027/attempts/1#job-117614425534): execution unconfirmed, execution stage. |
+| `permissions::hook_limits_fail_closed_and_timeouts_reap_descendants` | 39100777287 / release 117596447425 above; retain its own first stage/check if it recurs rather than infer it from the timeout case. |
+| `unguarded::always_allow_records_the_exact_rule_for_this_project_only_and_applies_next_submission` (historical name) | [39087838535 / release 117558066050](https://github.com/fpmirabile/arany/actions/runs/39087838535/attempts/1#job-117558066050): storage cleanup unconfirmed. |
+
+R1/R2 are scoped recurrence checks, not whole-plan Research blockers. A passing
+repeat does not establish a historical cause; evidence-only closure records
+stability without claiming a repair. Retain every attempt/failure, effective
+nonzero selections and stage/check facts; missing stages remain unknown.
 
 ### Proven peers
 
@@ -89,38 +107,27 @@ Sources were read on 2026-10-27; immutable source links pin inspected code.
   sites and per-operation measurements. Claude's default unavailable-sandbox
   fallback is unsuitable for Arany; its strict settings demonstrate refusal is
   compatible with the peer UX.
-- [Anthropic's macOS sandbox wrapper](https://github.com/anthropics/sandbox-runtime/blob/3a2954dc8ab938877fe4e279f04dfe4dd18ab40d/src/sandbox/macos-sandbox-utils.ts#L1596)
-  constructs a Seatbelt `sandbox-exec` command. This inspected path supplies no
-  disk-image cleanup algorithm to copy. Arany's bounded storage and positive
-  cleanup requirements justify its additional lifecycle work.
 - [Codex Tool timing](https://github.com/openai/codex/blob/b4ad33d1a3c10c9652dd57f7afd7a949f8f26895/codex-rs/otel/src/events/session_telemetry.rs#L1273)
   measures the awaited handler with `Instant` and records operation/success.
   Reuse that measurement shape, extending the endpoint through Arany's durable
   acknowledgement as already decided in [D-23](../../docs/research/next-step-decision-register.md#d-23--tool-latency-measures-durable-acknowledgement).
   No inspected peer supplies a transferable numeric latency objective.
-- [Codex exec lifecycle](https://github.com/openai/codex/blob/cba716c0f1caa4f2528dedbb1075b50126709d7e/codex-rs/core/src/exec.rs#L1034)
-  distinguishes cancellation/timeout, terminates the child group and bounds pipe
-  draining ([same source, drain owner](https://github.com/openai/codex/blob/cba716c0f1caa4f2528dedbb1075b50126709d7e/codex-rs/core/src/exec.rs#L84)).
-  Copy explicit lifecycle ownership and bounded waits. Group termination alone
-  cannot replace Arany's native coalition/storage proof or settle an unknown
-  effect as success. No inspected peer source diagnoses Arany's Keychain flake.
 
 ### RPI gates
 
-- **Research gate:** current code/spec and peers are verified above. R1 and R2
-  remain material missing evidence; historical busy-detach has a confirmed failure
-  boundary, but native confirmation of the proposed attachment repair remains a
-  required experiment. Obtain red-capable exact native reproductions and minimize
-  them; then replace provisional repair choices with observed causes. Do not use
-  sleeps, random ordering, effect retries or changed acceptance thresholds to
-  manufacture a passing result.
-- **Plan gate:** O1/O2 need owner disposition and R1/R2 must resolve. Every repair
-  must name a demonstrated failure, the owning function/callers, a deterministic
-  trigger, and evidence that fails before the fix. Re-estimate the affected slice
-  if those findings change its inventory. No slice is authorized to invent a
-  repair while these gates are open.
-- **Implement gate:** only after both gates pass, land the slices below in order,
-  one PR per exact ID. If code contradicts research, stop and revise this plan.
+- **Research gate:** current code/spec and retained evidence establish the bounded
+  work below; the full-history non-recurrence findings are attributed above.
+  VR2 begins with current native evidence. R1/R2 govern only VR3/VR4 closure and
+  any recurrence-driven repair; they do not block VR1, VR2 evidence or VR5 work.
+- **Plan gate:** O1/O2 remain owner decisions for VR1 wording/measurement acceptance.
+  VR1 and VR5 have concrete implementation scope now. Any source repair in VR2
+  or VR4 requires a demonstrated current failure, owning function/callers,
+  deterministic trigger and evidence that fails before the fix. Re-estimate that
+  slice after diagnosis; no speculative repair, sleep, effect retry or changed
+  acceptance threshold is authorized.
+- **Implement gate:** deliver independent VR1–VR4 in any order; VR5 lands last
+  because it closes the plan. Its adapter proof can be prepared now. Each PR names
+  its exact ID; if code contradicts research, stop and revise the affected slice.
 
 ## Contract and scenarios
 
@@ -141,7 +148,7 @@ or scenario row only if the approved repair exposes a missing recovery contract.
 | Latency failure or lost acknowledgement | Denial, stale digest, pre-GO refusal, failed command, cancellation, unknown post-GO cleanup, lost append acknowledgement or capture overflow invalidates the row; no success percentile or replacement attempt. Existing acknowledgement/failure scenarios own this, extended by a small operation table. |
 | Mounted runtime, then explicit new clean attempt | Nested mount rejects before GO with no payload marker; closed replay retains failure. Fixture cleanup positively proves owned image and mount absence. A separately requested new Run after removal succeeds under the selected runtime; this is not an automatic retry. Owner: `session_run/tools_macos.rs::native_runtime_mount_journey_helper`. |
 | Native store deny and authorized read | Unauthorized test actor cannot access/delete the item; the admitted helper can read the unchanged selected identity afterward. Actual lock still refuses; explicit synthetic unlock recovers; malformed/stale identities and cancellation stay refused. No helper/Provider fallback or secret output. Owner: `credentials/macos_tests.rs` through the existing native parent. |
-| Permission case completion and failure | Existing mode/rule/Tool matrix succeeds with exact permission source and replay; deterministic failures at connection, preparation, native manager and teardown retain their own stage. No dispatch before GO; unknown post-GO result stops continuation, publishes nothing and retains recovery records. Owner: `guard_runs/permissions/modes.rs`, shared fixture and existing Guard failure tables/native unit corpus. |
+| Permission case completion and failure | Existing mode/rule/Tool matrix succeeds with exact permission source and replay; deterministic failures at connection, preparation, native manager and teardown retain their own stage. No dispatch before GO; unknown post-GO result stops continuation, publishes nothing and retains recovery records. Owner: `guard_runs/permissions.rs` fixture and its scenario children (`modes.rs`, `rules.rs`, `hooks.rs`, `host.rs`), the affected `unguarded.rs` caller, and existing Guard failure tables/native unit corpus. |
 | Collector overflow / incomplete body / dropped future | A streaming response crossing the locked adapter's cap is refused; an incomplete response cannot hold the next export; dropping the bounded response future releases its owned read. A subsequent export works, shutdown stays bounded and canonical Run/output/replay are unchanged. Owners: `telemetry/http.rs`, existing telemetry corpus and `session_run/telemetry.rs`. |
 
 ## Chosen direction
@@ -149,8 +156,9 @@ or scenario row only if the approved repair exposes a missing recovery contract.
 Use the existing corpus, native process helpers, Keychain fixture, Guard lifecycle
 owners and HTTP adapter. Ponytail selects reuse before new code: no new crate,
 dependency, trait, daemon, benchmark subsystem or canonical Event. The only
-behavioral variation is the existing Linux/macOS adapter pair. Private test gates
-may control the demonstrated race; they are not production configuration.
+behavioral variation is the existing Linux/macOS adapter pair. Existing fixture
+gates may control a demonstrated race; VR5 gates only its local Collector socket,
+never the HTTP adapter control flow.
 
 Linux gains a fourth ignored release measurement row. macOS gains repairs and
 native evidence in its existing enforcement/account lanes; no Linux timing result
@@ -207,8 +215,9 @@ against the [security pass](../../agents/security.md#security-pass-triggers):
 - Old CI symptoms may already have a partial repair: compare the exact failing
   revision with current owners, demonstrate the surviving gap, and avoid duplicate
   retry or instrumentation machinery.
-- `Locked` collapses multiple native causes: obtain R1 and distinguish them in a
-  private native fixture before deciding between fixture and product repair.
+- `Locked` collapses multiple native causes: expose only a closed native category
+  through the bounded helper response, retaining the refusal. Helper identity is
+  a hypothesis until a recurrence supplies evidence; stability is not cause proof.
 - Timing can hide missing guarantees: audit receipts, unchanged bytes and closed
   replay before accepting any sample; never trade SQLite durability for a target.
 - A full native run can expose unrelated failures: consolidate failures on that
@@ -222,16 +231,17 @@ against the [security pass](../../agents/security.md#security-pass-triggers):
 
 Every estimate is **added + deleted lines**, including tests and same-PR docs;
 there are no move/deletion exclusions or ceiling exceptions. Each ID is one
-branch/PR and one observable increment. Order: VR1 → VR2 → VR3 → VR4 → VR5.
+branch/PR and one observable increment. VR1–VR4 are independent and may land in
+any order or in parallel; VR5 lands last for the closing checklist.
 Keep this list/index unchanged in ordinary slice PRs; merged PR `Slices` lines
 are the progress record under [slice delivery](../PLANNING.md#slice-delivery).
 
 | ID | Observable delivery | Estimate | Hard ceiling |
 | --- | --- | --- | --- |
 | VR1 | Audited guarded no-op Command measurement beside existing Read and Edit rows | +650 / -170 = **820** | **1,200** |
-| VR2 | Mounted-runtime refusal followed by positively cleaned fixture and clean selected-runtime success | +220 / -90 = **310** | **600** |
-| VR3 | Native unauthorized denial followed by reliable authorized selected-item access | +330 / -110 = **440** | **800** |
-| VR4 | Permission commands complete under native lifecycle races or stop at the correct proven failure boundary | +650 / -230 = **880** | **1,400** |
+| VR2 | Current-head topology stability closure; attachment repair only on reproduced busy-detach | Evidence-only **≤120**; conditional repair +220 / -90 = **310** | **600** |
+| VR3 | Closed-category Locked diagnostics and native selected-item stability closure | **≤200** | **400** |
+| VR4 | Permission-family recurrence check and closure; shared-owner repair only if reproduced | Provisional until R2: +650 / -230 = **880**; evidence-only **≤150** | **1,400**, provisional until R2 |
 | VR5 | Malformed/incomplete Collector responses release the observer and preserve canonical outcomes; close the plan | +440 / -560 = **1,000** | **1,500** |
 
 VR5 includes deletion of this plan and its index row in its changed-line estimate.
@@ -243,7 +253,11 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   `docs/specs/tools.md`, and this item's wording in `NEXT_STEPS.md`.
 - Extend the current row table/helper with Command. Admit and hash a real native
   no-op executable on the selected host using ordinary executable pinning; record
-  its canonical identity as a prerequisite and refuse absence. Use explicit argv,
+  its canonical identity as a prerequisite and refuse absence. Update the corpus
+  notes' owner procedure to require the selected revision's native namespace
+  bootstrap and host authorization ([D7′](../command-workspace-overlay/README.md#research));
+  stock-policy refusal is failed evidence, never a host/fake-Guard fallback.
+  Read/Edit alone did not exercise that prerequisite. Use explicit argv,
   no interpreter, no network, no MCP and no approval wait, with a matching admitted
   allow rule. Do not use `CommandUnguarded` or a fake Guard. Planning is already
   optional ([Goals](../../docs/specs/goals.md#initial-plan-contract-and-success-receipt));
@@ -268,79 +282,95 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   retaining each invocation's reports and journals; no native numbers are claimed
   by this planning PR.
 
-### VR2 — Settle runtime topology fixture ownership
+### VR2 — Check current runtime topology stability before repair
 
-- Inventory: `crates/arany-cli/tests/session_run/tools_macos.rs`,
-  `crates/arany/src/test_support/process.rs` only if a demonstrated shared-helper
-  defect remains, its focused child evidence if needed, and the existing
-  macOS runtime-topology `NEXT_STEPS.md` row.
-- Use kernel-only attachment for the synthetic topology image as production
-  storage already does. Keep the image guard established immediately after
-  attachment and release owned handles before explicit detach. Reuse the bounded
-  image-to-device lookup/confirmation helper; never kill an ambient `diskimage`
-  process or select a device by a remembered number.
-- Preserve the complete mounted-runtime refusal/replay and subsequent clean
-  selected-runtime success journey. Add a controlled held-reference case at the
-  fixture owner: cleanup must not claim absence while the OS still lists the
-  image or mount; after explicit release, require fresh inventory and mount
-  absence before root deletion. A held descriptor alone is not proof that forced
-  detachment must fail. Failure/unwind retains the image/root if absence cannot
-  be proved.
-- Gate the repair with the historical failure boundary and native macOS debug
-  runs. Existing production topology/cleanup contracts are sufficient; do not
-  change them or add production detach retries for this fixture defect. Record
-  stability before removing its pending row.
+- Inventory: the existing runtime-topology `NEXT_STEPS.md` row and retained native
+  evidence first; `crates/arany-cli/tests/session_run/tools_macos.rs` and
+  `crates/arany/src/test_support/process.rs` only for a reproduced current defect.
+- Record the post-`572b46b3` history result and the exact number of macOS debug
+  jobs inspected. Repeat the complete mounted-runtime refusal/replay → positive
+  detach → clean selected-runtime success journey on the same current head via
+  the existing Focused CI `macos-debug` lane. Name a finite N in the PR before
+  running; retain all attempts and distinguish other topology assertions.
+  This is diagnostic repetition, never retry-until-green.
+- If busy-detach recurs with the current bounded helper, retain bounded
+  `lsof`/`hdiutil info` red evidence. Kernel-only fixture attachment matching
+  production is a candidate repair to verify, not an unconditional change.
+  Keep the guard established immediately after attachment and release owned
+  handles before detach; re-resolve image identity and freshly confirm absence.
+  Never kill an ambient `diskimage` or act on a remembered device number.
+- If it does not recur, ship no source change: record stability/run links and
+  close the pending row without claiming a cause. Add a held-reference regression
+  only if reproduction demonstrates false absence. Failure/unwind retains the
+  image/root when absence cannot be proved. Existing product contracts suffice;
+  no production detach retry or deadline change. A repair requires the focused
+  native debug lane again before closure; full CI still belongs to E6.
 
-### VR3 — Repair the selected-item denial/read boundary
+### VR3 — Add closed-category diagnostics and close native-store stability
 
-- Inventory: `crates/arany-cli/src/accounts/credentials/macos_tests.rs`,
-  `credentials/keyring_helper/macos.rs` and `credentials/keyring_helper.rs` only
-  when R1 proves a production classification/ownership defect, plus the existing
-  Credentials scenario and native-stores `NEXT_STEPS.md` row as needed.
-- **Repair selection is gated by R1.** Pin the historical failing stage and
-  native error category without secret/platform-text logging. Reproduce the
-  unauthorized actor → admitted helper sequence in an exactly-one-test child
-  with the same immutable helper identity and synthetic item.
-- If R1 proves fixture lifetime contamination, isolate the negative actor's
-  native handles/process and require its completion before the authorized helper;
-  keep the same item/identity and verify unchanged contents. If it proves the
-  Keychain really locked, establish why the fixture's lock policy/lifetime changed
-  and repair that synthetic lifecycle. If it proves a helper/adapter defect, fix
-  the single shared owner and exercise every affected read/authorize caller.
-  Replace this decision tree with the demonstrated repair before Ready.
-- Preserve actual locked/denied refusal, stale identity, explicit synthetic
-  unlock, cancellation/reap and output canaries. Never translate Locked into
-  success, retry credential reads, relax ACLs or automatically unlock storage.
-  Run the existing native parent in macOS debug and retain Linux helper-protocol
-  coverage. Clipboard regressions use their existing owner only if R1 connects
-  them; human clipboard/Keychain dialog checks stay deferred native evidence.
+- Inventory: `crates/arany-cli/src/accounts/credentials/keyring_helper/macos.rs`,
+  `credentials/keyring_helper.rs` and its Linux helper-protocol table,
+  `credentials/macos_tests.rs`, the existing Credentials/Diagnostics scenario
+  wording only if needed, and the native-stores `NEXT_STEPS.md` row.
+- R1 starts from the retained-history absence above and #171's already-shipped
+  pinned helper copy. Preserve that immutable identity through the exactly-one-test
+  synthetic child. Identity replacement causing interaction-required access is
+  the candidate explanation, not a demonstrated lock or ACL defect. Current
+  recurrence diagnostics supply the missing native category.
+- Carry a closed native category (constant name only, never platform text, paths,
+  identities or contents) through the existing bounded helper response for
+  `EXIT_LOCKED`. The caller currently discards helper stderr, so stderr-only
+  diagnostics would not expose recurrence. Keep `CredentialError::Locked` and
+  empty secret output; admit only the closed category at the reply decoder and
+  reject malformed/unknown payloads. Add the Linux helper-protocol table row for
+  category propagation/refusal and canaries; no public abstraction or fallback.
+- Pin the synthetic Keychain's settings explicitly with `SecKeychain::set_settings`
+  (no idle lock), while retaining actual lock refusal and explicit test unlock.
+  Preserve denied actor → authorized read of the same unchanged item, stale
+  identity, cancellation/reap and output canaries. Never remap Locked to success,
+  retry credential reads, relax ACLs or automatically unlock user storage.
+- Run the existing native parent repeatedly on one current head through Focused
+  CI `macos-debug`, with finite N named in the PR and every attempt retained.
+  Closed-category diagnostics plus stability close R1/the pending row within
+  200 changed lines; a recurrence identifies its category and triggers a plan
+  revision before any broader repair. Linux retains helper-protocol evidence.
+  Clipboard remains separate; human Keychain/clipboard dialogs stay deferred.
 
-### VR4 — Close the permission-case native lifecycle failure
+### VR4 — Check the complete permission early-stop family before repair
 
-- Inventory: `crates/arany-cli/tests/guard_runs/permissions.rs`,
-  `permissions/modes.rs`, existing Guard failure tables in
-  `crates/arany/src/tools/guard.rs`, and the demonstrated owner in
-  `guard/macos/unit.rs`, `storage.rs` or `fixture.rs`; update only the affected
-  Tool/Diagnostics scenario and readiness/load `NEXT_STEPS.md` row if necessary.
-- **Repair selection is gated by R2.** Bind mode/rule/operation, intent identity,
-  GO state and first failed native stage/check before teardown overwrites a
-  snapshot. The existing bounded release recorder and debug stages are the first
-  probe. Fix the shared lifecycle owner and all its callers, not each permission
-  matrix cell. Replace this provisional inventory with the diagnosed function
-  and repair before Ready; split by failure risk if the ceiling would be exceeded.
-- Exercise explicit gates for connection refusal, preparation failure,
-  native-manager refusal, post-GO process/report loss and the proven storage
-  check. A pre-GO failure must prove no payload; post-GO loss remains Uncertain,
-  no integration, no further Provider call and non-executing closed replay.
-  Successful release must positively empty the coalition/remove the owned job,
-  release storage handles, confirm detach and settle the journal before
-  continuation. Retained uncertain records remain recoverable under exact
-  ownership; a fresh explicit Run never retries the old intent.
-- Test schedules use channels/failpoints and paused time only outside native
-  I/O. Do not increase product deadlines, insert sleeps, retry matrix cases,
-  quarantine the case or weaken expected permission/attestation assertions.
-  Run the full matrix through current macOS release CI; use a focused debug
-  invocation diagnostically if R2 requires it, without changing shared CI.
+- Inventory: `crates/arany-cli/tests/guard_runs/permissions.rs` (shared fixture),
+  `permissions/modes.rs`, `permissions/rules.rs`, `permissions/hooks.rs`,
+  `permissions/host.rs` and `unguarded.rs` as affected callers; existing Guard
+  failure tables in `crates/arany/src/tools/guard.rs`, and only the demonstrated
+  owner in `guard/macos/unit.rs`, `storage.rs` or `fixture.rs`. Update affected
+  Tool/Diagnostics scenarios and the readiness/load `NEXT_STEPS.md` row as needed.
+- **R2 begins with recurrence, not a presumed repair.** The five tests/eight runs
+  above precede #171; Fable reports no later execution-unconfirmed or
+  storage-cleanup-unconfirmed message. Select finite N full macOS release runs
+  on the same current head via Focused CI `macos-release`, named in the PR before
+  running. Retain every attempt and current intent-correlated stage/check capture.
+  No recurrence closes VR4 as evidence plus row removal (≤150 changed lines),
+  without source changes or a claim that the historical cause is known.
+- On recurrence, bind mode/rule/operation, intent identity, GO state and first
+  closed stage/check before teardown overwrites a snapshot. Reuse the bounded
+  release recorder/debug stages; distinguish execution unconfirmed
+  (`Guard stage=execution`) from storage cleanup unconfirmed. Name the shared
+  owner: native unit release, `storage.rs::cleanup_storage_until`, or the
+  `permissions.rs` fixture, as demonstrated. Fix that owner and all affected
+  callers rather than individual matrix cells. The 880/1,400 estimate/ceiling are
+  provisional until R2; replace the repair inventory and re-estimate before repair.
+- For a demonstrated lifecycle repair, extend existing fault tables only at its
+  proven boundary: connection/preparation/native-manager refusal before GO proves
+  no payload; post-GO process/report loss remains Uncertain, no integration,
+  no next Provider call and non-executing closed replay. Successful release
+  positively empties the coalition/removes the owned job, releases handles,
+  confirms detach and settles the journal before continuation. Retained uncertain
+  records remain recoverable under exact ownership; a new Run never retries an
+  old intent. Evidence-only closure reuses these existing owners.
+- Use channels/failpoints and paused time only outside native I/O. Never increase
+  deadlines, insert sleeps, retry matrix cells, quarantine or weaken assertions.
+  Full release CI exercises the family; focused runs diagnose and establish the
+  scoped stability result, without replacing E6 or changing shared CI.
 
 ### VR5 — Prove observer response disposal and close delivery
 
@@ -353,22 +383,29 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   cap-plus-one responses without a trustworthy Content-Length, and a bounded
   response that never completes. Require typed oversize refusal independently
   of timeout so an early deadline cannot pass the size test.
-- Add a gate after headers/first body bytes and drop the incomplete response
-  future at that gate; prove owned read disposal and a successful next export.
-  If access to the inner bounded future is needed, extract one private async
-  function used by the existing runtime wrapper and the test; no new public
-  client abstraction, dependency or alternate HTTP implementation. Use explicit
-  gates and virtual time for logical deadlines, bounded real socket supervision,
-  cleared ambient proxy configuration and nonblocking-to-blocking accepted-socket
-  normalization on macOS. No sleep-driven ordering.
+- The local Collector thread sends status/headers and part of the body, then
+  holds the socket. After a virtual-time deadline drops the incomplete bounded
+  future, observe server-side read EOF or a closed/reset connection (EPIPE on a
+  write), proving the owned read was released. A second export to the same
+  Collector must succeed. Do not mistake a server timeout for client disposal.
+  Add no test gate, feature flag or `cfg(test)` control-flow branch in `http.rs`.
+  If needed, extract one private async bounded-send function used by the existing
+  runtime wrapper and test; that is the only permitted change in that file.
+  No public client abstraction, dependency or alternate HTTP implementation.
+  Use Collector-side synchronization and virtual time for logical deadlines,
+  bounded real socket supervision, cleared ambient proxy configuration and
+  nonblocking-to-blocking accepted-socket normalization on macOS. No sleeps.
 - Through the existing product export journey, compare exact exit/stdout/stderr,
   closed Events and reduced view with the failed-Collector variant; drain exports
   through shutdown and check canaries. Retain the separately ignored native
   trickle gate as native timing evidence. Update the two existing acceptance rows
   to identify their new evidence owners; no runtime contract change is expected.
 - Run the closing audit after all slices merge. Obtain three sequential complete
-  `ci.yml` runs on the identical final head with both native macOS profiles,
-  retaining all attempts and failures; focused passes alone do not close a flake.
+  `ci.yml` runs on the identical final head with both native macOS profiles.
+  Use sequential `workflow_dispatch` runs at an unchanged ref, or rerun the full
+  exact-head workflow; wait for completion before the next to avoid concurrency
+  cancellation and verify each checkout/head. Retain all attempts and failures;
+  focused passes alone do not close a flake.
   Record effective nonzero test counts/profile selections. No workflow or shared
   runner change is included; request owner scope if a new lane is necessary.
 - The closing PR uses this checklist, one completed line per ID and criterion:
@@ -381,9 +418,10 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   - [ ] E1 — corpus command, exact nonzero selection and audited retained reports;
     accepted host/objective disposition and every target miss.
   - [ ] E2 — topology refusal, positive detach and clean success evidence/run links.
-  - [ ] E3 — denial/authorized read, real lock refusal and explicit recovery evidence.
-  - [ ] E4 — each classified lifecycle fault, no forbidden continuation/publication,
-    replay and positive cleanup observations.
+  - [ ] E3 — closed-category diagnostics, helper-protocol refusal, native stability,
+    denial/authorized read, real lock refusal and explicit recovery evidence.
+  - [ ] E4 — full-family recurrence result; any demonstrated repair and classified
+    lifecycle fault, no forbidden continuation/publication, replay and cleanup.
   - [ ] E5 — oversize and incomplete/dropped-body cases, next export and unchanged
     product observations; Linux/macOS commands/results.
   - [ ] E6 — formatting, Clippy, full exact-head CI run URLs/attempts and stability
@@ -398,8 +436,8 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
 | --- | --- | --- |
 | O1 | Arany owner: does “guarded Edit” mean the current admitted typed Edit, or a new process execution site? | Keep the existing in-process Edit row with its real FileReceipt/checkpoint; rename the backlog wording to “admitted Edit and guarded no-op Command.” This matches both the current contract and peer separation of file Tools from commands. A separate Guard Edit path requires a different, explicitly authorized contract. |
 | O2 | Arany owner: select the quiet native Linux host and the no-op Command objective. | Preserve the existing Read/Edit objectives; publish Command p50/p95/max as a separate baseline with a null objective until the owner accepts a host-specific number. Do not inherit the single-call objective accidentally or infer a peer SLO. Retain all three corpus invocations per the existing owner procedure. |
-| R1 | Lead: exact failing native-store CI job/attempt/log and observed native category after denial. | Supply the archived evidence and a native controlled reproduction; repair the fixture unless evidence identifies a shared product-owner defect. No blanket error remapping or auto-unlock. |
-| R2 | Lead: current permission-case failure's first closed stage/check and native reproduction. | Use existing diagnostics/intent recorder on the exact head, classify connection/preparation/manager/process/storage independently, then fix the demonstrated shared owner. Do not decide that load or a short deadline is the cause without evidence. |
+| R1 | Native-store recurrence/stability closure; no retained failing log exists in Fable's scan. | Preserve #171's pinned helper; helper-identity replacement is a hypothesis matching the existing error chain. Add closed-category `EXIT_LOCKED` diagnostics plus Linux protocol evidence, then repeated same-head macOS debug stability; retain all links. No remap, ACL change or auto-unlock. |
+| R2 | Recurrence check for the five-test/eight-run family, with execution/storage cleanup as distinct closed stages; Fable reports none after #171. | Name finite N full focused macOS release runs on one current head using existing stage/check capture. No recurrence: evidence-only closure. Recurrence: identify first stage/check and shared native-release, storage or permissions-fixture owner before repair; re-estimate VR4. Never infer load/deadline causality. |
 
 ## Exit criteria
 
@@ -408,15 +446,18 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   durable history and fresh `show`. Failure/missing acknowledgement/overflow never
   produces a success verdict. Named-host claims require retained owner runs under
   [the corpus procedure](../../crates/arany-cli/tests/guard_runs/latency.md#owner-procedure).
-- **E2:** the topology journey refuses a mounted runtime before GO, proves fixture
-  detachment and succeeds on a new clean Run. No cleanup result is inferred from
-  a subprocess exit or missing path alone.
-- **E3:** R1 has a demonstrated cause and deterministic regression: unauthorized
-  access refuses, authorized access to the unchanged item succeeds afterward,
-  actual lock still refuses and explicit recovery works without credential leakage.
-- **E4:** R2 has a demonstrated cause/regression at its owner; meaningful pre/post-GO
-  faults retain correct outcomes, storage/recovery ownership and closed replay.
-  Permission matrix expectations remain exact on Linux and macOS.
+- **E2:** current-head focused debug evidence closes VR2 without source changes
+  if busy-detach does not recur; any repair has red evidence and native rerun.
+  The journey refuses a mounted runtime before GO, positively proves fixture
+  detach and succeeds on a new clean Run; exit or a missing path alone is no proof.
+- **E3:** R1 has closed-category helper diagnostics, Linux protocol evidence and
+  repeated same-head macOS debug stability. Unauthorized access refuses, authorized
+  access to the unchanged item succeeds, actual lock refuses and explicit recovery
+  works without leakage. Stability does not establish the helper-identity hypothesis.
+- **E4:** R2 records the full-family same-head release recurrence result; no
+  recurrence permits evidence-only VR4 closure. Any repair has a demonstrated
+  cause/regression at its shared owner; pre/post-GO outcomes, storage/recovery and
+  closed replay stay correct. Permission expectations remain exact on both OSes.
 - **E5:** response-size refusal and incomplete-future disposal are distinct proven
   observations through the actual OTLP adapter; subsequent export/shutdown proceed
   and product outcomes/channels/replay remain unchanged.
