@@ -83,9 +83,12 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
 }
 
 #[cfg(any(target_os = "macos", test))]
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+#[cfg_attr(
+    not(any(test, all(target_os = "macos", feature = "test-support"))),
+    expect(unused_variables)
+)]
 pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(target_os = "macos", feature = "test-support")))]
     FaultPlan::commit_marker(token)?;
     Ok(())
 }

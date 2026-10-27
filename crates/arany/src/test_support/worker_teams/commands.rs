@@ -34,6 +34,28 @@ pub(super) fn configure(state: &Path, case: &str) {
     })).unwrap());
 }
 
+pub(super) async fn approve_cache_failure(workspace: &Path, approval: ToolApproval) {
+    let identity = crate::store::BuildCacheIdentity::new(
+        workspace,
+        approval.intent.workspace_device,
+        approval.intent.workspace_inode,
+    )
+    .unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let (publishing, release) = FaultPlan::gate_guard_cache_publication(approval.intent.id);
+        approval.decide(true);
+        publishing.await.unwrap();
+        FaultPlan::fail_record_sync(identity.token().into(), "");
+        release.send(()).unwrap();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        FaultPlan::fail_commit_marker(&identity);
+        approval.decide(true);
+    }
+}
+
 impl LiveProvider {
     pub(super) fn command_outcome(
         &self,

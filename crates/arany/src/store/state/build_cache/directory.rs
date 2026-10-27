@@ -116,7 +116,6 @@ impl BuildCacheLease {
         measure(lower, self.candidate_limit)?;
         sync_tree(lower, &self.token)?;
         self.archive = None;
-        crate::fault::record_sync(Path::new(&self.token), "finish")?;
         self.finish_directory()?;
         self.defer_recovery = false;
         Ok(())
