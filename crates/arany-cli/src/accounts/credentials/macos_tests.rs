@@ -2,7 +2,7 @@ use super::*;
 use arany::RecordKind;
 use security_framework::{
     item::{ItemClass, ItemSearchOptions},
-    os::macos::keychain::{CreateOptions, SecKeychain},
+    os::macos::keychain::{CreateOptions, KeychainSettings, SecKeychain},
 };
 use std::{os::unix::fs::PermissionsExt, process::Command};
 
@@ -206,11 +206,15 @@ pub(super) async fn roundtrip() {
     let root = StateRoot::admit(&temp.path().join("keychain")).unwrap();
     let path = root.path().join(keyring_helper::macos::TEST_KEYCHAIN);
     let _interaction = SecKeychain::disable_user_interaction().unwrap();
-    let _keychain = CreateOptions::new()
+    let mut keychain = CreateOptions::new()
         .password(PASSWORD)
         .prompt_user(false)
         .create(&path)
         .unwrap();
+    let mut settings = KeychainSettings::new();
+    settings.set_lock_interval(None);
+    settings.set_lock_on_sleep(false);
+    keychain.set_settings(&settings).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -249,6 +253,16 @@ pub(super) async fn roundtrip() {
         "isolated native Keychain child: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+    if cfg!(debug_assertions) {
+        let diagnostic = b"credential store refused access: ERR_SEC_";
+        assert!(
+            output
+                .stderr
+                .windows(diagnostic.len())
+                .any(|part| part == diagnostic),
+            "native Locked must keep its closed debug category"
+        );
+    }
     assert!(
         output
             .stdout
