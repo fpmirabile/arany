@@ -253,6 +253,16 @@ pub(super) async fn roundtrip() {
         "isolated native Keychain child: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+    if cfg!(debug_assertions) {
+        let diagnostic = b"credential store refused access: ERR_SEC_";
+        assert!(
+            output
+                .stderr
+                .windows(diagnostic.len())
+                .any(|part| part == diagnostic),
+            "native Locked must keep its closed debug category"
+        );
+    }
     assert!(
         output
             .stdout
