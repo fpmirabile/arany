@@ -784,11 +784,7 @@ impl WorkerOutcome {
                     | WorkerCause::CriterionUnverified
             ) | (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
                 | (WorkerDisposition::Lost, WorkerCause::Lost)
-                | (
-                    WorkerDisposition::PrivateUncertain,
-                    WorkerCause::PrivateUncertain
-                )
-        ) && !matches!(self.disposition, WorkerDisposition::PrivateUncertain)
+        )
     }
 }
 

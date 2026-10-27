@@ -1876,7 +1876,9 @@ impl RunLoop<'_> {
             && abort.is_none()
         {
             *abort = Some(match cause {
-                cause @ StopCause::ToolRefused(_) => WaveStop::Abort(cause),
+                cause @ (StopCause::ToolRefused(_) | StopCause::Uncertain) => {
+                    WaveStop::Abort(cause)
+                }
                 cause @ (StopCause::ActiveTime
                 | StopCause::DelegationDeadline
                 | StopCause::Capacity) => WaveStop::Boundary(cause),
