@@ -702,10 +702,6 @@ fn push_success_facts(
             }
             let call = &tool.intent.call;
             match call {
-                crate::tools::ToolCall::PrepareWorker { .. } => {}
-                crate::tools::ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-                } => {}
                 crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. }
@@ -859,10 +855,6 @@ fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
 
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     match call {
-        crate::tools::ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
-        crate::tools::ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-        } => "Worker changeset publication".into(),
         crate::tools::ToolCall::ParseAgentDefinition { .. } => {
             "Agent definition preparation".into()
         }
@@ -926,10 +918,6 @@ fn goal_report_evidence(
         _ => "Guard",
     };
     match call {
-        crate::tools::ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
-        crate::tools::ToolCall::ApplyChangeset {
-            source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-        } => "Worker changeset publication".into(),
         crate::tools::ToolCall::ParseAgentDefinition { .. } => {
             "Agent definition preparation".into()
         }

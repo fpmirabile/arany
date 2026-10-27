@@ -531,76 +531,39 @@ fn changeset_rules_require_all_paths_for_allow_and_any_path_for_deny_or_ask() {
             },
         },
     };
-    let mixed = batch(&["docs/a", "src/a"]);
-    assert_eq!(
-        config(json!({"allow":["Edit(src/**)"]})).decision(&mixed),
-        Decision::Ask
-    );
-    assert_eq!(
-        config(json!({"deny":["Edit(src/**)"]})).decision(&mixed),
-        Decision::Deny
-    );
-    assert_eq!(
-        config(json!({"defaultMode":"acceptEdits", "ask":["Edit(src/**)"]})).decision(&mixed),
-        Decision::Ask
-    );
-    assert_eq!(
-        config(json!({"allow":["Edit(src/**)"]})).decision(&batch(&["src/a", "src/b"])),
-        Decision::Allow
-    );
-    assert_eq!(
-        config(json!({"deny":["Read(src/**)"]})).decision(&mixed),
-        Decision::Deny
-    );
-
-    use crate::session::worker::*;
-    let assignment_id = crate::session::AgentRunId::new();
-    let worker = ToolCall::ApplyChangeset {
-        source: ChangesetSource::WorkerHandover {
-            assignment_id,
-            handover_sequence: 3,
-            data: WorkerDataRef {
-                assignment_id,
-                purpose: WorkerDataPurpose::Handover,
-                first_sequence: 1,
-                seal_sequence: 2,
-                chunks: 1,
-                bytes: 1,
-                sha256: [1; 32],
-            },
-        },
-    };
-    for (settings, paths) in [
-        (json!({"allow":["Edit(src/**)"]}), vec!["docs/a", "src/a"]),
-        (json!({"deny":["Edit(src/**)"]}), vec!["docs/a", "src/a"]),
+    for (settings, paths, expected) in [
+        (
+            json!({"allow":["Edit(src/**)"]}),
+            vec!["docs/a", "src/a"],
+            Decision::Ask,
+        ),
+        (
+            json!({"deny":["Edit(src/**)"]}),
+            vec!["docs/a", "src/a"],
+            Decision::Deny,
+        ),
         (
             json!({"defaultMode":"acceptEdits","ask":["Edit(src/**)"]}),
             vec!["docs/a", "src/a"],
+            Decision::Ask,
         ),
-        (json!({"allow":["Edit(src/**)"]}), vec!["src/a", "src/b"]),
-        (json!({"deny":["Read(src/**)"]}), vec!["docs/a", "src/a"]),
+        (
+            json!({"allow":["Edit(src/**)"]}),
+            vec!["src/a", "src/b"],
+            Decision::Allow,
+        ),
+        (
+            json!({"deny":["Read(src/**)"]}),
+            vec!["docs/a", "src/a"],
+            Decision::Deny,
+        ),
         (
             json!({"defaultMode":"acceptEdits","deny":["Edit(other/**)"]}),
             vec!["src/a"],
+            Decision::Allow,
         ),
     ] {
-        let files: Vec<_> = paths
-            .iter()
-            .map(|path| WorkerFileFact {
-                path: (*path).into(),
-                before: WorkerBaseVersion::Absent,
-                after: WorkerBaseVersion::File {
-                    sha256: crate::validate::hex_digest(b"x"),
-                    bytes: 1,
-                    executable: false,
-                },
-            })
-            .collect();
-        let permissions = config(settings);
-        assert_eq!(
-            permissions.evaluate_worker_paths(&worker, Some(&files)),
-            permissions.evaluate(&batch(&paths))
-        );
+        assert_eq!(config(settings).decision(&batch(&paths)), expected);
     }
 }
 

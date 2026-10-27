@@ -1082,12 +1082,7 @@ impl From<&Event> for TraceEventKind {
             | Event::RunFinished { .. }
             | Event::ContextCompacted { .. } => Self::Run(kind),
             Event::SupervisorVerdictRecorded { .. }
-            | Event::WorkerDataChunk { .. }
-            | Event::WorkerDataSealed { .. }
             | Event::WorkerStopObserved { .. }
-            | Event::WorkerHandoverRecorded { .. }
-            | Event::WorkerIntegrationRecorded { .. }
-            | Event::WorkerHandoverDiscarded { .. }
             | Event::WorkerLeaseReleased { .. }
             | Event::WorkerVerificationRecorded { .. }
             | Event::AssistantDisplayRecorded { .. }

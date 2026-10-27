@@ -26,9 +26,6 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
             .await
         }
         Family::Git => git::run(site).await,
-        Family::Preparation if matches!(call, ToolCall::PrepareWorker { .. }) => {
-            Ok("Private candidate captured".into())
-        }
         Family::Preparation => {
             super::definitions::parse(site.definition.as_deref().ok_or(ToolError::Configuration)?)
         }

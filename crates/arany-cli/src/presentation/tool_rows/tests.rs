@@ -10,23 +10,8 @@ mod peer_row_tests {
 
     #[test]
     fn publication_summaries_follow_the_file_family() {
-        use arany::worker::{ChangesetSource, WorkerDataPurpose, WorkerDataRef};
+        use arany::worker::ChangesetSource;
 
-        let handover = ToolCall::ApplyChangeset {
-            source: ChangesetSource::WorkerHandover {
-                assignment_id: arany::AgentRunId::new(),
-                handover_sequence: 7,
-                data: WorkerDataRef {
-                    assignment_id: arany::AgentRunId::new(),
-                    purpose: WorkerDataPurpose::Handover,
-                    first_sequence: 1,
-                    seal_sequence: 2,
-                    chunks: 1,
-                    bytes: 1,
-                    sha256: [1; 32],
-                },
-            },
-        };
         let rewind = ToolCall::ApplyChangeset {
             source: ChangesetSource::Rewind {
                 plan_digest: [3; 32],
@@ -37,7 +22,6 @@ mod peer_row_tests {
 
         for (call, expected) in [
             (rewind, "⏺ Rewind publication()\n  ⎿ applied"),
-            (handover, "⏺ Worker changeset publication()\n  ⎿ applied"),
             (
                 command_receipt_call(),
                 "⏺ Publish(1 command file changes)\n  ⎿ applied",
