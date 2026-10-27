@@ -203,8 +203,7 @@ fn unit_leftovers() -> Vec<String> {
     found
 }
 
-// Native journeys run in parallel and share the unit parent, so a unit another journey held at the
-// baseline may be gone by now; only a unit absent from the baseline can have leaked from this one.
+// Only units absent from the baseline can leak from this journey; parallel journeys share the parent.
 #[cfg(any(debug_assertions, arany_ci))]
 fn assert_no_new_units(baseline: &[String], message: &str) {
     let leaked: Vec<String> = unit_leftovers()
