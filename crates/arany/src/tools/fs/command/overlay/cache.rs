@@ -105,6 +105,7 @@ fn inventory(
 ) -> Result<BTreeMap<String, (std::fs::Metadata, bool)>, ToolError> {
     let mut pending = vec![String::new()];
     let mut entries = BTreeMap::new();
+    let mut cache_entries = 0usize;
     if matches!(layer, Layer::Upper) && metadata::validate(&pin(root, "")?, budget)? {
         return Err(ToolError::Path);
     }
@@ -120,7 +121,10 @@ fn inventory(
                 .map_err(|_| ToolError::Path)?;
             let path = joined(&path, &name);
             budget.entry(&path)?;
-            if entries.len() >= MAX_ARCHIVE_ENTRIES
+            if selected(&path) {
+                cache_entries += 1;
+            }
+            if cache_entries > MAX_ARCHIVE_ENTRIES
                 || path.split('/').count() > COMMAND_SNAPSHOT_DEPTH
             {
                 return Err(ToolError::Limit);
