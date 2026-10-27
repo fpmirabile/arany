@@ -746,7 +746,7 @@ async fn approved_git_write(
         .expect("Git write deadline")
         .unwrap()
     };
-    (outcome, provider)
+    (outcome, Arc::clone(&provider))
 }
 
 #[cfg(any(debug_assertions, arany_ci))]
