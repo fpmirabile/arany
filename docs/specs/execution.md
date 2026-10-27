@@ -100,7 +100,7 @@ This follows Claude Code and Codex CLI subagents sharing the working tree. Arany
 
 A write-capable parent, Implementation phase, an admitted matching definition and a committed Goal plan are required. Invalid input is refused before spawn or child disclosure. Background assignments, nonempty command lists and command criteria are currently refused. No editor can invoke Git, MCP, Skill, network, host commands or nested delegation. Existing per-Tool, context, turn, call, token, active-time and Store bounds remain in force; no transfer allowance grants live editor authority.
 
-`RunStarted.config.worker_policy` remains required nullable data. The bounded parent grant, concurrency, turns and model Tool ceiling are admission pins. Its `data_bytes` field remains serialized bounded residue until native protocol retirement; live assignments neither consume nor depend on it.
+`RunStarted.config.worker_policy` remains required nullable data. The bounded parent grant, concurrency, turns and model Tool ceiling are admission pins. Its `data_bytes` field remains serialized bounded residue; live assignments neither consume nor depend on it.
 
 `ProviderCallRecorded.delegation` retains its required nullable, bounded typed assignments and ordinal/wave matching. `AgentSpawned.assignment` is required nullable, present exactly with `ChildGrant::EditOnly`. Its current record contains the request, effective grant, parent policy digest and required nullable permission digest. It contains no base, cache generation or data allowance. Spawn atomically acquires the lease and validates lineage, concurrency and overlapping assignments against committed facts.
 
@@ -116,7 +116,7 @@ The editor's answer passes the criterion gate before SubagentStop. An unmet crit
 
 `WorkerStopObserved` retains the first cancellation, pause or budget boundary before further team dispatch. New spawns, calls, Tools and verification reject after it, while in-flight observations and terminal/release facts drain. Cancellation and pause retain landed edits and their checkpoints. Process death leaves Interrupted intents and the last receipted Workspace state. Unknown Workspace effects stop the whole Run without lease release, continuation or retry; replay never executes cleanup or publication.
 
-Private targets, PrepareWorker, worker data and handover Event/Attestation vocabulary remain bounded serialized residue for subsequent format retirement. Current live histories reject all private-target, private-data, handover, integration and discard transitions. They cannot become a compatibility execution path.
+Private targets, PrepareWorker, worker data and handover Event/Attestation vocabulary remain bounded serialized residue. Current live histories reject all private-target, private-data, handover, integration and discard transitions. They cannot become a compatibility execution path.
 
 Evidence owners: [Engine team corpus](../../crates/arany/tests/engine_run/team.rs), [live replay and hostile transitions](../../crates/arany/src/session/reducer/worker/workspace_tests.rs), [native foreground/reopen journeys](../../crates/arany-cli/tests/guard_runs/worker.rs), [shared team support](../../crates/arany/src/test_support/worker_teams.rs), [migration/archive](../../crates/arany/src/store/migrate/shared_editors_tests.rs), [checkpoint/rewind](../../crates/arany-cli/tests/guard_runs/rewind.rs), and [editor parent authority](../../crates/arany/tests/engine_run/shared_editors.rs).
 
