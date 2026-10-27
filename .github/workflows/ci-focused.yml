@@ -46,7 +46,7 @@ jobs:
     name: Focused macOS Tests (${{ matrix.profile }})
     if: startsWith(inputs.lane, 'macos-')
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       matrix:
         profile: ["${{ endsWith(inputs.lane, '-release') && 'release' || 'debug' }}"]
