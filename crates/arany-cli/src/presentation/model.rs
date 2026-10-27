@@ -619,6 +619,7 @@ mod tests {
             output: String::new(),
             attestation: Some(arany::Attestation::Guard(guard)),
             approval_cause: None,
+            guard_stage: None,
             cache_update: arany::CacheUpdate::NotApplicable,
         });
         {

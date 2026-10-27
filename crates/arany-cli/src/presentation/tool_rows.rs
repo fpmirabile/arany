@@ -113,6 +113,14 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · ");
         summary.push_str(cause);
     }
+    if let Some(stage) = tool
+        .observation
+        .as_ref()
+        .and_then(|value| value.guard_stage_diagnostic())
+    {
+        summary.push_str(" · ");
+        summary.push_str(&stage);
+    }
     if let Some(verdict) = &tool.permission_verdict
         && verdict.decision == arany::permissions::Decision::Deny
     {

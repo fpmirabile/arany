@@ -8,6 +8,8 @@ pub mod latency;
 pub mod process;
 pub mod routing;
 pub mod scenario;
+#[cfg(target_os = "linux")]
+pub use crate::session::selection_failure_session;
 #[cfg(unix)]
 pub mod worker_teams;
 
@@ -566,6 +568,7 @@ fn host_admission_tool(
             output: output.into(),
             attestation: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: crate::CacheUpdate::NotApplicable,
         }),
         started_sequence: Some(0),
