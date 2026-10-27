@@ -73,7 +73,6 @@ fn process(call: &ToolCall) -> String {
     }
 }
 
-// Shows a multi-line script argument as its first non-blank line plus "…".
 fn command_line(args: &[String]) -> String {
     let mut shown = Vec::with_capacity(args.len());
     for (index, arg) in args.iter().enumerate() {
