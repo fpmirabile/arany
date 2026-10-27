@@ -30,8 +30,6 @@ impl ToolRuntime {
 pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
 pub(super) const MAX_COMMAND_ARGS: usize = 64;
 
-const WORKER_CAPTURE_RESULT_BYTES: usize = 512;
-
 #[derive(Clone, Copy)]
 pub(super) enum Truncation {
     Allow,
@@ -250,32 +248,6 @@ fn command_output(
     } else {
         Truncation::Allow
     };
-    if matches!(
-        site.intent.target,
-        crate::session::worker::EffectTarget::WorkerView { .. }
-    ) {
-        let output = super::output::fit_streams(
-            &out,
-            &err,
-            budget.saturating_sub(WORKER_CAPTURE_RESULT_BYTES),
-            |stdout, stderr| {
-                serde_json::to_string(&crate::session::worker::WorkerCommandResult {
-                    exit_code,
-                    stdout: stdout.into(),
-                    stderr: stderr.into(),
-                    stdout_total: out.total(),
-                    stderr_total: err.total(),
-                    private_capture: crate::session::worker::PrivateCapture::None {},
-                })
-                .map_err(|_| ToolError::Operation)
-            },
-        )?;
-        return if timed_out {
-            Err(ToolError::Timeout(output))
-        } else {
-            Ok(output)
-        };
-    }
     if site.hook_stdin.is_none() {
         *site.captured.lock().map_err(|_| ToolError::Operation)? =
             Some(super::spill::streams(&out, &err));

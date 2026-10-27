@@ -366,7 +366,7 @@ mod tests {
             ),
             (tools, "    async fn run_unguarded(", "    fn pinned_root("),
             (tools, "    fn pinned_root(", "    async fn run_in_process("),
-            (guard, "fn validate_task(", "fn restore_cache("),
+            (guard, "fn validate_task(", "fn receive_handover("),
         ] {
             let body = source
                 .split_once(start)

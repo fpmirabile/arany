@@ -82,6 +82,7 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[cfg_attr(
     not(any(test, all(target_os = "macos", feature = "test-support"))),
     expect(unused_variables)
