@@ -4118,6 +4118,7 @@ int main(int argc, char **argv) {
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
+                    git_stage: None,
                     definition: None,
                     worker: None,
                     handover: None,

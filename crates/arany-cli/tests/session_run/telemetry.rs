@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "telemetry/observations.rs"]
 mod observations;
 
 #[derive(Clone, Copy)]
