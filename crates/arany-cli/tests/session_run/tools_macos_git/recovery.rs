@@ -3,6 +3,8 @@ use crate::process::BoundedOutput;
 use arany::test_support::scenario::{ScriptedProvider, request};
 use arany::{Engine, EngineError, Event, EventEnvelope, GitWriteStage, RunCancellation, SessionId};
 
+type Snapshot = Vec<(std::path::PathBuf, Vec<u8>)>;
+
 pub(super) struct Recorded {
     events: Vec<EventEnvelope>,
     view: SessionView,
@@ -55,20 +57,26 @@ async fn drive(
     (result, calls)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Action {
     Cancel,
     Release,
     Replace,
+    RewindRef(String),
+    TouchIndex,
 }
 
 async fn gated(
     engine: &Engine,
     workspace: &Path,
+    call: ToolCall,
     stage: GitWriteStage,
     action: Action,
-) -> (Result<arany::RunOutcome, EngineError>, usize) {
-    let call = branch_creation(&format!("recovery-{stage:?}-{action:?}"));
+) -> (
+    Result<arany::RunOutcome, EngineError>,
+    usize,
+    Option<Snapshot>,
+) {
     let (entered, release) = arany::FaultPlan::gate_git_write(call.clone(), stage);
     let mut release = Some(release);
     let cancellation = RunCancellation::new();
@@ -93,11 +101,26 @@ async fn gated(
         alive.status.success(),
         "{stage:?}: executor helper must remain alive until relay acknowledgement"
     );
+    let mut raced = None;
     match action {
         Action::Cancel => {
             assert!(cancellation.cancel());
         }
         Action::Release => {
+            release.take().unwrap().send(()).unwrap();
+        }
+        Action::RewindRef(older) => {
+            std::fs::write(workspace.join(".git/refs/heads/main"), format!("{older}\n")).unwrap();
+            raced = Some(tree_snapshot(workspace));
+            release.take().unwrap().send(()).unwrap();
+        }
+        Action::TouchIndex => {
+            let index = std::fs::OpenOptions::new()
+                .append(true)
+                .open(workspace.join(".git/index"))
+                .unwrap();
+            index.set_len(index.metadata().unwrap().len() + 1).unwrap();
+            raced = Some(tree_snapshot(workspace));
             release.take().unwrap().send(()).unwrap();
         }
         Action::Replace => {
@@ -125,7 +148,7 @@ async fn gated(
         "{stage:?}: unit removed after confirmed cleanup"
     );
     drop(release);
-    result
+    (result.0, result.1, raced)
 }
 
 async fn record(state: &Path, workspace: &Path, call: &ToolCall) -> Recorded {
@@ -198,23 +221,100 @@ async fn capacity_released(engine: &Engine, workspace: &Path, name: &str, leftov
     assert_eq!(unit_leftovers(), leftovers, "both capacity slots released");
 }
 
+// With exactly two slots, every subsequent write proves that both reservations were released.
+fn two_slots() {
+    private_file(
+        &StateRoot::account_path().unwrap().join("guard/limits.json"),
+        br#"{"version":1,"units":2,"queued":32}"#,
+    );
+}
+
+pub(super) async fn commit_death(engine: &Engine, workspace: &Path, state: &Path) -> Recorded {
+    two_slots();
+    let leftovers = unit_leftovers();
+    let main = workspace.join(".git/refs/heads/main");
+    let before = std::fs::read(&main).unwrap();
+    let recorded = dead_publisher(
+        engine,
+        workspace,
+        state,
+        commit("publisher died", &["."]),
+        || std::fs::read(&main).unwrap() != before,
+    )
+    .await;
+    capacity_released(engine, workspace, "after-commit-death", &leftovers).await;
+    recorded
+}
+
+// Drift between the executor's snapshot and publication must publish nothing and keep the racing state.
+pub(super) async fn commit_drift(
+    engine: &Engine,
+    workspace: &Path,
+    state: &Path,
+    older: &str,
+) -> Vec<Recorded> {
+    two_slots();
+    let leftovers = unit_leftovers();
+    let main = workspace.join(".git/refs/heads/main");
+    let index = workspace.join(".git/index");
+    let (current, indexed) = (
+        std::fs::read(&main).unwrap(),
+        std::fs::read(&index).unwrap(),
+    );
+    let mut rows = Vec::new();
+    for (label, action) in [
+        ("ref", Action::RewindRef(older.into())),
+        ("index", Action::TouchIndex),
+    ] {
+        std::fs::write(workspace.join("src/a.txt"), format!("drift {label}\n")).unwrap();
+        let call = commit(&format!("drift {label}"), &["."]);
+        let (result, calls, raced) = tokio::time::timeout(
+            Duration::from_secs(120),
+            gated(
+                engine,
+                workspace,
+                call.clone(),
+                GitWriteStage::BeforeGo,
+                action,
+            ),
+        )
+        .await
+        .expect("drift deadline");
+        assert!(result.is_ok(), "{label}: {result:?}");
+        assert_eq!(calls, 2, "{label}: a known outcome permits continuation");
+        let row = record(state, workspace, &call).await;
+        let observed = observation(&row);
+        assert_eq!(observed.disposition, ToolDisposition::Failed, "{label}");
+        assert!(!observed.output.contains("publication"), "{label}");
+        assert_eq!(
+            Some(tree_snapshot(workspace)),
+            raced,
+            "{label}: nothing published"
+        );
+        assert_eq!(unit_leftovers(), leftovers, "{label}: units cleaned up");
+        std::fs::write(&main, &current).unwrap();
+        std::fs::write(&index, &indexed).unwrap();
+        rows.push(row);
+    }
+    capacity_released(engine, workspace, "after-commit-drift", &leftovers).await;
+    rows
+}
+
 pub(super) async fn run(
     engine: &Engine,
     root: &Path,
     workspace: &Path,
     state: &Path,
 ) -> Vec<Recorded> {
-    // With exactly two slots, every subsequent write proves that both reservations were released.
-    private_file(
-        &StateRoot::account_path().unwrap().join("guard/limits.json"),
-        br#"{"version":1,"units":2,"queued":32}"#,
-    );
+    two_slots();
     let leftovers = unit_leftovers();
     let mut recorded = Vec::new();
     cancelled_rows(engine, workspace, state, &leftovers, &mut recorded).await;
     completed_rows(engine, workspace, state, &leftovers, &mut recorded).await;
     storage_rows(engine, root, workspace, state, &mut recorded).await;
-    recorded.push(dead_publisher(engine, workspace, state).await);
+    let call = branch_creation("publisher-died");
+    let created = workspace.join(".git/refs/heads/publisher-died");
+    recorded.push(dead_publisher(engine, workspace, state, call, || created.is_file()).await);
     capacity_released(engine, workspace, "after-death", &leftovers).await;
     recorded
 }
@@ -232,9 +332,15 @@ async fn cancelled_rows(
         GitWriteStage::PublisherHeld,
     ] {
         let before = tree_snapshot(workspace);
-        let (result, calls) = tokio::time::timeout(
+        let (result, calls, _) = tokio::time::timeout(
             Duration::from_secs(120),
-            gated(engine, workspace, stage, Action::Cancel),
+            gated(
+                engine,
+                workspace,
+                branch_creation(&format!("recovery-{stage:?}-Cancel")),
+                stage,
+                Action::Cancel,
+            ),
         )
         .await
         .expect("cancelled publisher cleanup deadline");
@@ -298,9 +404,9 @@ async fn completed_rows(
         let name = format!("recovery-{stage:?}-{action:?}");
         let call = branch_creation(&name);
         let before = tree_snapshot(workspace);
-        let (result, calls) = tokio::time::timeout(
+        let (result, calls, _) = tokio::time::timeout(
             Duration::from_secs(120),
-            gated(engine, workspace, stage, action),
+            gated(engine, workspace, call.clone(), stage, action),
         )
         .await
         .expect("Git recovery gate deadline");
@@ -386,8 +492,13 @@ async fn storage_rows(
     }
 }
 
-async fn dead_publisher(engine: &Engine, workspace: &Path, state: &Path) -> Recorded {
-    let call = branch_creation("publisher-died");
+async fn dead_publisher(
+    engine: &Engine,
+    workspace: &Path,
+    state: &Path,
+    call: ToolCall,
+    first_effect_published: impl Fn() -> bool,
+) -> Recorded {
     arany::FaultPlan::kill_git_publisher_after_effect(call.clone());
     let (result, calls) = tokio::time::timeout(
         Duration::from_secs(120),
@@ -401,7 +512,7 @@ async fn dead_publisher(engine: &Engine, workspace: &Path, state: &Path) -> Reco
     );
     assert_eq!(calls, 1);
     assert!(
-        workspace.join(".git/refs/heads/publisher-died").is_file(),
+        first_effect_published(),
         "publisher died after its first real effect"
     );
     let recorded = record(state, workspace, &call).await;

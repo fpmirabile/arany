@@ -148,6 +148,20 @@ fn guarded_native_git_branch_creation_publishes_through_two_units_and_replays() 
     panic!("release Git journey requires CI's disposable account");
 }
 
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS Git write journey; release requires CI's disposable account"
+)]
+fn guarded_native_git_commit_publishes_through_two_units_and_replays() {
+    #[cfg(debug_assertions)]
+    crate::tools::native_journey("tools_git::native_git_commit_helper");
+    #[cfg(all(not(debug_assertions), arany_ci))]
+    release_git_journey("tools_git::native_git_commit_helper");
+    #[cfg(all(not(debug_assertions), not(arany_ci)))]
+    panic!("release Git journey requires CI's disposable account");
+}
+
 #[cfg(all(not(debug_assertions), arany_ci))]
 fn release_git_journey(helper: &str) {
     use crate::process::BoundedOutput;
@@ -746,14 +760,19 @@ fn branch_creation(name: &str) -> ToolCall {
 }
 
 #[cfg(any(debug_assertions, arany_ci))]
-#[tokio::test]
-#[ignore = "isolated helper owned by native Git write journey"]
-async fn native_git_branch_helper() {
-    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
-    let root = Path::new(&root);
+struct WriteFixture {
+    home: std::path::PathBuf,
+    workspace: std::path::PathBuf,
+    head: String,
+    state_path: std::path::PathBuf,
+    engine: arany::Engine,
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn write_fixture(root: &Path, case: &str) -> WriteFixture {
     #[cfg(debug_assertions)]
     {
-        crate::tools::trace_case(root, "git-write");
+        crate::tools::trace_case(root, case);
         assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
     }
     #[cfg(not(debug_assertions))]
@@ -804,6 +823,28 @@ async fn native_git_branch_helper() {
         },
     )
     .unwrap();
+    WriteFixture {
+        home,
+        workspace,
+        head,
+        state_path,
+        engine,
+    }
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+#[tokio::test]
+#[ignore = "isolated helper owned by native Git write journey"]
+async fn native_git_branch_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let WriteFixture {
+        home,
+        workspace,
+        head,
+        state_path,
+        engine,
+    } = write_fixture(root, "git-write");
     let leftovers = unit_leftovers();
 
     let (created, provider) =
@@ -847,7 +888,13 @@ async fn native_git_branch_helper() {
         serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
-        json!(["git_status", "git_diff", "git_log", "git_branch"])
+        json!([
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_commit",
+            "git_branch"
+        ])
     );
     assert_eq!(catalog["git"]["write"], true);
     assert_eq!(
@@ -885,4 +932,137 @@ async fn native_git_branch_helper() {
         .filter(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::GitBranch { name: Some(_), .. })))
         .count();
     assert_eq!(started, 1, "strict replay never re-executes the creation");
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn commit(message: &str, paths: &[&str]) -> ToolCall {
+    ToolCall::GitCommit {
+        message: message.into(),
+        paths: paths.iter().map(|path| (*path).into()).collect(),
+        staged: false,
+    }
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+async fn succeeded_write(
+    engine: &arany::Engine,
+    workspace: &Path,
+    call: ToolCall,
+) -> (arany::RunOutcome, serde_json::Value) {
+    let (outcome, _) = approved_git_write(engine, workspace, call).await;
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.disposition,
+        ToolDisposition::Succeeded,
+        "{}",
+        observation.output
+    );
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+    let result = serde_json::from_str(&observation.output).unwrap();
+    (outcome, result)
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+#[tokio::test]
+#[ignore = "isolated helper owned by native Git write journey"]
+async fn native_git_commit_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let WriteFixture {
+        home,
+        workspace,
+        head,
+        state_path,
+        engine,
+    } = write_fixture(root, "git-commit");
+    let leftovers = unit_leftovers();
+
+    std::fs::write(workspace.join("src/a.txt"), "beta\n").unwrap();
+    std::fs::write(workspace.join("src/b.txt"), "new\n").unwrap();
+    std::fs::write(workspace.join(".env"), "SECRET_CANARY=1\n").unwrap();
+    let (paths, result) = succeeded_write(&engine, &workspace, commit("paths", &["."])).await;
+    let first = git_text(&workspace, &home, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_ne!(first, head);
+    assert_eq!(result["commit"], first);
+    assert_eq!(result["branch"], "main");
+    assert_eq!(result["publication"]["ref"]["name"], "refs/heads/main");
+    assert_eq!(result["publication"]["ref"]["before"], head);
+    assert_eq!(result["publication"]["ref"]["after"], first);
+    assert!(result["publication"]["index"]["after"].is_string());
+    assert_eq!(
+        git_text(
+            &workspace,
+            &home,
+            &["show", "--format=%an%n%s", "--name-only", "HEAD"]
+        ),
+        "Arany\npaths\n\nsrc/a.txt\nsrc/b.txt\n"
+    );
+    assert_eq!(
+        git_text(&workspace, &home, &["status", "--porcelain=v1", "-uall"]),
+        "?? .env\n",
+        "a protected path stays uncommitted"
+    );
+    assert_eq!(unit_leftovers(), leftovers);
+
+    std::fs::write(workspace.join("src/a.txt"), "gamma\n").unwrap();
+    let lock = workspace.join(".git/refs/heads/main.lock");
+    std::fs::write(&lock, "").unwrap();
+    let (held, _) = approved_git_write(&engine, &workspace, commit("held", &["."])).await;
+    let refused = held.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(refused.disposition, ToolDisposition::Failed);
+    assert!(!refused.output.contains("publication"));
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(
+        git_text(&workspace, &home, &["rev-parse", "HEAD"]).trim(),
+        first,
+        "a held lock publishes nothing"
+    );
+    assert_eq!(unit_leftovers(), leftovers);
+
+    git_text(&workspace, &home, &["add", "src/a.txt"]);
+    std::fs::write(workspace.join("src/a.txt"), "worktree only\n").unwrap();
+    let staged = ToolCall::GitCommit {
+        message: "staged".into(),
+        paths: Vec::new(),
+        staged: true,
+    };
+    let (staged, result) = succeeded_write(&engine, &workspace, staged).await;
+    assert_eq!(
+        git_text(&workspace, &home, &["show", "HEAD:src/a.txt"]),
+        "gamma\n"
+    );
+    assert_eq!(result["publication"]["ref"]["before"], first);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src/a.txt")).unwrap(),
+        "worktree only\n"
+    );
+    assert_eq!(unit_leftovers(), leftovers);
+
+    let mut rows = recovery::commit_drift(&engine, &workspace, &state_path, &head).await;
+    std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
+    rows.push(recovery::commit_death(&engine, &workspace, &state_path).await);
+    engine.close().await.unwrap();
+    assert_eq!(unit_leftovers(), leftovers);
+
+    std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
+    recovery::replay(&state_path, &home, &workspace, rows).await;
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    for outcome in [&paths, &staged] {
+        let events = store.load_session(outcome.session_id).await.unwrap();
+        let replay = SessionView::replay(outcome.session_id, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.runs.last().unwrap(), &outcome.run);
+        let started = events
+            .iter()
+            .filter(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::GitCommit { .. })))
+            .count();
+        assert_eq!(started, 1, "strict replay never re-executes the commit");
+    }
+    store.close().await.unwrap();
 }

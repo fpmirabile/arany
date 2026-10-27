@@ -59,9 +59,13 @@ pub(super) fn git_writes_available() -> bool {
     }
 }
 
-// macOS offers branch creation alone until its executor and publisher units cover the other verbs.
+// macOS offers branch creation and commits until its units cover switches.
 pub(super) fn git_branch_creation_available() -> bool {
     cfg!(target_os = "macos") || git_writes_available()
+}
+
+pub(super) fn git_commit_available() -> bool {
+    git_branch_creation_available()
 }
 
 #[cfg(target_os = "macos")]
