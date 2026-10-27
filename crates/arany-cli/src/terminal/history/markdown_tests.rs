@@ -347,6 +347,11 @@ fn tables_fit_or_use_records_with_source_copy_find_and_exact_classic_costs() {
                         .join("\n");
                     if width == 16 {
                         assert!(body.contains("Name: Result"));
+                        let records: String = rows
+                            .iter()
+                            .map(|row| row.text.strip_prefix("  ").unwrap_or(&row.text))
+                            .collect();
+                        assert!(records.contains("Description: escaped | pipe and value"));
                     }
                     if width >= 80 {
                         history.top = history.messages[1].start;
