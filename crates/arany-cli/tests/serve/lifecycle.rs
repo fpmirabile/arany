@@ -752,6 +752,7 @@ async fn thread_settings_update_accepts_only_loaded_threads_and_closed_modes() {
 #[tokio::test]
 async fn session_lifecycle_releases_capacity_and_pages_only_workspace_metadata() {
     let _deadline = deadline();
+    const PAGE_SIZE: usize = 2;
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     let foreign = root.path().join("foreign");
@@ -813,13 +814,13 @@ async fn session_lifecycle_releases_capacity_and_pages_only_workspace_metadata()
             .send(request(
                 20,
                 "thread/list",
-                json!({"cwd":workspace,"limit":2}),
+                json!({"cwd":workspace,"limit":PAGE_SIZE}),
             ))
             .await
             .unwrap();
         let first = next(&mut output).await;
         let page = &first["result"];
-        assert_eq!(page["data"].as_array().unwrap().len(), 2);
+        assert_eq!(page["data"].as_array().unwrap().len(), PAGE_SIZE);
         assert_eq!(page["data"][0]["id"], newest);
         let cursor = page["nextCursor"].as_str().unwrap();
         assert!(cursor.len() <= 128);
@@ -834,7 +835,7 @@ async fn session_lifecycle_releases_capacity_and_pages_only_workspace_metadata()
         let second = next(&mut output).await;
         assert_eq!(
             second["result"]["data"].as_array().unwrap().len(),
-            threads::MAX_THREADS + 1 - 2
+            threads::MAX_THREADS + 1 - PAGE_SIZE
         );
         assert!(second["result"]["nextCursor"].is_null());
         let mut listed = std::collections::BTreeSet::new();
