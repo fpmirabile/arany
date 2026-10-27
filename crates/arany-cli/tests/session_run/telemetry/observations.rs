@@ -60,6 +60,7 @@ fn align_ids(event: &mut EventEnvelope, reference: &EventEnvelope) {
 
 fn align_clocks(event: &mut Event, reference: &Event) {
     match (event, reference) {
+        // The reserved ceiling is derived from measured in-flight time, so it is a clock too.
         (
             Event::GoalProviderCallReserved {
                 active_ceiling_ms, ..
