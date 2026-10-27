@@ -38,10 +38,13 @@ pub(in crate::tools) fn capture(
             || entry.is_file() && before.get(path).is_some_and(|(old, _)| old.is_dir())
             || entry.is_dir() && before.get(path).is_some_and(|(old, _)| old.is_file())
         {
-            for child in before
-                .keys()
-                .filter(|child| Path::new(child).starts_with(path))
-            {
+            let prefix = format!("{path}/");
+            let subtree = before.get_key_value(path).into_iter().chain(
+                before
+                    .range(prefix.clone()..)
+                    .take_while(|(child, _)| child.starts_with(&prefix)),
+            );
+            for (child, _) in subtree {
                 Selector::new(0, deadline).check_time()?;
                 if selected(child)
                     && !excluded(child)

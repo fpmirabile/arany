@@ -17,7 +17,14 @@ impl BuildCacheLease {
         if self.shared || self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
-        self.reserve_directory(own_tree_bytes(&self.dir, &self.token)?)?;
+        let lower_bytes = own_tree_bytes(&self.dir, &self.token)?.max(
+            self.archive
+                .as_ref()
+                .map(|archive| archive.metadata().map(|metadata| metadata.len()))
+                .transpose()?
+                .unwrap_or_default(),
+        );
+        self.reserve_directory(lower_bytes)?;
         let name = tree_name(&self.token);
         let stamp = stamp_name(&self.token);
         let migrate = file_exists(&self.dir, &stamp)?;

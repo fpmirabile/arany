@@ -96,6 +96,20 @@ fn directory_cache_migrates_archives_reuses_identity_and_requires_clear_after_in
     assert_eq!(lower.read("target/nested/new").unwrap(), b"new");
     drop(lower);
     drop(lease);
+    let dir = cache_directory(&state, false).unwrap();
+    let committed = inventory(&dir).unwrap();
+    let mut reuse = state.begin_build_cache(identity.clone()).unwrap();
+    assert_eq!(
+        inventory(&dir).unwrap(),
+        committed + DEFAULT_ARCHIVE_BYTES * 2
+    );
+    let lower = reuse.prepare_directory().unwrap();
+    assert_eq!(
+        inventory(&dir).unwrap(),
+        committed + DEFAULT_ARCHIVE_BYTES * 2
+    );
+    drop(lower);
+    drop(reuse);
     let reader = state
         .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
         .unwrap();
