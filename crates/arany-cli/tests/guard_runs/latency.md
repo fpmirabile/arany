@@ -116,7 +116,7 @@ accepted host, objectives and remaining native evidence.
 The existing dispatch-only measurement remains separate and unchanged:
 
 ```sh
-cargo test -p arany --lib --release --locked --offline tools::tests::in_process_repeated_reads_all_succeed_on_a_large_file -- --exact --nocapture --test-threads=1
+cargo test -p arany --lib --release --locked --offline tools::read_tests::in_process_repeated_reads_all_succeed_on_a_large_file -- --exact --nocapture --test-threads=1
 ```
 
 Cold disk, long history, large snapshots, concurrent load, live Provider latency

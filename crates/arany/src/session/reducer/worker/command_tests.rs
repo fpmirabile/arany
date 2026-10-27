@@ -282,6 +282,8 @@ fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() 
         let view = f.view();
         assert_eq!(view.runs[0].agents[1].tools[0].outcome_unknown(), unknown);
         if unknown {
+            assert!(!view.goals[0].can_resume(&view));
+            assert!(!wave_settled(&view.runs[0]));
             let count = f.events.len();
             f.call(
                 f.child,
