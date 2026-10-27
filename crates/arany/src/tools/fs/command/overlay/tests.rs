@@ -1,6 +1,6 @@
 use super::*;
 
-fn baseline(root: &Dir) -> Baseline {
+pub(super) fn baseline(root: &Dir) -> Baseline {
     fn walk(root: &Dir, path: &str, baseline: &mut Baseline) {
         let directory = if path.is_empty() {
             root.try_clone().unwrap()
@@ -92,11 +92,12 @@ fn capture_freezes_selection_preserves_binary_exec_and_checks_host_drift() {
 }
 
 #[test]
-fn capture_validates_ignored_metadata_before_discard_and_rejects_publishable_opaque() {
+fn capture_validates_ignored_and_publishable_metadata_before_selection() {
     for (name, value, ignored, accepted) in [
         ("user.overlay.opaque", b"y".as_slice(), true, true),
-        ("user.overlay.opaque", b"y", false, false),
+        ("user.overlay.opaque", b"y", false, true),
         ("user.overlay.opaque", b"x", true, false),
+        ("user.overlay.opaque", b"x", false, false),
         ("user.overlay.metacopy", b"y", true, false),
         ("user.overlay.whiteout", b"", true, false),
         ("user.overlay.redirect", b"outside", true, false),
@@ -359,7 +360,10 @@ fn plain_whiteouts_use_baseline_files_and_classify_host_creation_as_conflict() {
         let upper = tempfile::tempdir().unwrap();
         let path = lower.path().join("removed");
         match case {
-            "directory" => std::fs::create_dir(&path).unwrap(),
+            "directory" => {
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("nested"), b"before").unwrap();
+            }
             "symlink" => std::os::unix::fs::symlink("target", &path).unwrap(),
             "absent" | "host-create" => {}
             "content-limit" | "file-limit" => {
@@ -402,11 +406,18 @@ fn plain_whiteouts_use_baseline_files_and_classify_host_creation_as_conflict() {
             Instant::now() + crate::tools::selection::PHASE_TIME,
         );
         match case {
-            "file" => {
+            "file" | "directory" => {
                 let (changes, _) = result.unwrap();
                 assert_eq!(changes.files.len(), 1);
                 let change = &changes.files[0];
-                assert_eq!(change.path, "removed");
+                assert_eq!(
+                    change.path,
+                    if case == "directory" {
+                        "removed/nested"
+                    } else {
+                        "removed"
+                    }
+                );
                 assert_eq!(
                     change.before.as_ref().unwrap().sha256,
                     hex_digest(b"before")
@@ -414,7 +425,7 @@ fn plain_whiteouts_use_baseline_files_and_classify_host_creation_as_conflict() {
                 assert_eq!(change.before.as_ref().unwrap().bytes().unwrap(), b"before");
                 assert!(change.after.is_none());
                 apply_files(&source, &changes.files).unwrap();
-                assert!(!path.exists());
+                assert!(!lower.path().join(&change.path).exists());
             }
             "host-create" => {
                 assert!(matches!(result, Err(ToolError::Conflict)));
