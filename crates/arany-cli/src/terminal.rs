@@ -30,6 +30,7 @@ mod clipboard;
 mod commands;
 mod composer;
 mod graphics;
+pub const SIXEL_LIMITS: &[arany::limits::Limit] = graphics::sixel::LIMITS;
 mod history;
 mod input;
 mod linear;

@@ -19,6 +19,21 @@ const SIXEL_ROWS: usize = 6;
 const RGBA_CHANNELS: usize = 4;
 const TRANSPARENT: u8 = u8::MAX;
 
+pub(in crate::terminal) const LIMITS: &[arany::limits::Limit] = &[
+    arany::limits::Limit {
+        name: "MAX_CELL_PIXELS",
+        value: MAX_CELL_PIXELS as u64,
+        unit: "pixels",
+        owner: "crates/arany-cli/src/terminal/graphics/sixel.rs",
+    },
+    arany::limits::Limit {
+        name: "PREVIEW_MAX_PIXELS",
+        value: PREVIEW_MAX_PIXELS as u64,
+        unit: "pixels",
+        owner: "crates/arany-cli/src/terminal/graphics/sixel.rs",
+    },
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::terminal) struct CellPixels {
     width: u16,
