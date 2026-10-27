@@ -2063,6 +2063,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
             _ => failure_stage(&error),
         });
         let next = match &error {
+            ToolError::GuardBootstrap(failure) if failure.namespace_remedy().is_some() => {
+                failure.namespace_remedy().unwrap_or_default()
+            }
             ToolError::GuardRejected(guard::GuardStage::NamespaceBootstrap) => {
                 "Enable unprivileged user namespaces and Bubblewrap for Arany, then resend your message."
             }

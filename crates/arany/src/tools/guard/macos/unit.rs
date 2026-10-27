@@ -1732,6 +1732,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         stage,
                         check,
                         detail: None,
+                        namespace_remedy: None,
                     }))
                 }
                 (result, _) => result,
