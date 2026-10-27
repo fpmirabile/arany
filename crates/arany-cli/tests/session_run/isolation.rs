@@ -66,9 +66,18 @@ pub fn enter_account_isolated_test() -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn enter_native_account_isolated_test() -> bool {
+    enter_native_account_isolated_test_with_timeout(NATIVE_TEST_TIMEOUT_SECONDS)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) const NATIVE_TEST_TIMEOUT_SECONDS: u32 = 80;
+
+#[cfg(target_os = "linux")]
+pub fn enter_native_account_isolated_test_with_timeout(timeout_seconds: u32) -> bool {
     const CHILD: &str = "ARANY_ACCOUNT_ISOLATED_TEST";
     use crate::process::BoundedOutput;
     use std::{io::Write, os::unix::fs::DirBuilderExt, path::Path, time::Duration};
+    const PARENT_EXIT_WAIT: Duration = Duration::from_secs(10);
 
     if std::env::var_os(CHILD).is_some() {
         let test = std::thread::current()
@@ -116,7 +125,12 @@ pub fn enter_native_account_isolated_test() -> bool {
             .expect("native fixture directory");
     }
     let guard = Path::new(env!("CARGO_BIN_EXE_arany"));
-    let mut command = native_account_isolated_test_command(temp.path(), &executable, guard);
+    let mut command = native_account_isolated_test_command_with_timeout(
+        temp.path(),
+        &executable,
+        guard,
+        timeout_seconds,
+    );
     command
         .args(["--exact", &test, "--include-ignored", "--nocapture"])
         .env_clear()
@@ -124,7 +138,10 @@ pub fn enter_native_account_isolated_test() -> bool {
     let temp_path = temp.path().to_path_buf();
     let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let output = command
-            .bounded_output_for(Duration::from_secs(90), 32 * 1024 * 1024)
+            .bounded_output_for(
+                Duration::from_secs(u64::from(timeout_seconds)) + PARENT_EXIT_WAIT,
+                32 * 1024 * 1024,
+            )
             .expect("native account test process");
         if !output.status.success() {
             let relayed =
@@ -182,7 +199,12 @@ pub fn native_account_isolated_test_command(
     test_executable: &std::path::Path,
     guard_executable: &std::path::Path,
 ) -> Command {
-    native_account_isolated_test_command_with_timeout(root, test_executable, guard_executable, 80)
+    native_account_isolated_test_command_with_timeout(
+        root,
+        test_executable,
+        guard_executable,
+        NATIVE_TEST_TIMEOUT_SECONDS,
+    )
 }
 
 #[cfg(target_os = "linux")]
