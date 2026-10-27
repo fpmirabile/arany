@@ -31,6 +31,7 @@ fn narrow_mounts_attest_every_grant_readonly_parents_and_aggregate_bounds() {
         .map(|root| root.relative.clone())
         .collect::<Vec<_>>();
     let attestation = Attestation {
+        cache_bytes: None,
         digest: [0; 32],
         namespaces: profile::Namespaces::read().unwrap(),
         masks: vec!["src/.env".into()],
@@ -319,6 +320,7 @@ fn mask_reservations_and_helper_frames_fit_maximum_grants_and_refuse_short_buffe
             bytes -= used;
         }
         let attestation = Attestation {
+            cache_bytes: None,
             digest: [u8::MAX; 32],
             namespaces: profile::Namespaces::read().unwrap(),
             masks,
@@ -343,6 +345,7 @@ fn whole_root_views_refuse_a_parent_mount_that_only_narrow_views_expect() {
             directory: true,
         }];
         let view = View {
+            cache: None,
             root: root.clone(),
             grant: Grant {
                 command_deadline: [0; 8],
@@ -356,6 +359,7 @@ fn whole_root_views_refuse_a_parent_mount_that_only_narrow_views_expect() {
             selection_ms: 0,
             directories: Vec::new(),
             attestation: Attestation {
+                cache_bytes: None,
                 digest: [0; 32],
                 namespaces: profile::Namespaces::read().unwrap(),
                 masks: Vec::new(),
