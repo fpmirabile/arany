@@ -13,6 +13,14 @@ use std::time::Duration;
 
 const TEAM_SIZE: u8 = 3;
 
+pub(crate) const RETIRED_WORKER_KINDS: &[&str] = &[
+    "WorkerDataChunk",
+    "WorkerDataSealed",
+    "WorkerHandoverRecorded",
+    "WorkerIntegrationRecorded",
+    "WorkerHandoverDiscarded",
+];
+
 pub struct TeamObservation {
     pub directory: tempfile::TempDir,
     pub session: SessionId,
@@ -705,14 +713,11 @@ async fn run_live(
                 .all(|(phase, _)| *phase != AgentPhase::ChildWork)
         );
     }
-    assert!(!events.iter().any(|e| matches!(
-        e.event.kind(),
-        "WorkerDataChunk"
-            | "WorkerDataSealed"
-            | "WorkerHandoverRecorded"
-            | "WorkerIntegrationRecorded"
-            | "WorkerHandoverDiscarded"
-    )));
+    assert!(
+        !events
+            .iter()
+            .any(|e| RETIRED_WORKER_KINDS.contains(&e.event.kind()))
+    );
     assert_action_bounds(&events, false, false);
     TeamObservation {
         directory,
