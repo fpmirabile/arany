@@ -788,6 +788,7 @@ pub(super) fn undispatched(
         output: output.into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }

@@ -140,6 +140,7 @@ pub(crate) fn observation(
         disposition: crate::tools::ToolDisposition::Succeeded,
         output: output.into(),
         approval_cause: None,
+        guard_stage: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }
