@@ -27,30 +27,33 @@ use replay::{
     inspect_session, latest_session_id, list_session_page, load_session, resolve_open_view,
     resolve_view, session_for_run,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use state::CacheGuardRecovery;
 #[cfg(test)]
 pub(crate) use state::capture_archive;
 pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use state::restore_archive_with_limit;
 pub(crate) use state::spill::{SWEEP_TIME_MS, SpillAccess};
 pub(crate) use state::{
     AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
     MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
-    archive_size_with_limit,
 };
 pub use state::{ArchivedHistory, HistoryReset};
+#[cfg(target_os = "linux")]
+pub(crate) use state::{
+    CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES, validate_cache_path,
+};
 #[cfg(unix)]
 pub(crate) use state::{
     MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES,
 };
 pub use state::{ProviderRecordEdit, ProviderRecordTarget, Record, RecordKind, StateRoot};
 #[cfg(target_os = "macos")]
-pub(crate) use state::{capture_archive_async_with_limit, restore_archive_async_with_limit};
-#[cfg(target_os = "linux")]
-pub(crate) use state::{capture_archive_with_limit, restore_archive_with_limit};
+pub(crate) use state::{
+    archive_size_with_limit, capture_archive_async_with_limit, restore_archive_async_with_limit,
+};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 const PROVIDER_SETUP_EDIT_EVENT_SLOTS: usize = 2;
