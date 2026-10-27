@@ -168,8 +168,10 @@ fn native_account_test_case(test: &str) -> &'static str {
         "active_terminal::tool_group::read_group_appends_once_and_denied_read_stays_separate" => {
             "tool_group"
         }
-        "tools::exact_goal_token_cap_fails_before_a_tool_request_is_journaled" => "goal_token_cap",
-        "tools::unfinished_implementation_goal_holds_workspace_lease_across_runs" => {
+        "tools::admission::exact_goal_token_cap_fails_before_a_tool_request_is_journaled" => {
+            "goal_token_cap"
+        }
+        "tools::admission::paused_implementation_goal_does_not_hold_the_workspace_writer" => {
             "workspace_lease"
         }
         _ => "native_account_test",
