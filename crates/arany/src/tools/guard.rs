@@ -153,6 +153,9 @@ struct Task {
     #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_stage: Option<GitStage>,
+    #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1919,6 +1922,10 @@ fn receive_git_input(
     stdin: &mut std::io::BufReader<impl Read>,
 ) -> Result<GitWork, ToolError> {
     let stage = task.git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    if task.git_fault == Some(crate::fault::git_write::GitWriteStage::Published) {
+        crate::fault::git_write::arm_death(task.intent.id);
+    }
     if stage != Some(GitStage::Publish) {
         return Ok(GitWork { stage, input: None });
     }
@@ -2795,6 +2802,10 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            git_fault: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2891,6 +2902,10 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            git_fault: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -4285,6 +4300,10 @@ mod tests {
                 guard_executable: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]
                 system_programs: None,
+                #[cfg(target_os = "macos")]
+                git_stage: None,
+                #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+                git_fault: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;

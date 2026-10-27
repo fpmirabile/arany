@@ -1048,6 +1048,8 @@ impl Task {
                 None
             },
             git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         })
     }
 
@@ -1146,6 +1148,8 @@ struct GoGate {
     receive_go: tokio::sync::oneshot::Receiver<()>,
     git_stage: Option<super::GitStage>,
     git_input: Option<tokio::sync::oneshot::Receiver<(Vec<u8>, Vec<u8>)>>,
+    #[cfg(any(test, feature = "test-support"))]
+    git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
 async fn read_command_windows(
@@ -1244,9 +1248,15 @@ async fn execute_worker(
         receive_go,
         git_stage,
         git_input,
+        #[cfg(any(test, feature = "test-support"))]
+        git_fault,
     } = gate;
     let mut task = Task::new(runtime, intent, None)?;
     task.git_stage = git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        task.git_fault = git_fault;
+    }
     let task = super::encode_task(&task)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
@@ -1308,6 +1318,20 @@ async fn execute_worker(
                 .await?;
             }
             receive_go.await.map_err(|_| ToolError::Operation)?;
+            #[cfg(any(test, feature = "test-support"))]
+            if matches!(
+                git_fault,
+                Some(
+                    crate::fault::git_write::GitWriteStage::PublisherHeld
+                        | crate::fault::git_write::GitWriteStage::ExecutorTimeout
+                )
+            ) {
+                control
+                    .write_all(b"GIT_HELD\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                std::future::pending::<()>().await;
+            }
             capture.complete();
             let payload_deadline = super::payload_report_deadline(
                 tokio::time::Instant::now(),
@@ -1662,6 +1686,8 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         };
         assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
@@ -2129,6 +2155,8 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         };
         let phase = std::env::var("ARANY_TEST_GIT_PROFILE_PHASE").unwrap();
         if phase == "bare" {

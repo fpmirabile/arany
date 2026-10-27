@@ -568,6 +568,15 @@ async fn manager(
 }
 
 impl Unit {
+    pub(super) fn take_capacity(&mut self) -> Result<super::super::admission::Permit, ToolError> {
+        self._permit.take().ok_or(ToolError::Configuration)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn fixture_witness(&self) -> Result<(PathBuf, u32), ToolError> {
+        Ok((self.root.clone(), self.supervisor()?.pid))
+    }
+
     pub(super) fn supervisor(&self) -> Result<Identity, ToolError> {
         recovery(&self._directory)?
             .supervisor
@@ -999,7 +1008,9 @@ pub(super) async fn run_unit(
     let (mut unit, active_window) = admitted;
     let git_stage = link.stage;
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
-    crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
+    if git_stage != Some(GitStage::Publish) {
+        crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
+    }
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     if let Some(private) = &runtime.worker {
@@ -1029,6 +1040,13 @@ pub(super) async fn run_unit(
         let phases = async {
             let mut task = Task::new(runtime, intent, cache_transfer)?;
             task.git_stage = git_stage;
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                task.git_fault = crate::fault::git_write::take_mode(
+                    &intent.call,
+                    git_stage == Some(GitStage::Plan),
+                );
+            }
             let task = super::super::encode_task(&task)?;
             let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
                 stream
@@ -1136,19 +1154,21 @@ pub(super) async fn run_unit(
                     .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
                     .await?;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            if git_stage == Some(GitStage::Publish) {
+                super::git_write::fixture_gate(
+                    intent,
+                    crate::fault::git_write::GitWriteStage::BeforeGo,
+                    &unit,
+                )
+                .await?;
+            }
             payload_phase.store(true, Ordering::Release);
             if git_stage != Some(GitStage::Plan) {
                 dispatched.store(true, Ordering::Release);
             }
             let observation = async {
-                stream
-                    .get_mut()
-                    .write_all(
-                        b"GO
-",
-                    )
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
+                super::git_write::send_go(stream.get_mut(), intent, &unit, git_stage).await?;
                 if git_stage != Some(GitStage::Plan) {
                     crate::fault::guard_dispatched(intent);
                 }
@@ -1326,6 +1346,9 @@ pub(super) async fn run_unit(
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
+    #[cfg(any(test, feature = "test-support"))]
+    crate::fault::git_write::storage_finished(&unit.root, intent.id)
+        .map_err(|_| ToolError::Operation)?;
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
     if let Some(private) = &runtime.worker {
@@ -1406,6 +1429,8 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             cache.validate(&task.intent, &task.config)?;
         }
         let git_stage = task.git_stage;
+        #[cfg(any(test, feature = "test-support"))]
+        let git_fault = task.git_fault;
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
@@ -1610,6 +1635,8 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         receive_go,
                         git_stage,
                         git_input: publishing.then_some(plan_receiver),
+                        #[cfg(any(test, feature = "test-support"))]
+                        git_fault,
                     },
                     path.parent().ok_or(ToolError::Path)?,
                 )
@@ -4146,6 +4173,8 @@ int main(int argc, char **argv) {
                     workspace: runtime.workspace.clone(),
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
+                    git_stage: None,
+                    git_fault: None,
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();
