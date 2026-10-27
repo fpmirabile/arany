@@ -67,6 +67,12 @@ pub(super) fn git_branch_creation_available() -> bool {
 }
 
 #[cfg(target_os = "macos")]
+mod git_stage;
+#[cfg(target_os = "macos")]
+pub(super) use git_stage::GitStage;
+#[cfg(target_os = "macos")]
+use git_stage::{GitWork, read_plan_report, receive_git_input};
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
@@ -119,14 +125,6 @@ pub(super) fn native_system_program(path: &str) -> Result<bool, ToolError> {
 pub(super) use linux::RESERVATION_OVERHEAD;
 #[cfg(target_os = "macos")]
 pub(super) use macos::RESERVATION_OVERHEAD;
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum GitStage {
-    Plan,
-    Publish,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1216,24 +1214,6 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
         .map_err(|rejected| rejected.0)
 }
 
-// An executor's report may be followed by its plan frame; the flag says whether bytes remain.
-#[cfg(target_os = "macos")]
-async fn read_plan_report<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    intent: &EffectIntent,
-) -> Result<(ToolObservation, bool), ToolError> {
-    let bytes = read_line_capped(reader, super::spill::report_cap(intent)).await?;
-    let observation = parse_observation(&bytes)?;
-    if observation.cache_update != CacheUpdate::NotApplicable || !observation.attested_for(intent) {
-        return Err(ToolError::Operation);
-    }
-    let framed = !tokio::io::AsyncBufReadExt::fill_buf(reader)
-        .await
-        .map_err(|_| ToolError::Operation)?
-        .is_empty();
-    Ok((observation, framed))
-}
-
 // A rejection keeps the error the reader has always returned and, where it is an Operation, a closed check.
 async fn read_report<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -1936,34 +1916,6 @@ fn receive_bulk(
     }
 }
 
-#[cfg(target_os = "macos")]
-pub(super) struct GitWork {
-    pub(super) stage: Option<GitStage>,
-    pub(super) input: Option<(Vec<u8>, Vec<u8>)>,
-}
-
-// A publisher receives the executor's result text, then its plan frame, before GO.
-#[cfg(target_os = "macos")]
-fn receive_git_input(
-    task: &Task,
-    stdin: &mut std::io::BufReader<impl Read>,
-) -> Result<GitWork, ToolError> {
-    let stage = task.git_stage;
-    #[cfg(any(test, feature = "test-support"))]
-    if task.git_fault == Some(crate::fault::git_write::GitWriteStage::Published) {
-        crate::fault::git_write::arm_death(task.intent.id);
-    }
-    if stage != Some(GitStage::Publish) {
-        return Ok(GitWork { stage, input: None });
-    }
-    let result = transfer::read_frame(stdin, task.intent.limits.result_bytes as usize)?;
-    let frame = transfer::read_frame(stdin, super::git::WRITE_FRAME_BYTES)?;
-    Ok(GitWork {
-        stage,
-        input: Some((result, frame)),
-    })
-}
-
 fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
     if let Some(plan) = plan {
         transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
@@ -2242,6 +2194,10 @@ pub(super) fn helper_main() -> ExitCode {
         send_plan(plan, &mut stdout)?;
         Ok(())
     })();
+    bootstrap_exit(stage, result)
+}
+
+fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

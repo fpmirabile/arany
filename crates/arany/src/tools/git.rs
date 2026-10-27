@@ -1265,7 +1265,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     output
 }
 
-pub(super) const WRITE_FRAME_BYTES: usize = write::FRAME_BYTES;
+pub(crate) const WRITE_FRAME_BYTES: usize = write::FRAME_BYTES;
 
 #[cfg(target_os = "macos")]
 async fn write_stage(site: &GuardContext<'_>, git: &Program) -> Result<String, ToolError> {
