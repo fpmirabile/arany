@@ -260,6 +260,7 @@ impl RunLoop<'_> {
                 attestation: None,
                 cache_update: CacheUpdate::NotApplicable,
                 approval_cause: None,
+                guard_stage: None,
                 limit_cause: None,
                 enforcement_cause: None,
             },

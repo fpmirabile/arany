@@ -505,3 +505,30 @@ fn merge(
     )
     .map_err(|_| CaptureFailure::Limit)
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::tools) fn selection_failure(
+    intent: crate::tools::EffectIntent,
+) -> crate::tools::ToolObservation {
+    let lower = tempfile::tempdir().expect("selection fixture directory");
+    std::fs::write(lower.path().join("file"), b"x").expect("selection fixture file");
+    let source = crate::tools::fs::open_directory(lower.path()).expect("selection fixture root");
+    let deadline = std::time::Instant::now();
+    let Err(error) = masks::Inventory::read_shared(
+        &source,
+        ("", masks::MASK_ARGUMENT_BYTES),
+        &mut Default::default(),
+        &mut crate::tools::selection::Selector::new(0, deadline),
+        deadline,
+    ) else {
+        panic!("an expired walk must fail");
+    };
+    let report = crate::tools::guard::linux::supervisor::failure_report(
+        crate::tools::guard::BootstrapStage::RuntimeMounts,
+        &error,
+    );
+    let bytes = serde_json::to_vec(&report).expect("failure report");
+    let decoded = crate::tools::guard::bootstrap_failure(&bytes).expect("decoded failure");
+    crate::tools::guard::dispatch_result(&intent, false, Err(decoded))
+        .expect("unstarted observation")
+}

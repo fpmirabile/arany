@@ -433,9 +433,10 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
             base: None,
             max_count: None,
         }),
-        super::guard::git_writes_available()
+        super::guard::git_branch_creation_available()
     );
     for git_writes in [false, true] {
+        let creation = git_writes || super::guard::git_branch_creation_available();
         let operations = if git_writes {
             vec![
                 "git_status",
@@ -449,13 +450,13 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
             vec!["git_status", "git_diff", "git_log", "git_branch"]
         };
         let catalog = catalog(config.clone(), git_writes);
-        assert_eq!(catalog["git"]["write"], git_writes);
+        assert_eq!(catalog["git"]["write"], creation);
         assert_eq!(catalog["git"]["operations"], json!(operations));
         let branch = catalog_call_schemas(&catalog)
             .into_iter()
             .find(|call| call["properties"]["operation"]["enum"][0] == "git_branch")
             .unwrap();
-        let expected = if git_writes {
+        let expected = if creation {
             json!(["string", "null"])
         } else {
             json!("null")

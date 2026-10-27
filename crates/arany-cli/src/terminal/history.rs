@@ -89,6 +89,8 @@ struct TextPoint {
     byte: usize,
     // A boundary sits between graphemes; otherwise the grapheme starting at `byte` is selected.
     boundary: bool,
+    // The rendered row and cell, so cells sharing one source range (an entity) stay distinct drag endpoints.
+    slot: (usize, usize),
 }
 
 #[derive(Clone, Copy)]
@@ -748,6 +750,7 @@ impl History {
             source: message.source,
             byte,
             boundary: true,
+            slot: (0, 0),
         };
         let offset = row - message.start;
         if offset == 0 && has_heading(message.kind) {
@@ -759,7 +762,7 @@ impl History {
             if column < at {
                 return Some(boundary(rows[offset].source_byte));
             }
-            for cell in cells {
+            for (index, cell) in cells.iter().enumerate() {
                 at += cell.text.width();
                 if column < at {
                     return Some(TextPoint {
@@ -767,6 +770,7 @@ impl History {
                         source: message.source,
                         byte: cell.byte,
                         boundary: false,
+                        slot: (row, index),
                     });
                 }
             }
@@ -791,6 +795,7 @@ impl History {
                     source: message.source,
                     byte,
                     boundary: false,
+                    slot: (0, 0),
                 }),
         )
     }
@@ -804,26 +809,36 @@ impl History {
             .iter()
             .find(|message| message.source == point.source)?;
         let text = message_text(view, message, &self.notices);
+        let width = self
+            .width
+            .min(MAX_ROW_CELLS)
+            .saturating_sub(row_indent(message.kind));
+        let visible = formats_markdown(message.kind)
+            .then(|| super::markdown::visible_line(&text, point.byte, width))
+            .flatten();
         let (mut line_start, mut line_end) = line_bounds(&text, point.byte);
-        if formats_markdown(message.kind)
-            && let Some(content) = super::markdown::content_at(
-                &text,
-                point.byte,
-                self.width
-                    .min(MAX_ROW_CELLS)
-                    .saturating_sub(row_indent(message.kind)),
-            )
+        if visible.is_none()
+            && formats_markdown(message.kind)
+            && let Some(content) = super::markdown::content_at(&text, point.byte, width)
         {
             line_start = line_start.max(content.start);
             line_end = line_end.min(content.end);
         }
-        let graphemes = text[line_start..line_end]
-            .grapheme_indices(true)
-            .map(|(byte, grapheme)| (line_start + byte, grapheme))
-            .collect::<Vec<_>>();
+        let graphemes = match &visible {
+            Some(cells) => cells
+                .iter()
+                .map(|cell| (cell.byte, cell.text.as_str()))
+                .collect::<Vec<_>>(),
+            None => text[line_start..line_end]
+                .grapheme_indices(true)
+                .map(|(byte, grapheme)| (line_start + byte, grapheme))
+                .collect::<Vec<_>>(),
+        };
         let at = graphemes.iter().position(|(byte, _)| *byte == point.byte)?;
         let at_index = |index: usize| TextPoint {
-            mapped: None,
+            mapped: visible
+                .as_ref()
+                .map(|cells| (cells[index].source.start, cells[index].source.end)),
             byte: graphemes[index].0,
             ..point
         };
@@ -872,6 +887,7 @@ impl History {
             source: point.source,
             byte,
             boundary: true,
+            slot: (0, 0),
         };
         Some(Selection {
             anchor: boundary(start),
@@ -2047,12 +2063,14 @@ mod tests {
                 source: MessageSource::User(0),
                 byte: 0,
                 boundary: true,
+                slot: (0, 0),
             },
             head: TextPoint {
                 mapped: None,
                 source: MessageSource::User(0),
                 byte: text.len(),
                 boundary: true,
+                slot: (0, 0),
             },
             shown: true,
         });
@@ -2111,7 +2129,7 @@ mod tests {
         let heading = row_of(&history, &view, "Arany:");
         assert_eq!(
             history.visible(&view)[heading + 1].text,
-            "  alpha beta gamma d"
+            "  alpha beta gamma "
         );
         history.select_at(&view, heading, 0, 1);
         assert!(history.selecting() && !history.has_selection());
@@ -2124,8 +2142,8 @@ mod tests {
         assert_eq!(copied(&history, &view).as_deref(), Some(answer));
         let rows = history.visible(&view);
         assert_eq!(rows[heading].selected, None, "headings are never selected");
-        assert_eq!(rows[heading + 1].selected, Some((2, 20)));
-        assert_eq!(rows[heading + 2].selected, Some((2, 14)));
+        assert_eq!(rows[heading + 1].selected, Some((2, 19)));
+        assert_eq!(rows[heading + 2].selected, Some((2, 15)));
         assert!(rows[..heading].iter().all(|row| row.selected.is_none()));
 
         view.runs.push(run("second", "later answer"));
@@ -3454,3 +3472,9 @@ mod markdown_tests;
 
 #[cfg(test)]
 mod find_tests;
+
+#[cfg(test)]
+mod inline_tests;
+
+#[cfg(test)]
+mod link_tests;

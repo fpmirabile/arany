@@ -125,13 +125,27 @@ fn guarded_native_git_reads_survive_closed_replay() {
     #[cfg(debug_assertions)]
     crate::tools::native_journey("tools_git::native_git_journey_helper");
     #[cfg(all(not(debug_assertions), arany_ci))]
-    release_git_journey();
+    release_git_journey("tools_git::native_git_journey_helper");
+    #[cfg(all(not(debug_assertions), not(arany_ci)))]
+    panic!("release Git journey requires CI's disposable account");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS Git write journey; release requires CI's disposable account"
+)]
+fn guarded_native_git_branch_creation_publishes_through_two_units_and_replays() {
+    #[cfg(debug_assertions)]
+    crate::tools::native_journey("tools_git::native_git_branch_helper");
+    #[cfg(all(not(debug_assertions), arany_ci))]
+    release_git_journey("tools_git::native_git_branch_helper");
     #[cfg(all(not(debug_assertions), not(arany_ci)))]
     panic!("release Git journey requires CI's disposable account");
 }
 
 #[cfg(all(not(debug_assertions), arany_ci))]
-fn release_git_journey() {
+fn release_git_journey(helper: &str) {
     use crate::process::BoundedOutput;
 
     let _gate = crate::process::NATIVE_GATE
@@ -143,12 +157,7 @@ fn release_git_journey() {
     }
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
-        .args([
-            "--exact",
-            "tools_git::native_git_journey_helper",
-            "--ignored",
-            "--nocapture",
-        ])
+        .args(["--exact", helper, "--ignored", "--nocapture"])
         .env_clear()
         .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
         .env("HOME", temp.path().join("home"))
@@ -168,6 +177,147 @@ fn release_git_journey() {
     );
     crate::process::assert_single_test_completed(&output.stdout, "native Git journey");
     assert!(output.stderr.is_empty());
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn unit_leftovers() -> Vec<String> {
+    const PARENT: &str = "/private/tmp";
+    const PREFIX: &str = "arany-u-";
+    let mut found: Vec<String> = std::fs::read_dir(PARENT)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(PREFIX))
+        .collect();
+    use crate::process::BoundedOutput;
+    let mounts = std::process::Command::new("/sbin/mount")
+        .bounded_output_for(Duration::from_secs(10), 1024 * 1024)
+        .unwrap();
+    assert!(mounts.status.success(), "mount probe: {mounts:?}");
+    found.extend(
+        String::from_utf8_lossy(&mounts.stdout)
+            .lines()
+            .filter(|line| line.contains(&format!("{PARENT}/{PREFIX}")))
+            .map(str::to_owned),
+    );
+    found.sort();
+    found
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+async fn faulted_git_read(
+    engine: &arany::Engine,
+    workspace: &Path,
+    fault: arany::GitStorageFault,
+    refusal_evidence: &Path,
+) -> arany::RunOutcome {
+    let call = ToolCall::GitStatus { path: ".".into() };
+    assert!(!refusal_evidence.exists());
+    arany::FaultPlan::fail_git_storage(call.clone(), fault, refusal_evidence.into());
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        crate::tool_outcome(call),
+        arany::test_support::goals::finish_with("Done"),
+    ]));
+    run_with(
+        engine,
+        &provider,
+        RunRequest {
+            skill: None,
+            session_id: None,
+            title: Some(format!("{fault:?} Git")),
+            objective: "Fault this Git unit".into(),
+            images: Vec::new(),
+            workspace: workspace.into(),
+            launch_directory: None,
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
+        },
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+async fn cancelled_git_read(engine: &arany::Engine, workspace: &Path) -> arany::SessionId {
+    let call = ToolCall::GitStatus { path: ".".into() };
+    let session = engine
+        .create_session(workspace.into(), Some("Cancelled Git".into()))
+        .await
+        .unwrap();
+    let (dispatched, release) = arany::FaultPlan::gate_guard_dispatch(call.clone());
+    let cancellation = arany::RunCancellation::new();
+    let pending = cancellation.clone();
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        crate::tool_outcome(call),
+    ]));
+    let stop = async {
+        dispatched.await.unwrap();
+        assert!(pending.cancel());
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            run_with(
+                engine,
+                &provider,
+                RunRequest {
+                    skill: None,
+                    session_id: Some(session),
+                    title: None,
+                    objective: "Cancel this Git read".into(),
+                    images: Vec::new(),
+                    workspace: workspace.into(),
+                    launch_directory: None,
+                    include_paths: Vec::new(),
+                    policy: CollaborationPolicy::Single,
+                    goal: arany::GoalRequest::default(),
+                },
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    cancellation,
+                    ..Default::default()
+                },
+            ),
+            stop
+        )
+    })
+    .await
+    .expect("cancelled Git read deadline");
+    drop(release);
+    assert!(
+        matches!(
+            &outcome,
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+        ),
+        "dispatched Git cancellation must preserve uncertainty: {outcome:?}"
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    session
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn assert_cancelled_git_read(session: arany::SessionId, events: &[arany::EventEnvelope]) {
+    let replay = SessionView::replay(session, events).unwrap().unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    let run = &replay.runs[0];
+    assert_eq!(run.status, RunStatus::Interrupted);
+    assert_eq!(run.tools.len(), 1);
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert!(matches!(
+        &observation.intent.call,
+        ToolCall::GitStatus { .. }
+    ));
+    assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+    assert!(observation.attestation.is_none());
+    assert_eq!(
+        observation.output,
+        "Guard execution unconfirmed; effects may have occurred. Do not retry automatically."
+    );
+    assert_eq!(replay.goals.len(), 1);
+    assert_eq!(replay.goals[0].status, arany::GoalStatus::Interrupted);
 }
 
 #[cfg(any(debug_assertions, arany_ci))]
@@ -318,6 +468,7 @@ async fn native_git_journey_helper() {
         },
     )
     .unwrap();
+    let leftovers = unit_leftovers();
     let outcome = tokio::time::timeout(
         Duration::from_secs(120),
         run_with(
@@ -344,7 +495,46 @@ async fn native_git_journey_helper() {
     .await
     .expect("Git journey deadline")
     .unwrap();
+    let cancelled = cancelled_git_read(&engine, &workspace).await;
+    for fault in [
+        arany::GitStorageFault::Refuse,
+        arany::GitStorageFault::Exhaust,
+    ] {
+        let refusal_evidence = root.join(format!("git-storage-{fault:?}.json"));
+        let faulted = faulted_git_read(&engine, &workspace, fault, &refusal_evidence).await;
+        assert_eq!(faulted.run.tools.len(), 1, "{fault:?}");
+        let observation = faulted.run.tools[0].observation.as_ref().unwrap();
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Failed,
+            "{fault:?}"
+        );
+        match fault {
+            arany::GitStorageFault::Refuse => {
+                assert!(observation.attestation.is_none(), "{observation:?}");
+                let (intent, unit): (uuid::Uuid, std::path::PathBuf) = serde_json::from_slice(
+                    &std::fs::read(&refusal_evidence)
+                        .expect("Git unit attached its volume, checked the canary and refused"),
+                )
+                .unwrap();
+                assert_eq!(intent, observation.intent.id);
+                assert!(!unit.exists(), "refused Git unit root must be removed");
+            }
+            arany::GitStorageFault::Exhaust => {
+                assert!(observation.attestation.is_some(), "{observation:?}");
+                assert_eq!(
+                    observation.output,
+                    "Tool operation failed; no automatic retry"
+                );
+            }
+        }
+    }
     engine.close().await.unwrap();
+    assert_eq!(
+        unit_leftovers(),
+        leftovers,
+        "every Git unit, including the failed and denied reads, must detach its volume and remove its root"
+    );
     assert_eq!(
         outcome.run.status,
         RunStatus::Finished,
@@ -476,6 +666,8 @@ async fn native_git_journey_helper() {
 
     std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let cancelled_events = store.load_session(cancelled).await.unwrap();
+    assert_cancelled_git_read(cancelled, &cancelled_events);
     let events = store.load_session(outcome.session_id).await.unwrap();
     let replay = SessionView::replay(outcome.session_id, &events)
         .unwrap()
@@ -502,4 +694,224 @@ async fn native_git_journey_helper() {
         .filter(|event| matches!(&event.event, arany::Event::ToolFinished { observation, .. } if is_git(&observation.intent.call)))
         .count();
     assert_eq!((started, finished), (9, 9));
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+async fn approved_git_write(
+    engine: &arany::Engine,
+    workspace: &Path,
+    call: ToolCall,
+) -> (
+    arany::RunOutcome,
+    Arc<arany::test_support::scenario::ScriptedProvider>,
+) {
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        crate::tool_outcome(call),
+        arany::test_support::goals::finish_with("Done"),
+    ]));
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
+    let running = run_with(
+        engine,
+        &provider,
+        RunRequest {
+            skill: None,
+            session_id: None,
+            title: Some("Git write".into()),
+            objective: "Create a branch".into(),
+            images: Vec::new(),
+            workspace: workspace.into(),
+            launch_directory: None,
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
+        },
+        RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        },
+    );
+    tokio::pin!(running);
+    let outcome = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            tokio::select! {
+                biased;
+                outcome = &mut running => break outcome,
+                Some(approval) = inbox.next() => approval.decide(arany::ApprovalReply::AllowOnce),
+            }
+        }
+    })
+    .await
+    .expect("Git write deadline")
+    .unwrap();
+    (outcome, provider)
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn git_text(workspace: &Path, home: &Path, args: &[&str]) -> String {
+    use crate::process::BoundedOutput;
+
+    let output = std::process::Command::new(CLT_GIT)
+        .args(args)
+        .current_dir(workspace)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .bounded_output_for(Duration::from_secs(10), 32 * 1024)
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn branch_creation(name: &str) -> ToolCall {
+    ToolCall::GitBranch {
+        name: Some(name.into()),
+        start_point: None,
+        scope: None,
+        base: None,
+        max_count: None,
+    }
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+#[tokio::test]
+#[ignore = "isolated helper owned by native Git write journey"]
+async fn native_git_branch_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    #[cfg(debug_assertions)]
+    {
+        crate::tools::trace_case(root, "git-write");
+        assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+    }
+    #[cfg(not(debug_assertions))]
+    assert!(std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none());
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    host_git(CLT_GIT, &workspace, &home, &["init", "-q", "-b", "main"]);
+    std::fs::write(workspace.join("src/a.txt"), "alpha\n").unwrap();
+    host_git(CLT_GIT, &workspace, &home, &["add", "-A"]);
+    host_git(
+        CLT_GIT,
+        &workspace,
+        &home,
+        &["commit", "-q", "-m", "first commit"],
+    );
+    let head = git_text(&workspace, &home, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    let state_path = root.join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    let git = std::fs::canonicalize(CLT_GIT).unwrap();
+    private_file(
+        &state_path.join("tools.json"),
+        &serde_json::to_vec(&json!({
+            "version": 1,
+            "workspace_paths": ["."],
+            "write": true,
+            "commands": [],
+            "skills": [],
+            "mcp": [],
+            "git": {
+                "name": "git",
+                "executable": git,
+                "sha256": hash(&std::fs::read(&git).unwrap()),
+                "interpreter": false,
+                "inputs": []
+            }
+        }))
+        .unwrap(),
+    );
+    let engine = arany::test_support::engine::open(
+        state,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let leftovers = unit_leftovers();
+
+    let (created, provider) =
+        approved_git_write(&engine, &workspace, branch_creation("topic")).await;
+    assert_eq!(
+        created.run.status,
+        RunStatus::Finished,
+        "{:?}",
+        created.run.tools
+    );
+    let observation = created.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.disposition,
+        ToolDisposition::Succeeded,
+        "{}",
+        observation.output
+    );
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+    let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(result["branch"], "topic");
+    assert_eq!(result["oid"], head);
+    assert_eq!(result["publication"]["ref"]["name"], "refs/heads/topic");
+    assert_eq!(result["publication"]["ref"]["after"], head);
+    assert_eq!(
+        git_text(&workspace, &home, &["rev-parse", "refs/heads/topic"]).trim(),
+        head
+    );
+    assert_eq!(
+        git_text(&workspace, &home, &["status", "--porcelain=v1"]),
+        ""
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src/a.txt")).unwrap(),
+        "alpha\n"
+    );
+    let requests = provider.requests.lock().unwrap().clone();
+    let catalog: serde_json::Value =
+        serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
+    assert_eq!(
+        catalog["git"]["operations"],
+        json!(["git_status", "git_diff", "git_log", "git_branch"])
+    );
+    assert_eq!(catalog["git"]["write"], true);
+    assert_eq!(
+        unit_leftovers(),
+        leftovers,
+        "the executor and the publisher must both detach their volumes and remove their roots"
+    );
+
+    let (existing, _) = approved_git_write(&engine, &workspace, branch_creation("topic")).await;
+    let refused = existing.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(refused.disposition, ToolDisposition::Failed);
+    assert!(refused.output.contains("failed"));
+    assert!(!refused.output.contains("publication"));
+    assert_eq!(unit_leftovers(), leftovers);
+
+    engine.close().await.unwrap();
+    assert_eq!(
+        unit_leftovers(),
+        leftovers,
+        "every Git write unit must detach its volume and remove its root"
+    );
+
+    std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(created.session_id).await.unwrap();
+    let replay = SessionView::replay(created.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.last().unwrap(), &created.run);
+    store.close().await.unwrap();
+    let started = events
+        .iter()
+        .filter(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::GitBranch { name: Some(_), .. })))
+        .count();
+    assert_eq!(started, 1, "strict replay never re-executes the creation");
 }

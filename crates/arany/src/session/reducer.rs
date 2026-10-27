@@ -19,8 +19,11 @@ mod rewind;
 pub(crate) mod rewind_tests;
 mod run;
 mod session;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), expect(dead_code))]
 mod test_support;
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub use test_support::selection_failure_session;
 mod tool;
 pub(crate) use tool::{
     validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,

@@ -779,6 +779,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
                         .then_some(crate::tools::LimitCause::Resource),
                     output: "tool-output-canary".repeat(1024),
                     approval_cause: None,
+                    guard_stage: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             });

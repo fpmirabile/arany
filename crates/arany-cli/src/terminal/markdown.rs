@@ -1,5 +1,7 @@
 use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_terminal_width};
 mod blocks;
+mod inline;
+mod links;
 mod tables;
 use blocks::BlockLine;
 use ratatui::style::Modifier;
@@ -58,6 +60,8 @@ fn layout(
             let content = line.map_or(text, |line| &source[line.content.clone()]);
             if let Some(table) = line.and_then(|line| line.table.as_ref()) {
                 tables::layout(table, width, capture, &mut record)?;
+            } else if let Some(lines) = line.and_then(|line| line.flow.as_ref()) {
+                inline::layout(lines, width, capture, &mut record)?;
             } else {
                 layout_line((start, content), line, width, capture, &mut record)?;
             }
@@ -179,10 +183,19 @@ fn source_range(line: Option<&BlockLine>, mut mapped: Range<usize>) -> Range<usi
     mapped
 }
 type Layout = (Vec<Row>, usize, usize);
-pub(super) fn content_at(source: &str, byte: usize, width: usize) -> Option<Range<usize>> {
+fn projected(source: &str, width: usize) -> Option<Vec<BlockLine>> {
     let lines = blocks::project(source).ok()?;
     layout(source, width, false, Some(&lines)).ok()?;
-    lines
+    Some(lines)
+}
+pub(super) fn visible_line(source: &str, byte: usize, width: usize) -> Option<Vec<Cell>> {
+    projected(source, width)?
+        .iter()
+        .find_map(|line| line.flow.as_ref()?.line_at(byte))
+        .map(<[Cell]>::to_vec)
+}
+pub(super) fn content_at(source: &str, byte: usize, width: usize) -> Option<Range<usize>> {
+    projected(source, width)?
         .iter()
         .find(|line| !line.hidden && line.content.contains(&byte))
         .map(|line| line.content.clone())
