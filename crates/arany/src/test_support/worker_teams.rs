@@ -516,6 +516,7 @@ async fn run_live(
         ApprovalMode::Request
     });
     let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
+    let mut cache_gate = None;
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -544,10 +545,22 @@ async fn run_live(
                 commands::overlay::dispatched(&state, &workspace, case);
                 overlay_dispatch = None;
             }
+            gated = async {
+                match &mut cache_gate {
+                    Some((publishing, _, _)) => publishing.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                gated.expect("editor cache publication reached its gate");
+                if let Some((_, release, token)) = cache_gate.take() {
+                    FaultPlan::fail_record_sync(token.into(), "");
+                    release.send(()).unwrap();
+                }
+            }
             Some(approval) = inbox.next() => {
                 commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
-                    commands::approve_cache_failure(&workspace, approval).await;
+                    cache_gate = commands::approve_cache_failure(&workspace, approval);
                     continue;
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {

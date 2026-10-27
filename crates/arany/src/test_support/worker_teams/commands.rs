@@ -36,7 +36,15 @@ pub(super) fn configure(state: &Path, case: &str) {
     })).unwrap());
 }
 
-pub(super) async fn approve_cache_failure(workspace: &Path, approval: ToolApproval) {
+// On Linux the publication gate is returned for the caller to await while it keeps polling its Run.
+pub(super) fn approve_cache_failure(
+    workspace: &Path,
+    approval: ToolApproval,
+) -> Option<(
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    String,
+)> {
     let identity = crate::store::BuildCacheIdentity::new(
         workspace,
         approval.intent.workspace_device,
@@ -47,14 +55,13 @@ pub(super) async fn approve_cache_failure(workspace: &Path, approval: ToolApprov
     {
         let (publishing, release) = FaultPlan::gate_guard_cache_publication(approval.intent.id);
         approval.decide(true);
-        publishing.await.unwrap();
-        FaultPlan::fail_record_sync(identity.token().into(), "");
-        release.send(()).unwrap();
+        Some((publishing, release, identity.token()))
     }
     #[cfg(not(target_os = "linux"))]
     {
         FaultPlan::fail_commit_marker(&identity);
         approval.decide(true);
+        None
     }
 }
 
