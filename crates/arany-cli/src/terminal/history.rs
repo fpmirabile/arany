@@ -919,10 +919,7 @@ impl History {
             |(_, end)| end,
         );
         // Raw word endpoints already identify the exact source span.
-        if low.1.mapped.is_none()
-            && high.1.mapped.is_none()
-            && !low.1.boundary
-            && !high.1.boundary
+        if low.1.mapped.is_none() && high.1.mapped.is_none() && !low.1.boundary && !high.1.boundary
         {
             return Some(((low.0, start), (high.0, end)));
         }
