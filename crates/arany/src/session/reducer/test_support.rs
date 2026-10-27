@@ -54,6 +54,7 @@ pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> Session
             },
             attestation: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         }),
         review_call_index: None,
@@ -689,6 +690,7 @@ pub(super) fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObser
         disposition: ToolDisposition::Succeeded,
         output,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }
@@ -1040,4 +1042,65 @@ pub(super) fn failed_compaction_record(run: RunId, covered_sequence: u64) -> Com
             reason: crate::session::events::CompactionFailure::ProviderUnavailable,
         },
     }
+}
+
+#[cfg(target_os = "linux")]
+pub async fn selection_failure_session(
+    root: &crate::StateRoot,
+    workspace: &std::path::Path,
+) -> SessionId {
+    let identity =
+        crate::session::input::WorkspaceInputs::admit_identity(workspace, root).expect("identity");
+    let (session, goal, run, agent) = (
+        SessionId::new(),
+        GoalId::new(),
+        RunId::new(),
+        AgentRunId::new(),
+    );
+    let mut run_config = config(crate::session::events::CollaborationPolicy::Single, true);
+    run_config.workspace_device = identity.device;
+    run_config.workspace_inode = identity.inode;
+    let mut intent = child_intent(
+        run,
+        agent,
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: String::new(),
+        },
+    );
+    intent.workspace_device = identity.device;
+    intent.workspace_inode = identity.inode;
+    let mut facts = vec![goal_started(goal, GoalBudget::default())];
+    facts.extend(start_run(goal, run, agent, run_config));
+    facts.extend([
+        reserve_child_call(goal, run, agent),
+        requesting_step(run, agent, 1),
+        tool_proposed(run, agent, &intent),
+        tool_started(run, agent, &intent),
+        Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: agent,
+            observation: crate::tools::selection_failure_observation(intent.clone()),
+        },
+    ]);
+    let store = crate::Store::open(root.try_clone().expect("State root")).expect("Store");
+    for mut envelope in session_with(session, facts) {
+        match &mut envelope.event {
+            Event::SessionStarted {
+                workspace_identity, ..
+            }
+            | Event::GoalStarted {
+                workspace_identity, ..
+            } => *workspace_identity = identity,
+            _ => {}
+        }
+        store
+            .append(session, envelope.event)
+            .await
+            .expect("committed event");
+    }
+    store.close().await.expect("close Store");
+    session
 }

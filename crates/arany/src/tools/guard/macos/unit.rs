@@ -1171,6 +1171,7 @@ pub(super) async fn run_unit(
                 super::git_write::send_go(stream.get_mut(), intent, &unit, git_stage).await?;
                 if git_stage != Some(GitStage::Plan) {
                     crate::fault::guard_dispatched(intent);
+                    crate::fault::guard_dispatch_gate(intent).await;
                 }
                 if primary_command {
                     use tokio::io::AsyncBufReadExt;

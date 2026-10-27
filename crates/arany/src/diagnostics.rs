@@ -180,11 +180,12 @@ pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) 
     let mut record = BoundedRecord(String::new());
     let _ = writeln!(
         record,
-        "{} stage={}{}{}",
+        "{} error={} stage={}{}{}",
         site.to_ascii_lowercase(),
-        crate::tools::failure_stage(error),
+        error.variant(),
+        crate::tools::failure_stage(error).label(),
         crate::tools::failure_check(error)
-            .map(|check| format!(" check={check}"))
+            .map(|check| format!(" check={}", check.label()))
             .unwrap_or_default(),
         crate::tools::failure_detail(error)
             .map(|detail| format!(" detail={detail}"))
@@ -419,6 +420,7 @@ mod tests {
                 output: CANARY.into(),
                 attestation: None,
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             },
         });
@@ -447,7 +449,7 @@ mod tests {
             "runtime stage=ProviderAdmission",
             "engine cause=Store",
             "filesystem kind=Other",
-            "guard stage=execution",
+            "guard error=Operation stage=execution",
             r#"provider phase=RootSynthesis disposition=Rejected reason=Some(ProposalRefused) refusal=Some(ProposalRefusal { operation: "arany_write", cause: PlanInvalid })"#,
             "tool operation=edit disposition=Uncertain receipt=false stops_run=true",
             "run disposition=Failed cause=Some(ProposalRefused)",

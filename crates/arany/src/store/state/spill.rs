@@ -430,6 +430,7 @@ mod tests {
             })
             .unwrap(),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         }
     }

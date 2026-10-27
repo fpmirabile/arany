@@ -163,10 +163,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     ApprovalCause, Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause,
-    FileChange, FileReceipt, FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit,
-    MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition,
-    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
+    FailureStage, FileChange, FileReceipt, FileVersion, GuardReceipt, GuardStageFact, HostIntent,
+    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall,
+    ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
+    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
+    UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -249,9 +250,82 @@ pub enum ToolError {
     GuardRejected(guard::GuardStage),
     #[error("Guard rejected at {0}")]
     GuardBootstrap(guard::BootstrapFailure),
+    #[error("{0}")]
+    ProjectSelection(SelectionCause),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectionCause {
+    TimedOut,
+    InputVanished,
+    InputConflict,
+}
+
+impl SelectionCause {
+    fn stage(self) -> FailureStage {
+        match self {
+            Self::TimedOut => FailureStage::SelectionTimedOut,
+            Self::InputVanished => FailureStage::SelectionInputVanished,
+            Self::InputConflict => FailureStage::SelectionInputConflict,
+        }
+    }
+}
+
+impl std::fmt::Display for SelectionCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.stage().label())
+    }
 }
 
 impl ToolError {
+    pub(crate) fn variant(&self) -> &'static str {
+        match self {
+            Self::SpillUnavailable => "SpillUnavailable",
+            Self::AtPath { source, .. } => source.variant(),
+            Self::HostHelperSearch => "HostHelperSearch",
+            Self::CredentialIncludes => "CredentialIncludes",
+            Self::MissingConfiguration => "MissingConfiguration",
+            Self::Configuration => "Configuration",
+            Self::HostPrefixConflict { .. } => "HostPrefixConflict",
+            Self::InactiveHostArchiveUnconfirmed => "InactiveHostArchiveUnconfirmed",
+            Self::InactiveHostArchiveConflict => "InactiveHostArchiveConflict",
+            Self::AccountBusy => "AccountBusy",
+            Self::ProtectionUnavailable => "ProtectionUnavailable",
+            Self::QueueFull => "QueueFull",
+            Self::ChangedInput => "ChangedInput",
+            Self::Path => "Path",
+            Self::OutsideWorkspace => "OutsideWorkspace",
+            Self::ProtectedPath => "ProtectedPath",
+            Self::SymbolicLink => "SymbolicLink",
+            Self::FilesystemBoundary => "FilesystemBoundary",
+            Self::NotDirectory => "NotDirectory",
+            Self::UnterminatedQuotedPath => "UnterminatedQuotedPath",
+            Self::NotFound => "NotFound",
+            Self::FilesystemDenied => "FilesystemDenied",
+            Self::Limit => "Limit",
+            Self::OutputCeiling => "OutputCeiling",
+            Self::Timeout(_) => "Timeout",
+            Self::Conflict => "Conflict",
+            Self::Pattern(_) => "Pattern",
+            Self::Operation => "Operation",
+            Self::Cancelled => "Cancelled",
+            Self::Uncertain => "Uncertain",
+            Self::StaleGitLocks(_) => "StaleGitLocks",
+            Self::GuardRejected(_) => "GuardRejected",
+            Self::GuardBootstrap(_) => "GuardBootstrap",
+            Self::ProjectSelection(_) => "ProjectSelection",
+        }
+    }
+
+    pub(crate) fn in_selection(self) -> Self {
+        match self {
+            Self::Timeout(_) => Self::ProjectSelection(SelectionCause::TimedOut),
+            Self::NotFound => Self::ProjectSelection(SelectionCause::InputVanished),
+            Self::Conflict => Self::ProjectSelection(SelectionCause::InputConflict),
+            error => error,
+        }
+    }
+
     pub(crate) fn at_path(self, path: &str) -> Self {
         let source = match self {
             Self::AtPath { source, .. } => source,
@@ -1560,6 +1634,7 @@ impl ToolRuntime {
                 output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
                 attestation: None,
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: CacheUpdate::NotApplicable,
             };
         }
@@ -1588,6 +1663,7 @@ impl ToolRuntime {
                 output: "Tool operation is outside the pinned grant".into(),
                 attestation: None,
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
         }
@@ -1710,6 +1786,7 @@ impl ToolRuntime {
                 enforcement_cause: None,
                 limit_cause: None,
                 approval_cause: None,
+                guard_stage: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output,
@@ -1776,6 +1853,7 @@ impl ToolRuntime {
             disposition: outcome.disposition,
             output: outcome.output,
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         if self.hook_stdin.is_none() {
@@ -1973,6 +2051,7 @@ impl ToolRuntime {
             enforcement_cause,
             limit_cause,
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         if !observation.valid() {
@@ -2015,6 +2094,7 @@ fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> To
         output: output.into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }
@@ -2029,6 +2109,7 @@ fn cancelled_read(intent: EffectIntent) -> ToolObservation {
         output: "Read cancelled; nothing in the Workspace changed".into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }
@@ -2041,22 +2122,31 @@ pub(super) fn guard_error_cache_update(call: &ToolCall, cache_selected: bool) ->
     }
 }
 
-pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub(crate) fn selection_failure_observation(intent: EffectIntent) -> ToolObservation {
+    guard::selection_failure(intent)
+}
+
+pub(crate) fn failure_stage(error: &ToolError) -> FailureStage {
     match error {
         ToolError::GuardBootstrap(failure) => failure.failure_stage(),
         ToolError::GuardRejected(stage) => stage.failure_stage(),
+        ToolError::ProjectSelection(cause) => cause.stage(),
         ToolError::Configuration
         | ToolError::HostPrefixConflict { .. }
         | ToolError::InactiveHostArchiveUnconfirmed
-        | ToolError::InactiveHostArchiveConflict => "admission",
-        ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => "pinned input",
-        ToolError::ProtectionUnavailable => "native protection",
-        ToolError::Limit | ToolError::QueueFull => "resource limit",
-        _ => "execution",
+        | ToolError::InactiveHostArchiveConflict => FailureStage::Admission,
+        ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => {
+            FailureStage::PinnedInput
+        }
+        ToolError::ProtectionUnavailable => FailureStage::NativeProtection,
+        ToolError::Limit | ToolError::QueueFull => FailureStage::ResourceLimit,
+        ToolError::Cancelled => FailureStage::Cancelled,
+        _ => FailureStage::Execution,
     }
 }
 
-pub(crate) fn failure_check(error: &ToolError) -> Option<&'static str> {
+pub(crate) fn failure_check(error: &ToolError) -> Option<guard::GuardCheck> {
     match error {
         ToolError::GuardBootstrap(failure) => failure.check(),
         _ => None,
@@ -2075,8 +2165,8 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
     crate::fault::record_tool_failure(
         intent.id,
         site,
-        failure_stage(error),
-        failure_check(error),
+        failure_stage(error).label(),
+        failure_check(error).map(guard::GuardCheck::label),
         failure_detail(error),
     );
 }
@@ -2113,9 +2203,12 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     } else {
         match &error {
             ToolError::QueueFull => format!("{error}. No operation was dispatched."),
+            ToolError::ProjectSelection(cause) => {
+                format!("{site} {cause} before dispatch; no operation was dispatched.")
+            }
             _ => format!(
                 "{site} {} unavailable before dispatch; no operation was dispatched.",
-                failure_stage(&error)
+                failure_stage(&error).label()
             ),
         }
     };
@@ -2123,10 +2216,13 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         && !resource_limit
         && !matches!(error, ToolError::QueueFull)
     {
-        let cause = failure_check(&error).unwrap_or(match &error {
-            ToolError::Operation => "Guard startup failed; exact cause was not reported",
-            _ => failure_stage(&error),
-        });
+        let cause = failure_check(&error).map_or_else(
+            || match &error {
+                ToolError::Operation => "Guard startup failed; exact cause was not reported",
+                _ => failure_stage(&error).label(),
+            },
+            guard::GuardCheck::label,
+        );
         let next = match &error {
             ToolError::GuardBootstrap(failure) if failure.namespace_remedy().is_some() => {
                 failure.namespace_remedy().unwrap_or_default()
@@ -2139,6 +2235,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
             }
             ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => {
                 "Check the admitted files and folder permissions, then resend your message to pin them again."
+            }
+            ToolError::ProjectSelection(_) => {
+                "Resend your message; the Guard executable is not involved."
             }
             _ => {
                 "Check the Guard executable and native sandbox prerequisites, then resend your message."
@@ -2154,10 +2253,15 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
             output.push_str(&detail);
         }
     }
+    let guard_stage = (intent.call.facts().site == Site::Guard).then(|| GuardStageFact {
+        stage: failure_stage(&error),
+        check: failure_check(&error),
+    });
     ToolObservation {
         spill: None,
         enforcement_cause,
         limit_cause: resource_limit.then_some(LimitCause::Resource),
+        guard_stage,
         output,
         intent,
         disposition: if resource_limit {
@@ -2177,7 +2281,7 @@ pub(super) fn uncertain_observation(
     cache_update: crate::tools::CacheUpdate,
 ) -> ToolObservation {
     record_failure("Guard", &intent, &error);
-    let stage = failure_stage(&error);
+    let stage = failure_stage(&error).label();
     ToolObservation {
         spill: None,
         enforcement_cause: None,
@@ -2189,6 +2293,7 @@ pub(super) fn uncertain_observation(
         ),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update,
     }
 }
