@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt as _;
 use std::time::Instant;
 
-const MASK_ARGUMENT_BYTES: usize = MAX_PATH_BYTES / 2;
+const ROOT_MASK_ARGUMENT_BYTES: usize =
+    2 * crate::validate::MAX_RELATIVE_PATH_BYTES + br#"["/"]"#.len();
+pub(in crate::tools::guard::linux) const MASK_ARGUMENT_BYTES: usize =
+    MAX_PATH_BYTES / 2 + crate::tools::config::MAX_WORKSPACE_PATHS * ROOT_MASK_ARGUMENT_BYTES;
 
 #[derive(Default)]
 pub(super) struct Inventory {
@@ -14,6 +17,7 @@ pub(super) struct Inventory {
     aliases: BTreeSet<(u64, u64)>,
     links: BTreeMap<PathBuf, PathBuf>,
     budget: crate::tools::fs::CommandScanBudget,
+    prefix: PathBuf,
 }
 
 impl Inventory {
@@ -22,8 +26,29 @@ impl Inventory {
         self.masks.keys().cloned().collect()
     }
 
+    #[cfg(test)]
     pub(super) fn read(lower: &Dir, deadline: Instant) -> Result<Self, ToolError> {
-        let mut inventory = Self::default();
+        Self::read_shared(
+            lower,
+            ("", MASK_ARGUMENT_BYTES),
+            &mut Default::default(),
+            &mut crate::tools::selection::Selector::new(0, deadline),
+            deadline,
+        )
+    }
+
+    pub(super) fn read_shared(
+        lower: &Dir,
+        (prefix, mask_bytes): (&str, usize),
+        budget: &mut crate::tools::fs::CommandScanBudget,
+        selector: &mut crate::tools::selection::Selector,
+        deadline: Instant,
+    ) -> Result<Self, ToolError> {
+        let mut inventory = Self {
+            prefix: prefix.into(),
+            budget: std::mem::take(budget),
+            ..Self::default()
+        };
         if inventory.walk(lower, Path::new(""), deadline).is_err() {
             if Instant::now() >= deadline {
                 return Err(ToolError::ProtectionUnavailable);
@@ -33,16 +58,42 @@ impl Inventory {
         if !inventory.aliases.is_disjoint(&inventory.protected) {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let paths: Vec<_> = inventory.masks.keys().collect();
-        if serde_json::to_vec(&paths)
-            .map_err(|_| ToolError::ProtectionUnavailable)?
-            .len()
-            > MASK_ARGUMENT_BYTES
-        {
+        if inventory.argument_bytes()? > mask_bytes {
             inventory.mask(lower, Path::new(""))?;
+            if inventory.argument_bytes()? > mask_bytes {
+                return Err(ToolError::ProtectionUnavailable);
+            }
         }
-        inventory.baseline.freeze(lower, deadline)?;
+        inventory.baseline.freeze_at(lower, prefix, selector)?;
+        *budget = std::mem::take(&mut inventory.budget);
         Ok(inventory)
+    }
+
+    pub(super) fn argument_bytes(&self) -> Result<usize, ToolError> {
+        serde_json::to_vec(
+            &self
+                .masks
+                .keys()
+                .map(|path| self.prefix.join(path))
+                .collect::<Vec<_>>(),
+        )
+        .map(|bytes| bytes.len())
+        .map_err(|_| ToolError::ProtectionUnavailable)
+    }
+
+    pub(super) fn aliases_safe(inventories: &[DirectoryView], roots: &[scope::Root]) -> bool {
+        inventories.iter().all(|view| {
+            roots.iter().filter(|root| !root.directory).all(|root| {
+                !view
+                    .inventory
+                    .protected
+                    .contains(&(root.device, root.inode))
+            }) && inventories.iter().all(|other| {
+                view.inventory
+                    .aliases
+                    .is_disjoint(&other.inventory.protected)
+            })
+        })
     }
 
     fn mask(&mut self, lower: &Dir, path: &Path) -> Result<(), ToolError> {
@@ -85,7 +136,8 @@ impl Inventory {
             let Some(text) = child.to_str() else {
                 return self.mask(lower, path);
             };
-            self.budget.entry(text)?;
+            self.budget
+                .entry(self.prefix.join(text).to_str().ok_or(ToolError::Path)?)?;
             let metadata = directory
                 .symlink_metadata(&name)
                 .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -99,7 +151,9 @@ impl Inventory {
             } else if metadata.is_file() && metadata.nlink() > 1 {
                 self.aliases.insert((metadata.dev(), metadata.ino()));
             } else if metadata.is_dir() {
-                if child.components().count() >= crate::tools::types::COMMAND_SNAPSHOT_DEPTH {
+                if self.prefix.join(&child).components().count()
+                    >= crate::tools::types::COMMAND_SNAPSHOT_DEPTH
+                {
                     self.mask(lower, &child)?;
                 } else if self.walk(lower, &child, deadline).is_err() {
                     return Err(ToolError::ProtectionUnavailable);

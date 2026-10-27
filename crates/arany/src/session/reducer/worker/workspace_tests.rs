@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::worker_teams::RETIRED_WORKER_KINDS;
 
 #[test]
 fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
@@ -51,14 +52,11 @@ fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
     let w = view.runs[0].agents[1].assignment.as_ref().unwrap();
     assert!(w.settled());
     assert!(w.verification.as_ref().unwrap().1.passed);
-    assert!(!f.events.iter().any(|e| matches!(
-        e.kind(),
-        "WorkerDataChunk"
-            | "WorkerDataSealed"
-            | "WorkerHandoverRecorded"
-            | "WorkerIntegrationRecorded"
-            | "WorkerHandoverDiscarded"
-    )));
+    assert!(
+        !f.events
+            .iter()
+            .any(|e| RETIRED_WORKER_KINDS.contains(&e.kind()))
+    );
     let plan = crate::session::rewind::plan(&view, &view.rewinds.checkpoints[0]).unwrap();
     assert_eq!(plan.files.len(), 1);
     assert_eq!(plan.files[0].path, "src/a");
@@ -108,7 +106,10 @@ fn live_replay_refuses_private_targets_and_old_release_fields() {
         "content": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"new"),
     })
     .to_string();
-    assert!(Event::decode("WorkerDataChunk", 1, &data, Some(f.run), Some(f.child)).is_err());
+    assert!(matches!(
+        Event::decode("WorkerDataChunk", 1, &data, Some(f.run), Some(f.child)),
+        Err(ReplayError::UnknownEvent)
+    ));
     let release = serde_json::json!({"assignment_id":f.child,"cause_sequence":1,"handover_sequence":null,"reason":"integrated"}).to_string();
     assert!(
         Event::decode(

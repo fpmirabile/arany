@@ -731,7 +731,14 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                     false,
                 ))
             }
-            "too-deep" => changeset.files[1].path = format!("z-target/{}", vec!["d"; 16].join("/")),
+            "too-deep" => {
+                changeset.files[1].path = vec!["nested"; COMMAND_SNAPSHOT_DEPTH + 1].join("/");
+                changeset.files[1].before = None;
+                assert!(
+                    !changeset.valid(),
+                    "the changeset depth limit rejects the batch"
+                );
+            }
             "unbound-source" => source_intent_digest = [0; 32],
             _ => unreachable!(),
         }
@@ -755,6 +762,12 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
             },
             &config,
         );
+        if case == "too-deep" {
+            assert!(
+                matches!(result, Err(super::ToolError::Path)),
+                "changeset depth rejection"
+            );
+        }
         assert!(result.is_err(), "batch rejection case {case}");
         assert!(
             !matches!(result, Err(super::ToolError::Uncertain)),
