@@ -67,7 +67,7 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
                         table = Some(super::tables::Table::new(range, columns.len())?);
                     }
                     Tag::CodeBlock(kind) if depth == 0 => {
-                        code_block(source, &mut lines, range.clone(), kind);
+                        code_block(source, &mut lines, range.clone(), kind)?;
                         code = Some(range);
                     }
                     tag @ (Tag::Paragraph | Tag::Heading { .. }) if depth == 0 => {
@@ -191,7 +191,12 @@ fn heading(source: &str, lines: &mut [BlockLine], range: Range<usize>) {
     line.style = Modifier::BOLD;
 }
 
-fn code_block(source: &str, lines: &mut [BlockLine], range: Range<usize>, kind: CodeBlockKind<'_>) {
+fn code_block(
+    source: &str,
+    lines: &mut [BlockLine],
+    range: Range<usize>,
+    kind: CodeBlockKind<'_>,
+) -> Result<(), ()> {
     let lines = covered(lines, range.clone());
     for line in lines.iter_mut() {
         line.padding = 0;
@@ -210,7 +215,14 @@ fn code_block(source: &str, lines: &mut [BlockLine], range: Range<usize>, kind: 
         line.content = start..start + info.len();
         line.padding = 0;
         line.style = Modifier::BOLD;
+        line.flow = Some(Lines::label(
+            source,
+            &language,
+            line.content.clone(),
+            line.envelope.clone(),
+        )?);
     }
+    Ok(())
 }
 
 fn finish_code(lines: &mut [BlockLine], range: Range<usize>) {
@@ -223,6 +235,9 @@ fn finish_code(lines: &mut [BlockLine], range: Range<usize>) {
     }
     if let Some(last) = lines.iter_mut().rev().find(|line| !line.hidden) {
         last.envelope.end = range.end;
+        if let Some(flow) = &mut last.flow {
+            flow.enclose(last.envelope.clone());
+        }
     }
 }
 
