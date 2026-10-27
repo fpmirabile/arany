@@ -1560,8 +1560,8 @@ pub(super) async fn native_command_changeset_corpus(
         ("drop", "", None),
         ("cancel", "", None),
         ("conflict", "", None),
-        ("scope", "printf forbidden > unselected", None),
-        ("scope-auto", "printf forbidden > unselected", None),
+        ("scope", "printf forbidden > outputs/unselected", None),
+        ("scope-auto", "printf forbidden > outputs/unselected", None),
         ("partial", "", None),
         (
             "symlink",
@@ -1642,11 +1642,12 @@ pub(super) async fn native_command_changeset_corpus(
         let state_path = case_root.join("state");
         let state = StateRoot::admit(&state_path).unwrap();
         let mut config = config.clone();
-        config["workspace_paths"] = json!(if matches!(case, "scope" | "scope-auto") {
-            ["."]
+        config["workspace_paths"] = if matches!(case, "scope" | "scope-auto") {
+            std::fs::create_dir(workspace.join("outputs")).unwrap();
+            json!(["outputs", "src"])
         } else {
-            ["src"]
-        });
+            json!(["src"])
+        };
         config["skills"] = json!([]);
         config["mcp"] = json!([]);
         crate::private_file(
@@ -2038,7 +2039,7 @@ pub(super) async fn native_command_changeset_corpus(
             );
             let catalog: serde_json::Value =
                 serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
-            assert_eq!(catalog["workspace_paths"], json!(["."]));
+            assert_eq!(catalog["workspace_paths"], json!(["outputs", "src"]));
         }
         if case == "ai-approve" {
             let reviews = requests
@@ -2114,6 +2115,15 @@ pub(super) async fn native_command_changeset_corpus(
             assert_eq!(result["exit_code"], if case == "nonzero" { 7 } else { 0 });
             assert_eq!(result["stdout"], "payload-complete");
             assert_eq!(result["stderr"], "");
+            if matches!(case, "scope" | "scope-auto") {
+                assert!(
+                    result["changeset"]["files"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|file| file["path"] == "outputs/unselected")
+                );
+            }
             if case == "selection" {
                 assert_eq!(
                     result["selection"],
@@ -2310,7 +2320,7 @@ pub(super) async fn native_command_changeset_corpus(
             assert!(!workspace.join("src/.git").exists());
             assert!(!workspace.join("src/overflow").exists());
             assert!(!workspace.join("src/extra-0").exists());
-            assert!(!workspace.join("unselected").exists());
+            assert!(!workspace.join("outputs/unselected").exists());
         }
     }
 }

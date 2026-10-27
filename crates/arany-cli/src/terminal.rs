@@ -1975,11 +1975,13 @@ impl AttachedTerminal {
         self.transcript.classic_history.set_preview(None);
     }
 
-    pub fn set_preview(&mut self, preview: Option<arany::DisplayUpdate>) {
+    pub fn set_preview(&mut self, preview: Option<arany::DisplayUpdate>) -> bool {
         if !self.is_linear() {
-            self.transcript.history.set_preview(preview.clone());
+            let changed = self.transcript.history.set_preview(preview.clone());
             self.transcript.classic_history.set_preview(preview);
+            return changed;
         }
+        false
     }
 
     fn insert_native(
