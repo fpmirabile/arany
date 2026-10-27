@@ -1134,7 +1134,7 @@ printf cache-changed
                     "{case}: {result}"
                 );
                 assert!(stdout.contains("local_test_ipc ... ignored, requires local test IPC"));
-                eprintln!(
+                println!(
                     "offline Cargo {case}: {} ms; 1 passed; 0 failed; 1 ignored; CPU cores {cores}; jobs {jobs}",
                     elapsed.as_millis()
                 );

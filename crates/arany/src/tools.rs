@@ -353,7 +353,6 @@ pub(crate) struct ToolRuntime {
     config: Config,
     git_writes_available: bool,
     host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
-    worker: Option<std::sync::Arc<guard::transfer::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -1103,7 +1102,6 @@ impl ToolRuntime {
             config,
             git_writes_available: guard::git_writes_available(),
             host_authentication,
-            worker: None,
             handover: None,
             permissions,
             result_filter: None,
@@ -1376,7 +1374,6 @@ impl ToolRuntime {
                 concurrency: 4,
                 max_turns: 17,
                 max_tools: 16,
-                data_bytes: WORKER_DATA_BYTES as u32,
             })
             .filter(WorkerPolicy::valid)
     }
@@ -1552,25 +1549,6 @@ impl ToolRuntime {
         .unwrap_or(false)
     }
 
-    pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call)
-            || call.facts().family == catalog::Family::File && call.facts().mutates
-        {
-            guard::RESERVATION_OVERHEAD
-        } else {
-            self.reservation_overhead(call)
-        }
-    }
-
-    pub(crate) fn intent_reservation_overhead(&self, intent: &EffectIntent) -> Duration {
-        match intent.target {
-            crate::worker::EffectTarget::WorkerView { .. } => {
-                self.worker_reservation_overhead(&intent.call)
-            }
-            crate::worker::EffectTarget::Workspace => self.reservation_overhead(&intent.call),
-        }
-    }
-
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         if discovery::possible(call) {
             let exact = self
@@ -1613,24 +1591,6 @@ impl ToolRuntime {
             && !self.guard_available
         {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
-        }
-        if matches!(
-            intent.target,
-            crate::worker::EffectTarget::WorkerView { .. }
-        ) && matches!(intent.call, ToolCall::Command { .. })
-        {
-            return ToolObservation {
-                spill: None,
-                enforcement_cause: None,
-                limit_cause: None,
-                intent,
-                disposition: ToolDisposition::Denied,
-                output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
-                attestation: None,
-                approval_cause: None,
-                guard_stage: None,
-                cache_update: CacheUpdate::NotApplicable,
-            };
         }
         if matches!(
             intent.call,
@@ -2070,8 +2030,6 @@ struct InProcessReads {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-pub(crate) const PRIVATE_IMAGE_REQUIRED: &str =
-    "Worker commands require an admitted private image; no operation was dispatched";
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {

@@ -209,7 +209,6 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),
-        worker: None,
         handover: None,
         definitions: Default::default(),
         permissions: None,
@@ -276,7 +275,6 @@ pub(super) async fn inspect_read(
         result_bytes: intent.limits.result_bytes as usize,
         deadline: std::time::Instant::now() + super::selection::DISCOVERY_TIME,
         output: super::discovery::Output::Tool,
-        private_image: false,
         cancellation: None,
     });
     let (disposition, output, enforcement_cause, limit_cause) =
