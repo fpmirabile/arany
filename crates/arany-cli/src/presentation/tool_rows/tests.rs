@@ -1278,6 +1278,18 @@ mod unguarded_tests {
             ]
         );
         assert!(lines.iter().all(|line| !line.contains('\u{1b}')));
+        let sensitive = unguarded_approval_lines(
+            &intent(&["-c", "cargo test"], ""),
+            &UnguardedPrompt {
+                sensitive: true,
+                ..prompt.clone()
+            },
+        );
+        assert_eq!(
+            sensitive[0],
+            crate::presentation::HOST_SENSITIVE_PATH_WARNING
+        );
+        assert_eq!(sensitive[1..], lines);
         let nested = unguarded_approval_lines(&intent(&[], "sub"), &prompt);
         assert!(nested.contains(&"Args: none".to_owned()));
         assert!(nested.contains(&"Directory: ./sub (inside the real project folder)".to_owned()));
