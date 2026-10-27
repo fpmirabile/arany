@@ -203,6 +203,17 @@ fn unit_leftovers() -> Vec<String> {
     found
 }
 
+// Native journeys run in parallel and share the unit parent, so a unit another journey held at the
+// baseline may be gone by now; only a unit absent from the baseline can have leaked from this one.
+#[cfg(any(debug_assertions, arany_ci))]
+fn assert_no_new_units(baseline: &[String], message: &str) {
+    let leaked: Vec<String> = unit_leftovers()
+        .into_iter()
+        .filter(|unit| !baseline.contains(unit))
+        .collect();
+    assert!(leaked.is_empty(), "{message}: {leaked:?}");
+}
+
 #[cfg(any(debug_assertions, arany_ci))]
 async fn faulted_git_read(
     engine: &arany::Engine,
@@ -530,10 +541,9 @@ async fn native_git_journey_helper() {
         }
     }
     engine.close().await.unwrap();
-    assert_eq!(
-        unit_leftovers(),
-        leftovers,
-        "every Git unit, including the failed and denied reads, must detach its volume and remove its root"
+    assert_no_new_units(
+        &leftovers,
+        "every Git unit, including the failed and denied reads, must detach its volume and remove its root",
     );
     assert_eq!(
         outcome.run.status,
@@ -881,10 +891,9 @@ async fn native_git_branch_helper() {
         json!(["git_status", "git_diff", "git_log", "git_branch"])
     );
     assert_eq!(catalog["git"]["write"], true);
-    assert_eq!(
-        unit_leftovers(),
-        leftovers,
-        "the executor and the publisher must both detach their volumes and remove their roots"
+    assert_no_new_units(
+        &leftovers,
+        "the executor and the publisher must both detach their volumes and remove their roots",
     );
 
     let (existing, _) = approved_git_write(&engine, &workspace, branch_creation("topic")).await;
@@ -892,13 +901,12 @@ async fn native_git_branch_helper() {
     assert_eq!(refused.disposition, ToolDisposition::Failed);
     assert!(refused.output.contains("failed"));
     assert!(!refused.output.contains("publication"));
-    assert_eq!(unit_leftovers(), leftovers);
+    assert_no_new_units(&leftovers, "a refused Git write must leave no unit");
 
     engine.close().await.unwrap();
-    assert_eq!(
-        unit_leftovers(),
-        leftovers,
-        "every Git write unit must detach its volume and remove its root"
+    assert_no_new_units(
+        &leftovers,
+        "every Git write unit must detach its volume and remove its root",
     );
 
     std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
