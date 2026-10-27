@@ -41,6 +41,7 @@ impl Grant {
                 }
                 let file = crate::tools::fs::open_file(&workspace, relative)?;
                 let metadata = file.metadata().map_err(|_| ToolError::ChangedInput)?;
+                single_link(&metadata)?;
                 if (!metadata.is_dir() && !metadata.is_file()) || metadata.mode() & 0o6000 != 0 {
                     return Err(ToolError::FilesystemDenied);
                 }
@@ -80,6 +81,7 @@ impl Grant {
                 },
             )?;
             let metadata = file.metadata().map_err(|_| ToolError::ChangedInput)?;
+            single_link(&metadata)?;
             if (metadata.dev(), metadata.ino(), metadata.is_dir())
                 != (root.device, root.inode, root.directory)
             {
@@ -223,10 +225,15 @@ impl View {
         if !self.grant.roots[0].relative.is_empty() {
             verify_parents(&mounts, &self.root.join("parents"), &self.grant.roots)?;
         }
+        self.verify_mount_scope(&mounts)
+    }
+
+    fn verify_mount_scope(&self, mounts: &[MountInfoEntry]) -> Result<(), ToolError> {
         if mounts.iter().any(|entry| {
             entry.path.starts_with(&self.root)
                 && entry.path != self.root
-                && entry.path != self.root.join("parents")
+                && (self.grant.roots[0].relative.is_empty()
+                    || entry.path != self.root.join("parents"))
                 && !self
                     .directories
                     .iter()
@@ -389,10 +396,18 @@ fn mount_parents(root: &Path, roots: &[Root]) -> Result<(), ToolError> {
     ))
 }
 
+fn single_link(metadata: &std::fs::Metadata) -> Result<(), ToolError> {
+    if metadata.is_file() && metadata.nlink() != 1 {
+        return Err(ToolError::Path);
+    }
+    Ok(())
+}
+
 fn mount_file(root: &Path, source: &Root, workspace: &Path) -> Result<(), ToolError> {
     let workspace = crate::tools::fs::open_directory(workspace)?;
     let file = crate::tools::fs::open_file(&workspace, &source.relative)?;
     let metadata = file.metadata().map_err(|_| ToolError::ChangedInput)?;
+    single_link(&metadata)?;
     if (metadata.dev(), metadata.ino()) != (source.device, source.inode) {
         return Err(ToolError::ChangedInput);
     }
@@ -414,6 +429,7 @@ fn verify_file(mounts: &[MountInfoEntry], target: &Path, source: &Root) -> Resul
         .find(|entry| entry.path == target)
         .ok_or(ToolError::ProtectionUnavailable)?;
     let metadata = std::fs::symlink_metadata(target).map_err(|_| ToolError::ChangedInput)?;
+    single_link(&metadata)?;
     if ![b"ro".as_slice(), b"nosuid", b"nodev"]
         .iter()
         .all(|flag| option(&entry.options, flag))

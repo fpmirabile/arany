@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt as _;
 use std::time::Instant;
 
-pub(super) const MASK_ARGUMENT_BYTES: usize = MAX_PATH_BYTES / 2;
+const ROOT_MASK_ARGUMENT_BYTES: usize =
+    2 * crate::validate::MAX_RELATIVE_PATH_BYTES + br#"["/"]"#.len();
+pub(in crate::tools::guard::linux) const MASK_ARGUMENT_BYTES: usize =
+    MAX_PATH_BYTES / 2 + crate::tools::config::MAX_WORKSPACE_PATHS * ROOT_MASK_ARGUMENT_BYTES;
 
 #[derive(Default)]
 pub(super) struct Inventory {

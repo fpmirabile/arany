@@ -108,7 +108,7 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
 #[test]
 fn overflowing_mask_arguments_replace_the_entire_enclosing_view() {
     let root = tempfile::tempdir().unwrap();
-    for index in 0..crate::tools::config::MAX_WORKSPACE_PATHS * 4 {
+    for index in 0..masks::MASK_ARGUMENT_BYTES / ".env.protected-variable-".len() + 1 {
         std::fs::write(
             root.path().join(format!(".env.protected-variable-{index}")),
             b"protected",

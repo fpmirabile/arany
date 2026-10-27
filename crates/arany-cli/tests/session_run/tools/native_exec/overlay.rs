@@ -69,7 +69,7 @@ fn overlay_fixture(case: &str) -> SpillFixture {
     );
     private_file(
         &fixture.workspace.join(".gitignore"),
-        b"node_modules/\nlarge\ndist/\n",
+        b"node_modules/\nlarge\ndist/\nsrc/gen/\n",
     );
     let large = std::fs::File::create(fixture.workspace.join("large")).unwrap();
     large.set_len(2 * 1024 * 1024).unwrap();
@@ -103,6 +103,11 @@ fn configure_narrow_grants(fixture: &SpillFixture, config: &mut Value, case: &st
     if case.starts_with("narrow") || case == "file-only" {
         std::fs::create_dir_all(fixture.workspace.join("lib/deep/node_modules")).unwrap();
         std::fs::create_dir_all(fixture.workspace.join("src/node_modules")).unwrap();
+        std::fs::create_dir(fixture.workspace.join("src/gen")).unwrap();
+        private_file(
+            &fixture.workspace.join("lib/sibling"),
+            b"PRIVATE_SIBLING_CANARY",
+        );
         private_file(&fixture.workspace.join("Cargo.toml"), b"manifest");
         private_file(
             &fixture.workspace.join("src/.env"),
@@ -132,7 +137,7 @@ async fn overlay_case(case: &str) {
             "set -eu; test \"$(cat Cargo.toml)\" = manifest; test ! -e src; test ! -e sibling; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch created 2>/dev/null; then exit 1; fi"
         }
         "narrow" => {
-            "set -eu; test \"$(cat Cargo.toml)\" = manifest; test \"$(wc -c < large)\" -eq 2097152; test ! -s src/.env; test ! -e sibling; test ! -e node_modules; test ! -e lib/sibling; test ! -e /seed/namespace; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch lib/sibling 2>/dev/null; then exit 1; fi; printf 'private edit' > src/current.txt; printf 'private create' > lib/deep/created; printf ignored > src/node_modules/generated; printf 'narrow grants passed\\n'"
+            "set -eu; test \"$(cat Cargo.toml)\" = manifest; test \"$(wc -c < large)\" -eq 2097152; test ! -s src/.env; test ! -e sibling; test ! -e node_modules; test ! -e lib/sibling; test ! -e /seed/namespace; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch lib/sibling 2>/dev/null; then exit 1; fi; printf 'private edit' > src/current.txt; printf 'private create' > lib/deep/created; printf ignored > src/node_modules/generated; printf selected > src/gen/output; printf 'narrow grants passed\\n'"
         }
         "narrow-replacement" => {
             "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt"
@@ -315,6 +320,10 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         }
         if case == "narrow" {
             assert_eq!(result["stdout"], "narrow grants passed\n");
+            assert_eq!(
+                std::fs::read(fixture.workspace.join("src/gen/output")).unwrap(),
+                b"selected"
+            );
             assert_eq!(
                 std::fs::read(fixture.workspace.join("lib/deep/created")).unwrap(),
                 b"private create"

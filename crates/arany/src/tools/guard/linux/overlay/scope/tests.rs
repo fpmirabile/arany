@@ -51,6 +51,21 @@ fn narrow_mounts_attest_every_grant_readonly_parents_and_aggregate_bounds() {
         )
     };
     assert!(verify(&topology).is_ok());
+    for configured in [paths[..paths.len() - 1].to_vec(), {
+        let mut changed = paths.clone();
+        changed[0] = "other".into();
+        changed
+    }] {
+        assert!(
+            verify_workspace(
+                &parse_mountinfo(topology.as_bytes()).unwrap(),
+                &attestation,
+                &configured,
+                workspace
+            )
+            .is_err()
+        );
+    }
     for invalid in [
         topology.replacen("ro,nosuid,nodev - tmpfs", "rw,nosuid,nodev - tmpfs", 1),
         topology.replace(&format!("size={}k", PARENT_BYTES / 1024), "size=1k"),
@@ -201,4 +216,136 @@ fn inventory_budget_and_protected_alias_refusals_span_grants() {
         .collect::<Vec<_>>();
     assert!(!masks::Inventory::aliases_safe(&views, &[]));
     assert!(!masks::Inventory::aliases_safe(&views[1..], &roots));
+}
+
+#[test]
+fn exact_file_grants_refuse_protected_hard_links_before_and_after_admission() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("Cargo.toml"), b"synthetic fixture").unwrap();
+    let runtime = crate::tools::tests::in_process_runtime(
+        root.path(),
+        serde_json::json!({
+        "version":1,"workspace_paths":["Cargo.toml"],"write":false,
+        "commands":[],"skills":[],"mcp":[]}),
+    );
+    let intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        ToolCall::Command {
+            program: "shell".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+    );
+    let grant = Grant::new(&runtime, &intent).unwrap();
+    std::fs::hard_link(root.path().join("Cargo.toml"), root.path().join(".env")).unwrap();
+    assert!(matches!(
+        Grant::new(&runtime, &intent),
+        Err(ToolError::Path)
+    ));
+    assert!(matches!(grant.verify(), Err(ToolError::Path)));
+}
+
+#[test]
+fn mask_reservations_and_helper_frames_fit_maximum_grants_and_refuse_short_buffers() {
+    for (count, length, quoted) in [
+        (5, 510, false),
+        (crate::tools::config::MAX_WORKSPACE_PATHS, 62, false),
+        (
+            crate::tools::config::MAX_WORKSPACE_PATHS,
+            crate::validate::MAX_RELATIVE_PATH_BYTES,
+            true,
+        ),
+    ] {
+        let roots = (0..count)
+            .map(|index| {
+                let segment = if quoted { "\"" } else { "part" }.repeat(42);
+                let mut relative = format!("grant-{index:02}/{}", vec![segment; 12].join("/"));
+                relative.truncate(length);
+                relative.replace_range(length - 1.., "z");
+                assert!(crate::validate::valid_relative(&relative, false));
+                assert!(relative.split('/').count() <= crate::tools::types::COMMAND_SNAPSHOT_DEPTH);
+                Root {
+                    relative,
+                    device: u64::MAX,
+                    inode: u64::MAX,
+                    directory: true,
+                }
+            })
+            .collect::<Vec<_>>();
+        let paths = roots
+            .iter()
+            .map(|root| root.relative.clone())
+            .collect::<Vec<_>>();
+        let config: crate::tools::config::Config = serde_json::from_value(serde_json::json!({
+            "version":1,"workspace_paths":paths,"write":false,"commands":[],"skills":[],"mcp":[]}))
+        .unwrap();
+        config.validate().unwrap();
+        let masks = roots
+            .iter()
+            .map(|root| Path::new(&root.relative).join(""))
+            .collect::<Vec<_>>();
+        let required = masks
+            .iter()
+            .map(|path| serde_json::to_vec(&[path]).unwrap().len())
+            .sum::<usize>();
+        assert!(matches!(
+            mask_allowance(&roots, required - 1),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        let mut bytes = masks::MASK_ARGUMENT_BYTES;
+        for index in 0..count {
+            let allowance = mask_allowance(&roots[index + 1..], bytes).unwrap();
+            let used = serde_json::to_vec(&[&masks[index]]).unwrap().len();
+            assert!(used <= allowance);
+            bytes -= used;
+        }
+        let attestation = Attestation {
+            digest: [u8::MAX; 32],
+            namespaces: profile::Namespaces::read().unwrap(),
+            masks,
+            roots,
+        };
+        let frame = serde_json::to_vec(
+            &serde_json::json!({"sha256":vec![u8::MAX; 32],"overlay":attestation}),
+        )
+        .unwrap();
+        assert!(frame.len() <= supervisor::MAX_PIN_BYTES);
+    }
+}
+
+#[test]
+fn whole_root_views_refuse_a_parent_mount_that_only_narrow_views_expect() {
+    let root = PathBuf::from("/private");
+    for relative in ["", "src"] {
+        let roots = vec![Root {
+            relative: relative.into(),
+            device: 0,
+            inode: 0,
+            directory: true,
+        }];
+        let view = View {
+            root: root.clone(),
+            grant: Grant {
+                path: "/project".into(),
+                device: 0,
+                inode: 0,
+                digest: [0; 32],
+                roots: roots.clone(),
+            },
+            bytes: 0,
+            directories: Vec::new(),
+            attestation: Attestation {
+                digest: [0; 32],
+                namespaces: profile::Namespaces::read().unwrap(),
+                masks: Vec::new(),
+                roots,
+            },
+        };
+        let mounts = parse_mountinfo(b"1 0 0:1 / / rw - tmpfs tmpfs rw\n2 1 0:2 / /private rw - tmpfs tmpfs rw\n3 2 0:3 / /private/parents ro - tmpfs tmpfs rw\n").unwrap();
+        assert_eq!(
+            view.verify_mount_scope(&mounts).is_ok(),
+            !relative.is_empty()
+        );
+    }
 }

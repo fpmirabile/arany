@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub(super) const SETUP_INODES: usize = 16;
 
 mod masks;
+pub(super) use masks::MASK_ARGUMENT_BYTES;
 mod scope;
 pub(super) use scope::{Grant, View};
 #[cfg(test)]
