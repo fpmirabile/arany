@@ -1459,7 +1459,7 @@ fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfoEntry>, ToolError> {
             return Err(ToolError::ProtectionUnavailable);
         }
         let source = decode_mount_field(fields[separator + 2])?;
-        let root = decode_mount_path(fields[3])?;
+        let root = decode_mount_root(fields[3])?;
         let path = decode_mount_path(fields[4])?;
         entries.push(MountInfoEntry {
             path: std::path::PathBuf::from(OsString::from_vec(path)),
@@ -1514,6 +1514,20 @@ fn decode_mount_field(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
         index += 4;
     }
     Ok(decoded)
+}
+
+fn decode_mount_root(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
+    // Kernel mount roots of unlinked bind sources retain a //deleted suffix.
+    let suffix = b"//deleted";
+    let live = bytes.strip_suffix(suffix).unwrap_or(bytes);
+    let mut root = decode_mount_path(live)?;
+    if live.len() != bytes.len() {
+        root.extend_from_slice(suffix);
+    }
+    if root.len() > MAX_PATH_BYTES {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(root)
 }
 
 fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
@@ -2479,6 +2493,25 @@ mod tests {
         assert_eq!(entries[1].source, b"/dev/root");
         assert_eq!(entries[1].super_options, b"ro");
         assert!(verify_mount_entries(&entries, std::slice::from_ref(&target)).is_ok());
+
+        let deleted = "1 0 0:2 /newroot / rw,nosuid,nodev - tmpfs tmpfs rw\n2 1 0:2 /bindfileRhvKXa//deleted /arany ro,nosuid,nodev - tmpfs tmpfs rw\n";
+        let entries = parse_mountinfo(deleted.as_bytes()).unwrap();
+        assert_eq!(
+            entries[1].root.as_os_str().as_encoded_bytes(),
+            b"/bindfileRhvKXa//deleted"
+        );
+        assert!(verify_mount_entries(&entries, &[PathBuf::from("/arany")]).is_ok());
+        for invalid in [
+            deleted.replace("/bindfileRhvKXa//deleted", "/bindfileRhvKXa///deleted"),
+            deleted.replace("/bindfileRhvKXa//deleted", "/bindfileRhvKXa/..//deleted"),
+            deleted.replace(" /arany ", " /arany//deleted "),
+            deleted.replace(
+                "/bindfileRhvKXa",
+                &format!("/{}", "a".repeat(MAX_PATH_BYTES - "//deleted".len())),
+            ),
+        ] {
+            assert!(parse_mountinfo(invalid.as_bytes()).is_err());
+        }
 
         let invalid_escape = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\141b /opt/toolchains/a\\141b ro - ext4 /dev/root ro\n";
         assert!(parse_mountinfo(invalid_escape).is_err());
