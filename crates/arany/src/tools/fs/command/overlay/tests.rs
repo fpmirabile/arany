@@ -532,3 +532,77 @@ fn multiple_roots_keep_relative_selection_and_share_candidate_limits() {
         }
     }
 }
+
+#[test]
+fn multiple_roots_keep_relative_selection_and_share_candidate_limits() {
+    for scenario in ["selection", "content-limit", "file-limit", "conflict"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut sources = Vec::new();
+        let mut baselines = Vec::new();
+        let deadline = Instant::now() + crate::tools::selection::PHASE_TIME;
+        let mut selector = Selector::new(0, deadline);
+        for (index, prefix) in ["src", "crates/core"].into_iter().enumerate() {
+            let lower = directory.path().join(format!("lower-{index}"));
+            let upper = directory.path().join(format!("upper-{index}"));
+            std::fs::create_dir(&lower).unwrap();
+            std::fs::create_dir(&upper).unwrap();
+            std::fs::write(lower.join("existing"), b"before").unwrap();
+            std::fs::write(lower.join(".gitignore"), b"/ignored\n").unwrap();
+            let source = open_directory(&lower).unwrap();
+            let mut baseline = baseline(&source);
+            baseline.selection = CommandSelection::default();
+            baseline.freeze_at(&source, prefix, &mut selector).unwrap();
+            match scenario {
+                "content-limit" => std::fs::write(
+                    upper.join("created"),
+                    vec![b'a'; MAX_CHANGESET_BYTES / 2 + 1],
+                )
+                .unwrap(),
+                "file-limit" => {
+                    for number in 0..=MAX_CHANGESET_FILES / 2 {
+                        std::fs::write(upper.join(format!("file-{number}")), b"after").unwrap();
+                    }
+                }
+                _ => {
+                    std::fs::write(upper.join("existing"), b"after").unwrap();
+                    std::fs::write(upper.join("ignored"), b"discarded").unwrap();
+                }
+            }
+            if scenario == "conflict" && index == 1 {
+                std::fs::write(lower.join("existing"), b"host").unwrap();
+            }
+            baselines.push(baseline);
+            sources.push((source, open_directory(&upper).unwrap(), prefix));
+        }
+        let roots = sources
+            .into_iter()
+            .zip(&baselines)
+            .map(|((lower, upper, prefix), baseline)| (baseline, lower, upper, prefix))
+            .collect::<Vec<_>>();
+        let captured = capture_roots(&roots, deadline);
+        match scenario {
+            "content-limit" | "file-limit" => {
+                assert!(matches!(captured, Err(ToolError::Limit)), "{scenario}")
+            }
+            "conflict" => assert!(matches!(captured, Err(ToolError::Conflict))),
+            _ => {
+                let (changes, summary) = captured.unwrap();
+                assert_eq!(
+                    changes
+                        .files
+                        .iter()
+                        .map(|file| file.path.as_str())
+                        .collect::<Vec<_>>(),
+                    ["crates/core/existing", "src/existing"]
+                );
+                assert_eq!(summary.discarded_outputs, 2);
+                assert!(
+                    changes
+                        .files
+                        .iter()
+                        .all(|file| file.before.as_ref().unwrap().bytes().unwrap() == b"before")
+                );
+            }
+        }
+    }
+}
