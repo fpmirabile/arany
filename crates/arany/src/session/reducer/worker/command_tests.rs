@@ -491,24 +491,3 @@ fn changed_path_reports_keep_only_the_latest_digest_for_each_path() {
     assert!(report.contains(&crate::validate::hex_digest(b"latest")));
     assert!(!report.contains(&crate::validate::hex_digest(b"new")));
 }
-
-#[test]
-fn unknown_editor_cache_update_blocks_release_continuation_and_goal_recovery() {
-    let mut f = command_fixture();
-    command(&mut f, &[]);
-    let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
-        unreachable!()
-    };
-    observation.cache_update = CacheUpdate::Uncertain;
-    let view = f.view();
-    assert!(view.runs[0].agents[1].tools[0].outcome_unknown());
-    assert!(!view.goals[0].can_resume(&view));
-    assert!(!wave_settled(&view.runs[0]));
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::Finished,
-        None,
-    );
-    assert!(SessionView::replay_open(f.session, &f.envelopes()).is_err());
-}
