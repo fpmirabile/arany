@@ -151,6 +151,9 @@ struct Task {
     #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_stage: Option<GitStage>,
+    #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1618,6 +1621,30 @@ fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolErr
     Ok(task)
 }
 
+fn send_ready(task: &Task) -> Result<(), ToolError> {
+    let ready = Ready {
+        digest: task.intent.digest(),
+        pid: std::process::id(),
+        #[cfg(target_os = "linux")]
+        namespaces: profile::Namespaces::read()?,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        profile_digest: task.enforcement_digest()?,
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        profile_digest: [0; 32],
+    };
+    #[cfg(target_os = "linux")]
+    if !ready.namespaces.isolated_from(&task.parent_namespaces) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &ready).map_err(|_| ToolError::Operation)?;
+    stdout
+        .write_all(b"\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)?;
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn bootstrap_locations(
     task: &Task,
@@ -1876,27 +1903,7 @@ pub(super) fn helper_main() -> ExitCode {
             prepare_command_baseline(&task, workspace, &mut stdin)?
         };
         stage = BootstrapStage::Handshake;
-        let ready = Ready {
-            digest: task.intent.digest(),
-            pid: std::process::id(),
-            #[cfg(target_os = "linux")]
-            namespaces: profile::Namespaces::read()?,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            profile_digest: task.enforcement_digest()?,
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            profile_digest: [0; 32],
-        };
-        #[cfg(target_os = "linux")]
-        if !ready.namespaces.isolated_from(&task.parent_namespaces) {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let mut stdout = std::io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &ready).map_err(|_| ToolError::Operation)?;
-        stdout
-            .write_all(b"\n")
-            .and_then(|()| stdout.flush())
-            .map_err(|_| ToolError::Operation)?;
-        drop(stdout);
+        send_ready(&task)?;
         #[cfg(target_os = "macos")]
         let git = receive_git_input(&task, &mut stdin)?;
         let mut go = [0; 3];
@@ -2533,6 +2540,8 @@ mod tests {
             system_programs: None,
             #[cfg(target_os = "macos")]
             git_stage: None,
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            git_fault: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2629,6 +2638,8 @@ mod tests {
             system_programs: None,
             #[cfg(target_os = "macos")]
             git_stage: None,
+            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+            git_fault: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -4091,6 +4102,8 @@ mod tests {
                 system_programs: None,
                 #[cfg(target_os = "macos")]
                 git_stage: None,
+                #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+                git_fault: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;

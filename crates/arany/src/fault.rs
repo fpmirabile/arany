@@ -11,6 +11,9 @@ use tokio::time::Instant;
 #[cfg(any(test, feature = "test-support"))]
 pub use injection::{FaultPlan, GitStorageFault};
 
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub(crate) mod git_write;
+
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
     #[cfg(any(test, feature = "test-support"))]

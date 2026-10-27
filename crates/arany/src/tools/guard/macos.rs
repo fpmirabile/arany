@@ -1034,6 +1034,8 @@ impl Task {
                 None
             },
             git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         })
     }
 
@@ -1127,6 +1129,24 @@ struct GoGate {
     receive_go: tokio::sync::oneshot::Receiver<()>,
     git_stage: Option<super::GitStage>,
     git_input: Option<tokio::sync::oneshot::Receiver<(Vec<u8>, Vec<u8>)>>,
+    #[cfg(any(test, feature = "test-support"))]
+    git_fault: Option<crate::fault::git_write::GitWriteStage>,
+}
+
+impl GoGate {
+    async fn wait(
+        self,
+        stdin: &mut tokio::process::ChildStdin,
+        result_bytes: usize,
+    ) -> Result<(), ToolError> {
+        if let Some(input) = self.git_input {
+            let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
+            super::transfer::send_frame_capped(stdin, &result, result_bytes).await?;
+            super::transfer::send_frame_capped(stdin, &frame, crate::tools::git::WRITE_FRAME_BYTES)
+                .await?;
+        }
+        self.receive_go.await.map_err(|_| ToolError::Operation)
+    }
 }
 
 async fn read_command_windows(
@@ -1210,13 +1230,15 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let GoGate {
-        receive_go,
-        git_stage,
-        git_input,
-    } = gate;
+    let git_stage = gate.git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
     task.git_stage = git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        task.git_fault = git_fault;
+    }
     let task = super::encode_task(&task)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
@@ -1260,22 +1282,22 @@ async fn execute_worker(
                 .map_err(|_| ToolError::Operation)?;
             capture.complete();
             let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
-            if let Some(input) = git_input {
-                let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
-                super::transfer::send_frame_capped(
-                    &mut stdin,
-                    &result,
-                    intent.limits.result_bytes as usize,
-                )
+            gate.wait(&mut stdin, intent.limits.result_bytes as usize)
                 .await?;
-                super::transfer::send_frame_capped(
-                    &mut stdin,
-                    &frame,
-                    crate::tools::git::WRITE_FRAME_BYTES,
+            #[cfg(any(test, feature = "test-support"))]
+            if matches!(
+                git_fault,
+                Some(
+                    crate::fault::git_write::GitWriteStage::PublisherHeld
+                        | crate::fault::git_write::GitWriteStage::ExecutorTimeout
                 )
-                .await?;
+            ) {
+                control
+                    .write_all(b"GIT_HELD\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                std::future::pending::<()>().await;
             }
-            receive_go.await.map_err(|_| ToolError::Operation)?;
             capture.complete();
             let payload_deadline = super::payload_report_deadline(
                 tokio::time::Instant::now(),
@@ -1625,6 +1647,8 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         };
         assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
@@ -2097,6 +2121,8 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         };
         let phase = std::env::var("ARANY_TEST_GIT_PROFILE_PHASE").unwrap();
         if phase == "bare" {

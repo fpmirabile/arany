@@ -1,4 +1,8 @@
 #[cfg(any(debug_assertions, arany_ci))]
+#[path = "tools_macos_git/recovery.rs"]
+mod recovery;
+
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::engine_support::run_with;
 #[cfg(any(debug_assertions, arany_ci))]
 use crate::git::{host_git, tree_snapshot};
@@ -902,6 +906,7 @@ async fn native_git_branch_helper() {
     assert!(!refused.output.contains("publication"));
     assert_no_new_units(&leftovers, "a refused Git write must leave no unit");
 
+    let recovered = recovery::run(&engine, root, &workspace, &state_path).await;
     engine.close().await.unwrap();
     assert_no_new_units(
         &leftovers,
@@ -909,6 +914,7 @@ async fn native_git_branch_helper() {
     );
 
     std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
+    recovery::replay(&state_path, &home, &workspace, recovered).await;
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(created.session_id).await.unwrap();
     let replay = SessionView::replay(created.session_id, &events)
