@@ -227,6 +227,9 @@ pub(crate) fn validate_request(
         .narrowed_for_editor(request, &plan.commands, |tool| {
             definition.allows_worker_tool(tool)
         });
+    if request.commands != grant.commands {
+        return Err(EditorCommands);
+    }
     if !grant.valid() {
         return Err(EditorGrant);
     }

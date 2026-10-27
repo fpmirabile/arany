@@ -11,7 +11,7 @@ fn command_fixture_with_tools(only_command: bool) -> Fixture {
         if only_command {
             vec!["command".into()]
         } else {
-            vec!["read".into(), "write".into(), "command".into()]
+            vec!["command".into(), "read".into(), "write".into()]
         },
         vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Command],
         None,
@@ -140,6 +140,26 @@ fn rejected(f: &Fixture, intent: &EffectIntent) {
         events.len() as u64 + 1,
     ));
     assert!(SessionView::replay_open(f.session, &events).is_err());
+}
+
+#[test]
+fn editor_admission_refuses_partially_granted_command_lists() {
+    for only_command in [false, true] {
+        let f = command_fixture_with_tools(only_command);
+        let view = f.view();
+        let mut request = view.runs[0].agents[1]
+            .assignment
+            .as_ref()
+            .unwrap()
+            .pins
+            .request
+            .clone();
+        request.commands.push("unadmitted".into());
+        assert_eq!(
+            crate::session::validate_editor_request(&view, &view.runs[0], &request, None),
+            Err(crate::session::ProposalRefusalCause::EditorCommands)
+        );
+    }
 }
 
 #[test]

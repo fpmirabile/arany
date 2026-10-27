@@ -272,8 +272,12 @@ fn background_assignments_are_admitted_but_ungranted_commands_refuse_before_spaw
             request.mode = WorkerMode::Background;
         }
         assert_eq!(
-            validate_editor_request(&view, &view.runs[0], &request, None).is_err(),
-            commands
+            validate_editor_request(&view, &view.runs[0], &request, None),
+            if commands {
+                Err(crate::session::ProposalRefusalCause::EditorCommands)
+            } else {
+                Ok(())
+            }
         );
     }
 }
