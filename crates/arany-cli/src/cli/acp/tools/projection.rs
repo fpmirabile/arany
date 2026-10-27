@@ -39,18 +39,34 @@ pub(super) fn project(call: &ToolCall) -> Projection<'_> {
 }
 
 fn file<'a>(call: &'a ToolCall, facts: DisplayFacts<'a>) -> Projection<'a> {
-    let (kind, label) = match call {
-        ToolCall::Read { .. } => ("read", facts.verb),
+    let (kind, label, paths) = match call {
+        ToolCall::Read { .. } => ("read", facts.verb, facts.paths),
         ToolCall::List { .. } | ToolCall::Search { .. } | ToolCall::Glob { .. } => {
-            ("search", facts.verb)
+            ("search", facts.verb, facts.paths)
         }
-        _ => ("other", "Tool"),
-    };
-    let paths = match call {
         ToolCall::MultiEdit { .. } | ToolCall::Move { .. } | ToolCall::ApplyChangeset { .. } => {
-            vec![]
+            ("other", "Tool", vec![])
         }
-        _ => facts.paths,
+        ToolCall::ParseAgentDefinition { .. }
+        | ToolCall::Mkdir { .. }
+        | ToolCall::Write { .. }
+        | ToolCall::Edit { .. }
+        | ToolCall::Delete { .. }
+        | ToolCall::Command { .. }
+        | ToolCall::CommandUnguarded { .. }
+        | ToolCall::Skill { .. }
+        | ToolCall::McpList { .. }
+        | ToolCall::McpCall { .. }
+        | ToolCall::GitStatus { .. }
+        | ToolCall::GitDiff { .. }
+        | ToolCall::GitLog { .. }
+        | ToolCall::GitCommit { .. }
+        | ToolCall::GitBranch { .. }
+        | ToolCall::GitSwitch { .. }
+        | ToolCall::GitPush { .. }
+        | ToolCall::GhPrCreate { .. }
+        | ToolCall::GhPrList { .. }
+        | ToolCall::GhPrView { .. } => ("other", "Tool", facts.paths),
     };
     Projection {
         kind,
@@ -78,7 +94,24 @@ fn git<'a>(call: &'a ToolCall, facts: DisplayFacts<'a>) -> Projection<'a> {
         ToolCall::GhPrList { .. } => ("read", "List GitHub pull requests", facts.subject, vec![]),
         ToolCall::GhPrView { .. } => ("read", "Inspect GitHub pull request", facts.subject, vec![]),
         ToolCall::GhPrCreate { .. } => ("other", "Tool", "".into(), vec![]),
-        _ => ("other", "Tool", facts.subject, vec![]),
+        ToolCall::GitPush { .. }
+        | ToolCall::ParseAgentDefinition { .. }
+        | ToolCall::List { .. }
+        | ToolCall::Read { .. }
+        | ToolCall::Search { .. }
+        | ToolCall::Mkdir { .. }
+        | ToolCall::Write { .. }
+        | ToolCall::Edit { .. }
+        | ToolCall::MultiEdit { .. }
+        | ToolCall::Delete { .. }
+        | ToolCall::Move { .. }
+        | ToolCall::Command { .. }
+        | ToolCall::CommandUnguarded { .. }
+        | ToolCall::ApplyChangeset { .. }
+        | ToolCall::Skill { .. }
+        | ToolCall::McpList { .. }
+        | ToolCall::McpCall { .. }
+        | ToolCall::Glob { .. } => ("other", "Tool", facts.subject, vec![]),
     };
     Projection {
         kind,

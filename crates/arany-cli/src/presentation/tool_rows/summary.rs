@@ -128,34 +128,29 @@ pub(super) enum ReadGroup {
 }
 
 pub(super) fn read_group(call: &ToolCall) -> Option<ReadGroup> {
-    match call {
-        ToolCall::Search { .. } | ToolCall::Glob { .. } => Some(ReadGroup::Pattern),
-        ToolCall::Read { .. } => Some(ReadGroup::File),
-        ToolCall::List { .. } => Some(ReadGroup::Directory),
-        ToolCall::GitStatus { .. }
-        | ToolCall::GitDiff { .. }
-        | ToolCall::GitLog { .. }
-        | ToolCall::GitBranch { name: None, .. } => Some(ReadGroup::Git),
-        ToolCall::Skill { .. } => Some(ReadGroup::Skill),
-        ToolCall::McpList { .. } => Some(ReadGroup::Mcp),
-        ToolCall::ParseAgentDefinition { .. }
-        | ToolCall::Mkdir { .. }
-        | ToolCall::Write { .. }
-        | ToolCall::Edit { .. }
-        | ToolCall::MultiEdit { .. }
-        | ToolCall::Delete { .. }
-        | ToolCall::Move { .. }
-        | ToolCall::Command { .. }
-        | ToolCall::CommandUnguarded { .. }
-        | ToolCall::ApplyChangeset { .. }
-        | ToolCall::McpCall { .. }
-        | ToolCall::GitCommit { .. }
-        | ToolCall::GitBranch { name: Some(_), .. }
-        | ToolCall::GitSwitch { .. }
-        | ToolCall::GitPush { .. }
-        | ToolCall::GhPrCreate { .. }
-        | ToolCall::GhPrList { .. }
-        | ToolCall::GhPrView { .. } => None,
+    match call.family() {
+        Family::File => {
+            if matches!(call, ToolCall::Search { .. } | ToolCall::Glob { .. }) {
+                Some(ReadGroup::Pattern)
+            } else if matches!(call, ToolCall::Read { .. }) {
+                Some(ReadGroup::File)
+            } else if matches!(call, ToolCall::List { .. }) {
+                Some(ReadGroup::Directory)
+            } else {
+                None
+            }
+        }
+        Family::Git => matches!(
+            call,
+            ToolCall::GitStatus { .. }
+                | ToolCall::GitDiff { .. }
+                | ToolCall::GitLog { .. }
+                | ToolCall::GitBranch { name: None, .. }
+        )
+        .then_some(ReadGroup::Git),
+        Family::Skill => Some(ReadGroup::Skill),
+        Family::Mcp => matches!(call, ToolCall::McpList { .. }).then_some(ReadGroup::Mcp),
+        Family::Process | Family::Preparation => None,
     }
 }
 
