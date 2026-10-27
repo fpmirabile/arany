@@ -82,7 +82,7 @@ pub(super) fn publish(cache: BuildCacheSession) -> CacheUpdate {
         &session.lower,
         &upper,
         &cache.transfer.exclusions,
-        std::time::Instant::now() + super::super::selection::PHASE_TIME,
+        std::time::Instant::now() + super::super::fs::command::overlay::cache::CAPTURE_TIME,
         cache.transfer.candidate_bytes,
     ) {
         Ok(changes) => changes,

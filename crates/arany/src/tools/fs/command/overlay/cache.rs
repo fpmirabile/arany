@@ -5,6 +5,8 @@ use std::os::unix::fs::FileTypeExt;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::tools) const CAPTURE_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(in crate::tools) fn capture(
     lower: &Dir,
     upper: &Dir,
