@@ -565,11 +565,11 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
     ] {
         assert_eq!(super::failure_stage(&error), stage);
     }
-    for error in [
-        ToolError::Timeout(String::new()),
-        ToolError::NotFound,
-        ToolError::Conflict,
-    ] {
+    let timed_out = super::unstarted_observation(command(), ToolError::Timeout(String::new()));
+    assert_eq!(timed_out.output, "Tool runtime expired");
+    assert_eq!(timed_out.limit_cause, Some(super::LimitCause::Timeout));
+    assert!(timed_out.guard_stage.is_none());
+    for error in [ToolError::NotFound, ToolError::Conflict] {
         let observation = super::unstarted_observation(command(), error);
         assert!(
             observation
