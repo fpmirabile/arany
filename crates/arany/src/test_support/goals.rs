@@ -264,14 +264,13 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 points.push((index, Action::Worker, None));
             }
             Event::ToolStarted { agent_run_id, .. } => {
-                let action = if workers.contains_key(agent_run_id) {
-                    Action::Worker
-                } else if primaries.contains(agent_run_id) {
+                let action = if primaries.contains(agent_run_id) {
                     Action::Tool
                 } else {
                     Action::Child {
                         in_flight: in_flight(index),
-                        research: researchers.contains(agent_run_id),
+                        research: researchers.contains(agent_run_id)
+                            || workers.contains_key(agent_run_id),
                     }
                 };
                 points.push((index, action, None));
