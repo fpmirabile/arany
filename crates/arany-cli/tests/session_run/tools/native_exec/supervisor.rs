@@ -47,7 +47,8 @@ fn entry_case(mode: &str) {
 }
 
 #[test]
-fn supervisor_namespace_denial_precedes_probe_and_payload() {
+fn supervisor_admission_and_namespace_denials_precede_probe_and_payload() {
+    entry_case("unaligned-probe");
     entry_case("namespace-denied");
 }
 
@@ -78,12 +79,14 @@ fn supervisor_overlay_probe_and_submount_refusal_clean_up_before_payload() {
 fn supervisor_entry_helper() {
     let mode = std::env::var("ARANY_TEST_SUPERVISOR_MODE").unwrap();
     let root = PathBuf::from(std::env::var_os("ARANY_TEST_SUPERVISOR_ROOT").unwrap());
-    let (executable, file, launch) = entry_launch(&root, &mode);
+    let (executable, file, mut launch) = entry_launch(&root, &mode);
+    if mode == "unaligned-probe" {
+        launch["probe"]["bytes"] = json!(1);
+    }
     if mode == "submount" {
         submount_fixture(&root);
     }
     let namespace = root.join("namespace");
-    let helper = root.join("supervisor-executable");
     deny_entry(&mode);
     let path = if mode == "replacement" {
         PathBuf::from(format!(
@@ -94,7 +97,7 @@ fn supervisor_entry_helper() {
     } else {
         executable.clone()
     };
-    let mut command = entry_command(&path, &launch, &helper);
+    let mut command = entry_command(&path, &launch);
     if matches!(mode.as_str(), "replacement" | "mount-flags") {
         command.args(["/arany", "--version"]);
     }
@@ -137,10 +140,13 @@ fn supervisor_entry_helper() {
             "no payload or READY before probe admission"
         );
         let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(
-            failure,
-            json!({"stage":if mode == "namespace-denied" {"namespace_entry"} else {"runtime_mounts"}})
-        );
+        let expected = match mode.as_str() {
+            "unaligned-probe" => "admission",
+            "namespace-denied" => "namespace_entry",
+            "probe-denied" | "overlay-probe-denied" | "submount" => "runtime_mounts",
+            _ => panic!("unsupported supervisor refusal mode"),
+        };
+        assert_eq!(failure, json!({"stage":expected}));
     }
     if mode == "submount" {
         rustix::mount::unmount(
@@ -153,7 +159,6 @@ fn supervisor_entry_helper() {
         std::fs::remove_dir_all(root.join("workspace")).unwrap();
     }
     std::fs::remove_dir(namespace).unwrap();
-    std::fs::remove_file(helper).unwrap();
     if matches!(mode.as_str(), "replacement" | "mount-flags") {
         std::fs::remove_file(executable).unwrap();
     }
@@ -167,8 +172,6 @@ fn supervisor_entry_helper() {
 fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
     let namespace = root.join("namespace");
     std::fs::create_dir(&namespace).unwrap();
-    let helper = root.join("supervisor-executable");
-    std::fs::File::create_new(&helper).unwrap();
     let installed = Path::new(env!("CARGO_BIN_EXE_arany"));
     let executable = if mode == "mount-flags" {
         restricted_executable(root, installed)
@@ -192,8 +195,7 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
     }
     let digest: [u8; 32] = hash.finalize().into();
     let mut launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
-        "probe":{"root":namespace,"bytes":arany::ToolLimits::default().project_bytes},
-        "helper":helper});
+        "probe":{"root":namespace,"bytes":arany::ToolLimits::default().project_bytes}});
     if matches!(mode, "overlay-probe-denied" | "submount") {
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -249,7 +251,7 @@ fn deny_entry(mode: &str) {
     }
 }
 
-fn entry_command(path: &Path, launch: &Value, helper: &Path) -> Command {
+fn entry_command(path: &Path, launch: &Value) -> Command {
     let mut command = Command::new(path);
     command
         .args(["--internal-tool-guard", "--supervisor"])
@@ -277,10 +279,9 @@ fn entry_command(path: &Path, launch: &Value, helper: &Path) -> Command {
             "/proc",
             "--dev",
             "/dev",
-            "--ro-bind",
-        ])
-        .arg(helper)
-        .args(["/arany", "--chdir", "/"]);
+            "--chdir",
+            "/",
+        ]);
     command
 }
 

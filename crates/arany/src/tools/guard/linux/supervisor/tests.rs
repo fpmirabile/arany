@@ -34,7 +34,7 @@ fn supervisor_pin_rejects_same_path_content_and_identity_replacement() {
     std::fs::rename(replacement, &path).unwrap();
     assert!(matches!(pin.verify(&path), Err(ToolError::ChangedInput)));
     let large = std::fs::File::create(&path).unwrap();
-    large.set_len(MAX_EXECUTABLE_BYTES + 1).unwrap();
+    large.set_len(MAX_SUPERVISOR_EXECUTABLE_BYTES + 1).unwrap();
     assert!(Pin::read(&path).is_err());
     let fifo = root.path().join("pipe");
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
@@ -133,7 +133,14 @@ fn namespace_remedy_uses_only_the_admitted_static_executable_path() {
 }
 
 #[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "requires user xattrs on the temporary filesystem"
+)]
 fn xattr_probe_requires_set_read_remove_on_the_exact_file() {
+    let _gate = crate::test_process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("probe");
     let file = std::fs::File::create_new(path).unwrap();
