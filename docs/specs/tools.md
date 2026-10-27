@@ -733,7 +733,7 @@ Discovery returns a digest of each admitted complete tool definition. A later ca
 
 ## Extension and transport admission
 
-The current MCP profile is [local stdio](#local-mcp); no generic listener, remote MCP or runtime self-update is admitted. The only other listeners are the per-command [egress proxy](#network-grants-and-egress-proxy) socket and its in-namespace loopback bridge, which accept no connection from outside the command's unit. A new listener requires a named feature and a separate reviewed protocol. The [stdio server](../../NEXT_STEPS.md#pursue-in-order) and network-capable extensions remain deferred.
+The current MCP profile is [local stdio](#local-mcp); no generic listener, remote MCP or runtime self-update is admitted. Within MCP and extension admission, the only other listeners are the per-command [egress proxy](#network-grants-and-egress-proxy) socket and its in-namespace loopback bridge, which accept no connection from outside the command's unit. A new listener requires a named feature and a separate reviewed protocol. The [stdio server](../../NEXT_STEPS.md#pursue-in-order) and network-capable extensions remain deferred.
 
 Any future HTTP or MCP listener must validate exact `Host` and `Origin`, authenticate and authorize each session, admit exact content types, bound bodies and sessions, reject DNS-rebinding, CSRF and cross-site requests, and encrypt traffic leaving loopback. Loopback routing is not authentication. The sole current listener exception is the one-shot [OAuth callback](./chatgpt.md#authorization-transaction). PTY, update, package-install, approval and other high-authority operations require a narrow authenticated protocol and explicit capability rather than a generic listener.
 

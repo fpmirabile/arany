@@ -3532,13 +3532,13 @@ mod tests {
                 matches!(other.call, ToolCall::Command { .. })
             );
         }
-        let mut private = serde_json::to_value(command).unwrap();
+        let mut private = serde_json::to_value(&command).unwrap();
         private["target"] = serde_json::json!({
-            "kind":"worker_view",
-            "assignment_id":crate::session::AgentRunId::new(),
-            "base_digest":vec![1; 32],
-            "revision":1,
-            "cache_generation":null
+            "kind": "worker_view",
+            "assignment_id": crate::session::AgentRunId::new(),
+            "base_digest": vec![1_u8; 32],
+            "revision": 1,
+            "cache_generation": null,
         });
         assert!(serde_json::from_value::<EffectIntent>(private).is_err());
     }
