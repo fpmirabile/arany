@@ -1,7 +1,6 @@
+use super::prompts::read_setup_value;
 use super::routing::ROLES;
-use super::{
-    SetupError, SetupJournal, await_setup_ack, choose, read_setup_value, review_warning, routing,
-};
+use super::{SetupError, SetupJournal, await_setup_ack, choose, review_warning, routing};
 use crate::cli::provider::roster::{
     MAX_ELIGIBLE_PROFILES, MAX_PRESETS, MAX_PROFILES, Preset, Profile, RosterDraft,
 };

@@ -706,7 +706,11 @@ fn attest_runtime_mounts(
     Ok(())
 }
 
-fn attest_task_mounts(task: &Task, stage: &mut BootstrapStage) -> Result<(), ToolError> {
+fn attest_task_mounts(
+    task: &Task,
+    stage: &mut BootstrapStage,
+    #[cfg(target_os = "linux")] overlay: Option<&linux::overlay::Attestation>,
+) -> Result<(), ToolError> {
     attest_runtime_mounts(
         &task.intent.call,
         &task.config.runtime_grants,
@@ -716,7 +720,11 @@ fn attest_task_mounts(task: &Task, stage: &mut BootstrapStage) -> Result<(), Too
     #[cfg(target_os = "linux")]
     if matches!(task.intent.call, ToolCall::Command { .. }) && task.worker.is_none() {
         *stage = BootstrapStage::RuntimeMounts;
-        linux::verify_copy_mount(task.intent.limits.project_bytes)?;
+        if linux::overlay::selected(&task.intent, &task.config) && !task.preparation {
+            linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
+        } else {
+            linux::verify_copy_mount(task.intent.limits.project_bytes)?;
+        }
     }
     Ok(())
 }
@@ -1882,7 +1890,16 @@ fn send_result(
             crate::tools::CacheUpdate::NotApplicable
         },
     };
-    observation.spill = super::spill::OutputSpill::captured(&observation, result.1);
+    observation.spill = {
+        #[cfg(target_os = "linux")]
+        if linux::overlay::selected(&observation.intent, &task.config) {
+            super::spill::OutputSpill::pending(&observation, result.1)
+        } else {
+            super::spill::OutputSpill::captured(&observation, result.1)
+        }
+        #[cfg(not(target_os = "linux"))]
+        super::spill::OutputSpill::captured(&observation, result.1)
+    };
     if private_command
         && serde_json::from_str::<crate::session::worker::WorkerCommandResult>(&observation.output)
             .is_err()
@@ -1994,7 +2011,7 @@ pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
         #[cfg(target_os = "linux")]
-        linux::supervisor::verify_helper()?;
+        let overlay = linux::supervisor::verify_helper()?;
         #[cfg(target_os = "macos")]
         macos::bootstrap()?;
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
@@ -2005,7 +2022,12 @@ pub(super) fn helper_main() -> ExitCode {
             return linux::prepare_main(&task, &mut stdin);
         }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
-        attest_task_mounts(&task, &mut stage)?;
+        attest_task_mounts(
+            &task,
+            &mut stage,
+            #[cfg(target_os = "linux")]
+            overlay.as_ref(),
+        )?;
         #[cfg(target_os = "linux")]
         if let Some(cache) = &task.cache {
             restore_cache(cache, &mut stdin, &root)?;
@@ -2066,7 +2088,12 @@ pub(super) fn helper_main() -> ExitCode {
             return Err(ToolError::Configuration);
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
-        attest_task_mounts(&task, &mut stage)?;
+        attest_task_mounts(
+            &task,
+            &mut stage,
+            #[cfg(target_os = "linux")]
+            overlay.as_ref(),
+        )?;
         if image.is_some() || handover.is_some() {
             let mut trailing = [0; 1];
             if stdin
@@ -2315,6 +2342,9 @@ fn prepare_command_baseline(
     workspace: &Path,
     stdin: &mut impl Read,
 ) -> Result<Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>, ToolError> {
+    if linux::overlay::selected(&task.intent, &task.config) {
+        return Ok(None);
+    }
     let command_before =
         if task.worker.is_none() && matches!(task.intent.call, ToolCall::Command { .. }) {
             let mut stdout = std::io::stdout().lock();

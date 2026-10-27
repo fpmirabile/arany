@@ -10,7 +10,7 @@
 
 One observable result: each oversized corpus inventoried below moves to focused evidence owners, except the explicitly retained journey roots and migration corpus. The harness responsibility served is reviewable evidence for the [non-negotiable guarantees](../../AGENTS.md#non-negotiable-guarantees). Placement and pruning follow [Corpus placement](../../agents/testing.md#corpus-placement) and [Tests worth keeping](../../agents/testing.md#tests-worth-keeping); the latter owns the moved-block exception and deletion safeguards.
 
-Excluded: new tests, behavior changes, fixture or Provider-double changes. `test_support/worker_teams.rs` is shared scenario support, not a corpus to prune; `guard_runs/worker.rs` is below the split signal. Shared-workspace-editors owns their protocol changes; the Gates section below pins the surviving-corpus handoff. Process/macOS modules with self-spawned filter paths (`cli/attached/run.rs::tests`, `session_run::active_terminal*`, `tools_macos`) retain those paths; architecture-residue R3 owns the other focused Run tests.
+Excluded: new tests, behavior changes, fixture or Provider-double changes. `test_support/worker_teams.rs` is shared scenario support, not a corpus to prune; `guard_runs/worker.rs` is below the split signal. Shared-workspace-editors owns their protocol changes; the Gates section below pins the surviving-corpus handoff. Process/macOS modules with self-spawned filter paths (`cli/attached/run.rs::tests`, `session_run::active_terminal*`, `tools_macos`) retain those paths; the other focused Run tests live in [run/tests.rs](../../crates/arany-cli/src/cli/attached/run/tests.rs).
 
 ## Research
 
@@ -23,8 +23,8 @@ Inventory at `dfba8416`, measured with `wc -l` and `grep -cE '#\[(tokio::)?test'
 | [session/reducer/worker_tests.rs](../../crates/arany/src/session/reducer/worker_tests.rs) | 6,203 | 61 | T3a: surviving editor lease, stop and verification evidence after shared-workspace-editors S2b2 |
 | [guard_runs/permissions.rs](../../crates/arany-cli/tests/guard_runs/permissions.rs) | 5,828 | 81 | T4a: modes, rules, hooks and host evidence |
 | [tools/tests.rs](../../crates/arany/src/tools/tests.rs) | 5,723 | 62 | T3b: Tool families and cross-family catalog cases |
-| [session_run/setup.rs](../../crates/arany-cli/tests/session_run/setup.rs) | 4,964 | 25 | T4b: setup flows after architecture-residue R2 |
-| [terminal/view/tests.rs](../../crates/arany-cli/src/terminal/view/tests.rs) | 4,810 | 50 | T4c: view regions after architecture-residue R4 |
+| [session_run/setup.rs](../../crates/arany-cli/tests/session_run/setup.rs) | 4,964 | 25 | T4b: [setup flow evidence](../../docs/specs/terminal.md#setup-and-account-choices) |
+| [terminal/view/tests.rs](../../crates/arany-cli/src/terminal/view/tests.rs) | 4,810 | 50 | T4c: [Transcript evidence](../../docs/specs/terminal.md#interruption-suspension-and-restoration) |
 | [engine_run.rs](../../crates/arany/tests/engine_run.rs) | 6,507 | 50 | T5a: in-process Engine scenario families |
 | [session_run/slash_completion.rs](../../crates/arany-cli/tests/session_run/slash_completion.rs) | 4,592 | 12 | T5b: completion, pickers and paste journeys |
 | [acp/in_process.rs](../../crates/arany-cli/tests/acp/in_process.rs) | 4,591 | 38 | T5c: transport, lifecycle and projection cases |
@@ -74,8 +74,8 @@ Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery), includ
 | T3a | Re-inventory surviving `reducer/worker_tests.rs` after shared-workspace-editors S2b2; move lease, stop and verification cases beside their reducer children. Shared fixtures and `guard_runs/worker.rs` stay unchanged. Optional shared-editor S0b may deliver this move before cutover under the Gates exception. | ≤300 |
 | T3b | Move `tools/tests.rs` cases beside `tools/{fs,process,git,mcp,permissions}` and catalog/type owners; only cross-family cases stay in the parent; after shared-workspace-editors S2b2. | ≤300 |
 | T4a | Move `guard_runs/permissions.rs` into `permissions/{modes,rules,hooks,host}.rs`, preserving all process/native gates. | ≤300 |
-| T4b | Move `session_run/setup.rs` into `setup/{native,chatgpt,custom}.rs`, leaving cross-flow journeys in the parent; after architecture-residue R2. | ≤300 |
-| T4c | Move `terminal/view/tests.rs` into view-region test children; retain cross-region frame cases in the parent; after architecture-residue R4. | ≤300 |
+| T4b | Move `session_run/setup.rs` into `setup/{native,chatgpt,custom}.rs`, leaving cross-flow journeys in the parent; preserve the [setup flow evidence](../../docs/specs/terminal.md#setup-and-account-choices). | ≤300 |
+| T4c | Move `terminal/view/tests.rs` into view-region test children; retain cross-region frame cases in the parent and preserve [Transcript continuity](../../docs/specs/terminal.md#interruption-suspension-and-restoration). | ≤300 |
 | T5a | Move `engine_run.rs` compaction, persistence, delegation and Tool-step cases into scenario-family submodules, preserving shared support and the integration target. | ≤300 |
 | T5b | Move `session_run/slash_completion.rs` into completion, picker and paste journey submodules; preserve self-spawn filters and process support. | ≤300 |
 | T5c | Move `acp/in_process.rs` transport, lifecycle and Tool projection cases to focused ACP test children; after display-facts D2. | ≤300 |

@@ -132,7 +132,7 @@ Each slice ID is exactly one PR within the [slice ceiling](../PLANNING.md#slice-
 
 ## Gates
 
-D7′ resolves the entry/policy design gate; S1a0's refusals are not success evidence. The [toolchain/defaults and cache contract](../../docs/specs/tools.md#persistent-workspace-build-cache) precedes S1a1; reserve `guard.rs::payload` against it. **S1a1 → S1a2a → S1a2b → S1b → S1c1 → S1c2 → S1d** serialize `guard/linux.rs`, `guard.rs`, `tools/fs.rs`, `tools/process.rs` and the internal-helper entry point. Keep primary publication [in process](../../docs/specs/tools.md#in-process-file-operations); no architecture-residue prerequisite is introduced.
+D7′ resolves the entry/policy design gate; S1a0's refusals are not success evidence. The [toolchain/defaults and cache contract](../../docs/specs/tools.md#persistent-workspace-build-cache) precedes S1a1; reserve `guard.rs::payload` against it. **S1a1 → S1a2a → S1a2b → S1b → S1c1 → S1c2 → S1d** serialize `guard/linux.rs`, `guard.rs`, `tools/fs.rs`, `tools/process.rs` and the internal-helper entry point. Keep primary publication [in process](../../docs/specs/tools.md#in-process-file-operations).
 
 **S2a → S2b open only after S1c2 and S1d**; reserve `store/state/build_cache.rs`, `store/state.rs`, `guard.rs` and `presentation/storage.rs`. S3 follows S2b; reserve `tools/config.rs`, `tools/process.rs`, `cli/attached/controls.rs` and `guard.rs`. The old merged issue/PR gates have been removed; current file reservations own integration.
 
