@@ -262,6 +262,16 @@ pub(crate) fn guard_dispatched(intent: &crate::tools::EffectIntent) {
     FaultPlan::guard_dispatched(&intent.call);
 }
 
+#[cfg(target_os = "macos")]
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn guard_dispatch_gate(intent: &crate::tools::EffectIntent) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((entered, release)) = FaultPlan::guard_dispatch_gate(&intent.call) {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
 pub(crate) struct CandidateSync {
     #[cfg(any(test, feature = "test-support"))]
     finished: Option<tokio::sync::oneshot::Sender<()>>,
@@ -399,6 +409,12 @@ mod injection {
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
+        #[cfg(target_os = "macos")]
+        GuardDispatchGate(
+            crate::tools::ToolCall,
+            oneshot::Sender<()>,
+            oneshot::Receiver<()>,
+        ),
         #[cfg(target_os = "macos")]
         GitStorage(crate::tools::ToolCall, GitStorageFault, std::path::PathBuf),
         GuardCacheReport(
@@ -781,6 +797,28 @@ mod injection {
             let (entered, wait) = oneshot::channel();
             plan().push(Fault::GuardDispatch(call, entered));
             wait
+        }
+
+        #[cfg(target_os = "macos")]
+        pub fn gate_guard_dispatch(
+            call: crate::tools::ToolCall,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            plan().push(Fault::GuardDispatchGate(call, entered, released));
+            (wait, release)
+        }
+
+        #[cfg(target_os = "macos")]
+        pub(crate) fn guard_dispatch_gate(
+            call: &crate::tools::ToolCall,
+        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::GuardDispatchGate(candidate, ..) if candidate == call),
+            ) {
+                Some(Fault::GuardDispatchGate(_, entered, release)) => Some((entered, release)),
+                _ => None,
+            }
         }
 
         pub(crate) fn guard_dispatched(call: &crate::tools::ToolCall) {

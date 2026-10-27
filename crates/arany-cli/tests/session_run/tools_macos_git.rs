@@ -233,14 +233,17 @@ async fn faulted_git_read(
 }
 
 #[cfg(any(debug_assertions, arany_ci))]
-async fn cancelled_git_read(engine: &arany::Engine, workspace: &Path) -> arany::RunOutcome {
+async fn cancelled_git_read(engine: &arany::Engine, workspace: &Path) -> arany::SessionId {
     let call = ToolCall::GitStatus { path: ".".into() };
-    let dispatched = arany::FaultPlan::observe_guard_dispatch(call.clone());
+    let session = engine
+        .create_session(workspace.into(), Some("Cancelled Git".into()))
+        .await
+        .unwrap();
+    let (dispatched, release) = arany::FaultPlan::gate_guard_dispatch(call.clone());
     let cancellation = arany::RunCancellation::new();
     let pending = cancellation.clone();
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(call),
-        arany::test_support::goals::finish_with("Done"),
     ]));
     let stop = async {
         dispatched.await.unwrap();
@@ -253,8 +256,8 @@ async fn cancelled_git_read(engine: &arany::Engine, workspace: &Path) -> arany::
                 &provider,
                 RunRequest {
                     skill: None,
-                    session_id: None,
-                    title: Some("Cancelled Git".into()),
+                    session_id: Some(session),
+                    title: None,
                     objective: "Cancel this Git read".into(),
                     images: Vec::new(),
                     workspace: workspace.into(),
@@ -274,7 +277,38 @@ async fn cancelled_git_read(engine: &arany::Engine, workspace: &Path) -> arany::
     })
     .await
     .expect("cancelled Git read deadline");
-    outcome.unwrap()
+    drop(release);
+    assert!(
+        matches!(
+            &outcome,
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+        ),
+        "dispatched Git cancellation must preserve uncertainty: {outcome:?}"
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    session
+}
+
+#[cfg(any(debug_assertions, arany_ci))]
+fn assert_cancelled_git_read(session: arany::SessionId, events: &[arany::EventEnvelope]) {
+    let replay = SessionView::replay(session, events).unwrap().unwrap();
+    assert_eq!(replay.runs.len(), 1);
+    let run = &replay.runs[0];
+    assert_eq!(run.status, RunStatus::Interrupted);
+    assert_eq!(run.tools.len(), 1);
+    let observation = run.tools[0].observation.as_ref().unwrap();
+    assert!(matches!(
+        &observation.intent.call,
+        ToolCall::GitStatus { .. }
+    ));
+    assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+    assert!(observation.attestation.is_none());
+    assert_eq!(
+        observation.output,
+        "Guard execution unconfirmed; effects may have occurred. Do not retry automatically."
+    );
+    assert_eq!(replay.goals.len(), 1);
+    assert_eq!(replay.goals[0].status, arany::GoalStatus::Interrupted);
 }
 
 #[cfg(any(debug_assertions, arany_ci))]
@@ -453,7 +487,6 @@ async fn native_git_journey_helper() {
     .expect("Git journey deadline")
     .unwrap();
     let cancelled = cancelled_git_read(&engine, &workspace).await;
-    assert_ne!(cancelled.run.status, RunStatus::Finished);
     for fault in [
         arany::GitStorageFault::Refuse,
         arany::GitStorageFault::Exhaust,
@@ -624,6 +657,8 @@ async fn native_git_journey_helper() {
 
     std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let cancelled_events = store.load_session(cancelled).await.unwrap();
+    assert_cancelled_git_read(cancelled, &cancelled_events);
     let events = store.load_session(outcome.session_id).await.unwrap();
     let replay = SessionView::replay(outcome.session_id, &events)
         .unwrap()
