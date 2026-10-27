@@ -1,6 +1,6 @@
 use crate::tools::config::Config;
 use crate::tools::tests::config_value;
-use crate::tools::types::*;
+use crate::tools::types::{ToolCall, model_call};
 use crate::validate::{MAX_REVISION_BYTES, valid_revision};
 use serde_json::{Value, json};
 
