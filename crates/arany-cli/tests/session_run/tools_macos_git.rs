@@ -521,10 +521,14 @@ async fn native_git_journey_helper() {
         }
     }
     engine.close().await.unwrap();
-    assert_eq!(
-        unit_leftovers(),
-        leftovers,
-        "every Git unit, including the failed and denied reads, must detach its volume and remove its root"
+    // Admission may recover abandoned roots that predate this journey.
+    let new_leftovers: Vec<_> = unit_leftovers()
+        .into_iter()
+        .filter(|entry| !leftovers.contains(entry))
+        .collect();
+    assert!(
+        new_leftovers.is_empty(),
+        "every Git unit, including the failed and denied reads, must detach its volume and remove its root: {new_leftovers:?}"
     );
     assert_eq!(
         outcome.run.status,

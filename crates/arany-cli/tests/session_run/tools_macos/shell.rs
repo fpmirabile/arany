@@ -50,12 +50,22 @@ pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde
         .unwrap();
         engine.close().await.unwrap();
         assert_eq!(outcome.run.status, RunStatus::Failed, "{option}");
+        assert_eq!(
+            outcome.run.failure,
+            Some(arany::RunFailure::ToolStopped),
+            "{option}"
+        );
         assert_eq!(outcome.run.tools.len(), 1, "{option}");
-        assert_eq!(requests.lock().unwrap().len(), 3, "no retry: {option}");
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "no continuation: {option}"
+        );
         let observation = outcome.run.tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.intent.call, call);
         assert_eq!(observation.disposition, ToolDisposition::Failed);
         assert!(observation.attestation.is_none());
+        assert!(observation.enforcement_cause.is_none());
         assert!(observation.output.contains("no operation was dispatched"));
         assert!(
             observation
