@@ -94,9 +94,7 @@ fn editor_terminal(failure: WorkerCause, facts: &EditorFacts) -> EditorTerminal 
         | WorkerCause::TurnLimit
         | WorkerCause::Budget
         | WorkerCause::SnapshotDrift
-        | WorkerCause::CriterionUnverified
-        | WorkerCause::PrivateUncertain
-        | WorkerCause::Lost => (AgentDisposition::Failed, WorkerDisposition::Failed),
+        | WorkerCause::CriterionUnverified => (AgentDisposition::Failed, WorkerDisposition::Failed),
     };
     EditorTerminal::Known {
         agent,

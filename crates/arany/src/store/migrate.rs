@@ -192,6 +192,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             1,
             crate::session::retired_worker_payload
         ),
+        variant_step!("AgentFinished", 11, crate::session::live_editor_payload),
         variant_step!(
             "AgentSpawned",
             15,
