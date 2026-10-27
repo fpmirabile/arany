@@ -44,6 +44,9 @@ impl Baseline {
         }
         let mut selector = Selector::new(0, deadline);
         for directory in &self.complete {
+            if ignored(directory, true, &mut selector)? {
+                continue;
+            }
             let path = if directory.is_empty() {
                 ".gitignore".into()
             } else {

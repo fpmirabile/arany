@@ -40,6 +40,45 @@ fn masks_keep_dependencies_and_large_inputs_but_refuse_known_protected_aliases()
 }
 
 #[test]
+fn ignored_controls_do_not_exhaust_publication_budgets() {
+    use crate::tools::selection::{CONTROL_FILES, PHASE_TIME};
+    for (directory, controls, accepted) in [
+        ("node_modules", CONTROL_FILES + 1, true),
+        ("ignored", CONTROL_FILES + 1, true),
+        ("visible", 1, true),
+        ("visible", CONTROL_FILES + 1, false),
+    ] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join(".gitignore"), b"ignored/\n").unwrap();
+        for index in 0..controls {
+            let path = lower.path().join(format!("{directory}/control-{index}"));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(".gitignore"), b"generated\n").unwrap();
+        }
+        let source = crate::tools::fs::open_directory(lower.path()).unwrap();
+        let inventory = masks::Inventory::read(&source, std::time::Instant::now() + PHASE_TIME);
+        if !accepted {
+            assert!(matches!(inventory, Err(ToolError::Limit)), "{directory}");
+            continue;
+        }
+        let inventory = inventory.unwrap();
+        assert!(inventory.paths().is_empty());
+        let generated = upper.path().join(format!("{directory}/control-0"));
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("generated"), b"discarded").unwrap();
+        std::fs::write(upper.path().join("created"), b"published").unwrap();
+        let target = crate::tools::fs::open_directory(upper.path()).unwrap();
+        let (changeset, _) = inventory
+            .baseline
+            .capture(&source, &target, std::time::Instant::now() + PHASE_TIME)
+            .unwrap();
+        assert_eq!(changeset.files.len(), 1, "{directory}");
+        assert_eq!(changeset.files[0].path, "created", "{directory}");
+    }
+}
+
+#[test]
 fn protected_links_and_unwalkable_trees_mask_an_enclosing_subtree() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
