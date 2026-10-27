@@ -227,9 +227,9 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
         uncovered(&changed, &FIXTURES, &NESTED_SCHEMAS),
         [
             "ProviderRouting declares 0 record formats",
-            "UiPreferences 8 has no accepted identity fixture",
-            "UiPreferences 7 -> 8 has no step and fixture",
-            "UiPreferences 3 -> 8 does not decode",
+            "UiPreferences 9 has no accepted identity fixture",
+            "UiPreferences 8 -> 9 has no step and fixture",
+            "UiPreferences 3 -> 9 does not decode",
         ]
     );
     // A decoder that changes shape without a version bump refuses its own identity fixture.
@@ -243,8 +243,8 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
             .filter(|problem| problem.starts_with("UiPreferences"))
             .collect::<Vec<_>>(),
         [
-            "UiPreferences 7 has no accepted identity fixture",
-            "UiPreferences 3 -> 7 does not decode",
+            "UiPreferences 8 has no accepted identity fixture",
+            "UiPreferences 3 -> 8 does not decode",
         ]
     );
 }
