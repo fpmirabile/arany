@@ -475,7 +475,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 if tool.intent.call.site() == arany::Site::InProcess {
                     return Some("Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run.".into());
                 }
-                return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
+                return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to open this Run; its Command row names the Guard stage and cause.".into());
             }
             if tool.is_some_and(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
@@ -1581,6 +1581,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
             output: output.into(),
             attestation: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: arany::CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,

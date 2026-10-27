@@ -3,7 +3,7 @@ use super::config::Config;
 use super::permissions::HiddenPaths;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
-use super::{Cancellation, ToolError, ToolRuntime};
+use super::{Cancellation, SelectionCause, ToolError, ToolRuntime};
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use crate::validate::{digest, hex_digest};
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,8 @@ pub(super) fn payload_report_deadline(
 mod landlock;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub(in crate::tools) use linux::overlay::selection_failure;
 #[cfg(target_os = "linux")]
 mod profile;
 #[cfg(target_os = "linux")]
@@ -207,7 +209,7 @@ impl BuildCacheTransfer {
 
 pub(super) struct BuildCacheSession {
     #[cfg(target_os = "linux")]
-    pub(super) directory: Option<cap_std::fs::Dir>,
+    pub(super) directory: Option<cache_directory::Session>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
 }
@@ -340,6 +342,7 @@ pub(super) async fn publish_cache_candidate(
     if !observation.cache_publication_eligible() {
         return;
     }
+    crate::fault::guard_cache_publication(observation.intent.id).await;
     let update = match (candidate, cache) {
         (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
         (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
@@ -353,25 +356,14 @@ pub(super) async fn publish_cache_candidate(
         }
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
-                    return CacheUpdate::Uncertain;
-                };
-                let mut candidate = match lease.open_candidate() {
-                    Ok(candidate) => candidate,
-                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
-                        return CacheUpdate::Rejected;
-                    }
-                    Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
-                    Err(_) => return CacheUpdate::Failed,
-                };
-                match lease.publish(&mut candidate, &cache.transfer.exclusions) {
-                    Ok(()) => CacheUpdate::Published,
-                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
-                        CacheUpdate::Rejected
-                    }
-                    Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
-                    Err(_) => CacheUpdate::Failed,
+                #[cfg(target_os = "linux")]
+                if cache.directory.is_some() {
+                    return cache_directory::publish(cache);
                 }
+                #[cfg(any(target_os = "macos", test))]
+                return publish_archive(cache);
+                #[cfg(all(not(target_os = "macos"), not(test)))]
+                CacheUpdate::Failed
             });
             match tokio::time::timeout_at(deadline, publication).await {
                 Ok(Ok(update)) => update,
@@ -386,6 +378,27 @@ pub(super) async fn publish_cache_candidate(
         observation.limit_cause = None;
     }
     debug_assert!(observation.valid());
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn publish_archive(cache: BuildCacheSession) -> CacheUpdate {
+    let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
+        return CacheUpdate::Uncertain;
+    };
+    let mut candidate = match lease.open_candidate() {
+        Ok(candidate) => candidate,
+        Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
+            return CacheUpdate::Rejected;
+        }
+        Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
+        Err(_) => return CacheUpdate::Failed,
+    };
+    match lease.publish(&mut candidate, &cache.transfer.exclusions) {
+        Ok(()) => CacheUpdate::Published,
+        Err(StoreError::StorageFull) if !lease.publication_uncertain() => CacheUpdate::Rejected,
+        Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
+        Err(_) => CacheUpdate::Failed,
+    }
 }
 
 impl Task {
@@ -444,7 +457,7 @@ struct Ready {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum GuardCheck {
+pub enum GuardCheck {
     Inspection,
     ListingUnavailable,
     DeviceUnlisted,
@@ -458,10 +471,25 @@ pub(super) enum GuardCheck {
     ReportTrailing,
     Cancelled,
     ControllerFailed,
+    PayloadTimeout,
+    PayloadLimit,
+    PayloadFailed,
+    SelectionTimedOut,
+    SelectionInputVanished,
+    SelectionInputConflict,
 }
 
 impl GuardCheck {
-    pub(super) fn label(self) -> &'static str {
+    fn selection(self) -> Option<SelectionCause> {
+        match self {
+            Self::SelectionTimedOut => Some(SelectionCause::TimedOut),
+            Self::SelectionInputVanished => Some(SelectionCause::InputVanished),
+            Self::SelectionInputConflict => Some(SelectionCause::InputConflict),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
         match self {
             Self::Inspection => "inspection",
             Self::ListingUnavailable => "listing unavailable",
@@ -476,6 +504,12 @@ impl GuardCheck {
             Self::ReportTrailing => "report not followed by end of stream",
             Self::Cancelled => "cancelled",
             Self::ControllerFailed => "controller thread failed",
+            Self::PayloadTimeout => "payload preparation timed out",
+            Self::PayloadLimit => "payload preparation hit a resource limit",
+            Self::PayloadFailed => "payload preparation failed",
+            Self::SelectionTimedOut => "project selection timed out",
+            Self::SelectionInputVanished => "project input vanished",
+            Self::SelectionInputConflict => "project input conflict",
         }
     }
 }
@@ -545,6 +579,23 @@ impl BootstrapFailure {
         }
     }
 
+    fn caused_by(mut self, error: &ToolError) -> Self {
+        if let ToolError::ProjectSelection(cause) = error {
+            self.check = Some(match cause {
+                SelectionCause::TimedOut => GuardCheck::SelectionTimedOut,
+                SelectionCause::InputVanished => GuardCheck::SelectionInputVanished,
+                SelectionCause::InputConflict => GuardCheck::SelectionInputConflict,
+            });
+        } else if matches!(self.stage, BootstrapStage::Payload) {
+            self.check = Some(match error {
+                ToolError::Timeout(_) => GuardCheck::PayloadTimeout,
+                ToolError::Limit => GuardCheck::PayloadLimit,
+                _ => GuardCheck::PayloadFailed,
+            });
+        }
+        self
+    }
+
     pub(super) fn sandbox_setup(&self) -> bool {
         match self.stage {
             BootstrapStage::RuntimeMounts
@@ -562,8 +613,8 @@ impl BootstrapFailure {
         }
     }
 
-    pub(super) fn check(&self) -> Option<&'static str> {
-        self.check.map(GuardCheck::label)
+    pub(super) fn check(&self) -> Option<GuardCheck> {
+        self.check
     }
 
     pub(super) fn detail(&self) -> Option<&str> {
@@ -574,20 +625,20 @@ impl BootstrapFailure {
         self.namespace_remedy.as_deref()
     }
 
-    pub(super) fn failure_stage(&self) -> &'static str {
+    pub(super) fn failure_stage(&self) -> FailureStage {
         match self.stage {
-            BootstrapStage::Admission => "admission",
-            BootstrapStage::NamespaceEntry => "namespace authorization",
-            BootstrapStage::Workspace => "pinned input",
-            BootstrapStage::RuntimeMounts => "runtime mount topology",
-            BootstrapStage::Capabilities => "native protection",
-            BootstrapStage::Handshake => "handshake",
-            BootstrapStage::Payload => "execution",
-            BootstrapStage::Receipt => "receipt",
-            BootstrapStage::ProcessStop => "process cleanup",
-            BootstrapStage::LauncherReap => "launcher reap",
-            BootstrapStage::StderrDrain => "output EOF",
-            BootstrapStage::StorageCleanup => "storage cleanup",
+            BootstrapStage::Admission => FailureStage::Admission,
+            BootstrapStage::NamespaceEntry => FailureStage::NamespaceAuthorization,
+            BootstrapStage::Workspace => FailureStage::PinnedInput,
+            BootstrapStage::RuntimeMounts => FailureStage::RuntimeMountTopology,
+            BootstrapStage::Capabilities => FailureStage::NativeProtection,
+            BootstrapStage::Handshake => FailureStage::Handshake,
+            BootstrapStage::Payload => FailureStage::Execution,
+            BootstrapStage::Receipt => FailureStage::Receipt,
+            BootstrapStage::ProcessStop => FailureStage::ProcessCleanup,
+            BootstrapStage::LauncherReap => FailureStage::LauncherReap,
+            BootstrapStage::StderrDrain => FailureStage::OutputEof,
+            BootstrapStage::StorageCleanup => FailureStage::StorageCleanup,
         }
     }
 }
@@ -607,25 +658,25 @@ pub enum GuardStage {
 }
 
 impl GuardStage {
-    pub(super) fn failure_stage(self) -> &'static str {
+    pub(super) fn failure_stage(self) -> FailureStage {
         match self {
-            Self::ConnectionDeadline => "connection deadline",
-            Self::PreparationDeadline => "preparation deadline",
-            Self::ResourceAttestation => "resource attestation",
-            Self::ProcessCleanup => "process cleanup",
-            Self::StorageCleanup => "storage cleanup",
-            Self::LauncherReap => "launcher reap",
-            Self::OutputEof => "output EOF",
-            Self::NamespaceBootstrap => "namespace bootstrap",
-            Self::NativeManager => "native manager",
-            Self::ControlProtocol => "control protocol",
+            Self::ConnectionDeadline => FailureStage::ConnectionDeadline,
+            Self::PreparationDeadline => FailureStage::PreparationDeadline,
+            Self::ResourceAttestation => FailureStage::ResourceAttestation,
+            Self::ProcessCleanup => FailureStage::ProcessCleanup,
+            Self::StorageCleanup => FailureStage::StorageCleanup,
+            Self::LauncherReap => FailureStage::LauncherReap,
+            Self::OutputEof => FailureStage::OutputEof,
+            Self::NamespaceBootstrap => FailureStage::NamespaceBootstrap,
+            Self::NativeManager => FailureStage::NativeManager,
+            Self::ControlProtocol => FailureStage::ControlProtocol,
         }
     }
 }
 
 impl std::fmt::Display for GuardStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.failure_stage())
+        f.write_str(self.failure_stage().label())
     }
 }
 
@@ -998,6 +1049,7 @@ fn discovery_result(
         enforcement_cause: None,
         limit_cause: cause,
         approval_cause: None,
+        guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     })
 }
@@ -1095,7 +1147,12 @@ pub(super) fn require_listed<T: PartialEq>(
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
     serde_json::from_slice::<BootstrapFailure>(stderr)
         .ok()
-        .map(ToolError::GuardBootstrap)
+        .map(
+            |failure| match failure.check.and_then(GuardCheck::selection) {
+                Some(cause) => ToolError::ProjectSelection(cause),
+                None => ToolError::GuardBootstrap(failure),
+            },
+        )
 }
 
 pub(super) async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
@@ -1397,6 +1454,7 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     lease: &Arc<BuildCacheLease>,
@@ -1449,11 +1507,13 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 // Drop the file before the lease can reclaim its reservation and identity lock.
+#[cfg(any(target_os = "macos", test))]
 struct CandidateStaging {
     file: cap_std::fs::File,
     _lease: Arc<BuildCacheLease>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl Write for CandidateStaging {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.file.write(bytes)
@@ -1465,6 +1525,7 @@ impl Write for CandidateStaging {
 }
 
 // Keep draining after a staging write failure so the archive stream stays aligned.
+#[cfg(any(target_os = "macos", test))]
 async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
     reader: &mut R,
     length: u64,
@@ -1680,6 +1741,11 @@ fn bootstrap_locations(
     ))
 }
 
+type Dispatched = (
+    (Result<String, ToolError>, Option<Vec<u8>>),
+    Option<Vec<u8>>,
+);
+
 pub(super) struct GuardContext<'a> {
     pub(super) captured: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "linux")]
@@ -1701,12 +1767,7 @@ pub(super) struct GuardContext<'a> {
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(
-        self,
-    ) -> (
-        (Result<String, ToolError>, Option<Vec<u8>>),
-        Option<Vec<u8>>,
-    ) {
+    async fn dispatch(self) -> Dispatched {
         let result = super::dispatch::run(&self).await;
         let plan = self.git_plan.into_inner().ok().flatten();
         ((result, self.captured.into_inner().ok().flatten()), plan)
@@ -1820,64 +1881,6 @@ fn restore_cache(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn send_cache_candidate(
-    cache: &BuildCacheTransfer,
-    observation: &ToolObservation,
-    stdout: &mut impl Write,
-    root: &Path,
-) -> Result<(), ToolError> {
-    if !observation.cache_publication_eligible() || cache.candidate_bytes == 0 {
-        stdout
-            .write_all(b"CACHE_REJECTED\n")
-            .and_then(|()| stdout.flush())
-            .map_err(|_| ToolError::Operation)?;
-    } else {
-        let cache_dir = super::fs::open_directory(&root.join("cache"))?;
-        match crate::store::archive_size_with_limit(
-            &cache_dir,
-            &cache.identity,
-            &cache.exclusions,
-            cache.candidate_bytes,
-        ) {
-            Ok(size) => {
-                stdout
-                    .write_all(b"CACHE_CANDIDATE\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-                stdout
-                    .write_all(&size.to_le_bytes())
-                    .map_err(|_| ToolError::Operation)?;
-                let captured = crate::store::capture_archive_with_limit(
-                    &cache_dir,
-                    &cache.identity,
-                    &cache.exclusions,
-                    &mut *stdout,
-                    cache.candidate_bytes,
-                )
-                .map_err(map_cache_error)?;
-                if captured != size {
-                    return Err(ToolError::Operation);
-                }
-                stdout.flush().map_err(|_| ToolError::Operation)?;
-            }
-            Err(StoreError::StorageFull) => {
-                stdout
-                    .write_all(b"CACHE_REJECTED\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-            }
-            Err(_) => {
-                stdout
-                    .write_all(b"CACHE_FAILED\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn receive_bulk(
     task: &Task,
     stdin: &mut std::io::BufReader<impl Read>,
@@ -1941,6 +1944,17 @@ fn receive_git_input(
     })
 }
 
+fn send_report(
+    task: Task,
+    workspace: &Path,
+    (result, plan): Dispatched,
+    image: Option<&transfer::Image>,
+) -> Result<(), ToolError> {
+    let mut stdout = std::io::stdout().lock();
+    send_result(task, workspace, result, &mut stdout, image)?;
+    send_plan(plan, &mut stdout)
+}
+
 fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
     if let Some(plan) = plan {
         transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
@@ -1955,7 +1969,6 @@ fn send_result(
     workspace: &Path,
     result: (Result<String, ToolError>, Option<Vec<u8>>),
     stdout: &mut impl Write,
-    root: &Path,
     before: Option<&transfer::Image>,
 ) -> Result<(), ToolError> {
     let (disposition, output, enforcement_cause, limit_cause) =
@@ -1977,6 +1990,7 @@ fn send_result(
         output,
         attestation: Some(Attestation::Guard(receipt)),
         approval_cause: None,
+        guard_stage: None,
         cache_update: if private_command {
             crate::tools::CacheUpdate::Discarded
         } else if task.cache.is_some() {
@@ -2089,15 +2103,10 @@ fn send_result(
         transfer::write_frame(stdout, &bytes, crate::session::worker::WORKER_DATA_BYTES)?;
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
-    #[cfg(target_os = "linux")]
-    if let Some(cache) = &task.cache
-        && task.worker.is_none()
-    {
-        send_cache_candidate(cache, &observation, stdout, root)?;
-    }
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) fn helper_main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--supervisor")) {
@@ -2120,7 +2129,9 @@ pub(super) fn helper_main() -> ExitCode {
             overlay.as_ref(),
         )?;
         #[cfg(target_os = "linux")]
-        if let Some(cache) = &task.cache {
+        if let Some(cache) = &task.cache
+            && task.worker.is_some()
+        {
             restore_cache(cache, &mut stdin, &root)?;
         }
         let workspace = workspace.as_path();
@@ -2238,16 +2249,17 @@ pub(super) fn helper_main() -> ExitCode {
         };
         let (result, plan) = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
-        let mut stdout = std::io::stdout().lock();
-        send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
-        send_plan(plan, &mut stdout)?;
-        Ok(())
+        send_report(task, workspace, (result, plan), image.as_ref())
     })();
-    if result.is_ok() {
-        ExitCode::SUCCESS
-    } else {
-        let _ = serde_json::to_writer(std::io::stderr().lock(), &BootstrapFailure::at(stage));
-        ExitCode::FAILURE
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = serde_json::to_writer(
+                std::io::stderr().lock(),
+                &BootstrapFailure::at(stage).caused_by(&error),
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -2582,6 +2594,7 @@ mod tests {
             enforcement_cause: None,
             limit_cause: None,
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert!(observation.attested_for(&intent));
@@ -2628,7 +2641,8 @@ mod tests {
         assert!(matches!(
             wait_discovery_completion(&mut failure, &intent).await,
             Err(ToolError::GuardBootstrap(failure))
-                if failure.failure_stage() == "storage cleanup" && failure.check() == Some("detach failed")
+                if failure.failure_stage() == FailureStage::StorageCleanup
+                    && failure.check() == Some(GuardCheck::DetachFailed)
         ));
     }
 
@@ -2941,7 +2955,7 @@ mod tests {
         let failure = br#"{"stage":"launcher_reap"}"#;
         assert!(matches!(
             parse_observation(failure),
-            Err(ToolError::GuardBootstrap(found)) if found.failure_stage() == "launcher reap"
+            Err(ToolError::GuardBootstrap(found)) if found.failure_stage() == FailureStage::LauncherReap
         ));
         let mut hook = intent(ToolCall::Command {
             program: "sh".into(),
@@ -3071,8 +3085,8 @@ mod tests {
         let ToolError::GuardBootstrap(panicked) = with_worker_exit(closed(), &tail) else {
             panic!("a closed worker stays a Guard failure");
         };
-        assert_eq!(panicked.failure_stage(), "execution");
-        assert_eq!(panicked.check(), Some("worker panicked"));
+        assert_eq!(panicked.failure_stage(), FailureStage::Execution);
+        assert_eq!(panicked.check(), Some(GuardCheck::WorkerPanicked));
         let detail = panicked.detail().unwrap();
         assert!(detail.ends_with("thread 'main' panicked at src/unit.rs:1:2: [31mboom"));
         assert!(detail.chars().all(|ch| ch.is_ascii_graphic() || ch == ' '));
@@ -3086,7 +3100,7 @@ mod tests {
         };
         assert_eq!(
             (silent.check(), silent.detail()),
-            (Some("worker closed before its report"), None)
+            (Some(GuardCheck::WorkerClosed), None)
         );
         let other = with_worker_exit(
             execution_failure(GuardCheck::ReportMalformed),
@@ -3095,7 +3109,7 @@ mod tests {
         assert!(matches!(
             other,
             ToolError::GuardBootstrap(failure)
-                if failure.check() == Some("malformed report") && failure.detail().is_none()
+                if failure.check() == Some(GuardCheck::ReportMalformed) && failure.detail().is_none()
         ));
     }
 
@@ -3199,6 +3213,71 @@ mod tests {
         assert!(matches!(lapsed, Err(ToolError::ProtectionUnavailable)));
     }
 
+    #[test]
+    fn supervisor_selection_failures_survive_serialization_and_reach_the_observation() {
+        for (cause, label) in [
+            (SelectionCause::TimedOut, "project selection timed out"),
+            (SelectionCause::InputVanished, "project input vanished"),
+            (SelectionCause::InputConflict, "project input conflict"),
+        ] {
+            let failure = BootstrapFailure::at(BootstrapStage::RuntimeMounts)
+                .caused_by(&ToolError::ProjectSelection(cause));
+            let bytes = serde_json::to_vec(&failure).unwrap();
+            let Some(ToolError::ProjectSelection(decoded)) = bootstrap_failure(&bytes) else {
+                panic!("selection cause did not survive");
+            };
+            assert_eq!(decoded, cause);
+            let mut command = intent(ToolCall::Command {
+                program: "sh".into(),
+                args: vec![],
+                cwd: String::new(),
+            });
+            command.policy_digest = [1; 32];
+            command.enforcement_digest = [2; 32];
+            let observation =
+                crate::tools::unstarted_observation(command, ToolError::ProjectSelection(decoded));
+            let stored: ToolObservation =
+                serde_json::from_str(&serde_json::to_string(&observation).unwrap()).unwrap();
+            assert!(stored.valid());
+            assert_eq!(
+                stored.guard_stage_diagnostic().as_deref(),
+                Some(format!("Guard stage: {label}").as_str())
+            );
+            assert!(stored.output.contains("Resend your message"));
+        }
+        let unrelated = BootstrapFailure::at(BootstrapStage::RuntimeMounts)
+            .caused_by(&ToolError::ProtectionUnavailable);
+        let bytes = serde_json::to_vec(&unrelated).unwrap();
+        assert!(matches!(
+            bootstrap_failure(&bytes),
+            Some(ToolError::GuardBootstrap(failure))
+                if failure.failure_stage() == FailureStage::RuntimeMountTopology
+                    && failure.check().is_none()
+        ));
+    }
+
+    #[test]
+    fn payload_stage_failures_serialize_a_closed_check() {
+        for (error, check) in [
+            (
+                ToolError::Timeout(String::new()),
+                Some(GuardCheck::PayloadTimeout),
+            ),
+            (ToolError::Limit, Some(GuardCheck::PayloadLimit)),
+            (ToolError::Operation, Some(GuardCheck::PayloadFailed)),
+        ] {
+            let failure = BootstrapFailure::at(BootstrapStage::Payload).caused_by(&error);
+            let bytes = serde_json::to_vec(&failure).unwrap();
+            let Some(ToolError::GuardBootstrap(decoded)) = bootstrap_failure(&bytes) else {
+                panic!("failure did not round-trip");
+            };
+            assert_eq!(decoded.failure_stage(), FailureStage::Execution);
+            assert_eq!(decoded.check(), check);
+        }
+        let other = BootstrapFailure::at(BootstrapStage::Workspace).caused_by(&ToolError::Limit);
+        assert_eq!(other.check(), None);
+    }
+
     #[tokio::test]
     async fn worker_report_rejections_name_their_execution_check() {
         let mut intent = intent(ToolCall::Command {
@@ -3236,6 +3315,7 @@ mod tests {
                 })
             }),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         let line = |observation: &ToolObservation| {
@@ -3245,15 +3325,15 @@ mod tests {
         };
         assert_eq!(
             check(Vec::new()).await,
-            Some(("execution", Some("worker closed before its report")))
+            Some((FailureStage::Execution, Some(GuardCheck::WorkerClosed)))
         );
         assert_eq!(
             check(b"partial".to_vec()).await,
-            Some(("execution", Some("worker closed before its report")))
+            Some((FailureStage::Execution, Some(GuardCheck::WorkerClosed)))
         );
         assert_eq!(
             check(b"not a report\n".to_vec()).await,
-            Some(("execution", Some("malformed report")))
+            Some((FailureStage::Execution, Some(GuardCheck::ReportMalformed)))
         );
         assert_eq!(
             check(
@@ -3262,12 +3342,12 @@ mod tests {
                 .to_vec()
             )
             .await,
-            Some(("storage cleanup", Some("detach failed"))),
+            Some((FailureStage::StorageCleanup, Some(GuardCheck::DetachFailed))),
             "a worker's own closed failure passes through unchanged"
         );
         assert_eq!(
             check(line(&observation(false))).await,
-            Some(("execution", Some("unattested report")))
+            Some((FailureStage::Execution, Some(GuardCheck::ReportUnattested)))
         );
         let attested = observation(true);
         assert!(attested.attested_for(&intent));
@@ -3275,7 +3355,7 @@ mod tests {
         trailing.push(b'x');
         assert_eq!(
             check(trailing).await,
-            Some(("execution", Some("report not followed by end of stream")))
+            Some((FailureStage::Execution, Some(GuardCheck::ReportTrailing)))
         );
         let mut overlong = line(&attested);
         overlong.extend_from_slice(b"xy");
@@ -3538,7 +3618,7 @@ mod tests {
     #[test]
     fn runtime_mount_rejection_reports_its_own_bootstrap_stage() {
         let failure = BootstrapFailure::at(BootstrapStage::RuntimeMounts);
-        assert_eq!(failure.failure_stage(), "runtime mount topology");
+        assert_eq!(failure.failure_stage(), FailureStage::RuntimeMountTopology);
         assert_eq!(failure.to_string(), "runtime mount topology");
         let encoded = serde_json::to_vec(&failure).unwrap();
         assert_eq!(encoded, br#"{"stage":"runtime_mounts"}"#);
@@ -3569,8 +3649,8 @@ mod tests {
     fn storage_cleanup_failure_carries_a_closed_check_without_changing_its_stage() {
         let failure: BootstrapFailure =
             serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#).unwrap();
-        assert_eq!(failure.failure_stage(), "storage cleanup");
-        assert_eq!(failure.check(), Some("detach failed"));
+        assert_eq!(failure.failure_stage(), FailureStage::StorageCleanup);
+        assert_eq!(failure.check(), Some(GuardCheck::DetachFailed));
         assert_eq!(
             serde_json::to_string(&failure).unwrap(),
             r#"{"stage":"storage_cleanup","check":"detach_failed"}"#
@@ -3578,7 +3658,7 @@ mod tests {
         let unlisted: BootstrapFailure =
             serde_json::from_str(r#"{"stage":"storage_cleanup","check":"device_unlisted"}"#)
                 .unwrap();
-        assert_eq!(unlisted.check(), Some("device unlisted before detach"));
+        assert_eq!(unlisted.check(), Some(GuardCheck::DeviceUnlisted));
         let bare: BootstrapFailure = serde_json::from_str(r#"{"stage":"payload"}"#).unwrap();
         assert_eq!(bare.check(), None);
         assert_eq!(
@@ -3724,6 +3804,7 @@ mod tests {
                 .into(),
             attestation: Some(Attestation::Guard(guard)),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotAttempted,
         }
     }

@@ -97,6 +97,8 @@ pub(super) struct Launch {
     probe: Option<ProjectProbe>,
     #[serde(default)]
     pub(super) overlay: Option<overlay::Grant>,
+    #[serde(default)]
+    pub(super) cache: Option<overlay::cache::Grant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,6 +143,7 @@ impl Launch {
                 pin,
                 probe,
                 overlay: None,
+                cache: None,
             },
             executable,
         ))
@@ -223,19 +226,24 @@ pub(in crate::tools::guard) fn verify_helper() -> Result<Option<overlay::Attesta
     Ok(helper.overlay)
 }
 
+pub(in crate::tools::guard) fn failure_report(
+    stage: super::super::BootstrapStage,
+    error: &ToolError,
+) -> super::super::BootstrapFailure {
+    super::super::BootstrapFailure::at(stage).caused_by(error)
+}
+
 pub(in crate::tools::guard) fn main() -> std::process::ExitCode {
     let mut stage = super::super::BootstrapStage::Admission;
-    let result = run(&mut stage);
-    if result.is_ok() {
-        std::process::ExitCode::SUCCESS
-    } else if !matches!(stage, super::super::BootstrapStage::LauncherReap) {
-        let _ = serde_json::to_writer(
-            std::io::stderr().lock(),
-            &super::super::BootstrapFailure::at(stage),
-        );
-        std::process::ExitCode::FAILURE
-    } else {
-        std::process::ExitCode::FAILURE
+    match run(&mut stage) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            if !matches!(stage, super::super::BootstrapStage::LauncherReap) {
+                let _ =
+                    serde_json::to_writer(std::io::stderr().lock(), &failure_report(stage, &error));
+            }
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
@@ -296,7 +304,7 @@ fn mount_view(
     launch: &mut Launch,
     arguments: &mut [std::ffi::OsString],
 ) -> Result<Option<overlay::View>, ToolError> {
-    let view = match launch.overlay.take() {
+    let mut view = match launch.overlay.take() {
         Some(grant) => Some(overlay::View::mount(
             &launch.probe.as_ref().ok_or(ToolError::Configuration)?.root,
             grant,
@@ -304,6 +312,11 @@ fn mount_view(
         )?),
         None => None,
     };
+    if let Some(cache) = launch.cache.take() {
+        view.as_mut()
+            .ok_or(ToolError::Configuration)?
+            .install_cache(cache.mount()?);
+    }
     if let Some(view) = &view {
         let helper = arguments.last_mut().ok_or(ToolError::Configuration)?;
         *helper = serde_json::to_string(&Helper {
@@ -378,6 +391,16 @@ fn mount_probe(probe: &ProjectProbe) -> Result<(), ToolError> {
     probe_xattr(&file)?;
     drop(file);
     std::fs::remove_file(path).map_err(|_| ToolError::ProtectionUnavailable)
+}
+
+pub(in crate::tools::guard::linux) fn mount_tmpfs(
+    root: &Path,
+    bytes: u64,
+) -> Result<(), ToolError> {
+    mount_probe(&ProjectProbe {
+        root: root.into(),
+        bytes,
+    })
 }
 
 fn probe_xattr(file: &std::fs::File) -> Result<(), ToolError> {
