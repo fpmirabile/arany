@@ -1,3 +1,4 @@
+use super::inline::{Flow, chunks, envelope, place, widen_end, widen_start};
 use super::*;
 use pulldown_cmark::{Event, Tag, TagEnd};
 
@@ -9,9 +10,7 @@ pub(super) struct Table {
     pub(super) range: Range<usize>,
     rows: Vec<TableRow>,
     columns: usize,
-    bytes: usize,
-    styles: Vec<(Modifier, Range<usize>, usize)>,
-    literal: Option<Range<usize>>,
+    flow: Flow,
 }
 #[derive(Default)]
 struct TableRow {
@@ -53,62 +52,11 @@ impl Table {
                 row.cells.push(Vec::new());
             }
             Event::End(TagEnd::TableCell) => {
-                let cell = self.cell()?;
-                envelope(cell, range);
+                let mut cells = self.flow.take();
+                envelope(&mut cells, range);
+                *self.cell()? = cells;
             }
-            _ => self.inline(source, event, range)?,
-        }
-        Ok(())
-    }
-    fn inline(&mut self, source: &str, event: &Event<'_>, range: Range<usize>) -> Result<(), ()> {
-        if self
-            .literal
-            .as_ref()
-            .is_some_and(|literal| range.start >= literal.start && range.end <= literal.end)
-        {
-            return Ok(());
-        }
-        match event {
-            Event::Start(Tag::Emphasis | Tag::Strong) => {
-                let style = if matches!(event, Event::Start(Tag::Strong)) {
-                    Modifier::BOLD
-                } else {
-                    Modifier::ITALIC
-                };
-                let start = self.cell()?.len();
-                self.styles.push((style, range, start));
-            }
-            Event::End(TagEnd::Emphasis | TagEnd::Strong) => {
-                let (_, range, start) = self.styles.pop().ok_or(())?;
-                envelope(&mut self.cell()?[start..], range);
-            }
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
-                self.append(
-                    source,
-                    &source[range.clone()],
-                    range.clone(),
-                    Modifier::empty(),
-                )?;
-                self.literal = Some(range);
-            }
-            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
-                let style = self
-                    .styles
-                    .iter()
-                    .fold(Modifier::empty(), |style, (next, _, _)| style | *next);
-                self.append(
-                    source,
-                    text,
-                    range,
-                    style
-                        | if matches!(event, Event::Code(_)) {
-                            Modifier::REVERSED
-                        } else {
-                            Modifier::empty()
-                        },
-                )?;
-            }
-            _ => {}
+            _ => self.flow.event(source, event, range)?,
         }
         Ok(())
     }
@@ -124,60 +72,22 @@ impl Table {
             cell.style |= Modifier::BOLD;
         }
         for row in &mut self.rows {
-            if let Some(first) = row.cells.iter_mut().flatten().next() {
-                first.source.start = row.range.start;
+            if let Some(first) = row.cells.iter_mut().find(|cell| !cell.is_empty()) {
+                widen_start(first, row.range.start);
             }
-            if let Some(last) = row.cells.iter_mut().flatten().next_back() {
-                last.source.end = row.range.end;
+            if let Some(last) = row.cells.iter_mut().rev().find(|cell| !cell.is_empty()) {
+                widen_end(last, row.range.end);
             }
         }
         if let Some(last) = self
             .rows
             .iter_mut()
             .flat_map(|row| &mut row.cells)
-            .flatten()
-            .next_back()
+            .rev()
+            .find(|cell| !cell.is_empty())
         {
-            last.source.end = self.range.end;
+            widen_end(last, self.range.end);
         }
-    }
-    fn append(
-        &mut self,
-        source: &str,
-        text: &str,
-        range: Range<usize>,
-        style: Modifier,
-    ) -> Result<(), ()> {
-        self.bytes += escaped_terminal_bytes(text);
-        if self.bytes > MAX_MARKDOWN_OUTPUT_BYTES {
-            return Err(());
-        }
-        let mut cursor = range.start;
-        let cell = self.cell()?;
-        let first = cell.len();
-        for text in text.graphemes(true) {
-            let byte = source[cursor..range.end]
-                .find(text)
-                .map(|offset| cursor + offset);
-            let origin = byte.map_or(range.clone(), |byte| cursor..byte + text.len());
-            cursor = origin.end;
-            cell.push(Cell {
-                byte: byte.unwrap_or(origin.start),
-                source: origin,
-                text: escape_terminal(text),
-                style,
-            });
-        }
-        envelope(&mut cell[first..], range);
-        Ok(())
-    }
-}
-fn envelope(cells: &mut [Cell], range: Range<usize>) {
-    if let Some(first) = cells.first_mut() {
-        first.source.start = range.start;
-    }
-    if let Some(last) = cells.last_mut() {
-        last.source.end = range.end;
     }
 }
 
@@ -256,28 +166,6 @@ fn records(
     }
     Ok(())
 }
-fn chunks(cells: &[Cell], width: usize) -> Vec<Range<usize>> {
-    let (mut start, mut columns, mut space) = (0, 0, None);
-    let mut rows = Vec::new();
-    for (index, cell) in cells.iter().enumerate() {
-        while index > start && columns + cell.text.width() > width {
-            let end = space.filter(|end| *end > start).unwrap_or(index);
-            rows.push(start..end);
-            start = end;
-            columns = cells[start..index]
-                .iter()
-                .map(|cell| cell.text.width().min(width))
-                .sum();
-            space = None;
-        }
-        columns += cell.text.width().min(width);
-        if cell.text == " " {
-            space = Some(index + 1);
-        }
-    }
-    rows.push(start..cells.len());
-    rows
-}
 fn emit(
     cells: &[Vec<Cell>],
     widths: &[usize],
@@ -294,19 +182,8 @@ fn emit(
         let (mut output, mut bytes) = (Vec::new(), 0);
         for (column, cell) in cells.iter().enumerate() {
             let range = wrapped[column].get(line).cloned().unwrap_or(0..0);
-            let mut columns = 0;
-            for cell in &cell[range] {
-                let text =
-                    overflow_replacement(cell.text.width(), widths[column]).unwrap_or(&cell.text);
-                columns += text.width();
-                bytes += text.len();
-                if capture {
-                    output.push(Cell {
-                        text: text.to_owned(),
-                        ..cell.clone()
-                    });
-                }
-            }
+            let (columns, size) = place(&cell[range], widths[column], capture, &mut output);
+            bytes += size;
             if column + 1 < cells.len() {
                 let padding = widths[column].saturating_sub(columns);
                 bytes += padding + SEPARATOR.len();
