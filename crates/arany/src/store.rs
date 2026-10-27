@@ -27,6 +27,8 @@ use replay::{
     inspect_session, latest_session_id, list_session_page, load_session, resolve_open_view,
     resolve_view, session_for_run,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use state::CacheGuardRecovery;
 #[cfg(test)]
 pub(crate) use state::capture_archive;
 pub use state::checkpoints::CheckpointReset;
