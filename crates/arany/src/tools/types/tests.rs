@@ -301,7 +301,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limit_cause: None,
         intent: command_intent,
         disposition: ToolDisposition::Uncertain,
-        output: r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
+        output: r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
             .into(),
         attestation: Some(Attestation::Guard(command_guard)),
         approval_cause: None,

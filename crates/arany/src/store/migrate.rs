@@ -181,11 +181,27 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         web_step!("AgentSpawned", 17),
         web_step!("ToolProposed", 4),
         web_step!("ToolStarted", 26),
-        web_step!("ToolFinished", 32),
+        web_step!("ToolFinished", 33),
         web_step!("HookStarted", 15),
-        web_step!("HookFinished", 21),
+        web_step!("HookFinished", 22),
         web_step!("GoalPlanContractRecorded", 14),
         web_step!("ProviderCallRecorded", 25),
+        EventStep {
+            kind: "ToolFinished",
+            from: 32,
+            transform: |value| crate::session::add_selection_timing("ToolFinished", value),
+            canonical: |payload| {
+                crate::session::pre_selection_timing_payload("ToolFinished", payload)
+            },
+        },
+        EventStep {
+            kind: "HookFinished",
+            from: 21,
+            transform: |value| crate::session::add_selection_timing("HookFinished", value),
+            canonical: |payload| {
+                crate::session::pre_selection_timing_payload("HookFinished", payload)
+            },
+        },
         variant_step!("ToolProposed", 3, crate::session::pre_proxy_payload),
         variant_step!("ToolStarted", 25, crate::session::pre_proxy_payload),
         variant_step!("ToolFinished", 31, crate::session::pre_proxy_payload),

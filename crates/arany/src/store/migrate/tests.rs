@@ -8,6 +8,8 @@ use std::path::Path;
 
 #[path = "retired_worker_tests.rs"]
 mod retired_worker;
+#[path = "selection_timing_tests.rs"]
+mod selection_timing;
 #[path = "shared_editors_tests.rs"]
 mod shared_editors;
 
@@ -18,7 +20,19 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 96] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 98] = [
+    (
+        "ToolFinished",
+        32,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookFinished",
+        21,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
     (
         "AgentFinished",
         11,
@@ -371,7 +385,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 96] = [
     ),
     (
         "ToolFinished",
-        32,
+        33,
         SELECTION_TOOLFINISHED,
         SELECTION_TOOLFINISHED,
     ),
@@ -383,7 +397,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 96] = [
     ),
     (
         "HookFinished",
-        21,
+        22,
         SELECTION_HOOKFINISHED,
         SELECTION_HOOKFINISHED,
     ),
@@ -439,17 +453,14 @@ const EVENT_FIXTURES: [EventFixture<'static>; 96] = [
 
 #[test]
 fn web_operations_never_appear_in_source_version_rows() {
-    for (kind, from, input) in [
-        ("ToolProposed", 4, include_str!("toolproposed-v1.json")),
-        ("ToolStarted", 26, include_str!("toolstarted-v23.json")),
-        ("ToolFinished", 32, SELECTION_TOOLFINISHED),
-        (
-            "HookStarted",
-            15,
-            include_str!("hookstarted-without-expiry.json"),
-        ),
-        ("HookFinished", 21, SELECTION_HOOKFINISHED),
+    for (kind, input) in [
+        ("ToolProposed", include_str!("toolproposed-v1.json")),
+        ("ToolStarted", include_str!("toolstarted-v23.json")),
+        ("ToolFinished", SELECTION_TOOLFINISHED),
+        ("HookStarted", include_str!("hookstarted-without-expiry.json")),
+        ("HookFinished", SELECTION_HOOKFINISHED),
     ] {
+        let from = crate::test_support::payload_version(kind) - 1;
         let value: Value = serde_json::from_str(input).unwrap();
         let pointer = ["/intent/call", "/observation/intent/call"]
             .into_iter()

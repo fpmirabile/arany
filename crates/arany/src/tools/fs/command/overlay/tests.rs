@@ -25,7 +25,7 @@ pub(super) fn baseline(root: &Dir) -> Baseline {
     let mut baseline = Baseline::default();
     walk(root, "", &mut baseline);
     baseline
-        .freeze(root, Instant::now() + crate::tools::selection::PHASE_TIME)
+        .freeze(root, Instant::now() + crate::tools::selection::TEST_RUNTIME)
         .unwrap();
     baseline
 }
@@ -66,7 +66,7 @@ fn capture_freezes_selection_preserves_binary_exec_and_checks_host_drift() {
         let result = baseline.capture(
             &source,
             &open_directory(upper.path()).unwrap(),
-            Instant::now() + crate::tools::selection::PHASE_TIME,
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
         );
         if matches!(drift, "edit" | "create" | "parent") {
             assert!(matches!(result, Err(ToolError::Conflict)), "{drift}");
@@ -132,7 +132,7 @@ fn capture_validates_ignored_and_publishable_metadata_before_selection() {
         let result = baseline.capture(
             &source,
             &open_directory(upper.path()).unwrap(),
-            Instant::now() + crate::tools::selection::PHASE_TIME,
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
         );
         assert_eq!(result.is_ok(), accepted, "{name}, ignored={ignored}");
         if !accepted {
@@ -172,7 +172,7 @@ fn capture_validates_ignored_and_publishable_metadata_before_selection() {
                 .capture(
                     &source,
                     &open_directory(upper.path()).unwrap(),
-                    Instant::now() + crate::tools::selection::PHASE_TIME
+                    Instant::now() + crate::tools::selection::TEST_RUNTIME
                 )
                 .is_err(),
             "{kind}"
@@ -193,7 +193,7 @@ fn capture_restores_private_readability_and_refuses_incomplete_absence_or_caps()
     )
     .unwrap();
     let target = open_directory(upper.path()).unwrap();
-    let deadline = Instant::now() + crate::tools::selection::PHASE_TIME;
+    let deadline = Instant::now() + crate::tools::selection::TEST_RUNTIME;
     assert_eq!(
         baseline
             .capture(&source, &target, deadline)
@@ -268,7 +268,7 @@ fn identical_copyups_do_not_consume_candidate_caps() {
             .capture(
                 &source,
                 &open_directory(upper.path()).unwrap(),
-                Instant::now() + crate::tools::selection::PHASE_TIME,
+                Instant::now() + crate::tools::selection::TEST_RUNTIME,
             )
             .unwrap();
         assert!(changes.files.is_empty());
@@ -337,7 +337,7 @@ fn comparison_preserves_content_exec_drift_and_metadata_checks() {
         let result = baseline.capture(
             &source,
             &open_directory(upper.path()).unwrap(),
-            Instant::now() + crate::tools::selection::PHASE_TIME,
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
         );
         match case {
             "drift" => assert!(matches!(result, Err(ToolError::Conflict))),
@@ -421,7 +421,7 @@ fn plain_whiteouts_use_baseline_files_and_classify_host_creation_as_conflict() {
         let result = baseline.capture(
             &source,
             &open_directory(upper.path()).unwrap(),
-            Instant::now() + crate::tools::selection::PHASE_TIME,
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
         );
         match case {
             "file" | "directory" => {
@@ -470,7 +470,7 @@ fn multiple_roots_keep_relative_selection_and_share_candidate_limits() {
         let directory = tempfile::tempdir().unwrap();
         let mut sources = Vec::new();
         let mut baselines = Vec::new();
-        let deadline = Instant::now() + crate::tools::selection::PHASE_TIME;
+        let deadline = Instant::now() + crate::tools::selection::TEST_RUNTIME;
         let mut selector = Selector::new(0, deadline);
         for (index, prefix) in ["src", "crates/core"].into_iter().enumerate() {
             let lower = directory.path().join(format!("lower-{index}"));

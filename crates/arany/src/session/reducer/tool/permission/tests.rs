@@ -259,7 +259,7 @@ fn unguarded_scenario(
         observation.limit_cause =
             (disposition == ToolDisposition::Limit).then_some(crate::tools::LimitCause::Resource);
         observation.output =
-            r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
+            r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
         apply(
             &mut view,
             Event::ToolFinished {
@@ -688,7 +688,7 @@ fn host_replay_requires_primary_human_authority_and_pin_without_prior_failure() 
     cached.cache_update = CacheUpdate::Published;
     assert!(rejected(&approved, finish(cached)));
     host_run.output =
-        r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
+        r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
     let no_verdict = good.view.clone();
     assert!(rejected(&no_verdict, finish(host_run.clone())));
     let mut refused = good.view.clone();
