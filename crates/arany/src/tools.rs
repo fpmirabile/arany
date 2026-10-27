@@ -21,6 +21,7 @@ mod guard;
 pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
+pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
 mod output;
 pub(crate) mod spill;
