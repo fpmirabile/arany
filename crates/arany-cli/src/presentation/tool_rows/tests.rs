@@ -862,6 +862,74 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn command_rows_show_only_nonzero_counters() {
+        let mut result = serde_json::json!({
+            "selection":{"ignored_entries":0,"pruned_directories":3,"oversized_inputs":0,"discarded_outputs":2},
+            "exit_code":0,"stdout":"x\n","stderr":"",
+            "stdout_total":{"bytes":2,"lines":1},"stderr_total":{"bytes":0,"lines":0}
+        });
+        let mut tool = tool_fixture(
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec![],
+                cwd: String::new(),
+            },
+            &result.to_string(),
+        );
+        for (selection, expected) in [
+            ([0, 3, 0, 2], "3 pruned roots, 2 discarded outputs"),
+            ([4, 0, 1, 0], "4 ignored entries, 1 oversized input"),
+            ([4, 1, 0, 0], "4 ignored entries (1 pruned root)"),
+        ] {
+            result["selection"] = serde_json::json!({
+                "ignored_entries":selection[0],"pruned_directories":selection[1],
+                "oversized_inputs":selection[2],"discarded_outputs":selection[3]
+            });
+            tool.observation.as_mut().unwrap().output = result.to_string();
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)),
+                format!("Command(sh )\nResult: exit 0 · 1 line · {expected}")
+            );
+        }
+    }
+
+    #[test]
+    fn command_rows_show_the_first_non_blank_script_line() {
+        for (args, expected) in [
+            (vec!["-c", "echo hi"], "Command(sh -c echo hi)"),
+            (vec!["-c", "\n  \necho hi\nls"], "Command(sh -c echo hi …)"),
+            (vec!["-c", "echo hi\n \n"], "Command(sh -c echo hi)"),
+            (
+                vec!["-c", "echo \u{1b}[2J\rx\nls"],
+                r"Command(sh -c echo \u{001b}[2J\u{000d}x …)",
+            ),
+        ] {
+            let tool = tool_fixture(
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: args.into_iter().map(String::from).collect(),
+                    cwd: String::new(),
+                },
+                "",
+            );
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)).lines().next(),
+                Some(expected)
+            );
+        }
+        let flood = tool_fixture(
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), format!("{}\nls", "\u{1b}".repeat(500))],
+                cwd: String::new(),
+            },
+            "",
+        );
+        assert!(!tool_summary(&flood).contains('\u{1b}'));
+        assert!(tool_summary(&flood).lines().next().unwrap().len() < 2048);
+    }
+
+    #[test]
     fn tool_rows_show_bounded_results_and_inert_failures() {
         for (call, output, expected) in [
             (
