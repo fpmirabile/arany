@@ -863,10 +863,28 @@ fn downgrade_run_provider(connection: &Connection) {
         if let Event::RunStarted { config, .. } = decode_row(row) {
             let tagged = serde_json::to_string(&config.provider).unwrap();
             let profile = serde_json::to_string(&config.provider.profile()).unwrap();
-            row.payload = row.payload.replacen(&tagged, &profile, 1);
+            row.payload = restore_allowance(row.payload.replacen(&tagged, &profile, 1), &config);
             row.version = 23;
         }
     });
+}
+
+// Versions before 25 pinned the Worker data allowance after the last policy field.
+fn restore_allowance(payload: String, config: &crate::session::RunConfig) -> String {
+    let Some(policy) = &config.worker_policy else {
+        return payload;
+    };
+    let last = format!(r#""max_tools":{}}}"#, policy.max_tools);
+    assert_eq!(payload.matches(&last).count(), 1);
+    payload.replacen(
+        &last,
+        &format!(
+            r#""max_tools":{},"data_bytes":{}}}"#,
+            policy.max_tools,
+            crate::session::worker::WORKER_DATA_BYTES
+        ),
+        1,
+    )
 }
 
 fn downgrade_run_started(connection: &Connection) {
@@ -878,10 +896,13 @@ fn downgrade_run_started(connection: &Connection) {
             };
             let tagged = serde_json::to_string(&config.provider).unwrap();
             let profile = serde_json::to_string(&config.provider.profile()).unwrap();
-            row.payload = row.payload.replacen(&tagged, &profile, 1).replacen(
-                r#""user_instruction_digest":null,"#,
-                "",
-                1,
+            row.payload = restore_allowance(
+                row.payload.replacen(&tagged, &profile, 1).replacen(
+                    r#""user_instruction_digest":null,"#,
+                    "",
+                    1,
+                ),
+                config,
             );
             row.version = 19;
         }
