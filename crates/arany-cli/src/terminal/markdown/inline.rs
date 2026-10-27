@@ -157,6 +157,7 @@ impl Flow {
                 link_type: LinkType::Autolink | LinkType::Email,
                 ..
             }) => {
+                self.source_end = range.end;
                 let inner = range.start + 1..range.end - 1;
                 let style = self.style() | Modifier::UNDERLINED;
                 self.append(
@@ -165,7 +166,6 @@ impl Flow {
                     Origin::plain(inner, range.clone()),
                     style,
                 )?;
-                self.source_end = range.end;
                 self.literal = Some(range);
             }
             Event::Start(_) => {

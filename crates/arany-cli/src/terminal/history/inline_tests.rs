@@ -550,26 +550,39 @@ fn leading_hard_breaks_keep_exact_rows_find_and_reading_anchors() {
 }
 
 #[test]
-fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables() {
-    for (markup, literal, style) in [
-        ("**[label](dest)**", "label (dest)", Modifier::BOLD),
+fn links_and_images_keep_accumulated_styles_in_prose_and_tables() {
+    for (markup, shown, bold, italic) in [
+        ("**[label](dest)**", "label (dest)", "label (dest)", ""),
+        ("*![alt](x.png)*", "![alt](x.png)", "", "![alt](x.png)"),
         (
             "***[label](dest)***",
             "label (dest)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "label (dest)",
+            "label (dest)",
         ),
-        ("**[a *label*](dest)**", "a label (dest)", Modifier::BOLD),
-        ("*![alt](x.png)*", "![alt](x.png)", Modifier::ITALIC),
         (
             "***![alt](x.png)***",
             "![alt](x.png)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "![alt](x.png)",
+            "![alt](x.png)",
         ),
-        ("*![**alt**](x.png)*", "![**alt**](x.png)", Modifier::ITALIC),
+        (
+            "**[a *label*](dest)**",
+            "a label (dest)",
+            "a label (dest)",
+            "label",
+        ),
+        (
+            "*![**alt**](x.png)*",
+            "![**alt**](x.png)",
+            "",
+            "![**alt**](x.png)",
+        ),
         (
             "***[label](a&amp;b)***",
             "label (a&b)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "label (a&b)",
+            "label (a&b)",
         ),
     ] {
         for source in [
@@ -584,20 +597,10 @@ fn decoded_links_and_literal_images_keep_accumulated_styles_in_prose_and_tables(
                 MessageKind::Incomplete,
             ] {
                 let rows = display_rows(kind, &source, 120, None);
-                let row = rows.iter().find(|row| row.text.contains(literal)).unwrap();
-                assert_eq!(row.text, format!("  {literal} plain"));
-                assert_eq!(styled(row, style), literal);
-                for modifier in [Modifier::BOLD, Modifier::ITALIC] {
-                    assert_eq!(
-                        styled(row, modifier),
-                        if markup == "**[a *label*](dest)**" && modifier == Modifier::ITALIC {
-                            "label"
-                        } else if style.contains(modifier) {
-                            literal
-                        } else {
-                            ""
-                        }
-                    );
+                let row = rows.iter().find(|row| row.text.contains(shown)).unwrap();
+                assert_eq!(row.text, format!("  {shown} plain"));
+                for (modifier, expected) in [(Modifier::BOLD, bold), (Modifier::ITALIC, italic)] {
+                    assert_eq!(styled(row, modifier), expected);
                 }
             }
         }
