@@ -184,6 +184,47 @@ mod approval_reply_tests {
     };
 
     #[test]
+    fn session_hint_follows_live_auto_edits_mode_without_changing_choices() {
+        use crate::presentation::ToolApprovalPrompt;
+        use arany::ApprovalMode::{Auto, AutoEdits, Request};
+        for unguarded in [false, true] {
+            for choices in [vec![Yes, No], vec![Yes, ExactCommand, No]] {
+                let prompt = ToolApprovalPrompt {
+                    intent_id: uuid::Uuid::now_v7(),
+                    lines: vec!["Complete escaped action".into()],
+                    choices,
+                    unguarded,
+                };
+                for mode in [
+                    Some(AutoEdits),
+                    Some(Request),
+                    Some(Auto),
+                    None,
+                    Some(AutoEdits),
+                ] {
+                    let displayed = prompt.for_mode(mode);
+                    let hint = unguarded
+                        && mode == Some(AutoEdits)
+                        && !prompt.choices.contains(&ExactCommand);
+                    assert_eq!(
+                        displayed.lines.len(),
+                        prompt.lines.len() + usize::from(hint)
+                    );
+                    assert_eq!(displayed.lines[0], prompt.lines[0]);
+                    assert_eq!(displayed.choices, prompt.choices);
+                    assert_eq!(displayed.intent_id, prompt.intent_id);
+                    assert_eq!(
+                        displayed.lines.last().unwrap()
+                            == "Shift+Tab to Request offers session approval for later eligible commands",
+                        hint
+                    );
+                }
+                assert_eq!(prompt.lines, ["Complete escaped action"]);
+            }
+        }
+    }
+
+    #[test]
     fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
         let prefix = GitPrefix(arany::permissions::TypedGitPrefix::Branch);
         for choices in [
@@ -201,7 +242,9 @@ mod approval_reply_tests {
             }
             for (answer, expected) in [
                 ("", Some(No)),
-                ("YES", Some(Yes)),
+                ("yes", Some(Yes)),
+                (" YES ", Some(Yes)),
+                ("Yes, for this session", None),
                 ("no", Some(No)),
                 ("allow", None),
                 ("always", None),
@@ -211,6 +254,12 @@ mod approval_reply_tests {
                 assert_eq!(linear_approval_choice(answer, &choices), expected);
             }
         }
+        assert_eq!(
+            linear_approval_choice("yes", &[Yes, ExactCommand, No])
+                .unwrap()
+                .reply(),
+            arany::ApprovalReply::AllowOnce
+        );
         assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
         assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
         assert_eq!(No.reply(), arany::ApprovalReply::Deny);
