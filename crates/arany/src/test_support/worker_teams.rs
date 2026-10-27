@@ -554,7 +554,7 @@ async fn run_live(
             Some(approval) = inbox.next() => {
                 commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
-                    cache_failure = Some(commands::CacheFailure::new(&workspace, &approval.intent));
+                    cache_failure = Some(commands::CacheFailure::new(&state, &workspace, &approval.intent));
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);
