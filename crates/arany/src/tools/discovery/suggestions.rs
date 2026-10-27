@@ -51,6 +51,7 @@ impl FileSuggestionSource {
             runtime_grants: Vec::new(),
             git: None,
             git_identity: None,
+            network: None,
         })
     }
 

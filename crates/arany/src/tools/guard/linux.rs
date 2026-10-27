@@ -19,6 +19,7 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+pub(super) mod bridge;
 mod cpu;
 pub(super) mod overlay;
 pub(super) mod supervisor;
@@ -46,7 +47,8 @@ const BWRAP_TEST_LAUNCH: &[&str] = &[
 ];
 
 pub(super) fn check_available() -> Result<(), ToolError> {
-    profile::programs()?;
+    profile::programs(profile::Routing::Proxy)?;
+    profile::programs(profile::Routing::Offline)?;
     use std::os::unix::fs::MetadataExt;
     for path in [
         "/usr/bin/bwrap",
@@ -80,7 +82,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
     bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
-    bytes.extend_from_slice(&profile::profile_digest()?);
+    bytes.extend_from_slice(&profile::profile_digest(profile::Routing::Offline)?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_SERIALIZED_BYTES as u64).to_le_bytes());
@@ -112,6 +114,7 @@ pub(super) async fn stop_command_descendants(
                 Err(_) => return Err(ToolError::ProtectionUnavailable),
             }
         }
+        bridge::reap();
         let mut count = 0usize;
         let mut live = false;
         for (index, entry) in std::fs::read_dir("/proc")
@@ -146,7 +149,7 @@ pub(super) async fn stop_command_descendants(
     }
 }
 
-pub(super) fn harden() -> Result<(), ToolError> {
+pub(super) fn harden(routing: profile::Routing) -> Result<(), ToolError> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
     use rustix::process::{Resource, Rlimit, setrlimit};
@@ -158,7 +161,7 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    profile::install()?;
+    profile::install(routing)?;
     setrlimit(
         Resource::Core,
         Rlimit {
@@ -643,6 +646,7 @@ struct UnitFilesystem<'a> {
     seed_dir: &'a cap_std::fs::Dir,
     runtime_directories: Vec<PathBuf>,
     mounts: Vec<(PathBuf, PathBuf)>,
+    proxy_socket: Option<&'a Path>,
 }
 
 fn unit_command(
@@ -658,6 +662,7 @@ fn unit_command(
         seed_dir,
         runtime_directories,
         mounts,
+        proxy_socket,
     } = filesystem;
     let phase_limits = &intent.limits;
     let memory_max = format!("--property=MemoryMax={}", phase_limits.memory_bytes);
@@ -736,6 +741,12 @@ fn unit_command(
     }
     for (source, target) in mounts {
         command.args(["--ro-bind"]).arg(source).arg(target);
+    }
+    if let Some(socket) = proxy_socket {
+        command
+            .args(["--ro-bind"])
+            .arg(socket)
+            .arg(crate::tools::network::PROXY_SOCKET_TARGET);
     }
     command
         .args(["--chdir", "/", "/arany", "--internal-tool-guard"])
@@ -1035,12 +1046,14 @@ pub(super) async fn execute_inner(
         kill: None,
         limits: Some(intent.limits.clone()),
     };
+    let proxy = proxy_for(runtime, intent, permit.id)?;
     let filesystem = UnitFilesystem {
         launch,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
         runtime_directories,
         mounts,
+        proxy_socket: proxy.as_ref().map(crate::tools::network::Proxy::socket),
     };
     let (mut command, _executable) =
         unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
@@ -1134,7 +1147,7 @@ pub(super) async fn execute_inner(
         () = cancellation.cancelled() => Err(ToolError::Operation),
         result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
     };
-    Box::pin(settle_launch(
+    let settled = Box::pin(settle_launch(
         &mut unit,
         &permit,
         &mut child,
@@ -1147,7 +1160,42 @@ pub(super) async fn execute_inner(
             super::super::discovery::possible(&intent.call),
         ),
     ))
-    .await
+    .await;
+    finish_proxy(proxy, settled).await
+}
+
+async fn finish_proxy(
+    proxy: Option<crate::tools::network::Proxy>,
+    settled: Result<ToolObservation, ToolError>,
+) -> Result<ToolObservation, ToolError> {
+    let Some(proxy) = proxy else {
+        return settled;
+    };
+    let refusals = proxy.finish().await;
+    settled.and_then(|mut observation| {
+        crate::tools::network::annotate(&mut observation, refusals)?;
+        Ok(observation)
+    })
+}
+
+fn proxy_for(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    id: uuid::Uuid,
+) -> Result<Option<crate::tools::network::Proxy>, ToolError> {
+    if intent.limits.network != crate::tools::types::NetworkGrant::Proxy {
+        return Ok(None);
+    }
+    let grant = runtime
+        .config
+        .network
+        .clone()
+        .ok_or(ToolError::Configuration)?;
+    let socket = PathBuf::from(format!(
+        "/run/user/{}/arany-egress-{id}.sock",
+        rustix::process::geteuid().as_raw()
+    ));
+    crate::tools::network::Proxy::start(grant, socket).map(Some)
 }
 
 const PREPARATION_ROOT: &str = "/prepared";
@@ -1172,7 +1220,10 @@ const PROFILE_MOUNT_TARGETS: [&str; 14] = [
 fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
     if PROFILE_MOUNT_TARGETS
         .iter()
-        .chain(std::iter::once(&PREPARATION_ROOT))
+        .chain([
+            &PREPARATION_ROOT,
+            &crate::tools::network::PROXY_SOCKET_TARGET,
+        ])
         .map(Path::new)
         .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))
     {
@@ -2103,6 +2154,7 @@ mod tests {
                 seed_dir: &seed,
                 runtime_directories: Vec::new(),
                 mounts: Vec::new(),
+                proxy_socket: None,
             },
         )
         .unwrap()
@@ -2248,7 +2300,7 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        harden().expect("production Guard hardening");
+        harden(profile::Routing::Offline).expect("production Guard hardening");
         let own = thread_status(Path::new("/proc/thread-self/status"))
             .unwrap()
             .expect("the caller's own status");

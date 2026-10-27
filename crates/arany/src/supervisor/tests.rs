@@ -301,6 +301,7 @@ fn supervisor_editor_command_outcomes_ignore_sequences_and_keep_the_exit_class()
             stderr_total: Default::default(),
             changeset: Default::default(),
             selection: None,
+            network_refusals: Vec::new(),
         })
         .unwrap();
         subject(&view.runs[0], fixture.child, &envelope, 1)

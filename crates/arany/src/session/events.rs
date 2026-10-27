@@ -170,16 +170,16 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolProposed", 2),
+    ("ToolProposed", 3),
     ("ToolPreflightRefused", 1),
-    ("HookStarted", 13),
-    ("HookFinished", 19),
-    ("ToolFinished", 30),
+    ("HookStarted", 14),
+    ("HookFinished", 20),
+    ("ToolFinished", 31),
     ("RunStarted", 24),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 24),
+    ("ToolStarted", 25),
     ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
@@ -1918,6 +1918,37 @@ pub(crate) fn pre_host_git_payload(kind: &str, payload: &str) -> Option<String> 
         return None;
     }
     before_operations(kind, payload, &["git_push", "gh_pr_create"], None)
+}
+
+// The egress proxy network class arrived with a later payload version.
+pub(crate) fn pre_proxy_payload(kind: &str, payload: &str) -> Option<String> {
+    fn has_proxy(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields
+                    .get("network")
+                    .is_some_and(|network| network == "proxy")
+                    || fields.values().any(has_proxy)
+            }
+            serde_json::Value::Array(values) => values.iter().any(has_proxy),
+            _ => false,
+        }
+    }
+    if has_proxy(&serde_json::from_str(payload).ok()?) {
+        return None;
+    }
+    match kind {
+        "ToolProposed" => serialize(&parse::<ToolProposedPayload>(payload).ok()?).ok(),
+        "ToolStarted" => serialize(&parse::<ToolStartedPayload>(payload).ok()?).ok(),
+        "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(payload).ok()?).ok(),
+        "HookStarted" => {
+            serialize(&parse::<crate::tools::permissions::HookInvocation>(payload).ok()?).ok()
+        }
+        "HookFinished" => {
+            serialize(&parse::<crate::tools::permissions::HookOutcome>(payload).ok()?).ok()
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String> {

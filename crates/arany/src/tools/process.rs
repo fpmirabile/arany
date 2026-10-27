@@ -1,11 +1,20 @@
 use super::catalog::string;
 use super::guard::{GuardContext, capture, capture_command, payload, spawn_before};
-use super::types::{CommandResult, EffectIntent, ToolCall, ToolLimits};
+use super::types::{CommandResult, EffectIntent, NetworkGrant, ToolCall, ToolLimits};
 use super::{ToolError, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
 use serde_json::{Value, json};
 
 impl ToolRuntime {
+    pub(crate) fn grant_network(&self, intent: &mut EffectIntent) {
+        if self.config.network.is_some()
+            && self.worker.is_none()
+            && matches!(intent.call, ToolCall::Command { .. })
+        {
+            intent.limits.network = NetworkGrant::Proxy;
+        }
+    }
+
     pub(crate) fn bind_build_jobs(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
         intent.enforcement_digest = self.build_jobs_digest(intent)?;
         Ok(())
@@ -14,6 +23,7 @@ impl ToolRuntime {
     pub(super) fn build_jobs_digest(&self, intent: &EffectIntent) -> Result<[u8; 32], ToolError> {
         if intent.limits.build_jobs == ToolLimits::default().build_jobs
             && intent.limits.build_cpu_cores == ToolLimits::default().build_cpu_cores
+            && intent.limits.network == NetworkGrant::None
         {
             return Ok(self.process_enforcement_digest);
         }
@@ -244,7 +254,7 @@ fn command_output(
     changeset: super::types::CommandChangeset,
     selection: super::types::CommandSelectionSummary,
 ) -> Result<String, ToolError> {
-    let budget = site.intent.limits.result_bytes as usize;
+    let budget = site.intent.limits.command_result_budget();
     let truncation = if site.hook_stdin.is_some() {
         Truncation::Refuse
     } else {
@@ -343,6 +353,7 @@ pub(super) fn fit_selected_command(
     let render = |out: &str, err: &str| {
         serde_json::to_string(&CommandResult {
             selection: Some(selection),
+            network_refusals: Vec::new(),
             exit_code,
             stdout: out.into(),
             stderr: err.into(),

@@ -499,7 +499,7 @@ fn merge(
         &stdout,
         &stderr,
         changeset,
-        observation.intent.limits.result_bytes as usize,
+        observation.intent.limits.command_result_budget(),
         truncation,
         selection,
     )

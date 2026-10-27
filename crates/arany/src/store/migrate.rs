@@ -171,6 +171,11 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("ToolProposed", 2, crate::session::pre_proxy_payload),
+        variant_step!("ToolStarted", 24, crate::session::pre_proxy_payload),
+        variant_step!("ToolFinished", 30, crate::session::pre_proxy_payload),
+        variant_step!("HookStarted", 13, crate::session::pre_proxy_payload),
+        variant_step!("HookFinished", 19, crate::session::pre_proxy_payload),
         variant_step!("ToolProposed", 1, crate::session::retired_worker_payload),
         variant_step!("ToolStarted", 23, crate::session::retired_worker_payload),
         variant_step!("ToolFinished", 29, crate::session::retired_worker_payload),

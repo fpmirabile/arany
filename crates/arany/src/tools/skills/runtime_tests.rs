@@ -35,6 +35,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         runtime_grants: Vec::new(),
         git: None,
         git_identity: None,
+        network: None,
     };
     let runtime = ToolRuntime {
         host_settings_admitted: true,

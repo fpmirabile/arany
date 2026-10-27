@@ -313,3 +313,44 @@ fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path:
         "commands":[{"name":"inspect","executable":executable,"sha256":pin.sha256,"interpreter":true,"inputs":[]}]
     })).unwrap()
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compaction_readmission_pins_the_effective_network_domains() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::store::StateRoot::admit(&root.join("state")).unwrap();
+    let mut tools = config_value();
+    tools["network"] = json!({"allow": ["example.com"]});
+    let permissions = json!({
+        "permissions": {"allow": ["Network(domain:*.pypi.org)"], "deny": ["Network(domain:bad.example.com)"]},
+        "hooks": {"PreCompact": [{"matcher": "auto", "hooks": [{"type": "command", "command": "check"}]}]}
+    });
+    for (name, value) in [("tools.json", tools), ("permissions.json", permissions)] {
+        let file = state.path().join(name);
+        std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let guard = root.join("missing-guard");
+    let admitted = super::ToolRuntime::admit(
+        Config::load(&state).unwrap(),
+        super::load_permissions(&state).unwrap(),
+        None,
+        &workspace,
+        &state,
+        guard.clone(),
+    )
+    .unwrap();
+    let network = admitted.config.network.as_ref().unwrap();
+    assert_eq!(network.allow, ["example.com", "*.pypi.org"]);
+    assert_eq!(network.deny, ["bad.example.com"]);
+    let pin = admitted.receipt();
+    let readmitted =
+        super::ToolRuntime::readmit_compaction_hooks(&state, &workspace, Some(guard), &pin)
+            .unwrap()
+            .expect("the PreCompact hook readmits the pinned runtime");
+    assert_eq!(readmitted.receipt().config_digest, pin.config_digest);
+}

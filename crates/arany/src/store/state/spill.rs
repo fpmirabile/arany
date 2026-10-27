@@ -427,6 +427,7 @@ mod tests {
                 stderr_total: OutputTotal::default(),
                 changeset: Default::default(),
                 selection: None,
+                network_refusals: Vec::new(),
             })
             .unwrap(),
             approval_cause: None,

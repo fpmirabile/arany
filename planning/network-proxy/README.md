@@ -45,7 +45,9 @@ New trust boundary: the proxy is a network reachability policy, not content insp
 
 ## Vertical slices
 
-1. **Egress proxy for commands.** Grant schema, enforcement-digest binding, parent-side proxy with Unix socket (Linux) and loopback port (macOS), payload environment, refusal recording, `/permissions` domain rows and `Network(domain:x)` rules, `arany storage`-independent (no persistent state). Same-PR docs: `tools.md` new section, Permission rules, Limits, Linux/macOS enforcement; `docs/tools.md` guide; overview §6. ≤600 (Linux and macOS launchers may split into 1a/1b).
+1. **Egress proxy for commands.** Grant schema, enforcement-digest binding, parent-side proxy with Unix socket (Linux) and loopback port (macOS), payload environment, refusal recording, `/permissions` domain rows and `Network(domain:x)` rules, `arany storage`-independent (no persistent state). Same-PR docs: `tools.md` new section, Permission rules, Limits, Linux/macOS enforcement; `docs/tools.md` guide; overview §6. Delivery:
+   - **S1a (Linux / np-s1): 3,076 changed lines (measured). Owner exception approved 2026-10-27 (relayed by the lead)** to the original 600-line estimate and the 1,500-line ceiling; reason: one coherent, already-reviewed Linux proxy/grant/launcher/bridge/rules delivery ships as one PR.
+   - **S1b (macOS): open follow-up; estimated 800–1,200 changed lines.** macOS launcher with a loopback port in the unit profile, proxy lifecycle and native macOS evidence; the estimate includes tests and contract updates and must be refined before implementation. A macOS grant fails closed until it lands.
 2. **`web_fetch` and `web_search` Tools.** Two operations, bounded extraction, search backend configuration, catalog/schema rows, presentation arms. Same-PR docs: `tools.md` operations and Limits, `provider.md` none, `terminal.md` tool rows, `docs/tools.md`. ≤600.
 3. **Remote MCP with OAuth.** `url` entries, streamable-HTTP transport behind the proxy, OAuth discovery/PKCE/callback through the existing account-root token owner, token refresh and revocation. Same-PR docs: `tools.md` MCP section, `credentials.md` MCP token slot, `docs/tools.md`. ≤600.
 

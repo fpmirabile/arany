@@ -1,7 +1,7 @@
 use super::setup::SetupError;
 use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput};
 use arany::permissions::{
-    Decision, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
+    Decision, NetworkDomainEdit, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
 };
 use arany::{
     ApprovalMode, ProviderKind, StateRoot, WorkspacePermissions, native_protection_supported,
@@ -82,6 +82,7 @@ pub(super) enum PermissionArea {
     FolderTrust,
     TypedGitRules,
     HostRules,
+    NetworkDomains,
 }
 
 pub(super) async fn choose_area(
@@ -97,6 +98,7 @@ pub(super) async fn choose_area(
                 (b'1', "Folder trust"),
                 (b'2', "Typed Git rules"),
                 (b'3', "Host command rules"),
+                (b'4', "Network domains"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -106,6 +108,7 @@ pub(super) async fn choose_area(
             Some(b'1') => Some(PermissionArea::FolderTrust),
             Some(b'2') => Some(PermissionArea::TypedGitRules),
             Some(b'3') => Some(PermissionArea::HostRules),
+            Some(b'4') => Some(PermissionArea::NetworkDomains),
             _ => None,
         },
     )
@@ -261,6 +264,130 @@ pub(super) async fn manage_rules(
             }
         }
     }
+}
+
+pub(super) async fn manage_network_rules(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+    workspace: &Path,
+    view: &arany::SessionView,
+) -> Result<String, SetupError> {
+    let mut notice = "Domain rules extend a private tools.json network grant; they apply from the next Run. An ask or deny rule removes the domain. HTTPS only; allowed hosts can still receive data.".to_owned();
+    let mut saved = false;
+    loop {
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(
+                "Error: state directory unavailable or unsafe; network rules unchanged".into(),
+            );
+        };
+        let settings = match PermissionSettings::load(&state, workspace) {
+            Ok(settings) => settings,
+            Err(error) => return Ok(format!("Error: {error}; network rules unchanged")),
+        };
+        let mut rows = vec![(ADD, "Add a domain refused in this conversation".to_owned())];
+        rows.extend(
+            settings
+                .network_domains()
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    (
+                        ENTRY_BASE + u8::try_from(index).expect("network rules are capped"),
+                        format!(
+                            "{} {}",
+                            decision_label(entry.decision),
+                            crate::presentation::escape_terminal(&entry.domain)
+                        ),
+                    )
+                }),
+        );
+        rows.push((BACK, "Back".to_owned()));
+        let labels = rows
+            .iter()
+            .map(|(value, label)| (*value, label.as_str()))
+            .collect::<Vec<_>>();
+        let instruction = [if settings.exists() { "" } else { SETTINGS_NOTE }, &notice].join(" ");
+        let choice = super::setup::choose_focused(
+            terminal,
+            2,
+            "Network domains",
+            &instruction,
+            &labels,
+            None,
+        )
+        .await?;
+        let edit = match choice {
+            Some(ADD) => add_network_edit(terminal, view).await?,
+            Some(value) if value >= ENTRY_BASE => {
+                let index = usize::from(value - ENTRY_BASE);
+                entry_edit(terminal).await?.map(|edit| match edit {
+                    EntryEdit::Change(decision) => NetworkDomainEdit::Replace { index, decision },
+                    EntryEdit::Remove => NetworkDomainEdit::Remove { index },
+                })
+            }
+            _ => {
+                return Ok(if saved {
+                    "Network domain rules saved; they apply from the next Run".into()
+                } else {
+                    "Network domain rules unchanged".into()
+                });
+            }
+        };
+        let Some(edit) = edit else { continue };
+        match settings.save_network_edit(&state, workspace, edit) {
+            Ok(_) => {
+                saved = true;
+                notice = "Saved.".into();
+            }
+            Err(SettingsError::NotConfirmed) => {
+                return Ok(
+                    "Network domain rules may have changed; reopen /permissions to verify".into(),
+                );
+            }
+            Err(error) => notice = format!("Error: {error}."),
+        }
+    }
+}
+
+async fn add_network_edit(
+    terminal: &mut AttachedTerminal,
+    view: &arany::SessionView,
+) -> Result<Option<NetworkDomainEdit>, SetupError> {
+    let mut seen = std::collections::HashSet::new();
+    let domains = view
+        .runs
+        .iter()
+        .rev()
+        .flat_map(|run| run.tools.iter().rev())
+        .filter_map(|tool| tool.observation.as_ref())
+        .flat_map(arany::ToolObservation::refused_domains)
+        .filter(|domain| seen.insert(domain.clone()))
+        .take(arany::permissions::MAX_RULES)
+        .collect::<Vec<_>>();
+    let options = domains
+        .iter()
+        .enumerate()
+        .map(|(index, domain)| (index, crate::presentation::escape_terminal(domain)))
+        .collect::<Vec<_>>();
+    let Some(index) = pick(
+        terminal,
+        "Refused domain",
+        "Choose a domain a command could not reach. Allowing it lets commands send data to that host over HTTPS.",
+        &options,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let domain = domains[index].clone();
+    Ok(pick(
+        terminal,
+        "Domain decision",
+        "Choose a decision",
+        &decisions(),
+    )
+    .await?
+    .map(|decision| NetworkDomainEdit::Insert { domain, decision }))
 }
 
 pub(super) enum HostRuleEditOutcome {

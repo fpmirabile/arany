@@ -2448,6 +2448,7 @@ done
                 runtime_grants: runtime_grants.clone(),
                 git: None,
                 git_identity: None,
+                network: None,
             },
             workspace: workspace.to_path_buf(),
             reads: None,
