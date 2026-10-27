@@ -47,7 +47,8 @@ fn entry_case(mode: &str) {
 }
 
 #[test]
-fn supervisor_namespace_denial_precedes_probe_and_payload() {
+fn supervisor_admission_and_namespace_denials_precede_probe_and_payload() {
+    entry_case("unaligned-probe");
     entry_case("namespace-denied");
 }
 
@@ -68,7 +69,10 @@ fn supervisor_probes_tmpfs_clears_caps_and_reaps_bwrap() {
 fn supervisor_entry_helper() {
     let mode = std::env::var("ARANY_TEST_SUPERVISOR_MODE").unwrap();
     let root = PathBuf::from(std::env::var_os("ARANY_TEST_SUPERVISOR_ROOT").unwrap());
-    let (executable, file, launch) = entry_launch(&root, &mode);
+    let (executable, file, mut launch) = entry_launch(&root, &mode);
+    if mode == "unaligned-probe" {
+        launch["probe"]["bytes"] = json!(1);
+    }
     let namespace = root.join("namespace");
     deny_entry(&mode);
     let path = if mode == "replacement" {
@@ -123,10 +127,13 @@ fn supervisor_entry_helper() {
             "no payload or READY before probe admission"
         );
         let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(
-            failure,
-            json!({"stage":if mode == "namespace-denied" {"namespace_entry"} else {"runtime_mounts"}})
-        );
+        let expected = match mode.as_str() {
+            "unaligned-probe" => "admission",
+            "namespace-denied" => "namespace_entry",
+            "probe-denied" => "runtime_mounts",
+            _ => panic!("unsupported supervisor refusal mode"),
+        };
+        assert_eq!(failure, json!({"stage":expected}));
     }
     std::fs::remove_dir(namespace).unwrap();
     if matches!(mode.as_str(), "replacement" | "mount-flags") {

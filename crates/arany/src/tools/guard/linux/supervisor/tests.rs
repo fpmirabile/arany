@@ -133,7 +133,14 @@ fn namespace_remedy_uses_only_the_admitted_static_executable_path() {
 }
 
 #[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "requires user xattrs on the temporary filesystem"
+)]
 fn xattr_probe_requires_set_read_remove_on_the_exact_file() {
+    let _gate = crate::test_process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("probe");
     let file = std::fs::File::create_new(path).unwrap();
