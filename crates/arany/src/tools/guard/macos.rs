@@ -2043,11 +2043,17 @@ mod tests {
             std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).map(|_| ()),
             "network",
         );
-        denied(
-            std::process::Command::new("/usr/bin/true")
-                .bounded_output_for(Duration::from_secs(10), 1024)
-                .map(|_| ()),
-            "exec",
+        // macOS 15 reports denied execs as ENOENT; later releases report EPERM.
+        let exec = std::process::Command::new("/usr/bin/true")
+            .bounded_output_for(Duration::from_secs(10), 1024)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(
+                exec.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            ),
+            "exec: {exec}"
         );
         assert_eq!(
             std::fs::read(workspace.join("a.txt")).unwrap(),
