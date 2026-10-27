@@ -142,10 +142,14 @@ impl Flow {
         match event {
             Event::Start(Tag::Link {
                 link_type:
-                    LinkType::Inline | LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut,
+                    link_type @ (LinkType::Inline
+                    | LinkType::Reference
+                    | LinkType::Collapsed
+                    | LinkType::Shortcut),
                 dest_url,
                 ..
             }) => {
+                let range = super::links::literal_range(source, range, *link_type);
                 self.link = Some(super::links::Link {
                     range,
                     start: self.cells.len(),
