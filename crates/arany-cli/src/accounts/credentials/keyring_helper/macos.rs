@@ -13,15 +13,27 @@ const ERR_SEC_AUTH_FAILED: i32 = -25293;
 const ERR_SEC_NO_SUCH_KEYCHAIN: i32 = -25294;
 const ERR_SEC_INVALID_KEYCHAIN: i32 = -25295;
 pub(in crate::accounts::credentials) const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
-const ERR_SEC_STORAGE_ACCESS: [i32; 8] = [
-    ERR_SEC_WR_PERM,
-    ERR_SEC_INVALID_OWNER_EDIT,
-    ERR_SEC_NOT_AVAILABLE,
-    ERR_SEC_READ_ONLY,
-    ERR_SEC_AUTH_FAILED,
-    ERR_SEC_NO_SUCH_KEYCHAIN,
-    ERR_SEC_INVALID_KEYCHAIN,
-    ERR_SEC_INTERACTION_NOT_ALLOWED,
+const ERR_SEC_STORAGE_ACCESS: [(i32, &str); 8] = [
+    (ERR_SEC_WR_PERM, stringify!(ERR_SEC_WR_PERM)),
+    (
+        ERR_SEC_INVALID_OWNER_EDIT,
+        stringify!(ERR_SEC_INVALID_OWNER_EDIT),
+    ),
+    (ERR_SEC_NOT_AVAILABLE, stringify!(ERR_SEC_NOT_AVAILABLE)),
+    (ERR_SEC_READ_ONLY, stringify!(ERR_SEC_READ_ONLY)),
+    (ERR_SEC_AUTH_FAILED, stringify!(ERR_SEC_AUTH_FAILED)),
+    (
+        ERR_SEC_NO_SUCH_KEYCHAIN,
+        stringify!(ERR_SEC_NO_SUCH_KEYCHAIN),
+    ),
+    (
+        ERR_SEC_INVALID_KEYCHAIN,
+        stringify!(ERR_SEC_INVALID_KEYCHAIN),
+    ),
+    (
+        ERR_SEC_INTERACTION_NOT_ALLOWED,
+        stringify!(ERR_SEC_INTERACTION_NOT_ALLOWED),
+    ),
 ];
 pub(in crate::accounts::credentials) const TEST_KEYCHAIN_ROOT_ENV: &str =
     "ARANY_TEST_KEYCHAIN_ROOT";
@@ -135,9 +147,21 @@ fn decode_error(error: security_framework::base::Error) -> Error {
     let code = error.code();
     if code == ERR_SEC_ITEM_NOT_FOUND {
         Error::NoEntry
-    } else if ERR_SEC_STORAGE_ACCESS.contains(&code) {
+    } else if ERR_SEC_STORAGE_ACCESS
+        .iter()
+        .any(|(value, _)| *value == code)
+    {
         Error::NoStorageAccess(Box::new(error))
     } else {
         Error::PlatformFailure(Box::new(error))
     }
+}
+
+pub(super) fn locked_category(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'static str> {
+    let error = error.downcast_ref::<security_framework::base::Error>()?;
+    ERR_SEC_STORAGE_ACCESS
+        .iter()
+        .find_map(|(code, category)| (*code == error.code()).then_some(*category))
 }

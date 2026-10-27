@@ -39,6 +39,16 @@ fn directory_cache_migrates_archives_reuses_identity_and_requires_clear_after_in
     stamp.sync_all().unwrap();
     let lower = lease.prepare_directory().unwrap();
     assert_eq!(lower.read("target/nested/old").unwrap(), b"old");
+    let reserved = open_regular(&lease.dir, &reservation_name(&lease.token), 96).unwrap();
+    let reserved_bytes = validate_reservation(&reserved, &lease.token).unwrap();
+    assert_eq!(
+        reserved_bytes,
+        measure(&lower, lease.archive_limit).unwrap() + lease.archive_limit + lease.candidate_limit
+    );
+    assert_eq!(
+        inventory(&lease.dir).unwrap(),
+        reserved_bytes + IDENTITY_METADATA_BYTES
+    );
     assert!(!file_exists(&lease.dir, &archive_name(&lease.token)).unwrap());
     assert!(!file_exists(&lease.dir, &stamp_name(&lease.token)).unwrap());
     assert!(matches!(

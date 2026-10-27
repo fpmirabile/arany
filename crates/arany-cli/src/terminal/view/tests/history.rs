@@ -257,6 +257,80 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
 }
 
 #[test]
+fn command_row_frames_show_first_script_line_and_nonzero_counters() {
+    let model = PresentationModel {
+        status_line: "ready".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+        agent_switch: false,
+    };
+    let output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":2,"oversized_inputs":0,"discarded_outputs":1},"exit_code":0,
+        "stdout":"x\n","stderr":"","stdout_total":{"bytes":2,"lines":1},
+        "stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}})
+    .to_string();
+    let args = vec!["-c".to_owned(), "\n echo \u{1b}[2J\rhi\nls".to_owned()];
+    let calls = [
+        (
+            arany::ToolCall::Command {
+                program: "sh".into(),
+                args: args.clone(),
+                cwd: String::new(),
+            },
+            r"⏺ Command(sh -c  echo \u{001b}[2J\u{000d}hi …)",
+        ),
+        (
+            arany::ToolCall::CommandUnguarded {
+                program: "sh".into(),
+                args,
+                cwd: String::new(),
+                justification: "check".into(),
+                prefix_rule: None,
+            },
+            r"⏺ Unguarded command(sh -c  echo \u{001b}[2J\u{000d}hi …)",
+        ),
+    ];
+    for width in [80, 120] {
+        for color in [false, true] {
+            for (call, expected) in &calls {
+                let tool = crate::presentation::tool_fixture(call.clone(), &output);
+                let rows = crate::terminal::history::display_rows(
+                    MessageKind::Tool,
+                    &crate::presentation::tool_summary(&tool),
+                    usize::from(width),
+                    None,
+                );
+                let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        draw_frame_with_history(
+                            frame,
+                            &model,
+                            &Composer::default(),
+                            None,
+                            ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            &rows,
+                            None,
+                        );
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert!(buffer_row(buffer, 1).starts_with(expected));
+                assert!(
+                    buffer_row(buffer, 2)
+                        .trim_end()
+                        .starts_with("  ⎿ exit 0 · 1 line · 2 pruned roots, 1 discarded output")
+                );
+                assert!(!buffer_row(buffer, 2).contains("oversized"));
+                assert!(!buffer_row(buffer, 2).contains("ignored"));
+                assert!((0..12).all(|y| !buffer_row(buffer, y).contains('\u{1b}')));
+            }
+        }
+    }
+}
+
+#[test]
 fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
     let rows = [
         HistoryRow {
