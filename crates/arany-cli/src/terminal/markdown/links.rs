@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, LinkType, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, LinkType, Parser, Tag};
 use std::ops::Range;
 
 pub(super) struct Link {
@@ -143,6 +143,9 @@ fn decoded_origin(source: &str, cursor: usize, end: usize) -> Option<(Range<usiz
 
 pub(super) fn charge(event: &Event<'_>, expanded: &mut usize) -> Result<(), ()> {
     let bytes = match event {
+        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(label))) => {
+            super::escaped_terminal_bytes(label)
+        }
         Event::Start(Tag::Link {
             link_type:
                 LinkType::Inline | LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut,

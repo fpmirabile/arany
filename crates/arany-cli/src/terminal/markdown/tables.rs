@@ -197,7 +197,7 @@ fn emit(
     let wrapped: Vec<_> = cells
         .iter()
         .zip(widths)
-        .map(|(cells, width)| chunks(cells, *width))
+        .map(|(cells, width)| chunks(cells, *width, super::inline::Wrap::Word))
         .collect();
     for line in 0..wrapped.iter().map(Vec::len).max().unwrap_or(1) {
         let (mut output, mut bytes) = (Vec::new(), 0);
