@@ -2110,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn native_launch_mounts_workspace_only_for_git_and_discovery() {
+    fn native_launch_separates_overlay_copy_and_direct_workspace_mounts() {
         let calls = [
             (
                 serde_json::json!({"operation":"command","program":"sh","args":[],"cwd":"."}),
@@ -2162,41 +2162,78 @@ mod tests {
             ),
         ];
         for (call, workspace_mode) in calls {
-            for private in [false, true] {
-                let arguments = native_launch_arguments(call.clone(), private);
-                let bootstrap = arguments
-                    .iter()
-                    .position(|argument| argument == "--supervisor")
-                    .unwrap();
-                let launch: serde_json::Value =
-                    serde_json::from_str(&arguments[bootstrap + 1]).unwrap();
-                assert_eq!(
-                    launch["probe"].is_object(),
-                    call["operation"] == "command" && !private
+            for (root, private) in [(".", false), ("src", false), (".", true), ("src", true)] {
+                let arguments = native_launch_arguments(call.clone(), root, private);
+                assert_native_workspace_mounts(
+                    &arguments,
+                    workspace_mode,
+                    root,
+                    private,
+                    call["operation"] == "command",
                 );
-                let mounts = arguments
-                    .windows(3)
-                    .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--bind"))
-                    .filter(|args| args[2] == "/workspace")
-                    .collect::<Vec<_>>();
-                if let Some(mode) = workspace_mode.filter(|_| !private) {
-                    assert_eq!(mounts.len(), 1, "{arguments:?}");
-                    assert_eq!(mounts[0][0], mode);
-                } else {
-                    assert!(mounts.is_empty(), "{arguments:?}");
-                }
             }
         }
     }
 
-    fn native_launch_arguments(call: serde_json::Value, private: bool) -> Vec<String> {
+    fn assert_native_workspace_mounts(
+        arguments: &[String],
+        workspace_mode: Option<&str>,
+        root: &str,
+        private: bool,
+        command: bool,
+    ) {
+        let bootstrap = arguments
+            .iter()
+            .position(|argument| argument == "--supervisor")
+            .unwrap();
+        let launch: serde_json::Value = serde_json::from_str(&arguments[bootstrap + 1]).unwrap();
+        let overlay = command && !private;
+        assert_eq!(launch["probe"].is_object(), overlay);
+        assert_eq!(launch["overlay"].is_object(), overlay);
+        let mounts = arguments
+            .windows(3)
+            .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--bind"))
+            .filter(|args| args[2] == "/workspace")
+            .collect::<Vec<_>>();
+        let workspace_mode = if overlay {
+            Some(if root == "." { "--bind" } else { "--ro-bind" })
+        } else {
+            workspace_mode.filter(|_| !private)
+        };
+        if let Some(mode) = workspace_mode {
+            assert_eq!(mounts.len(), 1, "{arguments:?}");
+            assert_eq!(mounts[0][0], mode);
+            if overlay {
+                let namespace = Path::new(launch["probe"]["root"].as_str().unwrap());
+                let source = if root == "." {
+                    "grant-0/merged"
+                } else {
+                    "parents"
+                };
+                assert_eq!(Path::new(&mounts[0][1]), namespace.join(source));
+                assert_ne!(mounts[0][1], launch["overlay"]["path"].as_str().unwrap());
+                if root != "." {
+                    assert!(arguments.windows(3).any(|args| {
+                        args[0] == "--bind"
+                            && Path::new(&args[1]) == namespace.join("grant-0/merged")
+                            && args[2] == "/workspace/src"
+                    }));
+                }
+            }
+        } else {
+            assert!(mounts.is_empty(), "{arguments:?}");
+        }
+    }
+
+    fn native_launch_arguments(call: serde_json::Value, root: &str, private: bool) -> Vec<String> {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fixture.path().join("src")).unwrap();
         let seed = crate::tools::fs::open_directory(fixture.path()).unwrap();
         let mut runtime = crate::tools::tests::in_process_runtime(
             fixture.path(),
-            serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
+            serde_json::json!({"version":1,"workspace_paths":[root],"write":true,
                 "commands":[],"skills":[],"mcp":[]}),
         );
         runtime.guard_executable = fixture.path().join("arany-guard");
