@@ -14,6 +14,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "tools_macos/network.rs"]
+mod network;
 #[path = "tools_macos/repository.rs"]
 mod repository;
 
@@ -358,6 +360,15 @@ fn guarded_native_files_and_skills_survive_closed_replay() {
 )]
 fn guarded_command_changesets_survive_closed_replay() {
     native_journey("tools::native_command_changeset_helper");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS egress proxy: loopback tunnel, unlisted refusal and no other route"
+)]
+fn guarded_command_egress_reaches_only_the_loopback_proxy() {
+    native_journey("tools::network::native_network_proxy_helper");
 }
 
 #[test]

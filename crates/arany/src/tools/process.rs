@@ -1,5 +1,7 @@
 use super::catalog::string;
-use super::guard::{GuardContext, capture, capture_command, payload, spawn_before};
+use super::guard::{
+    GuardContext, capture, capture_command, payload, set_proxy_environment, spawn_before,
+};
 use super::types::{CommandResult, EffectIntent, NetworkGrant, ToolCall, ToolLimits};
 use super::{ToolError, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
@@ -128,6 +130,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         site.intent.limits.cache_bytes > 0,
         &site.intent.limits,
     )?;
+    set_proxy_environment(&mut command, site);
     command.current_dir(site.workspace.join(cwd));
     command.env("ARANY_TOOL_WORKSPACE", site.workspace);
     command.stdin(if site.hook_stdin.is_some() {

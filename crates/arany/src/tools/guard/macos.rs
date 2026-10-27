@@ -191,6 +191,32 @@ const COMMAND_DENIED_SYSCALLS: &[i32] = &[
     SYS_COALITION_POLICY_SET,
 ];
 
+// Socket creation and sends are admitted only because the profile's destination filter limits them to the proxy port; bind, listen and descriptor delegation stay denied.
+const PROXY_COMMAND_DENIED_SYSCALLS: &[i32] = &[
+    SYS_SETUID,
+    SYS_PTRACE,
+    SYS_BIND,
+    SYS_LISTEN,
+    SYS_SETREUID,
+    SYS_SETREGID,
+    SYS_SETGID,
+    SYS_SETEGID,
+    SYS_SETEUID,
+    SYS_SETRLIMIT,
+    SYS_SYSCTL,
+    SYS_SYSCTLBYNAME,
+    SYS___SIGWAIT,
+    SYS___DISABLE_THREADSIGNAL,
+    SYS___MAC_EXECVE,
+    SYS_SIGSUSPEND_NOCANCEL,
+    SYS_SOCKET_DELEGATE,
+    SYS_COALITION,
+    SYS_COALITION_INFO,
+    SYS_SENDMSG_X,
+    SYS_PERSONA,
+    SYS_COALITION_POLICY_SET,
+];
+
 const PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
 (allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
 (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))
@@ -206,6 +232,10 @@ const COMMAND_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (litera
 (deny process-fork (require-entitlement \"com.apple.private.coalition-spawn\") (require-entitlement \"com.apple.private.persona-mgmt\"))
 (deny process-exec-update-label)
 (allow signal (target self) (target children))
+";
+
+const PROXY_RULES: &str = "(allow system-socket (socket-domain AF_INET))
+(allow network-outbound (remote ip \"localhost:{port}\"))
 ";
 
 const GIT_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
@@ -365,6 +395,7 @@ fn quoted(path: &Path) -> Result<String, ToolError> {
 enum ProfileKind {
     File,
     Command,
+    CommandProxy,
     Git,
     GitPlan,
     GitPublish,
@@ -375,6 +406,7 @@ impl ProfileKind {
         match self {
             Self::File | Self::GitPublish => FILE_DENIED_SYSCALLS,
             Self::Command | Self::Git | Self::GitPlan => COMMAND_DENIED_SYSCALLS,
+            Self::CommandProxy => PROXY_COMMAND_DENIED_SYSCALLS,
         }
     }
 
@@ -386,20 +418,28 @@ impl ProfileKind {
 struct SeatbeltProfile {
     text: String,
     kind: ProfileKind,
+    proxy_port: Option<u16>,
 }
 
 impl SeatbeltProfile {
     fn new(kind: ProfileKind) -> Self {
         let rules = match kind {
             ProfileKind::File | ProfileKind::GitPublish => PROFILE.to_owned(),
-            ProfileKind::Command => COMMAND_PROFILE.to_owned(),
+            ProfileKind::Command | ProfileKind::CommandProxy => COMMAND_PROFILE.to_owned(),
             ProfileKind::Git => GIT_PROFILE.to_owned(),
             ProfileKind::GitPlan => format!("{GIT_PROFILE}{GIT_PLAN_FCNTL_DENY}"),
         };
         Self {
             text: profile(&rules, kind.denied_syscalls()),
             kind,
+            proxy_port: None,
         }
+    }
+
+    fn allow_proxy(&mut self, port: u16) {
+        self.text
+            .push_str(&PROXY_RULES.replace("{port}", &port.to_string()));
+        self.proxy_port = Some(port);
     }
 
     fn rule(&mut self, operations: &str, filter: &str, path: &Path) -> Result<(), ToolError> {
@@ -431,17 +471,53 @@ impl SeatbeltProfile {
                 (c"iokit-open-user-client", 1),
                 (c"process-exec-update-label", 1),
             ],
+            ProfileKind::CommandProxy => &[
+                (c"process-fork", 0),
+                (c"mach-lookup", 1),
+                (c"iokit-open-user-client", 1),
+                (c"process-exec-update-label", 1),
+            ],
         };
         if !self.kind.is_file_like() && !ffi::detach_bootstrap_ports() {
             return Err(ToolError::ProtectionUnavailable);
         }
         install_profile(self.text)?;
         attest_policy(operations, self.kind.denied_syscalls())?;
+        if let Some(port) = self.proxy_port {
+            attest_proxy_routes(port)?;
+        }
         if self.kind.is_file_like() {
             verify_cpu_controls()?;
         }
         Ok(())
     }
+}
+
+// Filtered allows leave the unfiltered verdict ambiguous, so the route is attested by connects the profile must refuse before they leave the host.
+fn attest_proxy_routes(port: u16) -> Result<(), ToolError> {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    const ATTESTATION_DEADLINE: Duration = Duration::from_secs(1);
+    let denied = |address: SocketAddr| {
+        matches!(
+            TcpStream::connect_timeout(&address, ATTESTATION_DEADLINE),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+        )
+    };
+    let other = port.wrapping_add(1).max(1);
+    if denied(SocketAddr::from((Ipv4Addr::LOCALHOST, other)))
+        && denied(SocketAddr::from(([192, 0, 2, 1], 443)))
+    {
+        Ok(())
+    } else {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
+pub(super) fn proxy_contract() -> String {
+    format!(
+        "{}{PROXY_RULES}",
+        SeatbeltProfile::new(ProfileKind::CommandProxy).text
+    )
 }
 
 fn install_profile(profile: String) -> Result<(), ToolError> {
@@ -579,7 +655,13 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
             required_system_programs.push(PathBuf::from(&program.executable));
         }
     }
-    let mut profile = SeatbeltProfile::new(ProfileKind::Command);
+    let mut profile = SeatbeltProfile::new(match task.proxy_port {
+        Some(_) => ProfileKind::CommandProxy,
+        None => ProfileKind::Command,
+    });
+    if let Some(port) = task.proxy_port {
+        profile.allow_proxy(port);
+    }
     let grants = if task.intent.limits.cache_bytes > 0 {
         &["workspace", "scratch", "cache"][..]
     } else {
@@ -1034,6 +1116,7 @@ impl Task {
                 None
             },
             git_stage: None,
+            proxy_port: None,
             #[cfg(any(test, feature = "test-support"))]
             git_fault: None,
         })
@@ -1392,6 +1475,29 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn proxy_profile_admits_one_loopback_port_and_keeps_bind_and_listen_denied() {
+        let mut profile = SeatbeltProfile::new(ProfileKind::CommandProxy);
+        let offline = SeatbeltProfile::new(ProfileKind::Command);
+        assert!(!offline.text.contains("network-outbound"));
+        assert!(!profile.text.contains("network-outbound"));
+        profile.allow_proxy(49152);
+        assert!(
+            profile
+                .text
+                .contains("(allow network-outbound (remote ip \"localhost:49152\"))")
+        );
+        assert_eq!(profile.text.matches("(allow network-outbound").count(), 1);
+        for denied in [SYS_BIND, SYS_LISTEN, SYS_SOCKET_DELEGATE, SYS_SENDMSG_X] {
+            assert!(PROXY_COMMAND_DENIED_SYSCALLS.contains(&denied));
+        }
+        for admitted in [SYS_SOCKET, SYS_CONNECT, SYS_SENDTO, SYS_CONNECTX] {
+            assert!(!PROXY_COMMAND_DENIED_SYSCALLS.contains(&admitted));
+            assert!(COMMAND_DENIED_SYSCALLS.contains(&admitted));
+        }
+    }
+
     use crate::test_process::BoundedOutput;
     use crate::tools::config::Config;
     use crate::tools::types::ToolLimits;
@@ -1647,6 +1753,7 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
+            proxy_port: None,
             #[cfg(any(test, feature = "test-support"))]
             git_fault: None,
         };
@@ -2121,6 +2228,7 @@ mod tests {
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
+            proxy_port: None,
             #[cfg(any(test, feature = "test-support"))]
             git_fault: None,
         };

@@ -44,6 +44,7 @@ mod landlock;
 #[cfg(target_os = "linux")]
 mod linux;
 mod network;
+pub(super) use network::set_environment as set_proxy_environment;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
 #[cfg(target_os = "linux")]
@@ -156,6 +157,9 @@ struct Task {
     #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_stage: Option<GitStage>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_port: Option<u16>,
     #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_fault: Option<crate::fault::git_write::GitWriteStage>,
@@ -1710,6 +1714,8 @@ pub(super) struct GuardContext<'a> {
     pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "macos")]
     pub(super) git: GitWork,
+    #[cfg(target_os = "macos")]
+    proxy_port: Option<u16>,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
@@ -1982,6 +1988,8 @@ pub(super) fn helper_main() -> ExitCode {
             git_plan: Default::default(),
             #[cfg(target_os = "macos")]
             git,
+            #[cfg(target_os = "macos")]
+            proxy_port: task.proxy_port,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
@@ -2159,7 +2167,6 @@ pub(super) fn payload(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    network::set_environment(&mut command, limits);
     #[cfg(target_os = "macos")]
     let payload_args = {
         let mut args = payload_args;
@@ -2568,6 +2575,8 @@ mod tests {
             system_programs: None,
             #[cfg(target_os = "macos")]
             git_stage: None,
+            #[cfg(target_os = "macos")]
+            proxy_port: None,
             #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
             git_fault: None,
         };
@@ -2666,6 +2675,8 @@ mod tests {
             system_programs: None,
             #[cfg(target_os = "macos")]
             git_stage: None,
+            #[cfg(target_os = "macos")]
+            proxy_port: None,
             #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
             git_fault: None,
         };
@@ -4227,6 +4238,8 @@ mod tests {
                 system_programs: None,
                 #[cfg(target_os = "macos")]
                 git_stage: None,
+                #[cfg(target_os = "macos")]
+                proxy_port: None,
                 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
                 git_fault: None,
             };

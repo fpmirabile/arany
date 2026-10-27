@@ -1,5 +1,7 @@
+#[cfg(target_os = "linux")]
+use super::BRIDGE_OVERFLOW;
 use super::{
-    BRIDGE_OVERFLOW, MAX_HOST_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, NETWORK_IDLE_MS,
+    MAX_HOST_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, NETWORK_IDLE_MS,
     NETWORK_REFUSAL_ENTRIES, Network, OPEN_CONNECTIONS, REFUSAL_MARKER, valid_domain,
 };
 use crate::tools::ToolError;
@@ -7,13 +9,18 @@ use crate::tools::types::{
     CommandResult, MAX_TOOL_RESULT_BYTES, NetworkRefusal, NetworkRefusalReason, ToolObservation,
 };
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(target_os = "macos")]
+use tokio::net::{TcpListener as Listener, TcpStream as Client};
+#[cfg(target_os = "linux")]
+use tokio::net::{UnixListener as Listener, UnixStream as Client};
 use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, sleep, timeout};
@@ -26,11 +33,16 @@ const CHUNK_BYTES: usize = 16 * 1024;
 const STOP_DEADLINE: Duration = Duration::from_secs(2);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
 
+#[cfg(target_os = "linux")]
+type Endpoint = PathBuf;
+#[cfg(target_os = "macos")]
+type Endpoint = u16;
+
 pub(crate) struct Proxy {
     task: JoinHandle<()>,
     stop: Option<oneshot::Sender<()>>,
     refusals: Arc<Refusals>,
-    socket: PathBuf,
+    endpoint: Endpoint,
 }
 
 struct Context {
@@ -49,15 +61,38 @@ struct Activity {
 }
 
 impl Proxy {
+    #[cfg(target_os = "linux")]
     pub(crate) fn start(grant: Network, socket: PathBuf) -> Result<Self, ToolError> {
         Self::start_idle(grant, socket, Duration::from_millis(NETWORK_IDLE_MS))
     }
 
+    #[cfg(target_os = "linux")]
     fn start_idle(grant: Network, socket: PathBuf, idle: Duration) -> Result<Self, ToolError> {
         use std::os::unix::fs::PermissionsExt;
-        let listener = UnixListener::bind(&socket).map_err(|_| ToolError::ProtectionUnavailable)?;
+        let listener = Listener::bind(&socket).map_err(|_| ToolError::ProtectionUnavailable)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| ToolError::ProtectionUnavailable)?;
+        Ok(Self::serving(listener, grant, idle, socket))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn start(grant: Network) -> Result<Self, ToolError> {
+        Self::start_idle(grant, Duration::from_millis(NETWORK_IDLE_MS))
+    }
+
+    // The unit profile admits one numeric loopback port, so the listener takes an ephemeral port on 127.0.0.1 only.
+    #[cfg(target_os = "macos")]
+    fn start_idle(grant: Network, idle: Duration) -> Result<Self, ToolError> {
+        let unavailable = |_| ToolError::ProtectionUnavailable;
+        let listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(unavailable)?;
+        listener.set_nonblocking(true).map_err(unavailable)?;
+        let port = listener.local_addr().map_err(unavailable)?.port();
+        let listener = Listener::from_std(listener).map_err(unavailable)?;
+        Ok(Self::serving(listener, grant, idle, port))
+    }
+
+    fn serving(listener: Listener, grant: Network, idle: Duration, endpoint: Endpoint) -> Self {
         let refusals = Arc::new(Refusals::default());
         let (stop, stopped) = oneshot::channel();
         let context = Arc::new(Context {
@@ -68,16 +103,35 @@ impl Proxy {
             uploaded: AtomicU64::new(0),
             downloaded: AtomicU64::new(0),
         });
-        Ok(Self {
+        Self {
             task: tokio::spawn(serve(listener, context, stopped)),
             stop: Some(stop),
             refusals,
-            socket,
-        })
+            endpoint,
+        }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn socket(&self) -> &std::path::Path {
-        &self.socket
+        &self.endpoint
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn port(&self) -> u16 {
+        self.endpoint
+    }
+
+    // A cleanup failure propagates only once the listener and every tunnel are closed.
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn settle(
+        proxy: Option<Self>,
+        cleanup: Result<(), ToolError>,
+    ) -> Result<Vec<NetworkRefusal>, ToolError> {
+        let refusals = match proxy {
+            Some(proxy) => proxy.finish().await,
+            None => Vec::new(),
+        };
+        cleanup.map(|()| refusals)
     }
 
     // Returns only after the server and every connection task are gone, so no outbound work outlives the effect.
@@ -101,11 +155,12 @@ impl Proxy {
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.task.abort();
-        let _ = std::fs::remove_file(&self.socket);
+        #[cfg(target_os = "linux")]
+        let _ = std::fs::remove_file(&self.endpoint);
     }
 }
 
-async fn serve(listener: UnixListener, context: Arc<Context>, mut stopped: oneshot::Receiver<()>) {
+async fn serve(listener: Listener, context: Arc<Context>, mut stopped: oneshot::Receiver<()>) {
     let mut connections = JoinSet::new();
     let mut refusing = JoinSet::new();
     loop {
@@ -128,7 +183,7 @@ async fn serve(listener: UnixListener, context: Arc<Context>, mut stopped: onesh
 }
 
 fn admit(
-    mut stream: UnixStream,
+    mut stream: Client,
     context: &Arc<Context>,
     connections: &mut JoinSet<()>,
     refusing: &mut JoinSet<()>,
@@ -158,7 +213,7 @@ enum Form {
     Plain(Vec<u8>),
 }
 
-async fn connection(mut client: UnixStream, context: Arc<Context>) {
+async fn connection(mut client: Client, context: Arc<Context>) {
     let request = match read_request(&mut client).await {
         Ok(request) => request,
         Err((host, reason)) => {
@@ -225,7 +280,7 @@ async fn dial(host: &str, port: u16) -> Option<TcpStream> {
         .ok()
 }
 
-async fn read_request(client: &mut UnixStream) -> Result<Request, (String, NetworkRefusalReason)> {
+async fn read_request(client: &mut Client) -> Result<Request, (String, NetworkRefusalReason)> {
     let unsupported = |host: &str| (host.to_owned(), NetworkRefusalReason::Unsupported);
     let mut head = Vec::with_capacity(512);
     let end = timeout(HEAD_DEADLINE, async {
@@ -252,6 +307,7 @@ async fn read_request(client: &mut UnixStream) -> Result<Request, (String, Netwo
     let line_end = head.iter().position(|byte| *byte == b'\r').unwrap_or(0);
     let line = std::str::from_utf8(&head[..line_end]).map_err(|_| unsupported(""))?;
     let mut parts = line.split(' ');
+    #[cfg(target_os = "linux")]
     if line == BRIDGE_OVERFLOW {
         return Err((String::new(), NetworkRefusalReason::Limit));
     }
@@ -321,7 +377,7 @@ fn split_authority(authority: &str) -> Option<(String, u16)> {
     Some((host, port.parse().ok().filter(|port| *port != 0)?))
 }
 
-async fn refuse(client: &mut UnixStream, status: u16, reason: NetworkRefusalReason) {
+async fn refuse(client: &mut Client, status: u16, reason: NetworkRefusalReason) {
     let text = match status {
         403 => "Forbidden",
         405 => "Method Not Allowed",
@@ -336,7 +392,7 @@ async fn refuse(client: &mut UnixStream, status: u16, reason: NetworkRefusalReas
 }
 
 async fn tunnel(
-    client: UnixStream,
+    client: Client,
     upstream: TcpStream,
     early: &[u8],
     host: &str,
@@ -552,5 +608,7 @@ fn printable_host(host: &str) -> String {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+mod tests_macos;
