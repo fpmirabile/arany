@@ -226,6 +226,7 @@ mod goal_workspace_lease_tests {
                     autonomous: false,
                     resource_settings: crate::tools::ToolResourceSettings {
                         build_jobs: Some(2),
+                        build_cpu_cores: Some(8),
                         ..Default::default()
                     },
                     continues: None,
@@ -291,8 +292,10 @@ mod goal_workspace_lease_tests {
             .unwrap();
         let mut request = resume_request(session_id, goal_id, &workspace);
         request.goal.resource_settings.build_jobs = Some(u32::MAX);
+        request.goal.resource_settings.build_cpu_cores = Some(u32::MAX);
         let resumed = resolve_goal_admission(&request, Some(&history), GoalEntry::Resume).unwrap();
         assert_eq!(resumed.resource_settings.build_jobs, Some(2));
+        assert_eq!(resumed.resource_settings.build_cpu_cores, Some(8));
         engine.close().await.expect("close Engine");
     }
 

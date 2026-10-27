@@ -275,6 +275,7 @@ pub(super) fn proposed(
         let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
         if !matches!(intent.call, crate::tools::ToolCall::Command { .. })
             || goal.resource_settings.build_jobs != Some(intent.limits.build_jobs)
+            || goal.resource_settings.build_cpu_cores != Some(intent.limits.build_cpu_cores)
         {
             return Err(ReplayError::InvalidTransition);
         }

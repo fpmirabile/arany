@@ -61,6 +61,17 @@ pub(super) fn git_writes_available() -> bool {
     }
 }
 
+// macOS offers branch creation alone until its executor and publisher units cover the other verbs.
+pub(super) fn git_branch_creation_available() -> bool {
+    cfg!(target_os = "macos") || git_writes_available()
+}
+
+#[cfg(target_os = "macos")]
+mod git_stage;
+#[cfg(target_os = "macos")]
+pub(super) use git_stage::GitStage;
+#[cfg(target_os = "macos")]
+use git_stage::{GitWork, read_plan_report, receive_git_input};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -137,6 +148,9 @@ struct Task {
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     system_programs: Option<SystemPrograms>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_stage: Option<GitStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -358,7 +372,7 @@ impl Task {
         intent_enforcement_digest(
             self.intent.call.is_process(),
             &self.config.runtime_grants,
-            self.intent.limits.build_jobs,
+            &self.intent.limits,
             #[cfg(target_os = "macos")]
             self.system_programs.as_ref(),
         )
@@ -368,29 +382,38 @@ impl Task {
 pub(super) fn intent_enforcement_digest(
     is_process: bool,
     runtime_grants: &[RuntimeGrant],
-    build_jobs: u32,
+    limits: &ToolLimits,
     #[cfg(target_os = "macos")] programs: Option<&SystemPrograms>,
 ) -> Result<[u8; 32], ToolError> {
-    #[cfg(target_os = "macos")]
-    {
-        if is_process {
-            bind_runtime_grants(
-                macos_enforcement_digest(programs)?,
-                runtime_grants,
-                build_jobs,
-            )
-        } else {
-            enforcement_digest(&[])
+    let profile = {
+        #[cfg(target_os = "macos")]
+        {
+            if is_process {
+                bind_runtime_grants(
+                    macos_enforcement_digest(programs)?,
+                    runtime_grants,
+                    limits.build_jobs,
+                )
+            } else {
+                enforcement_digest(&[])
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bind_runtime_grants(
+                enforcement_digest(&[])?,
+                if is_process { runtime_grants } else { &[] },
+                limits.build_jobs,
+            )
+        }
+    }?;
+    if !is_process || limits.build_cpu_cores == ToolLimits::default().build_cpu_cores {
+        return Ok(profile);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        bind_runtime_grants(
-            enforcement_digest(&[])?,
-            if is_process { runtime_grants } else { &[] },
-            build_jobs,
-        )
-    }
+    let mut bytes = b"arany-build-cpu-cores-v1".to_vec();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(&limits.build_cpu_cores.to_le_bytes());
+    Ok(digest(&bytes))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1632,15 +1655,24 @@ pub(super) struct GuardContext<'a> {
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
+    pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
+    #[cfg(target_os = "macos")]
+    pub(super) git: GitWork,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
+    async fn dispatch(
+        self,
+    ) -> (
+        (Result<String, ToolError>, Option<Vec<u8>>),
+        Option<Vec<u8>>,
+    ) {
         let result = super::dispatch::run(&self).await;
-        (result, self.captured.into_inner().ok().flatten())
+        let plan = self.git_plan.into_inner().ok().flatten();
+        ((result, self.captured.into_inner().ok().flatten()), plan)
     }
 
     pub(super) fn remaining_runtime(&self) -> Duration {
@@ -1688,6 +1720,10 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     {
         return Err(ToolError::Configuration);
     }
+    #[cfg(target_os = "macos")]
+    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
+        return Err(ToolError::Configuration);
+    }
     if !task.intent.valid()
         || !(task.intent.call.facts().site == Site::Guard
             || super::discovery::possible(&task.intent.call))
@@ -1725,6 +1761,14 @@ fn receive_handover(
     let changeset = transfer::decode_handover(&task.intent, &bytes, &task.config)?;
     super::fs::worker_publication_paths(&super::fs::open_directory(workspace)?, &changeset.files)?;
     Ok(Some(changeset))
+}
+
+fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
+    if let Some(plan) = plan {
+        transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
+        stdout.flush().map_err(|_| ToolError::Operation)?;
+    }
+    Ok(())
 }
 
 fn send_result(
@@ -1852,6 +1896,9 @@ pub(super) fn helper_main() -> ExitCode {
             .write_all(b"\n")
             .and_then(|()| stdout.flush())
             .map_err(|_| ToolError::Operation)?;
+        drop(stdout);
+        #[cfg(target_os = "macos")]
+        let git = receive_git_input(&task, &mut stdin)?;
         let mut go = [0; 3];
         stdin
             .read_exact(&mut go)
@@ -1899,18 +1946,24 @@ pub(super) fn helper_main() -> ExitCode {
             hook_stdin: task.hook_stdin.as_deref(),
             hidden: &task.hidden,
             definition,
+            git_plan: Default::default(),
+            #[cfg(target_os = "macos")]
+            git,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
-        // Capture handshakes acquire stdout from a blocking worker during dispatch.
-        drop(stdout);
-        let result = runtime.block_on(site.dispatch());
+        let (result, plan) = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
         send_result(task, result, &mut stdout)?;
+        send_plan(plan, &mut stdout)?;
         Ok(())
     })();
+    bootstrap_exit(stage, result)
+}
+
+fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -2478,6 +2531,8 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2572,6 +2627,8 @@ mod tests {
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
+            #[cfg(target_os = "macos")]
+            git_stage: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -3326,7 +3383,7 @@ mod tests {
         let non_process_profile = intent_enforcement_digest(
             false,
             &grants,
-            1,
+            &ToolLimits::default(),
             #[cfg(target_os = "macos")]
             None,
         )
@@ -3334,7 +3391,7 @@ mod tests {
         let process_profile = intent_enforcement_digest(
             true,
             &grants,
-            1,
+            &ToolLimits::default(),
             #[cfg(target_os = "macos")]
             None,
         )
@@ -4032,6 +4089,8 @@ mod tests {
                 guard_executable: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]
                 system_programs: None,
+                #[cfg(target_os = "macos")]
+                git_stage: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;
