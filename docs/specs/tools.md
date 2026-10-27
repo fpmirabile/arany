@@ -544,7 +544,7 @@ excludes that record and makes its category partial, without reading content or
 changing permissions.
 
 Build-cache inventory reuses the owner's closed record-name classification. It
-counts owned directory caches and their generation, Guard ownership and unavailable records, committed/previous archives, candidate/staging files, lock files and
+counts owned directory caches and generation, Guard ownership and unavailable records, committed/previous archives, candidate/staging files, lock files and
 reservation/transaction record bytes without parsing their contents, acquiring
 leases or performing recovery. Pending/candidate/reservation records label the
 category busy/retained and keep the report partial. A capacity reservation's

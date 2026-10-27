@@ -11,9 +11,7 @@ pub(super) fn with_default(mut record: Value) -> Option<Value> {
         return None;
     }
     resources.insert("build_cpu_cores".into(), Value::Null);
-    record
-        .as_object_mut()?
-        .insert("version".into(), super::UI_PREFERENCES_VERSION.into());
+    record.as_object_mut()?.insert("version".into(), 8.into());
     Some(record)
 }
 
