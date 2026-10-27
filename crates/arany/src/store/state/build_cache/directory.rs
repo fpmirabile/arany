@@ -24,23 +24,7 @@ impl BuildCacheLease {
                 .transpose()?
                 .unwrap_or_default(),
         );
-        let reserved = self
-            .archive_limit
-            .checked_add(self.candidate_limit)
-            .and_then(|headroom| headroom.checked_add(lower_bytes))
-            .ok_or(StoreError::StorageFull)?;
-        let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
-        let previous = validate_reservation(&reservation, &self.token)?;
-        if inventory(&self.dir)?
-            .saturating_sub(previous)
-            .checked_add(reserved)
-            .ok_or(StoreError::StorageFull)?
-            > AGGREGATE_BYTES
-        {
-            return Err(StoreError::StorageFull);
-        }
-        set_reservation(&self.dir, &self.token, reserved)?;
-        sync_directory(&self.dir)?;
+        self.reserve_directory(lower_bytes)?;
         let name = tree_name(&self.token);
         let stamp = stamp_name(&self.token);
         let migrate = file_exists(&self.dir, &stamp)?;
@@ -74,11 +58,33 @@ impl BuildCacheLease {
                 self.archive_limit,
             )?;
         }
-        measure(&tree, self.archive_limit)?;
+        let lower_bytes = measure(&tree, self.archive_limit)?;
         sync_tree(&tree, &self.token)?;
         self.archive = None;
+        remove_if_present(&self.dir, &archive_name(&self.token))?;
+        self.reserve_directory(lower_bytes)?;
         self.finish_directory()?;
         Ok(tree)
+    }
+
+    fn reserve_directory(&self, lower_bytes: u64) -> Result<(), StoreError> {
+        let reserved = self
+            .archive_limit
+            .checked_add(self.candidate_limit)
+            .and_then(|headroom| headroom.checked_add(lower_bytes))
+            .ok_or(StoreError::StorageFull)?;
+        let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
+        let previous = validate_reservation(&reservation, &self.token)?;
+        if inventory(&self.dir)?
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(reserved))
+            .ok_or(StoreError::StorageFull)?
+            > AGGREGATE_BYTES
+        {
+            return Err(StoreError::StorageFull);
+        }
+        set_reservation(&self.dir, &self.token, reserved)?;
+        sync_directory(&self.dir)
     }
 
     pub(crate) fn publish_directory(

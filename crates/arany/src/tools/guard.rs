@@ -401,7 +401,7 @@ impl Task {
         intent_enforcement_digest(
             self.intent.call.is_process(),
             &self.config.runtime_grants,
-            self.intent.limits.build_jobs,
+            &self.intent.limits,
             #[cfg(target_os = "macos")]
             self.system_programs.as_ref(),
         )
@@ -411,29 +411,38 @@ impl Task {
 pub(super) fn intent_enforcement_digest(
     is_process: bool,
     runtime_grants: &[RuntimeGrant],
-    build_jobs: u32,
+    limits: &ToolLimits,
     #[cfg(target_os = "macos")] programs: Option<&SystemPrograms>,
 ) -> Result<[u8; 32], ToolError> {
-    #[cfg(target_os = "macos")]
-    {
-        if is_process {
-            bind_runtime_grants(
-                macos_enforcement_digest(programs)?,
-                runtime_grants,
-                build_jobs,
-            )
-        } else {
-            enforcement_digest(&[])
+    let profile = {
+        #[cfg(target_os = "macos")]
+        {
+            if is_process {
+                bind_runtime_grants(
+                    macos_enforcement_digest(programs)?,
+                    runtime_grants,
+                    limits.build_jobs,
+                )
+            } else {
+                enforcement_digest(&[])
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bind_runtime_grants(
+                enforcement_digest(&[])?,
+                if is_process { runtime_grants } else { &[] },
+                limits.build_jobs,
+            )
+        }
+    }?;
+    if !is_process || limits.build_cpu_cores == ToolLimits::default().build_cpu_cores {
+        return Ok(profile);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        bind_runtime_grants(
-            enforcement_digest(&[])?,
-            if is_process { runtime_grants } else { &[] },
-            build_jobs,
-        )
-    }
+    let mut bytes = b"arany-build-cpu-cores-v1".to_vec();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(&limits.build_cpu_cores.to_le_bytes());
+    Ok(digest(&bytes))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3614,7 +3623,7 @@ mod tests {
         let non_process_profile = intent_enforcement_digest(
             false,
             &grants,
-            1,
+            &ToolLimits::default(),
             #[cfg(target_os = "macos")]
             None,
         )
@@ -3622,7 +3631,7 @@ mod tests {
         let process_profile = intent_enforcement_digest(
             true,
             &grants,
-            1,
+            &ToolLimits::default(),
             #[cfg(target_os = "macos")]
             None,
         )
