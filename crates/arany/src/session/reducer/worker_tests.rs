@@ -139,6 +139,7 @@ impl Fixture {
                 limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                     .then_some(crate::tools::LimitCause::Resource),
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: CacheUpdate::NotApplicable,
             },
         })

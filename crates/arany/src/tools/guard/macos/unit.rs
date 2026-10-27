@@ -894,6 +894,58 @@ fn action_deadlines(
     (preparation_deadline, go_deadline, completion_deadline)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn git_storage_fault(
+    root: &Path,
+    volumes: &[cap_std::fs::Dir],
+    intent: &EffectIntent,
+) -> Result<(), ToolError> {
+    use crate::fault::GitStorageFault;
+    use std::io::Write as _;
+    let Ok(injection) = std::fs::read(root.join(crate::tools::GIT_STORAGE_FAULT)) else {
+        return Ok(());
+    };
+    let (fault, refusal_evidence): (GitStorageFault, PathBuf) =
+        serde_json::from_slice(&injection).map_err(|_| ToolError::Configuration)?;
+    let canary = || {
+        (std::fs::read(root.join(crate::tools::GIT_STORAGE_CANARY))
+            .ok()
+            .as_deref()
+            == Some(b"control".as_slice()))
+        .then_some(())
+        .ok_or(ToolError::Configuration)
+    };
+    match fault {
+        GitStorageFault::Refuse => {
+            super::storage::verify_git_storage(root)?;
+            canary()?;
+            let evidence =
+                serde_json::to_vec(&(intent.id, root)).map_err(|_| ToolError::Configuration)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(refusal_evidence)
+                .and_then(|mut file| file.write_all(&evidence))
+                .map_err(|_| ToolError::Operation)?;
+            Err(ToolError::ProtectionUnavailable)
+        }
+        GitStorageFault::Exhaust => {
+            super::storage::exhaust_git_storage(volumes.first().ok_or(ToolError::Operation)?)
+                .map_err(|_| ToolError::Operation)?;
+            canary()
+        }
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn git_storage_fault(
+    _root: &Path,
+    _volumes: &[cap_std::fs::Dir],
+    _intent: &EffectIntent,
+) -> Result<(), ToolError> {
+    Ok(())
+}
+
 #[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) async fn execute(
     runtime: &ToolRuntime,
@@ -907,6 +959,7 @@ pub(super) async fn execute(
         unit = Unit::admit(runtime, intent) => unit?,
     };
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
+    crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let (preparation_deadline, go_deadline, completion_deadline) =
@@ -990,7 +1043,9 @@ pub(super) async fn execute(
                             })??;
                 } else if bytes == b"WORKER_READY\n" && !image_sent {
                     image_sent = true;
-                    let input = crate::tools::guard::transfer::bulk_input(runtime)
+                    let input = runtime
+                        .handover
+                        .as_deref()
                         .ok_or(ToolError::Configuration)?;
                     tokio::time::timeout_at(
                         go_deadline,
@@ -1038,6 +1093,7 @@ pub(super) async fn execute(
                     .await
                     .map_err(|_| ToolError::Operation)?;
                 crate::fault::guard_dispatched(intent);
+                crate::fault::guard_dispatch_gate(intent).await;
                 if primary_command {
                     use tokio::io::AsyncBufReadExt;
                     if stream
@@ -1312,7 +1368,12 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if intent.call.is_process() {
+                storage = if intent.call.is_git() {
+                    let root = path.parent().ok_or(ToolError::Path)?;
+                    let volumes = super::storage::prepare_git_storage(root).await?;
+                    git_storage_fault(root, &volumes, &intent)?;
+                    Some(volumes)
+                } else if intent.call.is_process() {
                     Some(
                         prepare_command_storage(
                             path.parent().ok_or(ToolError::Path)?,
@@ -1743,7 +1804,9 @@ mod tests {
         crate::tools::guard::selection_phase::tests::protocol_outcomes().await;
     }
 
-    use super::super::storage::{STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage};
+    use super::super::storage::{
+        FILL_CHUNK_BYTES, STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage,
+    };
     use super::super::{ProfileKind, SYS_COALITION_INFO, SYS_PERSONA, SeatbeltProfile};
     use super::*;
     use crate::tools::ToolCall;
@@ -2812,6 +2875,65 @@ int main(int argc, char **argv) {
         unit.stop().await.unwrap();
     }
 
+    async fn verify_git_storage_exits(fixture: &Path) {
+        use super::super::storage::{
+            GIT_VOLUME, exhaust_git_storage, prepare_git_storage, verify_git_storage,
+        };
+        for exit in ["success", "exhaustion", "cancellation", "refusal"] {
+            let mut unit = Unit::new(fixture).await.unwrap();
+            std::fs::write(unit.root.join("canary"), b"control").unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let volume = if exit == "refusal" {
+                assert!(verify_git_storage(&unit.root).is_err());
+                std::os::unix::fs::symlink(outside.path(), unit.root.join(GIT_VOLUME)).unwrap();
+                let refused = prepare_git_storage(&unit.root).await;
+                assert!(
+                    matches!(refused, Err(ToolError::ChangedInput)),
+                    "{:?}",
+                    refused.err()
+                );
+                std::fs::remove_file(unit.root.join(GIT_VOLUME)).unwrap();
+                None
+            } else {
+                let volume = prepare_git_storage(&unit.root).await.unwrap();
+                verify_git_storage(&unit.root).unwrap();
+                Some(volume)
+            };
+            let names = |root: &Path| {
+                let mut names: Vec<_> = std::fs::read_dir(root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                names.sort();
+                names
+            };
+            let before = names(&unit.root);
+            let view = unit.root.join(GIT_VOLUME);
+            match exit {
+                "success" => std::fs::write(view.join("probe"), b"view").unwrap(),
+                "exhaustion" => {
+                    exhaust_git_storage(&volume.as_ref().unwrap()[0]).unwrap();
+                }
+                _ => {}
+            }
+            assert_eq!(names(&unit.root), before, "{exit}: control root changed");
+            assert_eq!(
+                std::fs::read(unit.root.join("canary")).unwrap(),
+                b"control",
+                "{exit}"
+            );
+            // Production teardown runs with the volume handles still open, as on a cancelled effect.
+            unit.stop().await.unwrap();
+            assert!(!storage_mounted(&unit.root).unwrap(), "{exit}");
+            assert_eq!(
+                std::fs::read_dir(outside.path()).unwrap().count(),
+                0,
+                "{exit}"
+            );
+            drop(volume);
+        }
+    }
+
     async fn verify_storage_free_cleanup(fixture: &Path) {
         use crate::test_process::BoundedOutput;
         let mut unit = Unit::new(fixture).await.unwrap();
@@ -3333,6 +3455,7 @@ int main(int argc, char **argv) {
         verify_uncertain_storage_is_retained(generated.path()).await;
         verify_partial_storage_is_cleaned(generated.path()).await;
         verify_storage_ownership(generated.path()).await;
+        verify_git_storage_exits(generated.path()).await;
         verify_storage_free_cleanup(generated.path()).await;
         verify_previous_boot_never_signals().await;
         verify_controller_crash_recovery(&plain, &disk_gate).await;
@@ -4126,10 +4249,10 @@ printf 'native command success'
                 volumes[0].write("profile-receipt", b"PROFILE\n").unwrap();
                 return;
             }
-            let block = vec![0; 1024 * 1024];
+            let block = vec![0; FILL_CHUNK_BYTES];
             for volume in &volumes {
                 let mut output = volume.create("filled").unwrap();
-                let full = (0..65).any(|_| {
+                let full = (0..=STORAGE_BYTES_CAP / block.len() as u64).any(|_| {
                     match output.write_all(&block).and_then(|()| output.sync_all()) {
                         Ok(()) => false,
                         Err(error) => {

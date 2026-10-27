@@ -649,6 +649,7 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
         output: "Outcome unknown".into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -732,6 +733,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         output: "Outcome unknown".into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter

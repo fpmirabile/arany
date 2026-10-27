@@ -716,7 +716,7 @@ pub struct HostCommandPin {
     pub environment_digest: [u8; 32],
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_host_pin() -> HostCommandPin {
     HostCommandPin {
         state_roots: ["/state".into(), "/account".into()],
@@ -1104,7 +1104,7 @@ impl Attestation {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_site(intent: &EffectIntent) -> Self {
         let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
             || intent.call.facts().mutates
@@ -1172,6 +1172,72 @@ impl EnforcementCause {
             Self::GuardBootstrap => "Guard enforcement: bootstrap failed before dispatch",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureStage {
+    Admission,
+    NamespaceAuthorization,
+    PinnedInput,
+    RuntimeMountTopology,
+    NativeProtection,
+    Handshake,
+    Execution,
+    Receipt,
+    ProcessCleanup,
+    LauncherReap,
+    OutputEof,
+    StorageCleanup,
+    ConnectionDeadline,
+    PreparationDeadline,
+    ResourceAttestation,
+    NamespaceBootstrap,
+    NativeManager,
+    ControlProtocol,
+    ResourceLimit,
+    Cancelled,
+    SelectionTimedOut,
+    SelectionInputVanished,
+    SelectionInputConflict,
+}
+
+impl FailureStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::NamespaceAuthorization => "namespace authorization",
+            Self::PinnedInput => "pinned input",
+            Self::RuntimeMountTopology => "runtime mount topology",
+            Self::NativeProtection => "native protection",
+            Self::Handshake => "handshake",
+            Self::Execution => "execution",
+            Self::Receipt => "receipt",
+            Self::ProcessCleanup => "process cleanup",
+            Self::LauncherReap => "launcher reap",
+            Self::OutputEof => "output EOF",
+            Self::StorageCleanup => "storage cleanup",
+            Self::ConnectionDeadline => "connection deadline",
+            Self::PreparationDeadline => "preparation deadline",
+            Self::ResourceAttestation => "resource attestation",
+            Self::NamespaceBootstrap => "namespace bootstrap",
+            Self::NativeManager => "native manager",
+            Self::ControlProtocol => "control protocol",
+            Self::ResourceLimit => "resource limit",
+            Self::Cancelled => "cancelled",
+            Self::SelectionTimedOut => "project selection timed out",
+            Self::SelectionInputVanished => "project input vanished",
+            Self::SelectionInputConflict => "project input conflict",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardStageFact {
+    pub stage: FailureStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<super::guard::GuardCheck>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1264,6 +1330,8 @@ pub struct ToolObservation {
     #[serde(deserialize_with = "Option::deserialize")]
     pub approval_cause: Option<ApprovalCause>,
     pub cache_update: CacheUpdate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_stage: Option<GuardStageFact>,
 }
 
 const GUARD_ALIASES: [&str; 8] = [
@@ -1314,6 +1382,13 @@ impl ToolObservation {
                         .is_ok_and(|result| result.valid() && result.changeset.files.is_empty()))
     }
 
+    pub fn guard_stage_diagnostic(&self) -> Option<String> {
+        self.guard_stage.map(|fact| match fact.check {
+            Some(check) => format!("Guard stage: {} · {}", fact.stage.label(), check.label()),
+            None => format!("Guard stage: {}", fact.stage.label()),
+        })
+    }
+
     pub fn enforcement_diagnostic(&self) -> Option<&'static str> {
         self.enforcement_cause.map(|cause| {
             if cause == EnforcementCause::FilesystemDenied
@@ -1347,6 +1422,13 @@ impl ToolObservation {
     pub(crate) fn valid(&self) -> bool {
         self.intent.valid()
             && self.spill.as_ref().is_none_or(|spill| spill.valid(self))
+            && (self.guard_stage.is_none()
+                || self.intent.call.facts().site == super::catalog::Site::Guard
+                    && self.attestation.is_none()
+                    && matches!(
+                        self.disposition,
+                        ToolDisposition::Failed | ToolDisposition::Limit
+                    ))
             && (self.approval_cause.is_none()
                 || self.disposition == ToolDisposition::Denied
                     && self.attestation.is_none()
@@ -1932,6 +2014,7 @@ mod model_call_tests {
                 disposition: ToolDisposition::Succeeded,
                 output: json!({"sha256":hex_digest(b"new"),"bytes":3}).to_string(),
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: CacheUpdate::NotApplicable,
                 enforcement_cause: None,
                 limit_cause: None,
@@ -2057,6 +2140,7 @@ mod unguarded_vocabulary_tests {
             .unwrap(),
             attestation: Some(attestation),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert!(observation.valid());
@@ -2083,6 +2167,7 @@ mod unguarded_vocabulary_tests {
             output: String::new(),
             attestation: Some(Attestation::Unguarded(unguarded_receipt(&host))),
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert_eq!(

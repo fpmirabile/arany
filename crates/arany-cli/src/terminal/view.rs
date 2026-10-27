@@ -467,15 +467,26 @@ fn numbered_line(index: usize, label: &str, focus: Option<usize>, width: u16) ->
     )
 }
 
+pub(super) struct ToolApprovalFrameState {
+    pub page: usize,
+    pub focus: Option<usize>,
+    pub review_notice: bool,
+    pub palette: Palette,
+}
+
 pub(super) fn draw_tool_approval_frame(
     frame: &mut Frame,
     area: Rect,
     lines: &[String],
     choices: &[crate::presentation::ToolApprovalChoice],
-    page: usize,
-    focus: Option<usize>,
-    review_notice: bool,
+    state: ToolApprovalFrameState,
 ) -> bool {
+    let ToolApprovalFrameState {
+        page,
+        focus,
+        review_notice,
+        palette,
+    } = state;
     frame.render_widget(Clear, area);
     let gutter = u16::from(area.width >= 40) * 2;
     let area = Rect::new(
@@ -497,8 +508,11 @@ pub(super) fn draw_tool_approval_frame(
     }
     let rows = lines
         .iter()
-        .flat_map(|line| {
-            let style = if line == crate::presentation::HOST_SESSION_APPROVAL_HINT {
+        .enumerate()
+        .flat_map(|(index, line)| {
+            let style = if index == 0 && line == crate::presentation::HOST_SENSITIVE_PATH_WARNING {
+                palette.attention()
+            } else if line == crate::presentation::HOST_SESSION_APPROVAL_HINT {
                 Style::default().add_modifier(Modifier::DIM)
             } else {
                 Style::default()

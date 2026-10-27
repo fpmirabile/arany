@@ -896,6 +896,52 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_host_warning_leads_the_plain_linear_action() {
+        use crate::presentation::{
+            ToolApprovalChoice::{No, Yes},
+            tool_fixture, unguarded_approval_lines,
+        };
+        let tool = tool_fixture(
+            arany::ToolCall::CommandUnguarded {
+                program: "cat".into(),
+                args: vec!["/private/credentials".into()],
+                cwd: String::new(),
+                justification: "Inspect credentials\u{1b}[31m".into(),
+                prefix_rule: None,
+            },
+            "",
+        );
+        let lines = unguarded_approval_lines(
+            &tool.intent,
+            &arany::UnguardedPrompt {
+                executable: "/usr/bin/cat".into(),
+                attribution: None,
+                remember: false,
+                prefix: false,
+                sensitive: true,
+                inactive_rules: false,
+            },
+        );
+        let mut state = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        for armed in [false, true] {
+            state
+                .write_tool_approval(&mut output, tool.intent.id, &lines, &[Yes, No], armed)
+                .unwrap();
+        }
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with(
+            "SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.\nRun outside the Guard? (unguarded)\nThe primary asks to run this command on this machine with no sandbox.\nProgram: cat → /usr/bin/cat\nArgs:\n  /private/credentials\n"
+        ));
+        assert!(text.contains("Model's reason: Inspect credentials\\u{001b}[31m\n"));
+        assert!(text.ends_with(
+            "Do you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
+        ));
+        assert_eq!(text.matches("SENSITIVE PATH:").count(), 1);
+        assert!(!text.contains(['\u{1b}', '\r']));
+    }
+
+    #[test]
     fn auto_edits_host_hint_is_plain_text_before_the_numbered_choices() {
         use crate::presentation::{
             ToolApprovalChoice::{No, Yes},
