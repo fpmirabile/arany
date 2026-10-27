@@ -21,13 +21,13 @@ const TRANSPARENT: u8 = u8::MAX;
 
 pub(in crate::terminal) const LIMITS: &[arany::limits::Limit] = &[
     arany::limits::Limit {
-        name: "MAX_CELL_PIXELS",
+        name: stringify!(MAX_CELL_PIXELS),
         value: MAX_CELL_PIXELS as u64,
         unit: "pixels",
         owner: "crates/arany-cli/src/terminal/graphics/sixel.rs",
     },
     arany::limits::Limit {
-        name: "PREVIEW_MAX_PIXELS",
+        name: stringify!(PREVIEW_MAX_PIXELS),
         value: PREVIEW_MAX_PIXELS as u64,
         unit: "pixels",
         owner: "crates/arany-cli/src/terminal/graphics/sixel.rs",
