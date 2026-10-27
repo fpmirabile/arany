@@ -442,10 +442,11 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         }),
         super::guard::git_commit_available()
     );
-    assert!(
-        !config.allows(&ToolCall::GitSwitch {
+    assert_eq!(
+        config.allows(&ToolCall::GitSwitch {
             branch: "topic".into()
-        }) || super::guard::git_writes_available()
+        }),
+        super::guard::git_writes_available()
     );
     for git_writes in [false, true] {
         let creation = git_writes || super::guard::git_branch_creation_available();
