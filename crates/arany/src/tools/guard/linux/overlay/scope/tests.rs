@@ -163,8 +163,12 @@ fn inventory_budget_and_protected_alias_refusals_span_grants() {
     let directory = tempfile::tempdir().unwrap();
     let mut inventories = Vec::new();
     let mut budget = crate::tools::fs::CommandScanBudget::default();
-    for _ in 0..crate::tools::types::COMMAND_SCAN_ENTRIES - 1 {
-        budget.entry("entry").unwrap();
+    let path = "first/input";
+    let entry_bytes = path.len() + std::mem::size_of::<std::fs::Metadata>();
+    let entries = crate::tools::types::COMMAND_SCAN_ENTRIES
+        .min(crate::tools::types::COMMAND_PATH_METADATA_BYTES / entry_bytes);
+    for _ in 0..entries - 1 {
+        budget.entry(path).unwrap();
     }
     let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
     let mut selector = crate::tools::selection::Selector::new(0, deadline);
