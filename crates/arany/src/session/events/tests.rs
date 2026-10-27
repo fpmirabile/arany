@@ -520,7 +520,7 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
 }
 
 #[test]
-fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
+fn supervisor_event_is_closed_bounded_and_run_started_requires_the_pin() {
     use crate::supervisor::*;
     let fixture = crate::session::worker_protocol_fixture();
     let start = fixture
@@ -566,17 +566,20 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         agent_run_id: AgentRunId::new(),
         verdict,
     };
-    assert_eq!(event.version(), 1);
+    let current = event.version();
+    assert_eq!(current, 2);
     let (run, actor) = event.scope();
     let payload = event.payload().unwrap();
     assert_eq!(
-        Event::decode(event.kind(), 1, &payload, run, actor).unwrap(),
+        Event::decode(event.kind(), current, &payload, run, actor).unwrap(),
         event
     );
-    assert!(matches!(
-        Event::decode(event.kind(), 0, &payload, run, actor),
-        Err(ReplayError::UnknownEvent)
-    ));
+    for version in [0, current - 1] {
+        assert!(matches!(
+            Event::decode(event.kind(), version, &payload, run, actor),
+            Err(ReplayError::UnknownEvent)
+        ));
+    }
     for (field, value) in [
         ("evaluator", serde_json::json!(2)),
         ("site", serde_json::json!("unknown")),
@@ -587,7 +590,14 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         let mut value_payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         value_payload[field] = value;
         assert!(
-            Event::decode(event.kind(), 1, &value_payload.to_string(), run, actor).is_err(),
+            Event::decode(
+                event.kind(),
+                current,
+                &value_payload.to_string(),
+                run,
+                actor
+            )
+            .is_err(),
             "{field}"
         );
     }
@@ -595,7 +605,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         value["signals"][0].as_object_mut().unwrap().remove(field);
         assert!(
-            Event::decode(event.kind(), 1, &value.to_string(), run, actor).is_err(),
+            Event::decode(event.kind(), current, &value.to_string(), run, actor).is_err(),
             "missing {field}"
         );
     }
@@ -604,7 +614,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         " ".repeat(MAX_VERDICT_BYTES + 1 - payload.len())
     );
     assert!(matches!(
-        Event::decode(event.kind(), 1, &padded, run, actor),
+        Event::decode(event.kind(), current, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
 }
