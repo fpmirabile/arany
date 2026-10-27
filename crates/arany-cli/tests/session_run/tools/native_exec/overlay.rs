@@ -5,6 +5,10 @@ const MERGE_OUTPUT_BYTES: usize = 32 * 1024;
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum OverlayCase {
     Reads,
+    Narrow,
+    FileOnly,
+    NarrowReplacement,
+    NarrowNoSpace,
     Writes,
     SpillMerge,
     IgnoredClean,
@@ -28,14 +32,25 @@ const OVERLAY_CASES: [OverlayCase; 10] = [
     OverlayCase::HostEdit,
     OverlayCase::HostCreate,
 ];
-const OVERLAY_JOURNEY_WAIT: Duration =
-    SPILL_JOURNEY_WAIT.saturating_mul(OVERLAY_CASES.len() as u32);
+const NARROW_OVERLAY_CASES: [OverlayCase; 4] = [
+    OverlayCase::Narrow,
+    OverlayCase::FileOnly,
+    OverlayCase::NarrowReplacement,
+    OverlayCase::NarrowNoSpace,
+];
 
 impl OverlayCase {
     fn publishes(self) -> bool {
         match self {
-            Self::Writes | Self::SpillMerge | Self::ModeZero | Self::NoSpace => true,
+            Self::Writes
+            | Self::SpillMerge
+            | Self::ModeZero
+            | Self::NoSpace
+            | Self::Narrow
+            | Self::NarrowNoSpace => true,
             Self::Reads
+            | Self::FileOnly
+            | Self::NarrowReplacement
             | Self::IgnoredClean
             | Self::Deletion
             | Self::Recreation
@@ -46,8 +61,15 @@ impl OverlayCase {
 
     fn refused(self) -> bool {
         match self {
-            Self::Deletion | Self::Recreation | Self::HostEdit | Self::HostCreate => true,
+            Self::Deletion
+            | Self::Recreation
+            | Self::HostEdit
+            | Self::HostCreate
+            | Self::NarrowReplacement => true,
             Self::Reads
+            | Self::Narrow
+            | Self::FileOnly
+            | Self::NarrowNoSpace
             | Self::Writes
             | Self::SpillMerge
             | Self::IgnoredClean
@@ -58,9 +80,12 @@ impl OverlayCase {
 
     fn host_path(self) -> Option<&'static str> {
         match self {
-            Self::HostEdit => Some("src/current.txt"),
+            Self::HostEdit | Self::NarrowReplacement => Some("src/current.txt"),
             Self::HostCreate => Some("created"),
             Self::Reads
+            | Self::Narrow
+            | Self::FileOnly
+            | Self::NarrowNoSpace
             | Self::Writes
             | Self::SpillMerge
             | Self::IgnoredClean
@@ -73,12 +98,18 @@ impl OverlayCase {
 
     fn disposition(self) -> ToolDisposition {
         match self {
-            Self::Reads | Self::Writes | Self::SpillMerge | Self::IgnoredClean | Self::ModeZero => {
-                ToolDisposition::Succeeded
-            }
-            Self::NoSpace => ToolDisposition::Failed,
+            Self::Reads
+            | Self::Writes
+            | Self::SpillMerge
+            | Self::IgnoredClean
+            | Self::ModeZero
+            | Self::Narrow
+            | Self::FileOnly => ToolDisposition::Succeeded,
+            Self::NoSpace | Self::NarrowNoSpace => ToolDisposition::Failed,
             Self::Deletion | Self::Recreation => ToolDisposition::Denied,
-            Self::HostEdit | Self::HostCreate => ToolDisposition::Conflict,
+            Self::HostEdit | Self::HostCreate | Self::NarrowReplacement => {
+                ToolDisposition::Conflict
+            }
         }
     }
 }
@@ -87,6 +118,10 @@ impl std::fmt::Display for OverlayCase {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Reads => "reads",
+            Self::Narrow => "narrow",
+            Self::FileOnly => "file-only",
+            Self::NarrowReplacement => "narrow-replacement",
+            Self::NarrowNoSpace => "narrow-no-space",
             Self::Writes => "writes",
             Self::SpillMerge => "spill-merge",
             Self::IgnoredClean => "ignored-clean",
@@ -106,8 +141,23 @@ impl std::fmt::Display for OverlayCase {
     ignore = "native Linux overlay publication and closed replay"
 )]
 fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
+    overlay_journey(&OVERLAY_CASES);
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux narrow overlay publication and closed replay"
+)]
+fn narrow_overlay_publication_and_refusals_reopen_without_execution() {
+    overlay_journey(&NARROW_OVERLAY_CASES);
+}
+
+fn overlay_journey(cases: &[OverlayCase]) {
+    let journey_wait = SPILL_JOURNEY_WAIT
+        .saturating_mul(u32::try_from(cases.len()).expect("bounded overlay case count"));
     if !crate::isolation::enter_native_account_isolated_test_with_timeout(
-        OVERLAY_JOURNEY_WAIT
+        journey_wait
             .as_secs()
             .try_into()
             .expect("bounded overlay journey timeout"),
@@ -117,15 +167,14 @@ fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _deadline =
-        arany::test_support::engine::deadline("whole-root overlay", OVERLAY_JOURNEY_WAIT);
+    let _deadline = arany::test_support::engine::deadline("Workspace overlay", journey_wait);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            for case in OVERLAY_CASES {
-                let name = format!("whole-root overlay {case}");
+            for &case in cases {
+                let name = format!("Workspace overlay {case}");
                 let _case_deadline =
                     arany::test_support::engine::deadline(&name, SPILL_JOURNEY_WAIT);
                 overlay_case(case).await;
@@ -139,6 +188,7 @@ fn overlay_fixture(case: OverlayCase) -> SpillFixture {
     let path = fixture.state.join("tools.json");
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     config["write"] = true.into();
+    configure_narrow_grants(&fixture, &mut config, case);
     private_file(&path, &serde_json::to_vec(&config).unwrap());
     std::fs::create_dir_all(fixture.workspace.join("node_modules/package/deep")).unwrap();
     std::fs::create_dir_all(fixture.workspace.join("node_modules/cache")).unwrap();
@@ -160,7 +210,7 @@ fn overlay_fixture(case: OverlayCase) -> SpillFixture {
     );
     private_file(
         &fixture.workspace.join(".gitignore"),
-        b"node_modules/\nlarge\ndist/\n",
+        b"node_modules/\nlarge\ndist/\nsrc/gen/\n",
     );
     let large = std::fs::File::create(fixture.workspace.join("large")).unwrap();
     large.set_len(2 * 1024 * 1024).unwrap();
@@ -190,14 +240,62 @@ fn overlay_fixture(case: OverlayCase) -> SpillFixture {
     fixture
 }
 
-async fn overlay_case(case: OverlayCase) {
-    let fixture = overlay_fixture(case);
+fn configure_narrow_grants(fixture: &SpillFixture, config: &mut Value, case: OverlayCase) {
+    let roots: &[&str] = match case {
+        OverlayCase::FileOnly => &["Cargo.toml"],
+        OverlayCase::Narrow | OverlayCase::NarrowReplacement | OverlayCase::NarrowNoSpace => {
+            &["src", "lib/deep", "Cargo.toml", "large", "released"]
+        }
+        OverlayCase::Reads
+        | OverlayCase::Writes
+        | OverlayCase::SpillMerge
+        | OverlayCase::IgnoredClean
+        | OverlayCase::ModeZero
+        | OverlayCase::NoSpace
+        | OverlayCase::Deletion
+        | OverlayCase::Recreation
+        | OverlayCase::HostEdit
+        | OverlayCase::HostCreate => return,
+    };
+    std::fs::create_dir_all(fixture.workspace.join("lib/deep/node_modules")).unwrap();
+    std::fs::create_dir_all(fixture.workspace.join("src/node_modules")).unwrap();
+    std::fs::create_dir(fixture.workspace.join("src/gen")).unwrap();
+    private_file(
+        &fixture.workspace.join("lib/sibling"),
+        b"PRIVATE_SIBLING_CANARY",
+    );
+    private_file(&fixture.workspace.join("Cargo.toml"), b"manifest");
+    private_file(
+        &fixture.workspace.join("src/.env"),
+        b"PRIVATE_OVERLAY_CANARY",
+    );
+    private_file(
+        &fixture.workspace.join("sibling"),
+        b"PRIVATE_SIBLING_CANARY",
+    );
+    config["workspace_paths"] = json!(roots);
+}
+
+fn overlay_command(case: OverlayCase) -> ToolCall {
     let spill_script = format!(
         "printf '%{}s\nPRIVATE_SPILL_CANARY\n' ''; printf '%{MERGE_OUTPUT_BYTES}s' '' > created",
         MERGE_OUTPUT_BYTES - b"\nPRIVATE_SPILL_CANARY\n".len()
     );
     let script = match case {
         OverlayCase::SpillMerge => spill_script.as_str(),
+        OverlayCase::FileOnly => {
+            "set -eu; test \"$(cat Cargo.toml)\" = manifest; test ! -e src; test ! -e sibling; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch created 2>/dev/null; then exit 1; fi"
+        }
+        OverlayCase::Narrow => {
+            "set -eu; test \"$(cat Cargo.toml)\" = manifest; test \"$(wc -c < large)\" -eq 2097152; test ! -s src/.env; test ! -e sibling; test ! -e node_modules; test ! -e lib/sibling; test ! -e /seed/namespace; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch lib/sibling 2>/dev/null; then exit 1; fi; printf 'private edit' > src/current.txt; printf 'private create' > lib/deep/created; printf ignored > src/node_modules/generated; printf selected > src/gen/output; printf 'narrow grants passed\\n'"
+        }
+        OverlayCase::NarrowReplacement => {
+            "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt"
+        }
+        OverlayCase::NarrowNoSpace => {
+            "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=src/node_modules/fill bs=1M count=160; LC_ALL=C dd if=/dev/zero of=lib/deep/node_modules/fill bs=1M count=160"
+        }
+
         OverlayCase::Writes => {
             "printf 'private edit' > src/current.txt; printf 'private create' > created; printf 'src/current.txt\\n' > .gitignore"
         }
@@ -217,11 +315,16 @@ async fn overlay_case(case: OverlayCase) {
             "set -eu; test \"$(cat node_modules/link)\" = dependency; test \"$(wc -c < large)\" -eq 2097152; test ! -s node_modules/package/deep/.env.local; test ! -e /seed/namespace; if printf leak > node_modules/package/deep/.env.local 2>/dev/null; then exit 1; fi; printf 'overlay reads passed\\n'"
         }
     };
-    let command = ToolCall::Command {
+    ToolCall::Command {
         program: "bash".into(),
         args: vec!["-c".into(), script.into()],
         cwd: "".into(),
-    };
+    }
+}
+
+async fn overlay_case(case: OverlayCase) {
+    let fixture = overlay_fixture(case);
+    let command = overlay_command(case);
     let dispatched = case.host_path().map(|path| {
         (
             path,
@@ -244,6 +347,14 @@ async fn overlay_case(case: OverlayCase) {
     let mutate = async {
         if let Some((path, dispatched)) = dispatched {
             dispatched.await.unwrap();
+            if case == OverlayCase::NarrowReplacement {
+                std::fs::rename(
+                    fixture.workspace.join("src"),
+                    fixture.workspace.join("old-source"),
+                )
+                .unwrap();
+                std::fs::create_dir(fixture.workspace.join("src")).unwrap();
+            }
             private_file(&fixture.workspace.join(path), b"host");
             private_file(&fixture.workspace.join("released"), b"release\n");
         }
@@ -330,7 +441,11 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         let result: Value = serde_json::from_str(&observation.output).unwrap();
         assert_eq!(
             result["exit_code"],
-            if case == OverlayCase::NoSpace { 1 } else { 0 },
+            if matches!(case, OverlayCase::NoSpace | OverlayCase::NarrowNoSpace) {
+                1
+            } else {
+                0
+            },
             "{case}"
         );
         assert_eq!(result["selection"]["pruned_directories"], 0);
@@ -339,7 +454,24 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
             assert!(observation.spill.is_none());
             assert_eq!(result["stdout"], "overlay reads passed\n");
         }
-        if case == OverlayCase::NoSpace {
+        if case == OverlayCase::Narrow {
+            assert_eq!(result["stdout"], "narrow grants passed\n");
+            assert_eq!(
+                std::fs::read(fixture.workspace.join("src/gen/output")).unwrap(),
+                b"selected"
+            );
+            assert_eq!(
+                std::fs::read(fixture.workspace.join("lib/deep/created")).unwrap(),
+                b"private create"
+            );
+            assert!(
+                !fixture
+                    .workspace
+                    .join("src/node_modules/generated")
+                    .exists()
+            );
+        }
+        if matches!(case, OverlayCase::NoSpace | OverlayCase::NarrowNoSpace) {
             assert!(
                 result["stderr"]
                     .as_str()
@@ -355,15 +487,17 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         matches!(&observation.attestation, Some(arany::Attestation::Guard(receipt)) if receipt.intent_digest == Sha256::digest(serde_json::to_vec(&outcome.run.tools[0].intent).unwrap()).as_slice())
     );
     assert!(!observation.output.contains("PRIVATE_OVERLAY_CANARY"));
+    assert!(!observation.output.contains("PRIVATE_SIBLING_CANARY"));
     check_overlay_files(&fixture.workspace, case);
 }
 
 fn check_overlay_files(workspace: &std::path::Path, case: OverlayCase) {
     let expected: &[u8] = match case {
-        OverlayCase::Writes => b"private edit",
-        OverlayCase::NoSpace => b"partial",
-        OverlayCase::HostEdit => b"host",
+        OverlayCase::Writes | OverlayCase::Narrow => b"private edit",
+        OverlayCase::NoSpace | OverlayCase::NarrowNoSpace => b"partial",
+        OverlayCase::HostEdit | OverlayCase::NarrowReplacement => b"host",
         OverlayCase::Reads
+        | OverlayCase::FileOnly
         | OverlayCase::SpillMerge
         | OverlayCase::IgnoredClean
         | OverlayCase::ModeZero

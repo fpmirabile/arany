@@ -34,17 +34,27 @@ impl Baseline {
             .retain(|child| !Path::new(child).starts_with(path));
     }
 
+    #[cfg(test)]
     pub(in crate::tools) fn freeze(
         &mut self,
         lower: &Dir,
         deadline: Instant,
     ) -> Result<(), ToolError> {
+        self.freeze_at(lower, "", &mut Selector::new(0, deadline))
+    }
+
+    pub(in crate::tools) fn freeze_at(
+        &mut self,
+        lower: &Dir,
+        prefix: &str,
+        selector: &mut Selector,
+    ) -> Result<(), ToolError> {
         for mask in self.masks.clone() {
             self.mask(Path::new(&mask));
         }
-        let mut selector = Selector::new(0, deadline);
+        let calls = selector.calls();
         for directory in &self.complete {
-            if ignored(directory, true, &mut selector)? {
+            if ignored(&joined(prefix, directory), true, selector)? {
                 continue;
             }
             let path = if directory.is_empty() {
@@ -58,19 +68,20 @@ impl Baseline {
                 safe_metadata(&file)?;
                 let bytes = self.read_lower(lower, &path, CONTROL_BYTES)?;
                 self.check(lower, &path)?;
-                selector.add(directory, &bytes)?;
+                let selected = joined(prefix, directory);
+                selector.add(&selected, &bytes)?;
                 self.selection.controls.insert(
-                    directory.clone(),
+                    selected,
                     String::from_utf8(bytes).map_err(|_| ToolError::Path)?,
                 );
             }
         }
         for (path, metadata) in &self.entries {
-            if ignored(path, metadata.is_dir(), &mut selector)? {
+            if ignored(&joined(prefix, path), metadata.is_dir(), selector)? {
                 self.selection.summary.ignored_entries += 1;
             }
         }
-        self.selection.calls = selector.calls();
+        self.selection.calls = selector.calls() - calls;
         Ok(())
     }
 
@@ -128,24 +139,62 @@ impl Baseline {
         self.complete.contains(parent) || self.absent_parent(parent)
     }
 
+    #[cfg(test)]
     pub(in crate::tools) fn capture(
         &self,
         lower: &Dir,
         upper: &Dir,
         deadline: Instant,
     ) -> Result<(CommandChangeset, CommandSelectionSummary), ToolError> {
+        capture_roots(
+            &[(
+                self,
+                lower.try_clone().map_err(|_| ToolError::Path)?,
+                upper.try_clone().map_err(|_| ToolError::Path)?,
+                "",
+            )],
+            deadline,
+        )
+    }
+}
+
+#[derive(Default)]
+struct Totals {
+    budget: CommandScanBudget,
+    summary: CommandSelectionSummary,
+    changes: ChangesetCapture,
+    retained: usize,
+}
+
+pub(in crate::tools) fn capture_roots(
+    roots: &[(&Baseline, Dir, Dir, &str)],
+    deadline: Instant,
+) -> Result<(CommandChangeset, CommandSelectionSummary), ToolError> {
+    let mut totals = Totals::default();
+    let mut selector = Selector::new(
+        roots
+            .iter()
+            .map(|(baseline, ..)| baseline.selection.calls)
+            .sum(),
+        deadline,
+    );
+    for (baseline, ..) in roots {
+        for (directory, bytes) in &baseline.selection.controls {
+            selector.add(directory, bytes.as_bytes())?;
+        }
+    }
+    for (baseline, lower, upper, prefix) in roots {
+        totals.summary.ignored_entries += baseline.selection.summary.ignored_entries;
         let mut capture = Capture {
-            baseline: self,
+            baseline,
             lower,
             upper,
-            selector: self.selection.selector(deadline)?,
-            budget: CommandScanBudget::default(),
-            summary: self.selection.summary,
-            changes: ChangesetCapture::default(),
-            retained: 0,
+            prefix,
+            selector: &mut selector,
+            totals: &mut totals,
             files: BTreeMap::new(),
         };
-        if metadata::validate(&pin(upper, "")?, &mut capture.budget)? {
+        if metadata::validate(&pin(upper, "")?, &mut capture.totals.budget)? {
             return Err(ToolError::Path);
         }
         capture.scan()?;
@@ -153,15 +202,25 @@ impl Baseline {
             capture.selector.check_time()?;
             capture.file(&path, executable)?;
         }
-        capture.changes.files.sort_by(|a, b| a.path.cmp(&b.path));
-        let changes = CommandChangeset {
-            files: capture.changes.files,
-        };
-        if !changes.valid() {
-            return Err(ToolError::Limit);
-        }
-        capture.selector.check_time()?;
-        Ok((changes, capture.summary))
+    }
+    totals.changes.files.sort_by(|a, b| a.path.cmp(&b.path));
+    let changes = CommandChangeset {
+        files: totals.changes.files,
+    };
+    if !changes.valid() {
+        return Err(ToolError::Limit);
+    }
+    Selector::new(0, deadline).check_time()?;
+    Ok((changes, totals.summary))
+}
+
+fn joined(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        path.into()
+    } else if path.is_empty() {
+        prefix.into()
+    } else {
+        format!("{prefix}/{path}")
     }
 }
 
@@ -186,11 +245,9 @@ struct Capture<'a> {
     baseline: &'a Baseline,
     lower: &'a Dir,
     upper: &'a Dir,
-    selector: Selector,
-    budget: CommandScanBudget,
-    summary: CommandSelectionSummary,
-    changes: ChangesetCapture,
-    retained: usize,
+    selector: &'a mut Selector,
+    prefix: &'a str,
+    totals: &'a mut Totals,
     files: BTreeMap<String, bool>,
 }
 
@@ -221,12 +278,12 @@ impl Capture<'_> {
             } else {
                 format!("{path}/{name}")
             };
-            self.budget.entry(&child)?;
+            self.totals.budget.entry(&joined(self.prefix, &child))?;
             self.entry(&child, pending)?;
         }
-        if empty && !path.is_empty() && !ignored(path, true, &mut self.selector)? {
-            self.retained += 1;
-            if self.retained > COMMAND_SNAPSHOT_FILES {
+        if empty && !path.is_empty() && !ignored(&joined(self.prefix, path), true, self.selector)? {
+            self.totals.retained += 1;
+            if self.totals.retained > COMMAND_SNAPSHOT_FILES {
                 return Err(ToolError::Limit);
             }
         }
@@ -241,7 +298,7 @@ impl Capture<'_> {
                 ToolError::Path
             });
         }
-        if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
+        if joined(self.prefix, path).split('/').count() > COMMAND_SNAPSHOT_DEPTH {
             return Err(ToolError::Limit);
         }
         let handle = pin(self.upper, path)?;
@@ -259,7 +316,7 @@ impl Capture<'_> {
         if metadata.is_dir() || metadata.is_file() {
             drop(readable(self.upper, path)?);
         }
-        let opaque = metadata::validate(&handle, &mut self.budget)?;
+        let opaque = metadata::validate(&handle, &mut self.totals.budget)?;
         let directory_type = metadata.is_dir()
             || whiteout
                 && self
@@ -267,19 +324,20 @@ impl Capture<'_> {
                     .entries
                     .get(path)
                     .is_some_and(Metadata::is_dir);
-        let discard = ignored(path, directory_type, &mut self.selector)?;
+        let discard = ignored(&joined(self.prefix, path), directory_type, self.selector)?;
         if whiteout || opaque {
             let directory = if opaque || directory_type {
                 path
             } else {
                 path.rsplit_once('/').map_or("", |(parent, _)| parent)
             };
-            if directory.is_empty() || !ignored(directory, true, &mut self.selector)? {
+            let directory = joined(self.prefix, directory);
+            if directory.is_empty() || !ignored(&directory, true, self.selector)? {
                 return Err(ToolError::Path);
             }
         }
         if discard {
-            self.summary.discarded_outputs += 1;
+            self.totals.summary.discarded_outputs += 1;
         } else {
             self.baseline.check(self.lower, path)?;
             if metadata.is_dir() {
@@ -305,8 +363,8 @@ impl Capture<'_> {
     }
 
     fn file(&mut self, path: &str, executable: bool) -> Result<(), ToolError> {
-        self.retained += 1;
-        if self.retained > COMMAND_SNAPSHOT_FILES {
+        self.totals.retained += 1;
+        if self.totals.retained > COMMAND_SNAPSHOT_FILES {
             return Err(ToolError::Limit);
         }
         let before = if let Some(metadata) = self.baseline.entries.get(path) {
@@ -324,7 +382,7 @@ impl Capture<'_> {
             None
         };
         let content = read_regular(readable(self.upper, path)?, MAX_FILE_BYTES)?;
-        self.budget.content(content.len())?;
+        self.totals.budget.content(content.len())?;
         self.baseline.check(self.lower, path)?;
         let after = FileVersion::from_bytes(&content, executable);
         // Identical copy-ups consume candidate caps until streaming comparison is introduced.
@@ -333,18 +391,23 @@ impl Capture<'_> {
                 .as_ref()
                 .and_then(|entry| entry.content.as_ref())
                 .map_or(0, Vec::len);
-        if self.changes.bytes + bytes > MAX_CHANGESET_BYTES
-            || self.changes.files.len() >= MAX_CHANGESET_FILES
+        if self.totals.changes.bytes + bytes > MAX_CHANGESET_BYTES
+            || self.totals.changes.files.len() >= MAX_CHANGESET_FILES
         {
             return Err(ToolError::Limit);
         }
         if before.as_ref().is_some_and(|entry| {
             entry.content.as_deref() == Some(&content) && entry.executable == executable
         }) {
-            self.changes.bytes += bytes;
+            self.totals.changes.bytes += bytes;
             return Ok(());
         }
-        self.changes.push(path, before.as_ref(), Some(after), bytes)
+        self.totals.changes.push(
+            &joined(self.prefix, path),
+            before.as_ref(),
+            Some(after),
+            bytes,
+        )
     }
 }
 
