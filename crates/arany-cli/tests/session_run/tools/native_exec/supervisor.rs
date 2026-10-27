@@ -54,7 +54,7 @@ fn entry_case(mode: SupervisorMode) {
     let root = tempfile::tempdir().unwrap();
     let executable = std::env::current_exe().unwrap();
     let mut command = match mode {
-        MountFlags => {
+        MountFlags | Submount => {
             let mut command = Command::new("/usr/bin/unshare");
             command
                 .args([
@@ -69,8 +69,8 @@ fn entry_case(mode: SupervisorMode) {
                 .arg(executable);
             command
         }
-        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Submount
-        | Success | Replacement => Command::new(executable),
+        UnalignedProbe | NamespaceDenied | ProbeDenied | OverlayProbeDenied | Success
+        | Replacement => Command::new(executable),
     };
     let output = command
         .args(["--exact", HELPER, "--ignored", "--nocapture"])
@@ -466,18 +466,6 @@ async fn assert_uncertain_guard_replay(
 }
 
 fn submount_fixture(root: &Path) {
-    use nix::sched::{CloneFlags, unshare};
-    let uid = nix::unistd::getuid().as_raw();
-    let gid = nix::unistd::getgid().as_raw();
-    unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS).unwrap();
-    std::fs::write("/proc/self/setgroups", "deny").unwrap();
-    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n")).unwrap();
-    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n")).unwrap();
-    rustix::mount::mount_change(
-        "/",
-        rustix::mount::MountPropagationFlags::PRIVATE | rustix::mount::MountPropagationFlags::REC,
-    )
-    .unwrap();
     let target = root.join("workspace/vendor");
     std::fs::create_dir(&target).unwrap();
     rustix::mount::mount(
