@@ -1727,9 +1727,12 @@ impl AttachedTerminal {
                 area,
                 lines,
                 choices,
-                page,
-                choice,
-                review_notice,
+                view::ToolApprovalFrameState {
+                    page,
+                    focus: choice,
+                    review_notice,
+                    palette,
+                },
             );
         })?;
         let area = terminal.get_frame().area();
