@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn selection_timing_migration_preserves_output_and_marks_old_timing_unknown() {
     for (kind, from, fixture) in [
-        ("ToolFinished", 30, SELECTION_TOOLFINISHED),
-        ("HookFinished", 19, SELECTION_HOOKFINISHED),
+        ("ToolFinished", 31, SELECTION_TOOLFINISHED),
+        ("HookFinished", 20, SELECTION_HOOKFINISHED),
     ] {
         let step = REGISTRY.event_step(kind, from).unwrap();
         let mut source: Value = serde_json::from_str(fixture).unwrap();
@@ -77,7 +77,7 @@ fn selection_timing_migration_refits_a_full_result_without_losing_totals() {
     result["stdout_total"]["bytes"] = length.into();
     assert_eq!(result.to_string().len(), budget);
     source["output"] = result.to_string().into();
-    let step = REGISTRY.event_step("ToolFinished", 30).unwrap();
+    let step = REGISTRY.event_step("ToolFinished", 31).unwrap();
     let migrated = (step.transform)(source).unwrap();
     assert_decodes_after_migration(
         "ToolFinished",
