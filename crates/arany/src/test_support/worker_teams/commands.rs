@@ -36,33 +36,17 @@ pub(super) fn configure(state: &Path, case: &str) {
     })).unwrap());
 }
 
-// On Linux the publication gate is returned for the caller to await while it keeps polling its Run.
-pub(super) fn approve_cache_failure(
-    workspace: &Path,
-    approval: ToolApproval,
-) -> Option<(
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Sender<()>,
-    String,
-)> {
-    let identity = crate::store::BuildCacheIdentity::new(
-        workspace,
-        approval.intent.workspace_device,
-        approval.intent.workspace_inode,
-    )
-    .unwrap();
+pub(super) fn fail_cache_publication(_state: &Path, identity: &crate::store::BuildCacheIdentity) {
     #[cfg(target_os = "linux")]
     {
-        let (publishing, release) = FaultPlan::gate_guard_cache_publication(approval.intent.id);
-        approval.decide(true);
-        Some((publishing, release, identity.token()))
+        let state = StateRoot::open_existing(_state).unwrap();
+        let mut lease = state.begin_build_cache(identity.clone()).unwrap();
+        // Initialize the directory so the sync fault reaches publication, not preparation.
+        drop(lease.prepare_directory().unwrap());
+        FaultPlan::fail_record_sync(identity.token().into(), "");
     }
     #[cfg(not(target_os = "linux"))]
-    {
-        FaultPlan::fail_commit_marker(&identity);
-        approval.decide(true);
-        None
-    }
+    FaultPlan::fail_commit_marker(identity);
 }
 
 impl LiveProvider {

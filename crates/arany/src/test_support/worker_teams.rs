@@ -516,11 +516,6 @@ async fn run_live(
         ApprovalMode::Request
     });
     let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
-    let mut cache_gate: Option<(
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-        String,
-    )> = None;
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -549,23 +544,11 @@ async fn run_live(
                 commands::overlay::dispatched(&state, &workspace, case);
                 overlay_dispatch = None;
             }
-            gated = async {
-                match &mut cache_gate {
-                    Some((publishing, _, _)) => publishing.await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                gated.expect("editor cache publication reached its gate");
-                if let Some((_, release, token)) = cache_gate.take() {
-                    FaultPlan::fail_record_sync(token.into(), "");
-                    release.send(()).unwrap();
-                }
-            }
             Some(approval) = inbox.next() => {
                 commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
-                    cache_gate = commands::approve_cache_failure(&workspace, approval);
-                    continue;
+                    let identity = crate::store::BuildCacheIdentity::new(&workspace, approval.intent.workspace_device, approval.intent.workspace_inode).unwrap();
+                    commands::fail_cache_publication(&state, &identity);
                 }
                 if case == "uncertain" && matches!(approval.intent.call, ToolCall::Write { .. }) {
                     FaultPlan::fail_file_parent_sync(approval.intent.id);

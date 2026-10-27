@@ -405,7 +405,7 @@ impl StateRoot {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(target_os = "linux", feature = "test-support")))]
     pub(crate) fn begin_build_cache(
         &self,
         identity: BuildCacheIdentity,

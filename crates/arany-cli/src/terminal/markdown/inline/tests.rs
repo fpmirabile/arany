@@ -20,7 +20,7 @@ fn escaped_backslash_runs_keep_exact_output_and_origins_with_linear_scan_work() 
         let (mut previous_end, mut text_events) = (0, 0);
         for (event, range) in Parser::new_ext(&source, Options::ENABLE_TABLES).into_offset_iter() {
             let before = flow.scanned_bytes;
-            flow.event(&source, &event, range.clone()).unwrap();
+            flow.event(&source, &event, range.clone(), None).unwrap();
             if matches!(event, Event::Text(_)) {
                 assert!(flow.scanned_bytes - before <= range.start - previous_end);
                 previous_end = range.end;
