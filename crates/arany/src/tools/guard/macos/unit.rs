@@ -974,7 +974,6 @@ fn git_storage_fault(
     Ok(())
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
