@@ -293,25 +293,28 @@ pub(super) async fn publish_cache_candidate(
     cache: Option<BuildCacheSession>,
     deadline: tokio::time::Instant,
 ) {
-    if observation.disposition != ToolDisposition::Succeeded
-        || matches!(
-            observation.intent.target,
-            crate::session::worker::EffectTarget::WorkerView { .. }
-        )
+    if observation.disposition == ToolDisposition::Succeeded
+        && observation.intent.target == crate::session::worker::EffectTarget::Workspace
+        && !observation.intent.call.is_process()
+        && candidate == CacheCandidate::Received
+        && cache.is_none()
     {
+        observation.cache_update = CacheUpdate::NotApplicable;
+    }
+    if !observation.cache_publication_eligible() {
         return;
     }
     let update = match (candidate, cache) {
         (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
         (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
         (CacheCandidate::Failed, _) => CacheUpdate::Failed,
-        (CacheCandidate::Received, None) if !observation.intent.call.is_process() => {
-            CacheUpdate::NotApplicable
-        }
         (CacheCandidate::Received, None) if observation.intent.limits.cache_requested_bytes > 0 => {
             CacheUpdate::Rejected
         }
         (CacheCandidate::Received, None) => CacheUpdate::NotApplicable,
+        (CacheCandidate::Received, Some(_)) if tokio::time::Instant::now() >= deadline => {
+            CacheUpdate::Rejected
+        }
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
                 let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
@@ -1722,16 +1725,11 @@ fn restore_cache(
 #[cfg(target_os = "linux")]
 fn send_cache_candidate(
     cache: &BuildCacheTransfer,
-    disposition: ToolDisposition,
+    observation: &ToolObservation,
     stdout: &mut impl Write,
     root: &Path,
 ) -> Result<(), ToolError> {
-    if disposition != ToolDisposition::Succeeded {
-        stdout
-            .write_all(b"CACHE_REJECTED\n")
-            .and_then(|()| stdout.flush())
-            .map_err(|_| ToolError::Operation)?;
-    } else if cache.candidate_bytes == 0 {
+    if !observation.cache_publication_eligible() || cache.candidate_bytes == 0 {
         stdout
             .write_all(b"CACHE_REJECTED\n")
             .and_then(|()| stdout.flush())
@@ -1952,7 +1950,7 @@ fn send_result(
     if let Some(cache) = &task.cache
         && task.worker.is_none()
     {
-        send_cache_candidate(cache, observation.disposition, stdout, root)?;
+        send_cache_candidate(cache, &observation, stdout, root)?;
     }
     Ok(())
 }
@@ -2306,6 +2304,9 @@ fn prepare_command_baseline(
 
     Ok(command_before)
 }
+
+#[cfg(test)]
+mod cache_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3522,7 +3523,7 @@ mod tests {
         bytes
     }
 
-    fn command_observation() -> ToolObservation {
+    pub(super) fn command_observation() -> ToolObservation {
         let mut intent = intent(ToolCall::Command {
             program: "cargo".into(),
             args: vec!["build".into()],
@@ -3567,7 +3568,7 @@ mod tests {
         }
     }
 
-    fn far_deadline() -> tokio::time::Instant {
+    pub(super) fn far_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_secs(60)
     }
 
@@ -3576,40 +3577,65 @@ mod tests {
         if crate::test_process::isolate_test() {
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
+        for original in [
+            command_observation(),
+            super::cache_tests::timeout_observation(),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (state, identity) = cache_fixture(temp.path());
 
-        let session = cache_session(&state, &identity);
-        let mut corrupt = session.lease.candidate_writer().unwrap();
-        corrupt.write_all(b"not an archive").unwrap();
-        drop(corrupt);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert_eq!(observation.cache_update, CacheUpdate::Failed);
+            let session = cache_session(&state, &identity);
+            let mut corrupt = session.lease.candidate_writer().unwrap();
+            corrupt.write_all(b"not an archive").unwrap();
+            drop(corrupt);
+            let mut observation = original.clone();
+            publish_cache_candidate(
+                &mut observation,
+                CacheCandidate::Received,
+                Some(session),
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(observation.disposition, original.disposition);
+            assert_eq!(observation.cache_update, CacheUpdate::Failed);
 
-        let session = cache_session(&state, &identity);
-        let mut valid = session.lease.candidate_writer().unwrap();
-        valid.write_all(&empty_archive(&identity)).unwrap();
-        valid.sync_all().unwrap();
-        drop(valid);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert_eq!(observation.cache_update, CacheUpdate::Published);
-        assert!(observation.valid());
+            let session = cache_session(&state, &identity);
+            let mut valid = session.lease.candidate_writer().unwrap();
+            valid.write_all(&empty_archive(&identity)).unwrap();
+            valid.sync_all().unwrap();
+            drop(valid);
+            let mut observation = original.clone();
+            publish_cache_candidate(
+                &mut observation,
+                CacheCandidate::Received,
+                Some(session),
+                far_deadline(),
+            )
+            .await;
+            assert_eq!(observation.disposition, original.disposition);
+            assert_eq!(observation.cache_update, CacheUpdate::Published);
+            assert!(observation.valid());
+            for candidate in [CacheCandidate::Rejected, CacheCandidate::Received] {
+                let session = cache_session(&state, &identity);
+                let mut invalid = session.lease.candidate_writer().unwrap();
+                invalid.write_all(b"invalid").unwrap();
+                drop(invalid);
+                let mut rejected = original.clone();
+                publish_cache_candidate(
+                    &mut rejected,
+                    candidate,
+                    Some(session),
+                    tokio::time::Instant::now(),
+                )
+                .await;
+                assert_eq!(rejected.cache_update, CacheUpdate::Rejected);
+                assert_eq!(rejected.disposition, original.disposition);
+                assert_eq!(
+                    committed_archive(&state, &identity),
+                    empty_archive(&identity)
+                );
+            }
+        }
     }
 
     fn captured_archive(root: &Path, identity: &BuildCacheIdentity, marker: &[u8]) -> Vec<u8> {
