@@ -12,7 +12,6 @@ use crate::tools::{ToolDisposition, ToolRuntime};
 #[must_use]
 pub(super) enum WorkerAdmission {
     Admitted(Box<ChildWork>),
-    Refused,
     Exhausted,
 }
 #[must_use]
@@ -26,6 +25,20 @@ pub(super) struct WorkerEnd {
     pub(super) torn_down: bool,
     pub(super) failure: WorkerCause,
     pub(super) step_stop: Option<StopCause>,
+}
+impl WorkerEnd {
+    pub(super) fn stopped(stop: super::children::WaveStop) -> Self {
+        use super::children::WaveStop;
+        Self {
+            answer: None,
+            torn_down: !matches!(
+                stop,
+                WaveStop::Boundary(StopCause::Budget | StopCause::Capacity | StopCause::ActiveTime)
+            ),
+            failure: WorkerCause::ToolFailed,
+            step_stop: None,
+        }
+    }
 }
 struct WorkerSpawn<'a> {
     id: AgentRunId,
@@ -201,7 +214,8 @@ impl RunLoop<'_> {
             }
             crate::session::GoalSuccessCriterion::WorkspaceFileContent { .. }
             | crate::session::GoalSuccessCriterion::WorkspaceFileDigest { .. } => true,
-        } && self.editor_grant(a)?.valid())
+        } && self.editor_catalog_fits(runtime, a)?
+            && self.editor_grant(a)?.valid())
     }
 
     pub(super) fn wave_settled(&self) -> Result<bool, EngineError> {
@@ -281,7 +295,7 @@ impl RunLoop<'_> {
         Box::pin(self.begin_worker_inner(root, assignment))
     }
 
-    // A catalog over its bound refuses the proposal before any view, base or lease exists.
+    // A catalog over its bound refuses before a delegation or lease is committed.
     fn editor_catalog_fits(
         &self,
         runtime: &ToolRuntime,
@@ -316,9 +330,6 @@ impl RunLoop<'_> {
             return Ok(WorkerAdmission::Exhausted);
         }
         self.admit_worker_action().await?;
-        if !self.editor_catalog_fits(runtime, &assignment)? {
-            return Ok(WorkerAdmission::Refused);
-        }
         let spawn = WorkerSpawn {
             id: AgentRunId::new(),
             runtime,
@@ -654,6 +665,69 @@ impl RunLoop<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wave_stop_worker_ends_preserve_budget_and_cancellation_causes() {
+        use super::super::children::WaveStop;
+        for (cause, stopped, expected_agent, expected_cause) in [
+            (
+                StopCause::Budget,
+                true,
+                AgentDisposition::Failed,
+                WorkerCause::Budget,
+            ),
+            (
+                StopCause::ActiveTime,
+                true,
+                AgentDisposition::Failed,
+                WorkerCause::Budget,
+            ),
+            (
+                StopCause::Capacity,
+                true,
+                AgentDisposition::Failed,
+                WorkerCause::Budget,
+            ),
+            (
+                StopCause::DelegationDeadline,
+                false,
+                AgentDisposition::Cancelled,
+                WorkerCause::Cancelled,
+            ),
+            (
+                StopCause::Paused,
+                false,
+                AgentDisposition::Cancelled,
+                WorkerCause::Cancelled,
+            ),
+            (
+                StopCause::Cancelled,
+                false,
+                AgentDisposition::Cancelled,
+                WorkerCause::Cancelled,
+            ),
+        ] {
+            let end = WorkerEnd::stopped(WaveStop::Boundary(cause));
+            let terminal = editor_terminal(
+                end.failure,
+                &EditorFacts {
+                    answered: false,
+                    unknown: false,
+                    changed: true,
+                    stopped,
+                    cancelled: end.torn_down,
+                    actor_hook_stop: false,
+                    step_stop: end.step_stop,
+                },
+            );
+            let EditorTerminal::Known { agent, outcome } = terminal else {
+                panic!("known wave stop: {cause:?}");
+            };
+            assert_eq!(agent, expected_agent, "{cause:?}");
+            assert_eq!(outcome.cause, expected_cause, "{cause:?}");
+            assert!(outcome.valid());
+        }
+    }
+
     #[test]
     fn terminal_facts_preserve_uncertainty_hook_cancel_budget_and_success_precedence() {
         for (unknown, hook, cancelled, stopped, answered, expected) in [
