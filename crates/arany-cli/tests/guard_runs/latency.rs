@@ -651,12 +651,13 @@ fn corpus_row(operation: Operation, calls: usize, deadline: std::time::Instant) 
     let valid =
         failure.is_none() && samples.len() == WARMUPS + MEASURED && measured.len() == MEASURED;
     let summary = valid.then(|| percentiles(&measured).unwrap());
-    let failed_capture = if failure.is_some() && attempted > samples.len() {
-        let path = root.join(format!("sample-{:03}/capture.json", attempted - 1));
-        load_failed_capture(&path)
-    } else {
-        None
-    };
+    let failed_ordinal = (failure.is_some() && attempted > samples.len()).then(|| attempted - 1);
+    let failed_capture = failed_ordinal.and_then(|ordinal| {
+        load_failed_capture(&root.join(format!("sample-{ordinal:03}/capture.json")))
+    });
+    let failed_prerequisites = failed_ordinal.and_then(|ordinal| {
+        load_failed_capture(&root.join(format!("sample-{ordinal:03}/prerequisites.json")))
+    });
     let objective = match (operation, calls) {
         (Operation::Read | Operation::Edit, 1) => Some(PROVISIONAL_P95_US),
         _ => None,
@@ -665,8 +666,7 @@ fn corpus_row(operation: Operation, calls: usize, deadline: std::time::Instant) 
         "corpus_version":1, "operation":operation, "calls_per_step":calls, "profile":"release with test-support", "host":host,
         "binary_sha256":binary_sha256,"test_binary_sha256":test_binary_sha256,"package_version":env!("CARGO_PKG_VERSION"),
         "failed_capture":failed_capture,
-        "failed_prerequisites":failure.and_then(|_| attempted.checked_sub(1)).and_then(|ordinal|
-            load_failed_capture(&root.join(format!("sample-{ordinal:03}/prerequisites.json")))),
+        "failed_prerequisites":failed_prerequisites,
         "evidence_root":root, "workload":"warm 53248-byte file: Read first 2000 lines, Edit unique final function or guarded native no-op Command, fresh State/Workspace per sample",
         "endpoint":"complete typed Provider receipt to final ToolFinished durable append acknowledgement",
         "excluded":"Provider transport/inference/decoding, startup, final answer, rendering, show; no Guard spawn for Read or Edit",
