@@ -100,6 +100,12 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         crate::test_support::recorded_tool_failure(unstarted.id).as_deref(),
         Some("Guard stage=connection deadline")
     );
+    let expired = super::unstarted_observation(
+        unstarted.clone(),
+        super::ToolError::Timeout(String::new()),
+    );
+    assert_eq!(expired.disposition, ToolDisposition::Limit);
+    assert_eq!(expired.limit_cause, Some(super::LimitCause::Timeout));
     let mut file = intent(ToolCall::Mkdir {
         path: "src/new".into(),
     });

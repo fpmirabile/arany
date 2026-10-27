@@ -2171,6 +2171,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         observation.output = "File operation cancelled; nothing in the Workspace changed".into();
         return observation;
     }
+    if matches!(error, ToolError::Timeout(_)) {
+        return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+    }
     if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
         return unattested_limit(
             intent,
