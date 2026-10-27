@@ -1,6 +1,8 @@
 use crate::provider::{ProviderError, ProviderRequest, ProviderResponse};
 use crate::session::{Event, EventEnvelope, RunId, SessionId};
-use crate::store::{AdmissionKind, BuildCacheLease, StoreError};
+#[cfg(any(target_os = "macos", test))]
+use crate::store::BuildCacheLease;
+use crate::store::{AdmissionKind, StoreError};
 use crate::tools::{ToolError, ToolObservation};
 use std::io;
 use std::time::Duration;
@@ -257,6 +259,12 @@ pub(crate) fn git_storage(root: &std::path::Path, call: &crate::tools::ToolCall)
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn guard_cache_publication(intent: uuid::Uuid) {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::guard_cache_publication_gate(intent).await;
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_dispatched(intent: &crate::tools::EffectIntent) {
     #[cfg(any(test, feature = "test-support"))]
     FaultPlan::guard_dispatched(&intent.call);
@@ -272,12 +280,14 @@ pub(crate) async fn guard_dispatch_gate(intent: &crate::tools::EffectIntent) {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) struct CandidateSync {
     #[cfg(any(test, feature = "test-support"))]
     finished: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn candidate_sync(lease: &BuildCacheLease) -> io::Result<CandidateSync> {
     Ok(CandidateSync {
         #[cfg(any(test, feature = "test-support"))]
@@ -286,6 +296,7 @@ pub(crate) fn candidate_sync(lease: &BuildCacheLease) -> io::Result<CandidateSyn
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn candidate_sync_finished(completion: io::Result<CandidateSync>) {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(CandidateSync {
@@ -422,6 +433,7 @@ mod injection {
             oneshot::Sender<crate::tools::ToolObservation>,
             oneshot::Receiver<()>,
         ),
+        GuardCachePublication(uuid::Uuid, oneshot::Sender<()>, oneshot::Receiver<()>),
         RecordSync(std::path::PathBuf, &'static str),
         RecordPublication(std::path::PathBuf, &'static str),
         GoalAppend(SessionId, Admits),
@@ -850,6 +862,24 @@ mod injection {
             }
         }
 
+        pub fn gate_guard_cache_publication(
+            intent: uuid::Uuid,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            plan().push(Fault::GuardCachePublication(intent, entered, released));
+            (wait, release)
+        }
+
+        pub(crate) async fn guard_cache_publication_gate(intent: uuid::Uuid) {
+            if let Some(Fault::GuardCachePublication(_, entered, release)) =
+                take(|fault| matches!(fault, Fault::GuardCachePublication(id, ..) if *id == intent))
+            {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+        }
+
         pub(crate) fn guard_receipt_lost(intent: uuid::Uuid) -> bool {
             take(|fault| matches!(fault, Fault::GuardReceipt(id) if *id == intent)).is_some()
         }
@@ -875,6 +905,7 @@ mod injection {
             }
         }
 
+        #[cfg(any(target_os = "macos", test))]
         pub(crate) fn candidate_sync(token: &str) -> io::Result<Option<oneshot::Sender<()>>> {
             let finished = None;
             #[cfg(test)]
