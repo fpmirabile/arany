@@ -320,7 +320,10 @@ pub(super) async fn manage_command_environment(
             EnvironmentStep::Act(action) => action,
             EnvironmentStep::Again => continue,
             EnvironmentStep::Leave => {
-                return Ok(EnvironmentOutcome::Confirmed(leave_notice(saved, last_failure)));
+                return Ok(EnvironmentOutcome::Confirmed(leave_notice(
+                    saved,
+                    last_failure,
+                )));
             }
         };
         let outcome = match action {
