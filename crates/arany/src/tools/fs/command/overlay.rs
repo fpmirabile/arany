@@ -331,6 +331,9 @@ impl Capture<'_> {
                     .get(path)
                     .is_some_and(Metadata::is_dir);
         let discard = ignored(&joined(self.prefix, path), directory_type, self.selector)?;
+        if whiteout && !discard {
+            self.baseline.check(self.lower, path)?;
+        }
         let plain_deletion = whiteout
             && self
                 .baseline

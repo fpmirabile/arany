@@ -257,7 +257,14 @@ fn identical_copyups_do_not_consume_candidate_caps() {
 
 #[test]
 fn comparison_preserves_content_exec_drift_and_metadata_checks() {
-    for case in ["equal", "content", "exec", "drift", "metadata"] {
+    for case in [
+        "equal",
+        "content",
+        "exec",
+        "exec-removed",
+        "drift",
+        "metadata",
+    ] {
         let lower = tempfile::tempdir().unwrap();
         let upper = tempfile::tempdir().unwrap();
         std::fs::write(lower.path().join("existing"), [0, 255]).unwrap();
@@ -275,7 +282,13 @@ fn comparison_preserves_content_exec_drift_and_metadata_checks() {
         for root in [lower.path(), upper.path()] {
             std::fs::set_permissions(
                 root.join("existing"),
-                std::fs::Permissions::from_mode(0o600),
+                std::fs::Permissions::from_mode(
+                    if case == "exec-removed" && root == lower.path() {
+                        0o700
+                    } else {
+                        0o600
+                    },
+                ),
             )
             .unwrap();
         }
@@ -308,6 +321,10 @@ fn comparison_preserves_content_exec_drift_and_metadata_checks() {
                 assert_eq!(changes.files.len(), usize::from(case != "equal"));
                 if let Some(change) = changes.files.first() {
                     assert_eq!(change.after.as_ref().unwrap().executable, case == "exec");
+                    assert_eq!(
+                        change.before.as_ref().unwrap().executable,
+                        case == "exec-removed"
+                    );
                     apply_files(&source, &changes.files).unwrap();
                     assert_eq!(
                         std::fs::read(lower.path().join("existing")).unwrap(),
@@ -315,6 +332,90 @@ fn comparison_preserves_content_exec_drift_and_metadata_checks() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn plain_whiteouts_use_baseline_files_and_classify_host_creation_as_conflict() {
+    for case in [
+        "file",
+        "directory",
+        "symlink",
+        "absent",
+        "host-create",
+        "content-limit",
+        "file-limit",
+    ] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        let path = lower.path().join("removed");
+        match case {
+            "directory" => std::fs::create_dir(&path).unwrap(),
+            "symlink" => std::os::unix::fs::symlink("target", &path).unwrap(),
+            "absent" | "host-create" => {}
+            "content-limit" | "file-limit" => {
+                let bytes = if case == "content-limit" {
+                    MAX_CHANGESET_BYTES
+                } else {
+                    MAX_FILE_BYTES
+                };
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(bytes as u64 + 1)
+                    .unwrap();
+            }
+            _ => std::fs::write(&path, b"before").unwrap(),
+        }
+        let source = open_directory(lower.path()).unwrap();
+        let baseline = baseline(&source);
+        if case == "host-create" {
+            std::fs::write(&path, b"host").unwrap();
+        }
+        match rustix::fs::mknodat(
+            rustix::fs::CWD,
+            upper.path().join("removed"),
+            rustix::fs::FileType::CharacterDevice,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::PERM) => {
+                eprintln!(
+                    "whiteout capture cases skipped: mknod of character device 0/0 is not permitted"
+                );
+                return;
+            }
+            Err(error) => panic!("whiteout fixture failed: {error}"),
+        }
+        let result = baseline.capture(
+            &source,
+            &open_directory(upper.path()).unwrap(),
+            Instant::now() + crate::tools::selection::PHASE_TIME,
+        );
+        match case {
+            "file" => {
+                let (changes, _) = result.unwrap();
+                assert_eq!(changes.files.len(), 1);
+                let change = &changes.files[0];
+                assert_eq!(change.path, "removed");
+                assert_eq!(
+                    change.before.as_ref().unwrap().sha256,
+                    hex_digest(b"before")
+                );
+                assert_eq!(change.before.as_ref().unwrap().bytes().unwrap(), b"before");
+                assert!(change.after.is_none());
+                apply_files(&source, &changes.files).unwrap();
+                assert!(!path.exists());
+            }
+            "host-create" => {
+                assert!(matches!(result, Err(ToolError::Conflict)));
+                assert_eq!(std::fs::read(path).unwrap(), b"host");
+            }
+            "content-limit" | "file-limit" => {
+                assert!(matches!(result, Err(ToolError::Limit)), "{case}")
+            }
+            _ => assert!(matches!(result, Err(ToolError::Path)), "{case}"),
         }
     }
 }
