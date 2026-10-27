@@ -1152,6 +1152,22 @@ struct GoGate {
     git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
+impl GoGate {
+    async fn wait(
+        self,
+        stdin: &mut tokio::process::ChildStdin,
+        result_bytes: usize,
+    ) -> Result<(), ToolError> {
+        if let Some(input) = self.git_input {
+            let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
+            super::transfer::send_frame_capped(stdin, &result, result_bytes).await?;
+            super::transfer::send_frame_capped(stdin, &frame, crate::tools::git::WRITE_FRAME_BYTES)
+                .await?;
+        }
+        self.receive_go.await.map_err(|_| ToolError::Operation)
+    }
+}
+
 async fn read_command_windows(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
     runtime: &ToolRuntime,
@@ -1244,13 +1260,9 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let GoGate {
-        receive_go,
-        git_stage,
-        git_input,
-        #[cfg(any(test, feature = "test-support"))]
-        git_fault,
-    } = gate;
+    let git_stage = gate.git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
     task.git_stage = git_stage;
     #[cfg(any(test, feature = "test-support"))]
@@ -1302,22 +1314,8 @@ async fn execute_worker(
                 .map_err(|_| ToolError::Operation)?;
             capture.complete();
             let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
-            if let Some(input) = git_input {
-                let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
-                super::transfer::send_frame_capped(
-                    &mut stdin,
-                    &result,
-                    intent.limits.result_bytes as usize,
-                )
+            gate.wait(&mut stdin, intent.limits.result_bytes as usize)
                 .await?;
-                super::transfer::send_frame_capped(
-                    &mut stdin,
-                    &frame,
-                    crate::tools::git::WRITE_FRAME_BYTES,
-                )
-                .await?;
-            }
-            receive_go.await.map_err(|_| ToolError::Operation)?;
             #[cfg(any(test, feature = "test-support"))]
             if matches!(
                 git_fault,
