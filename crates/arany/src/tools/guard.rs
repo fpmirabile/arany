@@ -942,6 +942,16 @@ async fn read_discovery_report<R: tokio::io::AsyncBufRead + Unpin>(
     read_worker_report(reader, intent).await
 }
 
+impl ToolRuntime {
+    pub(crate) fn refuses_shell_arguments(&self, call: &ToolCall) -> bool {
+        let Err(ToolError::GuardBootstrap(failure)) = shell::validate_command(&self.config, call)
+        else {
+            return false;
+        };
+        failure.check == Some(GuardCheck::ShellArguments)
+    }
+}
+
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
