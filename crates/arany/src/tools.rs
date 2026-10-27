@@ -1515,12 +1515,6 @@ impl ToolRuntime {
         }
         if intent.target != crate::session::worker::EffectTarget::Workspace
             || !self.config.allows(&intent.call)
-            || matches!(
-                intent.call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            )
         {
             return ToolObservation {
                 spill: None,
