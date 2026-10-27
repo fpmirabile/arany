@@ -127,7 +127,11 @@ impl Config {
             ToolCall::WebFetch { .. } => host(call).is_some_and(|host| {
                 super::network::Network {
                     allow: vec![host.clone()],
-                    deny: self.network.as_ref().map(|n| n.deny.clone()).unwrap_or_default(),
+                    deny: self
+                        .network
+                        .as_ref()
+                        .map(|n| n.deny.clone())
+                        .unwrap_or_default(),
                 }
                 .lists(&host)
             }),

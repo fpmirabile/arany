@@ -198,11 +198,12 @@ fn host_patterns_follow_the_grant_grammar() {
 #[test]
 fn decoded_results_that_repeat_the_key_are_detected() {
     let key = "ARANYKEY123";
-    let escaped = r#"{"web":{"results":[{"title":"\u0041RANYKEY123","url":"u","description":"d"}]}}"#;
+    let escaped =
+        r#"{"web":{"results":[{"title":"\u0041RANYKEY123","url":"u","description":"d"}]}}"#;
     let rows = results(escaped.as_bytes()).unwrap();
     assert!(reflects_key(&rows[0], key));
-    let clean = results(br#"{"web":{"results":[{"title":"t","url":"u","description":"d"}]}}"#)
-        .unwrap();
+    let clean =
+        results(br#"{"web":{"results":[{"title":"t","url":"u","description":"d"}]}}"#).unwrap();
     assert!(!reflects_key(&clean[0], key));
 }
 
@@ -249,5 +250,9 @@ fn researchers_need_an_explicit_grant_and_cannot_widen_parent_domains() {
     runtime.bind_web_network(&mut intent).unwrap();
     assert_eq!(intent.limits.network, crate::tools::NetworkGrant::Proxy);
     assert_eq!(before, runtime.config.digest());
-    assert!(!runtime.config.lists_web_host(&fetch("https://elsewhere.example/")));
+    assert!(
+        !runtime
+            .config
+            .lists_web_host(&fetch("https://elsewhere.example/"))
+    );
 }

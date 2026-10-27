@@ -87,7 +87,9 @@ fn search_allowance_spent(view: &SessionView, call: &crate::tools::ToolCall) -> 
             .runs
             .iter()
             .flat_map(|run| {
-                run.tools.iter().chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                run.tools
+                    .iter()
+                    .chain(run.agents.iter().flat_map(|agent| &agent.tools))
             })
             .filter(|tool| matches!(tool.intent.call, crate::tools::ToolCall::WebSearch { .. }))
             .count()

@@ -617,7 +617,9 @@ async fn committed_search_proposals_spend_the_session_allowance() {
     };
     let excess = tool_proposed(run, agent, &intent);
     let committed = store.load_session(session).await.unwrap();
-    let live = SessionView::replay_open(session, &committed).unwrap().unwrap();
+    let live = SessionView::replay_open(session, &committed)
+        .unwrap()
+        .unwrap();
     assert!(matches!(
         crate::session::validate_primary_tool_scope(&live, run, &intent.call),
         Err(crate::session::ProposalRefusalCause::NotOffered)
@@ -628,9 +630,13 @@ async fn committed_search_proposals_spend_the_session_allowance() {
     let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
     let mut reopened = store.load_session(session).await.unwrap();
     assert_eq!(reopened, committed);
-    let resumed = SessionView::replay_open(session, &reopened).unwrap().unwrap();
+    let resumed = SessionView::replay_open(session, &reopened)
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        crate::session::validate_tool_started(&resumed, &excess).unwrap_err().cause,
+        crate::session::validate_tool_started(&resumed, &excess)
+            .unwrap_err()
+            .cause,
         crate::session::ProposalRefusalCause::NotOffered
     );
     let replay = SessionView::replay(session, &reopened).unwrap().unwrap();

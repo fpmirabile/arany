@@ -58,7 +58,10 @@ fn old_worker_policies_and_assignments_cannot_acquire_web_tools() {
         }
     });
     let spawn = REGISTRY.event_step("AgentSpawned", 17).unwrap();
-    assert_eq!((spawn.transform)(assignment.clone()), Some(assignment.clone()));
+    assert_eq!(
+        (spawn.transform)(assignment.clone()),
+        Some(assignment.clone())
+    );
     for operation in ["web_fetch", "web_search"] {
         let mut widened = source.clone();
         widened["config"]["worker_policy"]["parent_grant"]["tools"] =

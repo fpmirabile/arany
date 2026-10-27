@@ -125,7 +125,10 @@ async fn web_case(root: &Path, case: WebCase) -> arany::RunOutcome {
     );
     if case.cancel_on_request.is_none() {
         assert!(provider.responses.lock().unwrap().is_empty());
-        assert_eq!(provider.requests.lock().unwrap().len(), case.calls.len() + 3);
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            case.calls.len() + 3
+        );
     }
     engine.close().await.unwrap();
     assert_closed_web_evidence(&root.join("state"), &provider, &outcome).await;
@@ -148,7 +151,11 @@ async fn assert_closed_web_evidence(
         .collect::<String>();
     let requests = format!("{:?}", provider.requests.lock().unwrap());
     let database = std::fs::read(state.join("events.sqlite3")).unwrap();
-    for bytes in [payloads.as_bytes(), requests.as_bytes(), database.as_slice()] {
+    for bytes in [
+        payloads.as_bytes(),
+        requests.as_bytes(),
+        database.as_slice(),
+    ] {
         assert!(
             !bytes
                 .windows(SEARCH_KEY.len())
@@ -174,7 +181,12 @@ async fn assert_closed_web_evidence(
     {
         assert_seed_retired(tool.intent.id);
         assert!(
-            !tool.observation.as_ref().unwrap().output.contains(SEARCH_KEY),
+            !tool
+                .observation
+                .as_ref()
+                .unwrap()
+                .output
+                .contains(SEARCH_KEY),
             "search credential reached an observation"
         );
     }
@@ -314,13 +326,20 @@ fn assert_search_headers(server: &PageServer) {
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_ascii_lowercase(), value.trim()))
         .collect();
-    assert!(headers.iter().any(|(name, value)| name == "accept" && *value == "application/json"));
+    assert!(
+        headers
+            .iter()
+            .any(|(name, value)| name == "accept" && *value == "application/json")
+    );
     let tokens: Vec<_> = headers
         .iter()
         .filter(|(name, _)| name == "x-subscription-token")
         .collect();
     assert_eq!(tokens.len(), 1);
-    assert!(tokens[0].1 == SEARCH_KEY, "the backend receives the exact credential");
+    assert!(
+        tokens[0].1 == SEARCH_KEY,
+        "the backend receives the exact credential"
+    );
 }
 
 async fn fetch_policy_journeys(root: &Path) {
@@ -348,7 +367,13 @@ async fn fetch_policy_journeys(root: &Path) {
             vec![false],
             vec![Denied],
         ),
-        ("once", false, json!({}), vec![true, false], vec![Succeeded, Denied]),
+        (
+            "once",
+            false,
+            json!({}),
+            vec![true, false],
+            vec![Succeeded, Denied],
+        ),
         (
             "dont-ask",
             false,
@@ -384,7 +409,10 @@ async fn fetch_policy_journeys(root: &Path) {
         }
         assert_eq!(
             server.requests.load(Ordering::SeqCst),
-            expected.iter().filter(|disposition| **disposition == Succeeded).count(),
+            expected
+                .iter()
+                .filter(|disposition| **disposition == Succeeded)
+                .count(),
             "{name}"
         );
     }
@@ -412,7 +440,11 @@ async fn redirect_failure_and_cancellation(root: &Path) {
     )
     .await;
     assert_eq!(first_result(&outcome).disposition, ToolDisposition::Failed);
-    assert!(first_result(&outcome).output.contains("redirects are refused"));
+    assert!(
+        first_result(&outcome)
+            .output
+            .contains("redirects are refused")
+    );
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
     assert_eq!(forbidden.requests.load(Ordering::SeqCst), 0);
     let server = page_server(PageReply {
@@ -444,7 +476,10 @@ async fn cancel_web_request(root: &Path) {
     case.cancel_on_request = Some(server.received.clone());
     let outcome = web_case(&root.join("cancel"), case).await;
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
-    assert_eq!(first_result(&outcome).disposition, ToolDisposition::Cancelled);
+    assert_eq!(
+        first_result(&outcome).disposition,
+        ToolDisposition::Cancelled
+    );
     let closed = server.closed.clone();
     let count = server.requests.clone();
     drop(server);
@@ -498,7 +533,10 @@ fn web_certificate(root: &Path) {
         .arg(root.join("server.key"))
         .arg("-out")
         .arg(root.join("server.csr"));
-    assert!(leaf.bounded_output().unwrap().status.success(), "fixture leaf");
+    assert!(
+        leaf.bounded_output().unwrap().status.success(),
+        "fixture leaf"
+    );
     let mut sign = Command::new("/usr/bin/openssl");
     sign.env_clear()
         .args(["x509", "-req", "-in"])
@@ -516,7 +554,10 @@ fn web_certificate(root: &Path) {
             "-out",
         ])
         .arg(root.join("server.pem"));
-    assert!(sign.bounded_output().unwrap().status.success(), "fixture signing");
+    assert!(
+        sign.bounded_output().unwrap().status.success(),
+        "fixture signing"
+    );
 }
 
 struct TlsPage {
@@ -584,7 +625,9 @@ fn tls_page(root: &Path) -> TlsPage {
         reader: Some(reader),
         port: 0,
     };
-    peer.port = receiver.recv_timeout(TLS_START_TIMEOUT).expect("TLS peer ready");
+    peer.port = receiver
+        .recv_timeout(TLS_START_TIMEOUT)
+        .expect("TLS peer ready");
     peer
 }
 
@@ -626,7 +669,10 @@ async fn researcher_journeys(root: &Path) {
             server.requests.load(Ordering::SeqCst),
             usize::from(enabled && listed)
         );
-        assert_eq!(outcome.run.agents[1].tools.len(), usize::from(enabled && listed));
+        assert_eq!(
+            outcome.run.agents[1].tools.len(),
+            usize::from(enabled && listed)
+        );
     }
 }
 
@@ -644,9 +690,10 @@ async fn researcher_case(root: &Path, case: WebCase, allowed: bool) -> arany::Ru
         crate::tool_outcome(case.calls[0].clone()),
     ];
     if allowed {
-        script.extend(["Child report", "Research settled"].map(|text| {
-            ProviderOutcome::Answer(Answer { text: text.into() })
-        }));
+        script.extend(
+            ["Child report", "Research settled"]
+                .map(|text| ProviderOutcome::Answer(Answer { text: text.into() })),
+        );
     }
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(script));
     let mut request = proposal_request(&workspace);
@@ -672,13 +719,20 @@ async fn researcher_case(root: &Path, case: WebCase, allowed: bool) -> arany::Ru
     assert_closed_web_evidence(&root.join("state"), &provider, &outcome).await;
     assert_eq!(
         outcome.run.status,
-        if allowed { RunStatus::Finished } else { RunStatus::Failed }
+        if allowed {
+            RunStatus::Finished
+        } else {
+            RunStatus::Failed
+        }
     );
     assert!(provider.responses.lock().unwrap().is_empty());
     if allowed {
         let observation = outcome.run.agents[1].tools[0].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert_eq!(observation.intent.limits.network, arany::NetworkGrant::Proxy);
+        assert_eq!(
+            observation.intent.limits.network,
+            arany::NetworkGrant::Proxy
+        );
     }
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), if allowed { 4 } else { 2 });
@@ -686,7 +740,11 @@ async fn researcher_case(root: &Path, case: WebCase, allowed: bool) -> arany::Ru
         .iter()
         .find(|request| request.phase == AgentPhase::ChildWork)
         .unwrap();
-    let catalog: Value = serde_json::from_str(child.input.tools.as_ref().unwrap().catalog()).unwrap();
-    assert_eq!(catalog.get("web").is_some(), case.config["child_web"] == true);
+    let catalog: Value =
+        serde_json::from_str(child.input.tools.as_ref().unwrap().catalog()).unwrap();
+    assert_eq!(
+        catalog.get("web").is_some(),
+        case.config["child_web"] == true
+    );
     outcome
 }

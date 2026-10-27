@@ -169,7 +169,10 @@ impl WorkerGrant {
         self.tools.retain(|tool| {
             !matches!(
                 tool,
-                WorkerTool::Skill | WorkerTool::McpList | WorkerTool::WebFetch | WorkerTool::WebSearch
+                WorkerTool::Skill
+                    | WorkerTool::McpList
+                    | WorkerTool::WebFetch
+                    | WorkerTool::WebSearch
             ) && allows_tool(*tool)
         });
         self.commands.retain(|c| {
