@@ -33,6 +33,7 @@ impl Table {
         source: &str,
         event: &Event<'_>,
         range: Range<usize>,
+        definition: Option<Range<usize>>,
     ) -> Result<(), ()> {
         match event {
             Event::Start(Tag::TableHead | Tag::TableRow) => {
@@ -56,7 +57,7 @@ impl Table {
                 envelope(&mut cells, range);
                 *self.cell()? = cells;
             }
-            _ => self.flow.event(source, event, range)?,
+            _ => self.flow.event(source, event, range, definition)?,
         }
         Ok(())
     }
@@ -65,6 +66,18 @@ impl Table {
             .last_mut()
             .and_then(|row| row.cells.last_mut())
             .ok_or(())
+    }
+    pub(super) fn link_line_at(&self, coordinate: Coordinate) -> Option<&[Cell]> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .find(|cells| {
+                cells.iter().any(|cell| {
+                    cell.coordinate == coordinate
+                        && (coordinate.fragment != Fragment::Label || coordinate.site != cell.byte)
+                })
+            })
+            .map(Vec::as_slice)
     }
     pub(super) fn finish(&mut self) {
         self.rows[0].range.start = self.range.start;
@@ -148,6 +161,13 @@ fn records(
                 for header in &table.rows[0].cells[column] {
                     cell.push(Cell {
                         byte: anchor,
+                        coordinate: Coordinate {
+                            fragment: Fragment::Label,
+                            offset: cell.len(),
+                            ..Coordinate::source(anchor)
+                        },
+                        envelope: None,
+                        definition: None,
                         source: anchor..anchor,
                         text: header.text.clone(),
                         style: header.style | Modifier::BOLD,
@@ -155,6 +175,12 @@ fn records(
                 }
                 cell.push(Cell {
                     byte: anchor,
+                    coordinate: Coordinate {
+                        fragment: Fragment::Separator,
+                        ..Coordinate::source(anchor)
+                    },
+                    envelope: None,
+                    definition: None,
                     source: anchor..anchor,
                     text: ": ".into(),
                     style: Modifier::empty(),
@@ -176,7 +202,7 @@ fn emit(
     let wrapped: Vec<_> = cells
         .iter()
         .zip(widths)
-        .map(|(cells, width)| chunks(cells, *width))
+        .map(|(cells, width)| chunks(cells, *width, super::inline::Wrap::Word))
         .collect();
     for line in 0..wrapped.iter().map(Vec::len).max().unwrap_or(1) {
         let (mut output, mut bytes) = (Vec::new(), 0);
@@ -190,6 +216,13 @@ fn emit(
                 if capture {
                     output.push(Cell {
                         byte: anchor,
+                        coordinate: Coordinate {
+                            fragment: Fragment::Rail,
+                            offset: column,
+                            ..Coordinate::source(anchor)
+                        },
+                        envelope: None,
+                        definition: None,
                         source: anchor..anchor,
                         text: format!("{}{SEPARATOR}", " ".repeat(padding)),
                         style: Modifier::empty(),

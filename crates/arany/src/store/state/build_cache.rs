@@ -137,30 +137,9 @@ pub(crate) struct BuildCacheLease {
     archive_limit: u64,
     candidate_limit: u64,
     defer_recovery: bool,
-    shared: bool,
 }
 
 impl BuildCacheLease {
-    pub(crate) fn generation(&self) -> Result<Option<[u8; 32]>, StoreError> {
-        let Some((file, _)) = self.archive()? else {
-            return Ok(None);
-        };
-        let metadata = file.metadata()?;
-        let mut hash = Sha256::new();
-        hash.update(b"arany.build-cache.generation.v1");
-        for value in [metadata.dev(), metadata.ino(), metadata.len()] {
-            hash.update(value.to_le_bytes());
-        }
-        for value in [
-            metadata.mtime(),
-            metadata.mtime_nsec(),
-            metadata.ctime(),
-            metadata.ctime_nsec(),
-        ] {
-            hash.update(value.to_le_bytes());
-        }
-        Ok(Some(hash.finalize().into()))
-    }
     pub(crate) fn candidate_limit(&self) -> u64 {
         self.candidate_limit
     }
@@ -180,6 +159,7 @@ impl BuildCacheLease {
         Ok(Some((opened, file.metadata()?.len())))
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn publish<R: Read>(
         &mut self,
         candidate: &mut R,
@@ -374,6 +354,7 @@ impl BuildCacheLease {
         &self.token
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn candidate_writer(&self) -> Result<File, StoreError> {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
@@ -400,7 +381,7 @@ impl BuildCacheLease {
 
 impl Drop for BuildCacheLease {
     fn drop(&mut self) {
-        if self.defer_recovery || self.shared {
+        if self.defer_recovery {
             return;
         }
         if let Ok(_aggregate) = lock_file(&self.dir, AGGREGATE_LOCK, true) {
@@ -424,63 +405,7 @@ impl StateRoot {
         Ok(())
     }
 
-    pub(crate) fn read_build_cache(
-        &self,
-        identity: BuildCacheIdentity,
-        archive_limit: u64,
-    ) -> Result<BuildCacheLease, StoreError> {
-        if archive_limit == 0 || archive_limit > MAX_ARCHIVE_BYTES {
-            return Err(StoreError::InvalidBuildCache);
-        }
-        self.admit_identity(&identity)?;
-        let dir = cache_directory(self, true)?;
-        let token = identity.token();
-        #[cfg(target_os = "linux")]
-        directory::prepare_worker_archive(self, &dir, &identity, archive_limit)?;
-        let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
-        if identity_count(&dir)? >= MAX_IDENTITIES && !contains_cache_identity(&dir, &token)? {
-            return Err(StoreError::StorageFull);
-        }
-        let (file, _) = open_lock_file(&dir, &identity_lock_name(&token))?;
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::WOULDBLOCK) => return Err(StoreError::BuildCacheBusy),
-            Err(error) => return Err(StoreError::Io(io::Error::from(error))),
-        }
-        let identity_lock = FlockGuard(file);
-        // The shared lease never recovers, reserves, collects or publishes an archive.
-        #[cfg(target_os = "linux")]
-        {
-            directory::guard::admit(&dir, &token)?;
-            directory::directory_available(&dir, &token)?;
-        }
-        if file_exists(&dir, &transaction_name(&token))?
-            || file_exists(&dir, &transaction_next_name(&token))?
-        {
-            return Err(StoreError::BuildCacheBusy);
-        }
-        let archive = match open_regular(&dir, &archive_name(&token), archive_limit) {
-            Ok(file) => Some(file),
-            Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => None,
-            Err(error) => return Err(error),
-        };
-        #[cfg(target_os = "linux")]
-        if archive.is_none() && file_exists(&dir, &directory::tree_name(&token))? {
-            return Err(StoreError::BuildCacheBusy);
-        }
-        Ok(BuildCacheLease {
-            dir,
-            _identity_lock: identity_lock,
-            identity,
-            token,
-            archive,
-            archive_limit,
-            candidate_limit: 0,
-            defer_recovery: false,
-            shared: true,
-        })
-    }
-    #[cfg(test)]
+    #[cfg(any(test, all(target_os = "linux", feature = "test-support")))]
     pub(crate) fn begin_build_cache(
         &self,
         identity: BuildCacheIdentity,
@@ -632,7 +557,6 @@ impl StateRoot {
             archive_limit,
             candidate_limit,
             defer_recovery: false,
-            shared: false,
         })
     }
 
@@ -915,7 +839,7 @@ pub(crate) fn capture_archive<W: Write>(
     capture_archive_with_limit(source, identity, exclusions, writer, MAX_ARCHIVE_BYTES)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub(crate) fn capture_archive_with_limit<W: Write>(
     source: &Dir,
     identity: &BuildCacheIdentity,
@@ -962,6 +886,7 @@ pub(crate) fn capture_archive_with_limit<W: Write>(
     Ok(total)
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn archive_size_with_limit(
     source: &Dir,
     identity: &BuildCacheIdentity,
@@ -1299,6 +1224,7 @@ impl<R: Read> ArchiveEntry<'_, R> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn write_entry<R: Read, W: Write>(
     output: &mut W,
     entry: &mut ArchiveEntry<'_, R>,
@@ -1838,6 +1764,7 @@ enum CacheTransaction {
 }
 
 impl CacheTransaction {
+    #[cfg(any(target_os = "macos", test))]
     fn record(self) -> &'static str {
         match self {
             Self::RollbackPrevious => "rollback-previous",
@@ -1864,6 +1791,7 @@ fn sync_directory(dir: &Dir) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn write_transaction(
     dir: &Dir,
     token: &str,
@@ -2078,6 +2006,7 @@ fn remove_archive_file(dir: &Dir, name: &str) -> Result<(), StoreError> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn finish_committed(dir: &Dir, token: &str) -> Result<(), StoreError> {
     let transaction = read_transaction(dir, token)?.ok_or(StoreError::StateNotPrivate)?;
     if !matches!(
@@ -2151,6 +2080,7 @@ fn is_excluded(path: &str, exclusions: &[String]) -> bool {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn write_header<W: Write>(writer: &mut W, identity: &BuildCacheIdentity) -> Result<(), StoreError> {
     writer.write_all(MAGIC)?;
     let path = identity.path.as_bytes();
@@ -2167,6 +2097,7 @@ fn header_size(identity: &BuildCacheIdentity) -> Result<u64, StoreError> {
         .map_err(|_| StoreError::StorageFull)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn write_entry_header<W: Write>(
     writer: &mut W,
     path: &str,
@@ -2186,6 +2117,7 @@ fn entry_header_size(path: &str) -> Result<u64, StoreError> {
     u64::try_from(12 + path.len()).map_err(|_| StoreError::StorageFull)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn write_terminator<W: Write>(writer: &mut W) -> Result<(), StoreError> {
     writer.write_all(&[0; 12])?;
     Ok(())
@@ -2429,98 +2361,6 @@ mod tests {
         lease
             .publish(&mut candidate, exclusions)
             .expect("atomic cache publish");
-    }
-
-    #[test]
-    fn worker_cache_shared_reads_pin_generation_and_never_publish_or_recover() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let state_path = temp.path().join("state");
-        let workspace = temp.path().join("workspace");
-        private_dir(&state_path);
-        private_dir(&workspace);
-        let state = StateRoot::admit(&state_path).unwrap();
-        let identity = identity(&workspace);
-        let source = workspace.join("source");
-        std::fs::create_dir_all(source.join("target")).unwrap();
-        std::fs::write(source.join("target/marker"), b"committed").unwrap();
-        let bytes = archive(&identity, &source, &[]);
-        let empty = state
-            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
-            .unwrap();
-        assert_eq!(empty.generation().unwrap(), None);
-        assert!(matches!(
-            state.begin_build_cache(identity.clone()),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        drop(empty);
-        publish(&state, identity.clone(), &bytes, &[]);
-        let mut first = state
-            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
-            .unwrap();
-        let second = state
-            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
-            .unwrap();
-        let generation = first.generation().unwrap().expect("committed generation");
-        assert_eq!(second.generation().unwrap(), Some(generation));
-        assert!(matches!(
-            first.candidate_writer(),
-            Err(StoreError::StorageFull)
-        ));
-        assert!(matches!(
-            first.publish(&mut bytes.as_slice(), &[]),
-            Err(StoreError::StorageFull)
-        ));
-        assert!(matches!(
-            state.begin_build_cache(identity.clone()),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        assert!(matches!(
-            state.clear_build_cache(identity.clone()),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        assert!(matches!(
-            state.clear_all_build_caches(),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        drop(first);
-        assert!(matches!(
-            state.begin_build_cache(identity.clone()),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        drop(second);
-        let exclusive = state.begin_build_cache(identity.clone()).unwrap();
-        assert!(matches!(
-            state.read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        drop(exclusive);
-        std::fs::write(source.join("target/marker"), b"replacement").unwrap();
-        publish(
-            &state,
-            identity.clone(),
-            &archive(&identity, &source, &[]),
-            &[],
-        );
-        let replaced = state
-            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
-            .unwrap();
-        assert_ne!(replaced.generation().unwrap(), Some(generation));
-        drop(replaced);
-        let dir = cache_directory(&state, false).unwrap();
-        let token = identity.token();
-        let mut marker = create_private_file(&dir, &transaction_name(&token)).unwrap();
-        marker.write_all(b"malformed").unwrap();
-        assert!(matches!(
-            state.read_build_cache(identity, DEFAULT_ARCHIVE_BYTES),
-            Err(StoreError::BuildCacheBusy)
-        ));
-        assert_eq!(
-            std::fs::read(state_path.join(DIRECTORY).join(transaction_name(&token))).unwrap(),
-            b"malformed"
-        );
     }
 
     #[test]

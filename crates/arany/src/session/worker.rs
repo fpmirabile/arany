@@ -10,7 +10,6 @@ pub const MAX_EDITOR_CHANGE_REPORT_BYTES: usize = 2048;
 
 pub const WORKER_CHUNK_BYTES: usize = 45 * 1024;
 pub const WORKER_DATA_BYTES: usize = 48 * 1024 * 1024;
-pub const WORKER_MANIFEST_BYTES: usize = 3 * 1024 * 1024;
 pub const WORKER_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 pub const WORKER_FILES: usize = 2048;
 pub(crate) const MAX_EDITOR_CONTINUATIONS: u8 = 3;
@@ -221,7 +220,6 @@ pub struct WorkerPolicy {
     pub concurrency: u8,
     pub max_turns: u8,
     pub max_tools: u8,
-    pub data_bytes: u32,
 }
 impl WorkerPolicy {
     pub(crate) fn valid(&self) -> bool {
@@ -229,8 +227,6 @@ impl WorkerPolicy {
             && (1..=8).contains(&self.concurrency)
             && (1..=17).contains(&self.max_turns)
             && self.max_tools <= 16
-            && self.data_bytes > 0
-            && self.data_bytes as usize <= WORKER_DATA_BYTES
     }
 }
 
@@ -328,51 +324,6 @@ pub struct WorkerAssignment {
     pub policy_digest: [u8; 32],
     #[serde(deserialize_with = "Option::deserialize")]
     pub permissions_digest: Option<[u8; 32]>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerDataPurpose {
-    Base,
-    Mutation,
-    Handover,
-}
-impl WorkerDataPurpose {
-    pub(crate) fn limit(self) -> usize {
-        if self == Self::Base {
-            WORKER_MANIFEST_BYTES
-        } else {
-            WORKER_DATA_BYTES
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerDataRef {
-    pub assignment_id: AgentRunId,
-    pub purpose: WorkerDataPurpose,
-    pub first_sequence: u64,
-    pub seal_sequence: u64,
-    pub chunks: u16,
-    pub bytes: u32,
-    pub sha256: [u8; 32],
-}
-impl WorkerDataRef {
-    pub(crate) fn valid(&self) -> bool {
-        self.assignment_id.valid()
-            && self.first_sequence > 0
-            && self.chunks > 0
-            && usize::from(self.chunks) <= self.purpose.limit().div_ceil(WORKER_CHUNK_BYTES)
-            && self
-                .first_sequence
-                .checked_add(u64::from(self.chunks))
-                .is_some_and(|minimum| minimum <= self.seal_sequence)
-            && self.bytes > 0
-            && self.bytes as usize <= self.purpose.limit()
-            && (self.bytes as usize).div_ceil(WORKER_CHUNK_BYTES) == usize::from(self.chunks)
-            && self.sha256 != [0; 32]
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -533,18 +484,6 @@ pub(crate) fn valid_leases(roots: &[String]) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerManifest {
-    #[serde(deserialize_with = "bounded_files")]
-    pub entries: Vec<WorkerManifestEntry>,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerManifestEntry {
-    pub path: String,
-    pub version: WorkerBaseVersion,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerBaseVersion {
     Absent,
@@ -568,12 +507,6 @@ pub struct WorkerFileFact {
     pub before: WorkerBaseVersion,
     pub after: WorkerBaseVersion,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkerDataFacts {
-    Manifest(Vec<WorkerManifestEntry>),
-    Changes(Vec<WorkerFileFact>),
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BorrowedVersion<'a> {
@@ -600,79 +533,9 @@ struct BorrowedChangeset<'a> {
     files: Vec<BorrowedChange<'a>>,
 }
 
-pub(crate) fn decode_data(
-    bytes: &[u8],
-    purpose: WorkerDataPurpose,
-) -> Result<WorkerDataFacts, ReplayError> {
-    decode_data_inner(bytes, purpose, WORKER_CONTENT_BYTES, false)
-}
-
-pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<WorkerDataFacts, ReplayError> {
-    let facts = decode_data_inner(
-        bytes,
-        WorkerDataPurpose::Handover,
-        2 * WORKER_CONTENT_BYTES,
-        true,
-    )?;
-    if let WorkerDataFacts::Changes(files) = &facts {
-        for before in [true, false] {
-            let size: usize = files
-                .iter()
-                .map(
-                    |file| match if before { &file.before } else { &file.after } {
-                        WorkerBaseVersion::File { bytes, .. } => *bytes as usize,
-                        _ => 0,
-                    },
-                )
-                .sum();
-            if size > WORKER_CONTENT_BYTES {
-                return Err(ReplayError::InvalidPayload);
-            }
-        }
-    }
-    Ok(facts)
-}
-
-fn decode_data_inner(
-    bytes: &[u8],
-    purpose: WorkerDataPurpose,
-    content_limit: usize,
-    rewind: bool,
-) -> Result<WorkerDataFacts, ReplayError> {
-    if bytes.is_empty() || bytes.len() > purpose.limit() {
+pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<Vec<WorkerFileFact>, ReplayError> {
+    if bytes.is_empty() || bytes.len() > WORKER_DATA_BYTES {
         return Err(ReplayError::InvalidPayload);
-    }
-    if purpose == WorkerDataPurpose::Base {
-        let manifest: WorkerManifest =
-            serde_json::from_slice(bytes).map_err(|_| ReplayError::InvalidPayload)?;
-        if manifest.entries.len() > WORKER_FILES || !canonical(&manifest, bytes) {
-            return Err(ReplayError::InvalidPayload);
-        }
-        let mut total = 0usize;
-        for (i, entry) in manifest.entries.iter().enumerate() {
-            if !crate::validate::valid_relative(&entry.path, false)
-                || entry.path.split('/').count() > 16
-                || manifest.entries[..i].iter().any(|e| {
-                    e.path >= entry.path
-                        || contains(&e.path, &entry.path)
-                            && e.version != WorkerBaseVersion::Directory
-                })
-            {
-                return Err(ReplayError::InvalidPayload);
-            }
-            if let WorkerBaseVersion::File { sha256, bytes, .. } = &entry.version {
-                if !crate::validate::valid_digest(sha256) || *bytes as usize > 1024 * 1024 {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                total = total
-                    .checked_add(*bytes as usize)
-                    .ok_or(ReplayError::InvalidPayload)?;
-            }
-        }
-        if total > WORKER_CONTENT_BYTES {
-            return Err(ReplayError::InvalidPayload);
-        }
-        return Ok(WorkerDataFacts::Manifest(manifest.entries));
     }
     let changeset: BorrowedChangeset<'_> =
         serde_json::from_slice(bytes).map_err(|_| ReplayError::InvalidPayload)?;
@@ -688,9 +551,6 @@ fn decode_data_inner(
         .collect();
     for (i, file) in changeset.files.iter().enumerate() {
         if !writable_path(&file.path)
-            || !rewind && matches!((&file.before, &file.after), (None, None))
-            || !rewind
-                && matches!((&file.before, &file.after), (Some(a),Some(b)) if a.sha256 == b.sha256 && a.executable == b.executable)
             || changeset.files[..i]
                 .iter()
                 .zip(&lowered)
@@ -724,7 +584,7 @@ fn decode_data_inner(
                 total = total
                     .checked_add(content.len())
                     .ok_or(ReplayError::InvalidPayload)?;
-                if total > content_limit {
+                if total > 2 * WORKER_CONTENT_BYTES {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(WorkerBaseVersion::File {
@@ -739,7 +599,21 @@ fn decode_data_inner(
             after: version(&file.after)?,
         });
     }
-    Ok(WorkerDataFacts::Changes(facts))
+    for before in [true, false] {
+        let size: usize = facts
+            .iter()
+            .map(
+                |file| match if before { &file.before } else { &file.after } {
+                    WorkerBaseVersion::File { bytes, .. } => *bytes as usize,
+                    _ => 0,
+                },
+            )
+            .sum();
+        if size > WORKER_CONTENT_BYTES {
+            return Err(ReplayError::InvalidPayload);
+        }
+    }
+    Ok(facts)
 }
 
 fn canonical(value: &impl Serialize, bytes: &[u8]) -> bool {
@@ -799,47 +673,4 @@ pub(crate) fn valid_commands(commands: &[String]) -> bool {
         && commands.iter().enumerate().all(|(i, name)| {
             crate::validate::valid_name(name) && commands[..i].iter().all(|earlier| earlier < name)
         })
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PrivateCapture {
-    None {},
-    Sealed { data: WorkerDataRef },
-    Rejected { cause: PrivateCaptureRejection },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrivateCaptureRejection {
-    OutOfLease,
-    Overflow,
-    UnsupportedEntry,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerCommandResult {
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub stdout_total: crate::tools::types::OutputTotal,
-    pub stderr_total: crate::tools::types::OutputTotal,
-    pub private_capture: PrivateCapture,
-}
-
-impl WorkerCommandResult {
-    pub(crate) fn valid(&self) -> bool {
-        self.stdout_total.valid_for(&self.stdout)
-            && self.stderr_total.valid_for(&self.stderr)
-            && serde_json::to_vec(self)
-                .is_ok_and(|b| b.len() <= crate::tools::types::MAX_TOOL_RESULT_BYTES)
-            && match &self.private_capture {
-                PrivateCapture::Sealed { data } => {
-                    data.valid() && data.purpose == WorkerDataPurpose::Mutation
-                }
-                _ => true,
-            }
-    }
 }

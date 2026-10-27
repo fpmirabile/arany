@@ -11,6 +11,9 @@ use tokio::time::Instant;
 #[cfg(any(test, feature = "test-support"))]
 pub use injection::{FaultPlan, GitStorageFault};
 
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub(crate) mod git_write;
+
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
     #[cfg(any(test, feature = "test-support"))]
@@ -82,9 +85,13 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
     Ok(())
 }
 
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(
+    not(any(test, all(target_os = "macos", feature = "test-support"))),
+    expect(unused_variables)
+)]
 pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(target_os = "macos", feature = "test-support")))]
     FaultPlan::commit_marker(token)?;
     Ok(())
 }
@@ -414,7 +421,9 @@ pub(crate) fn commit_latency(recorder: &LatencyRecorder, envelope: &EventEnvelop
 #[cfg(any(test, feature = "test-support"))]
 mod injection {
     use crate::session::{Event, SessionId};
+    #[cfg(any(target_os = "macos", test))]
     use crate::store::BuildCacheIdentity;
+    #[cfg(any(target_os = "macos", test))]
     use std::io;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -480,6 +489,7 @@ mod injection {
             std::sync::mpsc::Receiver<()>,
             oneshot::Sender<()>,
         ),
+        #[cfg(any(target_os = "macos", test))]
         CommitMarker(String),
         // Without a gate the Session's retry backoffs end at once; a gate holds one backoff.
         RetryBackoff(
@@ -724,6 +734,7 @@ mod injection {
             (wait_entered, release, wait_finished)
         }
 
+        #[cfg(any(target_os = "macos", test))]
         pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
             plan().push(Fault::CommitMarker(identity.token()));
         }
@@ -986,6 +997,7 @@ mod injection {
             }
         }
 
+        #[cfg(any(target_os = "macos", test))]
         pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
             match take(|fault| matches!(fault, Fault::CommitMarker(key) if key == token)) {
                 Some(_) => Err(io::Error::other("injected commit marker failure")),

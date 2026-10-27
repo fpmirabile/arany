@@ -384,109 +384,6 @@ impl CommandSnapshotBuilder<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SnapshotKind {
-    Worker,
-    WorkerCommand,
-}
-
-fn command_collect(
-    root: &Dir,
-    path: &str,
-    entries: &mut BTreeMap<String, Entry>,
-    budget: &mut ScanBudget,
-    retained: &mut usize,
-    kind: SnapshotKind,
-) -> Result<(), ToolError> {
-    let directory = if path.is_empty() {
-        root.try_clone().map_err(|_| ToolError::Path)?
-    } else {
-        Dir::from_std_file(open_file(root, path)?)
-    };
-    let mut names = Vec::new();
-    for entry in directory.entries().map_err(|_| ToolError::Path)? {
-        budget.entry()?;
-        if budget.entries > crate::session::worker::WORKER_FILES {
-            return Err(ToolError::Limit);
-        }
-        let name = entry
-            .map_err(|_| ToolError::Path)?
-            .file_name()
-            .into_string()
-            .map_err(|_| ToolError::Path)?;
-        let selected = if path.is_empty() {
-            name
-        } else {
-            format!("{path}/{name}")
-        };
-        if kind == SnapshotKind::WorkerCommand && selected.split('/').any(ignored_directory) {
-            return Err(ToolError::Path);
-        }
-        if !valid_relative(&selected, false) {
-            return Err(if selected.split('/').any(forbidden) {
-                ToolError::FilesystemDenied
-            } else {
-                ToolError::Path
-            });
-        }
-        if selected.split('/').count() > 16 {
-            return Err(ToolError::Limit);
-        }
-        names.push(selected);
-    }
-    names.sort();
-    if names.is_empty() && !path.is_empty() {
-        *retained += 1;
-    }
-    for selected in names {
-        let file = open_file(root, &selected)?;
-        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.mode() & 0o6000 != 0 {
-                return Err(ToolError::FilesystemDenied);
-            }
-        }
-        let entry = if metadata.is_dir() {
-            command_collect(root, &selected, entries, budget, retained, kind)?;
-            Entry {
-                path: selected.clone(),
-                content: None,
-                executable: false,
-            }
-        } else {
-            #[cfg(unix)]
-            let executable = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o111 != 0
-            };
-            #[cfg(not(unix))]
-            let executable = false;
-            let cap = MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes));
-            let content = read_regular(file, cap)?;
-            budget.bytes = budget
-                .bytes
-                .checked_add(content.len())
-                .ok_or(ToolError::Limit)?;
-            if budget.bytes > MAX_SNAPSHOT_BYTES {
-                return Err(ToolError::Limit);
-            }
-            *retained += 1;
-            Entry {
-                path: selected.clone(),
-                content: Some(content),
-                executable,
-            }
-        };
-        if *retained > MAX_SNAPSHOT_FILES {
-            return Err(ToolError::Limit);
-        }
-        entries.insert(selected, entry);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 pub(super) fn command_changeset(
     workspace: &Path,
@@ -1132,7 +1029,6 @@ pub(crate) fn workspace_entries(
         result_bytes: MAX_TOOL_RESULT_BYTES,
         deadline: std::time::Instant::now() + super::selection::DISCOVERY_TIME,
         output: super::discovery::Output::Suggestions,
-        private_image: false,
         cancellation: None,
     })?;
     super::discovery::SuggestionIndex::decode(&output)?.refine(folder, prefix)
@@ -1632,6 +1528,7 @@ pub(super) fn file_receipt(intent: &EffectIntent, output: &str) -> Result<FileRe
     Ok(receipt)
 }
 
+#[cfg(test)]
 pub(super) fn native(
     workspace: &Path,
     call: &ToolCall,
@@ -2233,152 +2130,6 @@ pub(super) fn reject_overlap(path: &Path, protected: &Path) -> Result<(), ToolEr
         }
     }
     Ok(())
-}
-
-pub(super) fn worker_image(
-    root: &Dir,
-    paths: &[String],
-) -> Result<super::guard::transfer::Image, ToolError> {
-    worker_snapshot(root, paths, SnapshotKind::Worker)
-}
-
-pub(super) fn worker_command_image(root: &Dir) -> Result<super::guard::transfer::Image, ToolError> {
-    worker_snapshot(root, &[".".into()], SnapshotKind::WorkerCommand)
-}
-
-fn worker_snapshot(
-    root: &Dir,
-    paths: &[String],
-    kind: SnapshotKind,
-) -> Result<super::guard::transfer::Image, ToolError> {
-    use super::guard::transfer::{Entry as WorkerEntry, Image};
-    let mut entries = BTreeMap::new();
-    let mut budget = ScanBudget::default();
-    let mut retained = 0usize;
-    check_change_directory(root, root)?;
-    for path in paths {
-        if entries.contains_key(path) {
-            continue;
-        }
-        if path == "." {
-            command_collect(root, "", &mut entries, &mut budget, &mut retained, kind)?;
-        } else if !valid_relative(path, false) || path.split('/').count() > 16 {
-            return Err(ToolError::Path);
-        } else {
-            budget.entry()?;
-            if budget.entries > crate::session::worker::WORKER_FILES {
-                return Err(ToolError::Limit);
-            }
-            match open_file(root, path) {
-                Ok(file) => {
-                    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if metadata.mode() & 0o6000 != 0 {
-                            return Err(ToolError::FilesystemDenied);
-                        }
-                    }
-                    if metadata.is_dir() {
-                        command_collect(
-                            root,
-                            path,
-                            &mut entries,
-                            &mut budget,
-                            &mut retained,
-                            kind,
-                        )?;
-                        entries.insert(
-                            path.clone(),
-                            Entry {
-                                path: path.clone(),
-                                content: None,
-                                executable: false,
-                            },
-                        );
-                    } else {
-                        #[cfg(unix)]
-                        let executable = {
-                            use std::os::unix::fs::PermissionsExt;
-                            metadata.permissions().mode() & 0o111 != 0
-                        };
-                        #[cfg(not(unix))]
-                        let executable = false;
-                        let content = read_regular(
-                            file,
-                            MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes)),
-                        )?;
-                        budget.bytes = budget
-                            .bytes
-                            .checked_add(content.len())
-                            .ok_or(ToolError::Limit)?;
-                        entries.insert(
-                            path.clone(),
-                            Entry {
-                                path: path.clone(),
-                                content: Some(content),
-                                executable,
-                            },
-                        );
-                    }
-                }
-                Err(_) => {
-                    let parent = change_parent(root, path)?;
-                    if parent.missing.is_empty()
-                        && !parent
-                            .directory
-                            .symlink_metadata(&parent.leaf)
-                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                    {
-                        return Err(ToolError::Path);
-                    }
-                }
-            }
-        }
-        if entries.len() > crate::session::worker::WORKER_FILES || budget.bytes > MAX_SNAPSHOT_BYTES
-        {
-            return Err(ToolError::Limit);
-        }
-    }
-    let mut image = Image {
-        entries: entries
-            .into_iter()
-            .map(|(path, entry)| {
-                (
-                    path,
-                    match entry.content {
-                        Some(bytes) => WorkerEntry::file(&bytes, entry.executable),
-                        None => WorkerEntry::Directory,
-                    },
-                )
-            })
-            .collect(),
-    };
-    for path in paths.iter().filter(|p| p.as_str() != ".") {
-        image
-            .entries
-            .entry(path.clone())
-            .or_insert(WorkerEntry::Absent);
-    }
-    if image.entries.len() > crate::session::worker::WORKER_FILES {
-        return Err(ToolError::Limit);
-    }
-    Ok(image)
-}
-
-pub(super) fn put_parent_directories(root: &Dir, path: &str) -> Result<(), ToolError> {
-    create_parents(root, path).map(|_| ())
-}
-
-pub(super) fn put_directory(root: &Dir, path: &str) -> Result<(), ToolError> {
-    put_entry(
-        root,
-        Entry {
-            path: path.to_owned(),
-            content: None,
-            executable: false,
-        },
-    )
 }
 
 pub(super) fn worker_publication_paths(root: &Dir, files: &[FileChange]) -> Result<(), ToolError> {
