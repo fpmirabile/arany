@@ -103,10 +103,10 @@ async fn worker_id_resume_survives_exit_show_fork_and_compaction_without_reexecu
                 let resumed = observed.view.runs[1].agents[1].id;
                 for expected in [
                     format!(
-                        "Worker {source}: Cancelled; cause=Some(Cancelled); publication=Unpublished; integration=None; discard=None; private_outcome_unknown=false; cleanup_confirmed=false; lease_released=true; verified=false; resumes=none; supersedes=none"
+                        "Worker {source}: Cancelled; cause=Some(Cancelled); publication=Unpublished; lease_released=true; verified=false; resumes=none; supersedes=none"
                     ),
                     format!(
-                        "Worker {resumed}: Ready; cause=Some(Finished); publication=Confirmed; integration=None; discard=None; private_outcome_unknown=false; cleanup_confirmed=false; lease_released=true; verified=true; resumes={source}; supersedes=none"
+                        "Worker {resumed}: Ready; cause=Some(Finished); publication=Confirmed; lease_released=true; verified=true; resumes={source}; supersedes=none"
                     ),
                 ] {
                     assert!(

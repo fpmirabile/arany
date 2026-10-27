@@ -1119,7 +1119,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
 }
 
 #[test]
-fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publication() {
+fn worker_recovery_report_preserves_exact_ids_uncertainty_and_unverified_publication() {
     let f = crate::session::worker_protocol_fixture();
     let events = f.envelopes();
     for end in 1..=events.len() {
@@ -1152,11 +1152,8 @@ fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publicatio
                     "prefix {end}"
                 );
             }
-            if worker.private_outcome_unknown {
-                assert!(
-                    text.contains("private_outcome_unknown=true"),
-                    "prefix {end}"
-                );
+            if worker.publication == crate::worker::WorkerPublication::Unknown {
+                assert!(text.contains("publication=Unknown"), "prefix {end}");
             }
         }
         assert!(
@@ -1290,8 +1287,8 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     assert!(!view.runs[0].worker_history()[0].verified);
 
     let mut template = view.rewinds.operations[0].clone();
-    // Long paths reach the report byte limit before its item limit.
-    template.files[0].path = format!("src/{}file.rs", "directory/".repeat(30));
+    // Long paths and resumed interruption facts exercise the report byte limit.
+    template.files[0].path = format!("src/{}file.rs", "directory/".repeat(35));
     for index in 1..10 {
         let mut operation = template.clone();
         operation.started.rewind_id = Uuid::now_v7();
@@ -1342,6 +1339,10 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
         agent.id = AgentRunId::new();
         uncertain_tool.intent.agent_run_id = agent.id;
         agent.tools = vec![uncertain_tool.clone()];
+        agent.status = AgentStatus::Interrupted;
+        let assignment = agent.assignment.as_mut().unwrap();
+        assignment.interrupted = true;
+        assignment.pins.request.resumes = Some(template.id);
         run.agents.push(agent);
     }
     let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());

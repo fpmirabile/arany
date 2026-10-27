@@ -121,13 +121,7 @@ impl RunLoop<'_> {
         } else {
             intent.limits.runtime_ms
         };
-        let transfer_multiplier = if command && intent.limits.cache_bytes > 0
-            || matches!(
-                intent.call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            ) {
+        let transfer_multiplier = if command && intent.limits.cache_bytes > 0 {
             COMMAND_CACHE_PHASES
         } else {
             1
