@@ -19,6 +19,8 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+pub(super) mod supervisor;
+
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
@@ -26,11 +28,11 @@ const MOUNTINFO_ENTRIES_CAP: usize = 4096;
 const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
 const HARDENED_THREADS_CAP: usize = 64;
 const STATUS_BYTES_CAP: usize = 16 * 1024;
-const BWRAP_BOOTSTRAP: &[&str] = &[
+#[cfg(test)]
+const BWRAP_TEST_LAUNCH: &[&str] = &[
     "/usr/bin/env",
     "-i",
     "PATH=/usr/bin:/bin",
-    // No --keep-caps: retained capabilities make Bubblewrap reject a non-root real UID.
     "/usr/bin/unshare",
     "--user",
     "--map-current-user",
@@ -49,7 +51,6 @@ pub(super) fn check_available() -> Result<(), ToolError> {
         "/usr/bin/systemd-run",
         "/usr/bin/systemctl",
         "/usr/bin/env",
-        "/usr/bin/unshare",
     ] {
         let metadata =
             std::fs::symlink_metadata(path).map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -65,7 +66,7 @@ const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-w
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v16:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v17:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
@@ -81,6 +82,8 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&(HARDENED_THREADS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(STATUS_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(super::TASK_BYTES_CAP as u64).to_le_bytes());
+    bytes.extend_from_slice(&supervisor::TMPFS_INODES.to_le_bytes());
+    bytes.extend_from_slice(&supervisor::MAX_SUPERVISOR_EXECUTABLE_BYTES.to_le_bytes());
     Ok(digest(&bytes))
 }
 
@@ -591,7 +594,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
             "--property=TimeoutStopSec=2s",
             "--property=RuntimeMaxSec=60s",
         ])
-        .args(BWRAP_BOOTSTRAP)
+        .args(BWRAP_TEST_LAUNCH)
         .args([
             "--unshare-all",
             "--unshare-user",
@@ -632,6 +635,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
 }
 
 struct UnitFilesystem<'a> {
+    launch: (supervisor::Launch, std::fs::File),
     preparation: bool,
     seed_path: &'a Path,
     seed_dir: &'a cap_std::fs::Dir,
@@ -645,8 +649,9 @@ fn unit_command(
     unit_name: &str,
     runtime_path: &str,
     filesystem: UnitFilesystem<'_>,
-) -> Command {
+) -> Result<(Command, std::fs::File), ToolError> {
     let UnitFilesystem {
+        launch: (launch, executable),
         preparation,
         seed_path,
         seed_dir,
@@ -665,6 +670,7 @@ fn unit_command(
     } else {
         "--property=CPUQuota=25%"
     };
+    let executable_path = supervisor::executable_path(&executable);
     let mut command = manager_command("/usr/bin/systemd-run");
     command.args([
         "--user",
@@ -675,6 +681,7 @@ fn unit_command(
         "--wait",
         "--expand-environment=no",
         "--service-type=exec",
+        "--working-directory=/",
         "--unit",
         unit_name,
         "--property=Restart=no",
@@ -699,9 +706,8 @@ fn unit_command(
             u64::try_from(super::transfer::transfer_overhead(intent).as_millis())
                 .expect("bounded worker transfer time"),
         );
-    command
-        .arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms))
-        .args(BWRAP_BOOTSTRAP);
+    command.arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms));
+    launch.append(&mut command, &executable_path)?;
     let native = intent.call.is_git() || super::super::discovery::possible(&intent.call);
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
@@ -720,7 +726,6 @@ fn unit_command(
         &folders,
         workspace_mount,
         &intent.limits,
-        &runtime.guard_executable,
     );
     if preparation {
         command
@@ -734,9 +739,11 @@ fn unit_command(
     for (source, target) in mounts {
         command.args(["--ro-bind"]).arg(source).arg(target);
     }
-    command.args(["--chdir", "/", "/arany", "--internal-tool-guard"]);
-    command.stdin(Stdio::piped());
     command
+        .args(["--chdir", "/", "/arany", "--internal-tool-guard"])
+        .arg(launch.helper_pin()?);
+    command.stdin(Stdio::piped());
+    Ok((command, executable))
 }
 
 async fn settle_launch(
@@ -1049,13 +1056,15 @@ pub(super) async fn execute_inner(
         limits: Some(intent.limits.clone()),
     };
     let filesystem = UnitFilesystem {
+        launch: supervisor::Launch::prepare(&runtime.guard_executable, &seed_path, intent).await?,
         preparation: false,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
         runtime_directories,
         mounts,
     };
-    let mut command = unit_command(runtime, intent, &unit.name, &runtime_path, filesystem);
+    let (mut command, _executable) =
+        unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
     let parent_namespaces = profile::Namespaces::read()?;
     permit.launching()?;
     mark_contained(runtime, false);
@@ -1073,7 +1082,7 @@ pub(super) async fn execute_inner(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let go_cancellation = cancellation.clone();
-    let execution = async {
+    let execution = Box::pin(async {
         let ready_bytes = prepare_ready(
             runtime,
             intent,
@@ -1127,7 +1136,7 @@ pub(super) async fn execute_inner(
             Ok((observation, candidate))
         };
         super::discovery_work(intent, capture).await
-    };
+    });
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Operation),
@@ -1222,7 +1231,6 @@ fn profile_arguments(
     folders: &[&str],
     workspace: Option<(&Path, bool)>,
     limits: &ToolLimits,
-    guard: &Path,
 ) {
     command.args([
         "--unshare-all",
@@ -1298,15 +1306,21 @@ fn profile_arguments(
                 .args(["--tmpfs", "/workspace"]);
         }
     }
-    command.args(["--ro-bind"]).arg(guard).arg("/arany");
 }
 
 pub(super) fn verify_runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
     cache_enabled: bool,
 ) -> Result<(), ToolError> {
-    use std::io::Read;
+    let mounts = read_mountinfo()?;
+    let targets = grants
+        .iter()
+        .map(|grant| grant.mounted_path(cache_enabled))
+        .collect::<Result<Vec<_>, _>>()?;
+    verify_mount_entries(&mounts, &targets)
+}
 
+fn read_mountinfo() -> Result<Vec<MountInfoEntry>, ToolError> {
     let mut bytes = Vec::new();
     std::fs::File::open("/proc/self/mountinfo")
         .map_err(|_| ToolError::ProtectionUnavailable)?
@@ -1316,12 +1330,29 @@ pub(super) fn verify_runtime_mounts(
     if bytes.len() > MOUNTINFO_BYTES_CAP {
         return Err(ToolError::Limit);
     }
-    let mounts = parse_mountinfo(&bytes)?;
-    let targets = grants
+    parse_mountinfo(&bytes)
+}
+
+pub(super) fn verify_copy_mount(project_bytes: u64) -> Result<(), ToolError> {
+    verify_copy_entries(&read_mountinfo()?, project_bytes)
+}
+
+fn verify_copy_entries(mounts: &[MountInfoEntry], project_bytes: u64) -> Result<(), ToolError> {
+    let target = PathBuf::from("/workspace");
+    verify_mount_entries(mounts, std::slice::from_ref(&target))?;
+    let entry = mounts
         .iter()
-        .map(|grant| grant.mounted_path(cache_enabled))
-        .collect::<Result<Vec<_>, _>>()?;
-    verify_mount_entries(&mounts, &targets)
+        .find(|entry| entry.path == target)
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    let size = tmpfs_size_option(project_bytes);
+    if entry.filesystem != b"tmpfs"
+        || entry.source != b"tmpfs"
+        || entry.root != Path::new("/")
+        || mount_option_count(&entry.super_options, size.as_bytes()) != 1
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
 }
 
 fn verify_mount_entries(
@@ -1371,7 +1402,23 @@ fn verify_mount_entries(
 
 struct MountInfoEntry {
     path: std::path::PathBuf,
+    root: std::path::PathBuf,
+    filesystem: Vec<u8>,
+    options: Vec<u8>,
+    source: Vec<u8>,
+    super_options: Vec<u8>,
     optional_fields: usize,
+}
+
+fn mount_option_count(options: &[u8], expected: &[u8]) -> usize {
+    options
+        .split(|byte| *byte == b',')
+        .filter(|option| *option == expected)
+        .count()
+}
+
+fn tmpfs_size_option(bytes: u64) -> String {
+    format!("size={}k", bytes.div_ceil(1024))
 }
 
 fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfoEntry>, ToolError> {
@@ -1418,11 +1465,16 @@ fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfoEntry>, ToolError> {
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let _mount_source = decode_mount_field(fields[separator + 2])?;
-        let _mount_root = decode_mount_path(fields[3])?;
+        let source = fields[separator + 2].to_vec();
+        let root = decode_mount_root(fields[3])?;
         let path = decode_mount_path(fields[4])?;
         entries.push(MountInfoEntry {
             path: std::path::PathBuf::from(OsString::from_vec(path)),
+            root: std::path::PathBuf::from(OsString::from_vec(root)),
+            filesystem: fields[separator + 1].to_vec(),
+            options: fields[5].to_vec(),
+            source,
+            super_options: fields[separator + 3].to_vec(),
             optional_fields: separator - 6,
         });
     }
@@ -1469,6 +1521,20 @@ fn decode_mount_field(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
         index += 4;
     }
     Ok(decoded)
+}
+
+fn decode_mount_root(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
+    // Kernel mount roots of unlinked bind sources retain a //deleted suffix.
+    let suffix = b"//deleted";
+    let live = bytes.strip_suffix(suffix).unwrap_or(bytes);
+    let mut root = decode_mount_path(live)?;
+    if live.len() != bytes.len() {
+        root.extend_from_slice(suffix);
+    }
+    if root.len() > MAX_PATH_BYTES {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(root)
 }
 
 fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
@@ -1624,13 +1690,15 @@ async fn prepare_inputs(
         intent.limits.cache_bytes > 0,
     )?;
     let filesystem = UnitFilesystem {
+        launch: supervisor::Launch::prepare(&runtime.guard_executable, seed_path, intent).await?,
         preparation: true,
         seed_path,
         seed_dir,
         runtime_directories,
         mounts,
     };
-    let mut command = unit_command(runtime, intent, &unit.name, "/usr/bin:/bin", filesystem);
+    let (mut command, _executable) =
+        unit_command(runtime, intent, &unit.name, "/usr/bin:/bin", filesystem)?;
     permit.launching()?;
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1644,7 +1712,7 @@ async fn prepare_inputs(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut drain = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let deadline = deadline.min(tokio::time::Instant::now() + crate::tools::selection::PHASE_TIME);
-    let execution = async {
+    let execution = Box::pin(async {
         let namespaces = profile::Namespaces::read()?;
         let mut task: Task =
             serde_json::from_slice(&task_bytes(runtime, intent, None, namespaces.clone())?)
@@ -1675,7 +1743,7 @@ async fn prepare_inputs(
             return Err(ToolError::Operation);
         }
         result
-    };
+    });
     let result = super::selection_phase::wait(deadline, cancellation, execution).await;
     let cleanup = tokio::time::Instant::now() + super::TEARDOWN_WAIT;
     tokio::time::timeout_at(cleanup, unit.stop())
@@ -1692,11 +1760,17 @@ async fn prepare_inputs(
     let reaped = reaped
         .map_err(|_| ToolError::ProtectionUnavailable)
         .and_then(|status| status.map_err(|_| ToolError::Operation));
+    let bootstrap = drained.as_deref().and_then(bootstrap_failure);
     if let Err(error) = reaped.and(drained.ok_or(ToolError::Operation)) {
         permit.terminated()?;
         return Err(error);
     }
     permit.prepared()?;
+    if result.is_err()
+        && let Some(error) = bootstrap
+    {
+        return Err(error);
+    }
     result
 }
 
@@ -1999,6 +2073,10 @@ mod tests {
     fn native_launch_mounts_workspace_only_for_git_and_discovery() {
         let calls = [
             (
+                serde_json::json!({"operation":"command","program":"sh","args":[],"cwd":"."}),
+                None,
+            ),
+            (
                 serde_json::json!({"operation":"list","path":"."}),
                 Some("--ro-bind"),
             ),
@@ -2046,6 +2124,16 @@ mod tests {
         for (call, workspace_mode) in calls {
             for private in [false, true] {
                 let arguments = native_launch_arguments(call.clone(), private);
+                let bootstrap = arguments
+                    .iter()
+                    .position(|argument| argument == "--supervisor")
+                    .unwrap();
+                let launch: serde_json::Value =
+                    serde_json::from_str(&arguments[bootstrap + 1]).unwrap();
+                assert_eq!(
+                    launch["probe"].is_object(),
+                    call["operation"] == "command" && !private
+                );
                 let mounts = arguments
                     .windows(3)
                     .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--bind"))
@@ -2062,6 +2150,8 @@ mod tests {
     }
 
     fn native_launch_arguments(call: serde_json::Value, private: bool) -> Vec<String> {
+        use std::os::unix::fs::PermissionsExt;
+
         let fixture = tempfile::tempdir().unwrap();
         let seed = crate::tools::fs::open_directory(fixture.path()).unwrap();
         let mut runtime = crate::tools::tests::in_process_runtime(
@@ -2069,6 +2159,13 @@ mod tests {
             serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
                 "commands":[],"skills":[],"mcp":[]}),
         );
+        runtime.guard_executable = fixture.path().join("arany-guard");
+        std::fs::write(&runtime.guard_executable, b"synthetic guard").unwrap();
+        std::fs::set_permissions(
+            &runtime.guard_executable,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let mut intent = runtime.intent(
             crate::session::RunId::new(),
             crate::session::AgentRunId::new(),
@@ -2099,6 +2196,8 @@ mod tests {
             "arany-discovery-profile",
             "/usr/bin:/bin",
             UnitFilesystem {
+                launch: supervisor::Launch::new(&runtime.guard_executable, fixture.path(), &intent)
+                    .unwrap(),
                 preparation: false,
                 seed_path: fixture.path(),
                 seed_dir: &seed,
@@ -2106,6 +2205,8 @@ mod tests {
                 mounts: Vec::new(),
             },
         )
+        .unwrap()
+        .0
         .as_std()
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -2125,8 +2226,8 @@ mod tests {
                 &folders,
                 mount,
                 &ToolLimits::default(),
-                Path::new("/host/guard"),
             );
+            command.args(["--ro-bind", "/host/guard", "/arany"]);
             let arguments = command
                 .as_std()
                 .get_args()
@@ -2184,8 +2285,8 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"allowed\n");
         }
 
-        let mut command = Command::new(BWRAP_BOOTSTRAP[0]);
-        command.args(&BWRAP_BOOTSTRAP[1..]);
+        let mut command = Command::new(BWRAP_TEST_LAUNCH[0]);
+        command.args(&BWRAP_TEST_LAUNCH[1..]);
         profile_arguments(
             &mut command,
             "/usr/bin:/bin",
@@ -2193,8 +2294,11 @@ mod tests {
             &[],
             Some((&workspace, false)),
             &ToolLimits::default(),
-            &std::env::current_exe().unwrap(),
         );
+        command
+            .args(["--ro-bind"])
+            .arg(std::env::current_exe().unwrap())
+            .arg("/arany");
         command
             .args(["--setenv", "ARANY_TEST_GIT_HOST_CONFIG"])
             .arg(&host_config)
@@ -2393,6 +2497,35 @@ mod tests {
         let target = Path::new("/opt/toolchains/a b").to_owned();
         let escaped = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\040b /opt/toolchains/a\\040b ro - ext4 /dev/root ro\n";
         let entries = parse_mountinfo(escaped).unwrap();
+        assert_eq!(entries[1].root, Path::new("/cache/a b"));
+        assert_eq!(entries[1].filesystem, b"ext4");
+        assert_eq!(entries[1].options, b"ro");
+        assert_eq!(entries[1].source, b"/dev/root");
+        assert_eq!(entries[1].super_options, b"ro");
+        assert!(verify_mount_entries(&entries, std::slice::from_ref(&target)).is_ok());
+
+        let deleted = "1 0 0:2 /newroot / rw,nosuid,nodev - tmpfs tmpfs rw\n2 1 0:2 /bindfileRhvKXa//deleted /arany ro,nosuid,nodev - tmpfs tmpfs rw\n";
+        let entries = parse_mountinfo(deleted.as_bytes()).unwrap();
+        assert_eq!(
+            entries[1].root.as_os_str().as_encoded_bytes(),
+            b"/bindfileRhvKXa//deleted"
+        );
+        assert!(verify_mount_entries(&entries, &[PathBuf::from("/arany")]).is_ok());
+        for invalid in [
+            deleted.replace("/bindfileRhvKXa//deleted", "/bindfileRhvKXa///deleted"),
+            deleted.replace("/bindfileRhvKXa//deleted", "/bindfileRhvKXa/..//deleted"),
+            deleted.replace(" /arany ", " /arany//deleted "),
+            deleted.replace(
+                "/bindfileRhvKXa",
+                &format!("/{}", "a".repeat(MAX_PATH_BYTES - "//deleted".len())),
+            ),
+        ] {
+            assert!(parse_mountinfo(invalid.as_bytes()).is_err());
+        }
+
+        let escaped_source = b"1 0 8:1 / / rw - ext4 host\\043volume rw\n2 1 8:1 /cache/a\\040b /opt/toolchains/a\\040b ro - ext4 host\\043volume ro\n";
+        let entries = parse_mountinfo(escaped_source).unwrap();
+        assert_eq!(entries[1].source, b"host\\043volume");
         assert!(verify_mount_entries(&entries, std::slice::from_ref(&target)).is_ok());
 
         let invalid_escape = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\141b /opt/toolchains/a\\141b ro - ext4 /dev/root ro\n";
@@ -2406,6 +2539,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn copy_view_attests_exact_tmpfs_size_and_identity() {
+        let valid = "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:2 / /workspace rw - tmpfs tmpfs rw,size=65536k\n";
+        assert!(
+            verify_copy_entries(
+                &parse_mountinfo(valid.as_bytes()).unwrap(),
+                ToolLimits::default().project_bytes
+            )
+            .is_ok()
+        );
+        for invalid in [
+            valid.replace("size=65536k", "size=32768k"),
+            valid.replace("tmpfs tmpfs", "ext4 /dev/root"),
+            valid.replace(" / /workspace", " /subtree /workspace"),
+            valid.replace("size=65536k", "size=65536k,size=65536k"),
+            format!("{valid}3 2 0:3 / /workspace/nested rw - tmpfs tmpfs rw\n"),
+        ] {
+            assert!(
+                verify_copy_entries(
+                    &parse_mountinfo(invalid.as_bytes()).unwrap(),
+                    ToolLimits::default().project_bytes
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2912,8 +3072,8 @@ mod tests {
                     .expect("fixture test binary");
                 let binary_metadata = std::fs::metadata(&binary).expect("test binary metadata");
                 assert!(binary_metadata.is_file());
-                let mut command = Command::new(BWRAP_BOOTSTRAP[0]);
-                command.args(&BWRAP_BOOTSTRAP[1..]);
+                let mut command = Command::new(BWRAP_TEST_LAUNCH[0]);
+                command.args(&BWRAP_TEST_LAUNCH[1..]);
                 profile_arguments(
                     &mut command,
                     &format!("{}/bin:/usr/bin:/bin", Path::new(&target).display()),
@@ -2921,8 +3081,8 @@ mod tests {
                     &[],
                     None,
                     &ToolLimits::default(),
-                    Path::new(&binary),
                 );
+                command.args(["--ro-bind"]).arg(&binary).arg("/arany");
                 for directory in mount_directories(Path::new(&target), Path::new("/")) {
                     command.args(["--dir"]).arg(directory);
                 }
@@ -3065,7 +3225,7 @@ mod tests {
         std::fs::write(&grant_path, serde_json::to_vec(&grant).unwrap()).unwrap();
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-mounts.sh");
         let mut command = Command::new("/usr/bin/unshare");
-        // The outer namespace owns fixture mount setup; the BWRAP_BOOTSTRAP worker drops these caps.
+        // The fixture launcher drops capabilities before exercising the inner mount attestation.
         command
             .args([
                 "--user",
