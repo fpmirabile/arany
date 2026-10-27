@@ -4,30 +4,30 @@ pub(super) fn operation(call: &ToolCall) -> String {
     match call.family() {
         Family::File => file(call),
         Family::Process => process(call),
-        Family::Skill => skill(call),
+        Family::Skill => simple(call),
         Family::Mcp => mcp(call),
         Family::Git => match call.site() {
             Site::Guard => git(call),
             Site::Host => host(call),
             Site::InProcess | Site::Unguarded => unreachable!("Git family execution site"),
         },
-        Family::Preparation => preparation(call),
+        Family::Preparation => simple(call),
     }
 }
 
 fn file(call: &ToolCall) -> String {
+    let facts = call.display_facts();
     match call {
-        ToolCall::List { path } => format!("List({path})"),
-        ToolCall::Read { path, .. } => format!("Read({path})"),
         ToolCall::Search {
-            path,
-            query,
             regex,
             include,
             case_sensitive,
             offset,
             limit,
+            ..
         } => {
+            let query = &facts.subject;
+            let path = facts.paths[0];
             let mut options = String::new();
             if *regex {
                 options.push_str(", regex");
@@ -46,26 +46,18 @@ fn file(call: &ToolCall) -> String {
             }
             format!("Search({query}, {path}{options})")
         }
-        ToolCall::Glob { pattern, path, .. } => format!("Glob({pattern}, {path})"),
-        ToolCall::Delete { path, .. } => format!("Delete({path})"),
-        ToolCall::Move {
-            source,
-            destination,
-            ..
-        } => format!("Move({source} → {destination})"),
-        ToolCall::Mkdir { path } => format!("Create folder({path})"),
-        ToolCall::Write { path, .. } => format!("Write({path})"),
-        ToolCall::Edit { path, .. } => format!("Edit({path})"),
-        ToolCall::MultiEdit {
-            file_path, edits, ..
-        } => format!("MultiEdit({file_path}, {} edits)", edits.len()),
+        ToolCall::Glob { .. } => format!("Glob({}, {})", facts.subject, facts.paths[0]),
+        ToolCall::Move { .. } => format!("Move({} → {})", facts.paths[0], facts.paths[1]),
+        ToolCall::MultiEdit { edits, .. } => {
+            format!("MultiEdit({}, {} edits)", facts.subject, edits.len())
+        }
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::Rewind { .. },
         } => "Rewind publication()".into(),
         ToolCall::ApplyChangeset {
-            source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
-        } => format!("Publish({} command file changes)", changeset.files.len()),
-        _ => unreachable!("file family operation"),
+            source: arany::worker::ChangesetSource::CommandReceipt { .. },
+        } => format!("Publish({} command file changes)", facts.paths.len()),
+        _ => format!("{}({})", facts.verb, facts.subject),
     }
 }
 
@@ -79,11 +71,9 @@ fn process(call: &ToolCall) -> String {
     }
 }
 
-fn skill(call: &ToolCall) -> String {
-    match call {
-        ToolCall::Skill { name, .. } => format!("Skill({name})"),
-        _ => unreachable!("Skill family operation"),
-    }
+fn simple(call: &ToolCall) -> String {
+    let facts = call.display_facts();
+    format!("{}({})", facts.verb, facts.subject)
 }
 
 fn mcp(call: &ToolCall) -> String {
@@ -95,17 +85,14 @@ fn mcp(call: &ToolCall) -> String {
 }
 
 fn git(call: &ToolCall) -> String {
+    let facts = call.display_facts();
     match call {
-        ToolCall::GitStatus { path } => format!("Git status({path})"),
-        ToolCall::GitDiff { path, .. } => format!("Git diff({path})"),
-        ToolCall::GitLog { path, .. } => format!("Git log({path})"),
         ToolCall::GitCommit {
             paths,
             staged: true,
             ..
         } if paths.is_empty() => "Git commit(staged)".into(),
-        ToolCall::GitCommit { paths, .. } => format!("Git commit({})", paths.join(", ")),
-        ToolCall::GitBranch { name: None, .. } => "Git branches()".into(),
+        ToolCall::GitCommit { .. } => format!("Git commit({})", facts.subject),
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
@@ -114,8 +101,7 @@ fn git(call: &ToolCall) -> String {
             Some(start) => format!("Git branch({name} from {start})"),
             None => format!("Git branch({name})"),
         },
-        ToolCall::GitSwitch { branch } => format!("Git switch({branch})"),
-        _ => unreachable!("guarded Git family operation"),
+        _ => format!("{}({})", facts.verb, facts.subject),
     }
 }
 
@@ -131,9 +117,70 @@ fn host(call: &ToolCall) -> String {
     }
 }
 
-fn preparation(call: &ToolCall) -> String {
-    match call {
-        ToolCall::ParseAgentDefinition { .. } => "Parse agent definition()".into(),
-        _ => unreachable!("preparation family operation"),
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadGroup {
+    Pattern,
+    File,
+    Directory,
+    Git,
+    Skill,
+    Mcp,
+}
+
+pub(super) fn read_group(call: &ToolCall) -> Option<ReadGroup> {
+    match call.family() {
+        Family::File => {
+            if matches!(call, ToolCall::Search { .. } | ToolCall::Glob { .. }) {
+                Some(ReadGroup::Pattern)
+            } else if matches!(call, ToolCall::Read { .. }) {
+                Some(ReadGroup::File)
+            } else if matches!(call, ToolCall::List { .. }) {
+                Some(ReadGroup::Directory)
+            } else {
+                None
+            }
+        }
+        Family::Git => matches!(
+            call,
+            ToolCall::GitStatus { .. }
+                | ToolCall::GitDiff { .. }
+                | ToolCall::GitLog { .. }
+                | ToolCall::GitBranch { name: None, .. }
+        )
+        .then_some(ReadGroup::Git),
+        Family::Skill => Some(ReadGroup::Skill),
+        Family::Mcp => matches!(call, ToolCall::McpList { .. }).then_some(ReadGroup::Mcp),
+        Family::Process | Family::Preparation => None,
     }
+}
+
+pub(super) enum ResultKind {
+    Read,
+    Applied,
+    Command,
+    GitCommit,
+    GitSwitch,
+    GitWrite,
+    Host,
+}
+
+pub(super) fn result_kind(call: &ToolCall) -> ResultKind {
+    match call.family() {
+        Family::File if read_group(call).is_none() => ResultKind::Applied,
+        Family::Process => ResultKind::Command,
+        Family::Git if call.site() == Site::Host => ResultKind::Host,
+        Family::Git if matches!(call, ToolCall::GitCommit { .. }) => ResultKind::GitCommit,
+        Family::Git if matches!(call, ToolCall::GitSwitch { .. }) => ResultKind::GitSwitch,
+        Family::Git if read_group(call).is_none() => ResultKind::GitWrite,
+        Family::File | Family::Git | Family::Skill | Family::Mcp | Family::Preparation => {
+            ResultKind::Read
+        }
+    }
+}
+
+pub(super) fn uncertain_git_write(call: &ToolCall) -> bool {
+    matches!(
+        call,
+        ToolCall::GitCommit { .. } | ToolCall::GitBranch { .. } | ToolCall::GitSwitch { .. }
+    )
 }

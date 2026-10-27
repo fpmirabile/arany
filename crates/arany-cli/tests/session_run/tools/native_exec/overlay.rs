@@ -28,20 +28,22 @@ enum OverlayCase {
     HostCreate,
 }
 
-const OVERLAY_CASES: [OverlayCase; 9] = [
+const OVERLAY_CASES: [OverlayCase; 8] = [
     OverlayCase::Reads,
     OverlayCase::Writes,
     OverlayCase::SpillMerge,
     OverlayCase::IgnoredClean,
     OverlayCase::ModeZero,
     OverlayCase::NoSpace,
-    OverlayCase::CopyUps,
     OverlayCase::HostEdit,
     OverlayCase::HostCreate,
 ];
-const SUBTREE_OVERLAY_CASES: [OverlayCase; 6] = [
+const PUBLICATION_OVERLAY_CASES: [OverlayCase; 3] = [
     OverlayCase::Deletion,
     OverlayCase::DeleteDrift,
+    OverlayCase::CopyUps,
+];
+const SUBTREE_OVERLAY_CASES: [OverlayCase; 4] = [
     OverlayCase::Recreation,
     OverlayCase::RecreationNonzero,
     OverlayCase::SubtreeDeletion,
@@ -182,6 +184,15 @@ impl std::fmt::Display for OverlayCase {
 )]
 fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
     overlay_journey(&OVERLAY_CASES);
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux overlay deletion and copy-up publication and closed replay"
+)]
+fn overlay_deletion_and_copyups_reopen_without_execution() {
+    overlay_journey(&PUBLICATION_OVERLAY_CASES);
 }
 
 #[test]
@@ -356,9 +367,7 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
         OverlayCase::Narrow => {
             "set -eu; test \"$(cat Cargo.toml)\" = manifest; test \"$(wc -c < large)\" -eq 2097152; test ! -s src/.env; test ! -e sibling; test ! -e node_modules; test ! -e lib/sibling; test ! -e /seed/namespace; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch lib/sibling 2>/dev/null; then exit 1; fi; printf 'private edit' > src/current.txt; printf 'private create' > lib/deep/created; printf ignored > src/node_modules/generated; printf selected > src/gen/output; printf 'narrow grants passed\\n'"
         }
-        OverlayCase::NarrowReplacement => {
-            "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt"
-        }
+        OverlayCase::NarrowReplacement => "printf candidate > src/current.txt",
         OverlayCase::NarrowNoSpace => {
             "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=src/node_modules/fill bs=1M count=160; LC_ALL=C dd if=/dev/zero of=lib/deep/node_modules/fill bs=1M count=160"
         }
@@ -402,14 +411,14 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
 async fn overlay_case(case: OverlayCase) {
     let fixture = overlay_fixture(case);
     let command = overlay_command(case);
-    let dispatched = case.host_path().map(|path| {
-        (
-            path,
-            arany::FaultPlan::observe_guard_dispatch(command.clone()),
-        )
-    });
+    let replacement = case == OverlayCase::NarrowReplacement;
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let dispatched = case
+        .host_path()
+        .filter(|_| !replacement)
+        .map(|_| arany::FaultPlan::observe_guard_dispatch(command.clone()));
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
-        crate::tool_outcome(command),
+        crate::tool_outcome(command.clone()),
         arany::test_support::goals::finish_with("Done"),
     ]));
     let running = run_with(
@@ -418,26 +427,61 @@ async fn overlay_case(case: OverlayCase) {
         proposal_request(&fixture.workspace),
         RunControls {
             tools: ToolGrant::Configured,
+            approvals: replacement.then_some(approvals),
             ..Default::default()
         },
     );
     let mutate = async {
-        if let Some((path, dispatched)) = dispatched {
-            dispatched.await.unwrap();
-            if case == OverlayCase::NarrowReplacement {
+        if let Some(path) = case.host_path() {
+            let release = if replacement {
+                let approval = inbox.next().await.expect("overlay command approval");
+                assert_eq!(approval.intent.call, command);
+                let (entered, release) =
+                    arany::FaultPlan::gate_guard_cache_report(approval.intent.id);
+                approval.decide(true);
+                let report = entered
+                    .await
+                    .expect("overlay command completed before capture");
+                assert_eq!(report.disposition, ToolDisposition::Succeeded, "{case}");
                 std::fs::rename(
                     fixture.workspace.join("src"),
                     fixture.workspace.join("old-source"),
                 )
                 .unwrap();
                 std::fs::create_dir(fixture.workspace.join("src")).unwrap();
-            }
+                Some(release)
+            } else {
+                dispatched
+                    .expect("host mutation dispatch gate")
+                    .await
+                    .unwrap();
+                None
+            };
             private_file(&fixture.workspace.join(path), b"host");
-            private_file(&fixture.workspace.join("released"), b"release\n");
+            if let Some(release) = release {
+                release.send(()).expect("resume overlay capture");
+            } else {
+                private_file(&fixture.workspace.join("released"), b"release\n");
+            }
         }
     };
-    let (outcome, ()) = tokio::join!(running, mutate);
-    check_overlay_case(fixture, &provider, outcome.unwrap(), case).await;
+    let running = async {
+        running.await.unwrap_or_else(|error| {
+            crate::process::annotate_native_fixture(&format!(
+                "fixture=command_overlay; case={case}; stage=engine; error={error:?}"
+            ));
+            panic!("Workspace overlay {case} Engine failed: {error:?}");
+        })
+    };
+    let outcome = {
+        tokio::pin!(running);
+        tokio::pin!(mutate);
+        tokio::select! {
+            outcome = &mut running => outcome,
+            () = &mut mutate => (&mut running).await,
+        }
+    };
+    check_overlay_case(fixture, &provider, outcome, case).await;
 }
 
 async fn check_overlay_case(
@@ -619,6 +663,12 @@ fn check_overlay_files(workspace: &std::path::Path, case: OverlayCase) {
             std::fs::read(workspace.join("src/current.txt")).unwrap(),
             expected,
             "{case}"
+        );
+    }
+    if case == OverlayCase::NarrowReplacement {
+        assert_eq!(
+            std::fs::read(workspace.join("old-source/current.txt")).unwrap(),
+            b"current"
         );
     }
     if case == OverlayCase::Writes {

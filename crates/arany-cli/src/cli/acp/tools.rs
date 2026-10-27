@@ -1,6 +1,9 @@
 use arany::{RunId, SessionId, ToolCall};
 use arany_cli::protocol::{methods::*, rpc::encode_line};
 use serde_json::{Value, json};
+use std::borrow::Cow;
+
+mod projection;
 
 pub(super) const UNKNOWN_ACP_TOOL_OUTCOME: &str = "Outcome unknown: Arany could not confirm whether this effect happened. It was not retried; inspect the Workspace before continuing.";
 
@@ -57,7 +60,7 @@ struct ToolItem<'a> {
     id: &'a str,
     kind: &'static str,
     label: &'static str,
-    detail: &'a str,
+    detail: Cow<'a, str>,
     paths: Vec<&'a str>,
     status: &'a ItemStatus,
     disposition: &'a Option<arany::ToolDisposition>,
@@ -66,6 +69,10 @@ struct ToolItem<'a> {
 }
 
 pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool) -> Option<Value> {
+    let typed = match item {
+        Item::ToolCall { call, .. } => Some(serde_json::from_value::<ToolCall>(call.clone()).ok()?),
+        _ => None,
+    };
     let tool = match item {
         Item::CommandExecution {
             id,
@@ -80,7 +87,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             id,
             kind: "execute",
             label: "Run command",
-            detail: command,
+            detail: command.as_str().into(),
             paths: vec![command_cwd],
             status,
             disposition,
@@ -104,7 +111,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                 "edit"
             },
             label: "Change files",
-            detail: changes.first().map_or("", |c| c.path.as_str()),
+            detail: changes.first().map_or("", |c| c.path.as_str()).into(),
             paths: changes.iter().map(|c| c.path.as_str()).collect(),
             status,
             disposition,
@@ -122,7 +129,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             id,
             kind: "other",
             label: "MCP",
-            detail: server,
+            detail: server.as_str().into(),
             paths: vec![],
             status,
             disposition,
@@ -136,58 +143,13 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             disposition,
             output,
         } => {
-            let typed: ToolCall = serde_json::from_value(call.clone()).ok()?;
-            let is_gh_pr_read = matches!(
-                &typed,
-                ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. }
-            );
-            let (kind, label) = match typed {
-                ToolCall::CommandUnguarded { .. } => ("execute", "Unguarded command"),
-                ToolCall::Read { .. } => ("read", "Read"),
-                ToolCall::GitStatus { .. }
-                | ToolCall::GitDiff { .. }
-                | ToolCall::GitLog { .. }
-                | ToolCall::GitBranch { name: None, .. } => ("read", "Git read"),
-                ToolCall::GitCommit { .. }
-                | ToolCall::GitBranch { .. }
-                | ToolCall::GitSwitch { .. } => ("edit", "Git write"),
-                ToolCall::Skill { .. } => ("read", "Read Skill"),
-                ToolCall::List { .. } => ("search", "List"),
-                ToolCall::Search { .. } => ("search", "Search"),
-                ToolCall::Glob { .. } => ("search", "Glob"),
-                ToolCall::GhPrList { .. } => ("read", "List GitHub pull requests"),
-                ToolCall::GhPrView { .. } => ("read", "Inspect GitHub pull request"),
-                ToolCall::ParseAgentDefinition { .. }
-                | ToolCall::Mkdir { .. }
-                | ToolCall::Write { .. }
-                | ToolCall::Edit { .. }
-                | ToolCall::MultiEdit { .. }
-                | ToolCall::Delete { .. }
-                | ToolCall::Move { .. }
-                | ToolCall::Command { .. }
-                | ToolCall::ApplyChangeset { .. }
-                | ToolCall::McpList { .. }
-                | ToolCall::McpCall { .. }
-                | ToolCall::GitPush { .. }
-                | ToolCall::GhPrCreate { .. } => ("other", "Tool"),
-            };
-            let path = call["path"].as_str();
+            let display = projection::project(typed.as_ref()?);
             ToolItem {
                 id,
-                kind,
-                label,
-                detail: path
-                    .or_else(|| call["name"].as_str())
-                    .or_else(|| call["program"].as_str())
-                    .or_else(|| call["branch"].as_str())
-                    .or_else(|| is_gh_pr_read.then(|| call["repository"].as_str()).flatten())
-                    .or_else(|| {
-                        call["message"]
-                            .as_str()
-                            .and_then(|message| message.lines().next())
-                    })
-                    .unwrap_or(""),
-                paths: path.into_iter().collect(),
+                kind: display.kind,
+                label: display.label,
+                detail: display.detail,
+                paths: display.paths,
                 status,
                 disposition,
                 output,

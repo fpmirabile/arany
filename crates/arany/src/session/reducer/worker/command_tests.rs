@@ -267,6 +267,27 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
 }
 
 #[test]
+fn unknown_editor_cache_update_blocks_release_continuation_and_goal_recovery() {
+    let mut f = command_fixture();
+    command(&mut f, &[]);
+    let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
+        unreachable!()
+    };
+    observation.cache_update = CacheUpdate::Uncertain;
+    let view = f.view();
+    assert!(view.runs[0].agents[1].tools[0].outcome_unknown());
+    assert!(!view.goals[0].can_resume(&view));
+    assert!(!wave_settled(&view.runs[0]));
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    assert!(SessionView::replay_open(f.session, &f.envelopes()).is_err());
+}
+
+#[test]
 fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() {
     for unknown in [false, true] {
         let mut f = command_fixture();
@@ -282,6 +303,8 @@ fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() 
         let view = f.view();
         assert_eq!(view.runs[0].agents[1].tools[0].outcome_unknown(), unknown);
         if unknown {
+            assert!(!view.goals[0].can_resume(&view));
+            assert!(!wave_settled(&view.runs[0]));
             let count = f.events.len();
             f.call(
                 f.child,
