@@ -210,8 +210,11 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
         Vec::<String>::new()
     );
 
+    let current = UI_PREFERENCES.current;
+    let floor = UI_PREFERENCES.floor;
+    let next = current + 1;
     let bumped = RecordFormat {
-        current: UI_PREFERENCES.current + 1,
+        current: next,
         ..UI_PREFERENCES
     };
     let changed: Vec<&RecordFormat> = formats()
@@ -228,10 +231,10 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
     assert_eq!(
         uncovered(&changed, &FIXTURES, &NESTED_SCHEMAS),
         [
-            "ProviderRouting declares 0 record formats",
-            "UiPreferences 8 has no accepted identity fixture",
-            "UiPreferences 7 -> 8 has no step and fixture",
-            "UiPreferences 3 -> 8 does not decode",
+            "ProviderRouting declares 0 record formats".to_owned(),
+            format!("UiPreferences {next} has no accepted identity fixture"),
+            format!("UiPreferences {current} -> {next} has no step and fixture"),
+            format!("UiPreferences {floor} -> {next} does not decode"),
         ]
     );
     // A decoder that changes shape without a version bump refuses its own identity fixture.
@@ -245,8 +248,8 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
             .filter(|problem| problem.starts_with("UiPreferences"))
             .collect::<Vec<_>>(),
         [
-            "UiPreferences 7 has no accepted identity fixture",
-            "UiPreferences 3 -> 7 does not decode",
+            format!("UiPreferences {current} has no accepted identity fixture"),
+            format!("UiPreferences {floor} -> {current} does not decode"),
         ]
     );
 }
