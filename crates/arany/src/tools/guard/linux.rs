@@ -1092,7 +1092,7 @@ pub(super) async fn execute_inner(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let go_cancellation = cancellation.clone();
-    let execution = async {
+    let execution = Box::pin(async {
         let ready_bytes = prepare_ready(
             runtime,
             intent,
@@ -1157,7 +1157,7 @@ pub(super) async fn execute_inner(
             Ok((observation, candidate))
         };
         super::discovery_work(intent, capture).await
-    };
+    });
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Operation),
@@ -1727,7 +1727,7 @@ async fn prepare_inputs(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut drain = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let deadline = deadline.min(tokio::time::Instant::now() + crate::tools::selection::PHASE_TIME);
-    let execution = async {
+    let execution = Box::pin(async {
         let namespaces = profile::Namespaces::read()?;
         let mut task: Task =
             serde_json::from_slice(&task_bytes(runtime, intent, None, namespaces.clone())?)
@@ -1758,7 +1758,7 @@ async fn prepare_inputs(
             return Err(ToolError::Operation);
         }
         result
-    };
+    });
     let result = super::selection_phase::wait(deadline, cancellation, execution).await;
     let cleanup = tokio::time::Instant::now() + super::TEARDOWN_WAIT;
     tokio::time::timeout_at(cleanup, unit.stop())
