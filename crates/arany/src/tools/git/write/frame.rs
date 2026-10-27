@@ -40,7 +40,6 @@ fn encode(plan: &Plan) -> Result<Vec<u8>, ToolError> {
     out.0.extend_from_slice(&plan.refs.head);
     out.optional(plan.refs.packed.as_ref().map(|hash| hash.as_slice()))?;
     out.optional(plan.index_before.as_ref().map(|hash| hash.as_slice()))?;
-    out.optional(plan.shallow.as_ref().map(|hash| hash.as_slice()))?;
     out.count(plan.refs.loose.len())?;
     for (name, hash) in &plan.refs.loose {
         out.field(name.as_bytes())?;
@@ -137,7 +136,6 @@ fn decode(bytes: &[u8]) -> Result<Plan, ToolError> {
     let head_digest = input.array()?;
     let packed = input.hash()?;
     let index_before = input.hash()?;
-    let shallow = input.hash()?;
     let mut loose = Vec::new();
     for _ in 0..input.count(MAX_REF_ENTRIES)? {
         let name = input.text(MAX_PATH_BYTES)?;
@@ -182,7 +180,6 @@ fn decode(bytes: &[u8]) -> Result<Plan, ToolError> {
             loose,
         },
         index_before,
-        shallow,
         publication: Publication {
             files,
             objects: names,

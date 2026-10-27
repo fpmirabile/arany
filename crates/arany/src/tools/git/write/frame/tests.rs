@@ -9,7 +9,6 @@ fn empty_plan() -> Plan {
             loose: Vec::new(),
         },
         index_before: Some(digest(b"original index")),
-        shallow: Some(digest(b"shallow boundary")),
         publication: Publication::default(),
         objects: Vec::new(),
     }

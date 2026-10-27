@@ -102,7 +102,6 @@ pub(super) struct Plan {
     pub(super) identity: (u64, u64),
     pub(super) refs: RefDigests,
     pub(super) index_before: Option<[u8; 32]>,
-    pub(super) shallow: Option<[u8; 32]>,
     pub(super) publication: Publication,
     pub(super) objects: Vec<Vec<u8>>,
 }
@@ -129,9 +128,6 @@ impl Plan {
             identity: repository.identity,
             refs: RefDigests::from(refs),
             index_before: repository.index.as_ref().map(|(bytes, _)| digest(bytes)),
-            shallow: read_optional(view, "shallow", MAX_SNAPSHOT_BYTES)?
-                .as_deref()
-                .map(digest),
             publication,
             objects,
         })
