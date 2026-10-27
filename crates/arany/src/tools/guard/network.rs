@@ -3,9 +3,7 @@ use crate::tools::types::{NetworkGrant, ToolLimits};
 
 pub(super) fn validate(task: &Task) -> Result<(), ToolError> {
     if task.intent.limits.network == NetworkGrant::Proxy
-        && (task.config.network.is_none()
-            || task.worker.is_some()
-            || cfg!(not(target_os = "linux")))
+        && (task.config.network.is_none() || cfg!(not(target_os = "linux")))
     {
         return Err(ToolError::Configuration);
     }
