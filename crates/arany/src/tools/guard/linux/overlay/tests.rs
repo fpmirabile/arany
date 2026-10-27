@@ -40,6 +40,45 @@ fn masks_keep_dependencies_and_large_inputs_but_refuse_known_protected_aliases()
 }
 
 #[test]
+fn ignored_controls_do_not_exhaust_publication_budgets() {
+    use crate::tools::selection::{CONTROL_FILES, PHASE_TIME};
+    for (directory, controls, accepted) in [
+        ("node_modules", CONTROL_FILES + 1, true),
+        ("ignored", CONTROL_FILES + 1, true),
+        ("visible", 1, true),
+        ("visible", CONTROL_FILES + 1, false),
+    ] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join(".gitignore"), b"ignored/\n").unwrap();
+        for index in 0..controls {
+            let path = lower.path().join(format!("{directory}/control-{index}"));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(".gitignore"), b"generated\n").unwrap();
+        }
+        let source = crate::tools::fs::open_directory(lower.path()).unwrap();
+        let inventory = masks::Inventory::read(&source, std::time::Instant::now() + PHASE_TIME);
+        if !accepted {
+            assert!(matches!(inventory, Err(ToolError::Limit)), "{directory}");
+            continue;
+        }
+        let inventory = inventory.unwrap();
+        assert!(inventory.paths().is_empty());
+        let generated = upper.path().join(format!("{directory}/control-0"));
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("generated"), b"discarded").unwrap();
+        std::fs::write(upper.path().join("created"), b"published").unwrap();
+        let target = crate::tools::fs::open_directory(upper.path()).unwrap();
+        let (changeset, _) = inventory
+            .baseline
+            .capture(&source, &target, std::time::Instant::now() + PHASE_TIME)
+            .unwrap();
+        assert_eq!(changeset.files.len(), 1, "{directory}");
+        assert_eq!(changeset.files[0].path, "created", "{directory}");
+    }
+}
+
+#[test]
 fn protected_links_and_unwalkable_trees_mask_an_enclosing_subtree() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
@@ -122,7 +161,7 @@ fn overflowing_mask_arguments_replace_the_entire_enclosing_view() {
 }
 
 #[tokio::test]
-async fn completion_is_correlated_and_nonempty_capture_preserves_confirmed_stops() {
+async fn completion_is_correlated_and_refusal_preserves_confirmed_stops() {
     use crate::tools::{ToolDisposition, guard::CacheCandidate};
     let parent = profile::Namespaces::read().unwrap();
     let mut namespaces = serde_json::to_value(&parent).unwrap();
@@ -134,6 +173,10 @@ async fn completion_is_correlated_and_nonempty_capture_preserves_confirmed_stops
         ToolDisposition::Succeeded,
         ToolDisposition::Limit,
         ToolDisposition::Cancelled,
+        ToolDisposition::Denied,
+        ToolDisposition::Failed,
+        ToolDisposition::Conflict,
+        ToolDisposition::Uncertain,
     ] {
         let mut observation = crate::tools::guard::tests::command_observation();
         let intent = observation.intent.clone();
@@ -142,7 +185,7 @@ async fn completion_is_correlated_and_nonempty_capture_preserves_confirmed_stops
         let report = Completion {
             digest: intent.digest(),
             namespaces: namespaces.clone(),
-            empty: false,
+            capture: Err(CaptureFailure::Rejected),
         };
         let mut bytes = serde_json::to_vec(&report).unwrap();
         bytes.push(b'\n');
@@ -151,6 +194,7 @@ async fn completion_is_correlated_and_nonempty_capture_preserves_confirmed_stops
             (&intent, &parent),
             &mut observation,
             &mut candidate,
+            crate::tools::process::Truncation::Allow,
         )
         .await
         .unwrap();
@@ -162,10 +206,17 @@ async fn completion_is_correlated_and_nonempty_capture_preserves_confirmed_stops
                 disposition
             }
         );
-        assert!(candidate == CacheCandidate::Rejected);
+        assert!(
+            candidate
+                == if disposition == ToolDisposition::Uncertain {
+                    CacheCandidate::Uncertain
+                } else {
+                    CacheCandidate::Rejected
+                }
+        );
         for invalid in [
-            serde_json::json!({"digest":[0],"namespaces":parent,"empty":true}),
-            serde_json::json!({"digest":intent.digest(),"namespaces":parent,"empty":true}),
+            serde_json::json!({"digest":[0],"namespaces":parent,"capture":{"Err":"Rejected"}}),
+            serde_json::json!({"digest":intent.digest(),"namespaces":parent,"capture":{"Err":"Rejected"}}),
         ] {
             let mut bytes = serde_json::to_vec(&invalid).unwrap();
             bytes.push(b'\n');
@@ -174,11 +225,117 @@ async fn completion_is_correlated_and_nonempty_capture_preserves_confirmed_stops
                     &mut bytes.as_slice(),
                     (&intent, &parent),
                     &mut observation,
-                    &mut candidate
+                    &mut candidate,
+                    crate::tools::process::Truncation::Allow,
                 )
                 .await
                 .is_err()
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn completion_merges_candidates_with_totals_and_keeps_hook_output_fail_closed() {
+    use crate::tools::types::{
+        CommandChangeset, CommandResult, CommandSelectionSummary, FileChange, FileVersion,
+    };
+    let parent = profile::Namespaces::read().unwrap();
+    let mut namespaces = serde_json::to_value(&parent).unwrap();
+    for name in ["mnt", "user"] {
+        namespaces[name] = (namespaces[name].as_u64().unwrap() + 1).into();
+    }
+    let namespaces: profile::Namespaces = serde_json::from_value(namespaces).unwrap();
+    for (exit_code, hook) in [(0, false), (0, true), (1, false), (1, true)] {
+        let mut observation = crate::tools::guard::tests::command_observation();
+        let intent = observation.intent.clone();
+        let mut original: CommandResult = serde_json::from_str(&observation.output).unwrap();
+        original.exit_code = Some(exit_code);
+        observation.disposition = if exit_code == 0 {
+            crate::tools::ToolDisposition::Succeeded
+        } else {
+            crate::tools::ToolDisposition::Failed
+        };
+        original.stdout = "x".repeat(intent.limits.result_bytes as usize / 2);
+        original.stdout_total = crate::tools::types::OutputTotal {
+            bytes: original.stdout.len() as u64,
+            lines: 1,
+        };
+        observation.output = serde_json::to_string(&original).unwrap();
+        assert!(!crate::tools::spill::has_excerpt(&observation));
+        observation.spill = crate::tools::spill::OutputSpill::pending(
+            &observation,
+            Some(original.stdout.as_bytes().to_vec()),
+        );
+        observation = crate::tools::spill::decode_report(
+            &crate::tools::spill::encode_report(&observation).unwrap(),
+        )
+        .unwrap();
+        let changeset = CommandChangeset {
+            files: vec![FileChange {
+                path: "created".into(),
+                before: None,
+                after: Some(FileVersion::from_bytes(
+                    &vec![b'a'; intent.limits.result_bytes as usize / 2],
+                    false,
+                )),
+            }],
+        };
+        let selection = CommandSelectionSummary {
+            ignored_entries: 3,
+            discarded_outputs: 2,
+            ..Default::default()
+        };
+        let report = Completion {
+            digest: intent.digest(),
+            namespaces: namespaces.clone(),
+            capture: Ok((changeset.clone(), selection)),
+        };
+        let mut bytes = serde_json::to_vec(&report).unwrap();
+        bytes.push(b'\n');
+        let mut candidate = super::super::super::CacheCandidate::Received;
+        complete(
+            &mut bytes.as_slice(),
+            (&intent, &parent),
+            &mut observation,
+            &mut candidate,
+            if hook {
+                crate::tools::process::Truncation::Refuse
+            } else {
+                crate::tools::process::Truncation::Allow
+            },
+        )
+        .await
+        .unwrap();
+        if hook {
+            assert_eq!(
+                observation.disposition,
+                crate::tools::ToolDisposition::Limit
+            );
+            assert_eq!(
+                observation.limit_cause,
+                Some(crate::tools::LimitCause::Resource)
+            );
+        } else {
+            let result: CommandResult = serde_json::from_str(&observation.output).unwrap();
+            assert_eq!(result.changeset, changeset);
+            assert_eq!(result.exit_code, Some(exit_code));
+            assert_eq!(
+                observation.disposition,
+                if exit_code == 0 {
+                    crate::tools::ToolDisposition::Succeeded
+                } else {
+                    crate::tools::ToolDisposition::Failed
+                }
+            );
+            assert_eq!(result.selection, Some(selection));
+            assert_eq!(result.stdout_total, original.stdout_total);
+            assert!(crate::tools::spill::has_excerpt(&observation));
+            assert_eq!(
+                observation.spill.as_ref().unwrap().captured.as_deref(),
+                Some(original.stdout.as_bytes())
+            );
+            assert!(observation.output.len() <= intent.limits.result_bytes as usize);
         }
     }
 }
