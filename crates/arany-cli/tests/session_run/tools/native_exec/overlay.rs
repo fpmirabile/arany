@@ -2,42 +2,138 @@ use super::*;
 
 const MERGE_OUTPUT_BYTES: usize = 32 * 1024;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OverlayCase {
+    Reads,
+    Writes,
+    SpillMerge,
+    IgnoredClean,
+    ModeZero,
+    NoSpace,
+    Deletion,
+    Recreation,
+    HostEdit,
+    HostCreate,
+}
+
+const OVERLAY_CASES: [OverlayCase; 10] = [
+    OverlayCase::Reads,
+    OverlayCase::Writes,
+    OverlayCase::SpillMerge,
+    OverlayCase::IgnoredClean,
+    OverlayCase::ModeZero,
+    OverlayCase::NoSpace,
+    OverlayCase::Deletion,
+    OverlayCase::Recreation,
+    OverlayCase::HostEdit,
+    OverlayCase::HostCreate,
+];
+const OVERLAY_JOURNEY_WAIT: Duration =
+    SPILL_JOURNEY_WAIT.saturating_mul(OVERLAY_CASES.len() as u32);
+
+impl OverlayCase {
+    fn publishes(self) -> bool {
+        match self {
+            Self::Writes | Self::SpillMerge | Self::ModeZero | Self::NoSpace => true,
+            Self::Reads
+            | Self::IgnoredClean
+            | Self::Deletion
+            | Self::Recreation
+            | Self::HostEdit
+            | Self::HostCreate => false,
+        }
+    }
+
+    fn refused(self) -> bool {
+        match self {
+            Self::Deletion | Self::Recreation | Self::HostEdit | Self::HostCreate => true,
+            Self::Reads
+            | Self::Writes
+            | Self::SpillMerge
+            | Self::IgnoredClean
+            | Self::ModeZero
+            | Self::NoSpace => false,
+        }
+    }
+
+    fn host_path(self) -> Option<&'static str> {
+        match self {
+            Self::HostEdit => Some("src/current.txt"),
+            Self::HostCreate => Some("created"),
+            Self::Reads
+            | Self::Writes
+            | Self::SpillMerge
+            | Self::IgnoredClean
+            | Self::ModeZero
+            | Self::NoSpace
+            | Self::Deletion
+            | Self::Recreation => None,
+        }
+    }
+
+    fn disposition(self) -> ToolDisposition {
+        match self {
+            Self::Reads | Self::Writes | Self::SpillMerge | Self::IgnoredClean | Self::ModeZero => {
+                ToolDisposition::Succeeded
+            }
+            Self::NoSpace => ToolDisposition::Failed,
+            Self::Deletion | Self::Recreation => ToolDisposition::Denied,
+            Self::HostEdit | Self::HostCreate => ToolDisposition::Conflict,
+        }
+    }
+}
+
+impl std::fmt::Display for OverlayCase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Reads => "reads",
+            Self::Writes => "writes",
+            Self::SpillMerge => "spill-merge",
+            Self::IgnoredClean => "ignored-clean",
+            Self::ModeZero => "mode-zero",
+            Self::NoSpace => "no-space",
+            Self::Deletion => "deletion",
+            Self::Recreation => "recreation",
+            Self::HostEdit => "host-edit",
+            Self::HostCreate => "host-create",
+        })
+    }
+}
+
 #[test]
 #[cfg_attr(
     not(arany_ci),
     ignore = "native Linux overlay publication and closed replay"
 )]
 fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
-    if !crate::isolation::enter_native_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test_with_timeout(
+        OVERLAY_JOURNEY_WAIT
+            .as_secs()
+            .try_into()
+            .expect("bounded overlay journey timeout"),
+    ) {
         return;
     }
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _deadline = arany::test_support::engine::deadline("whole-root overlay", SPILL_JOURNEY_WAIT);
+    let _deadline =
+        arany::test_support::engine::deadline("whole-root overlay", OVERLAY_JOURNEY_WAIT);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            for case in [
-                "reads",
-                "writes",
-                "spill-merge",
-                "ignored-clean",
-                "mode-zero",
-                "no-space",
-                "deletion",
-                "recreation",
-                "host-edit",
-                "host-create",
-            ] {
+            for case in OVERLAY_CASES {
+                let name = format!("whole-root overlay {case}");
+                let _case_deadline =
+                    arany::test_support::engine::deadline(&name, SPILL_JOURNEY_WAIT);
                 overlay_case(case).await;
             }
         });
 }
 
-fn overlay_fixture(case: &str) -> SpillFixture {
+fn overlay_fixture(case: OverlayCase) -> SpillFixture {
     let fixture = SpillFixture::new();
     fixture.set_workspace_root(".");
     let path = fixture.state.join("tools.json");
@@ -71,7 +167,7 @@ fn overlay_fixture(case: &str) -> SpillFixture {
     std::os::unix::fs::symlink("package/input", fixture.workspace.join("node_modules/link"))
         .unwrap();
     private_file(&fixture.workspace.join("released"), b"hold\n");
-    if case == "writes" {
+    if case == OverlayCase::Writes {
         let mut acl = 2u32.to_le_bytes().to_vec();
         for (tag, permissions) in [(1u16, 6u16), (4, 4), (16, 4), (32, 0)] {
             acl.extend_from_slice(&tag.to_le_bytes());
@@ -94,30 +190,30 @@ fn overlay_fixture(case: &str) -> SpillFixture {
     fixture
 }
 
-async fn overlay_case(case: &str) {
+async fn overlay_case(case: OverlayCase) {
     let fixture = overlay_fixture(case);
     let spill_script = format!(
         "printf '%{}s\nPRIVATE_SPILL_CANARY\n' ''; printf '%{MERGE_OUTPUT_BYTES}s' '' > created",
         MERGE_OUTPUT_BYTES - b"\nPRIVATE_SPILL_CANARY\n".len()
     );
     let script = match case {
-        "spill-merge" => spill_script.as_str(),
-        "writes" => {
+        OverlayCase::SpillMerge => spill_script.as_str(),
+        OverlayCase::Writes => {
             "printf 'private edit' > src/current.txt; printf 'private create' > created; printf 'src/current.txt\\n' > .gitignore"
         }
-        "ignored-clean" => {
+        OverlayCase::IgnoredClean => {
             "set -eu; rm -rf node_modules/cache dist; mkdir -p node_modules/cache; printf replacement > node_modules/cache/new"
         }
-        "mode-zero" => "umask 0777; printf readable > created",
-        "no-space" => {
+        OverlayCase::ModeZero => "umask 0777; printf readable > created",
+        OverlayCase::NoSpace => {
             "printf partial > src/current.txt; dd if=/dev/zero of=node_modules/fill bs=1M count=300 2>/dev/null"
         }
-        "deletion" => "rm src/current.txt",
-        "recreation" => "rm -rf src; mkdir src; printf recreated > src/current.txt",
-        "host-edit" | "host-create" => {
+        OverlayCase::Deletion => "rm src/current.txt",
+        OverlayCase::Recreation => "rm -rf src; mkdir src; printf recreated > src/current.txt",
+        OverlayCase::HostEdit | OverlayCase::HostCreate => {
             "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt; printf candidate > created"
         }
-        _ => {
+        OverlayCase::Reads => {
             "set -eu; test \"$(cat node_modules/link)\" = dependency; test \"$(wc -c < large)\" -eq 2097152; test ! -s node_modules/package/deep/.env.local; test ! -e /seed/namespace; if printf leak > node_modules/package/deep/.env.local 2>/dev/null; then exit 1; fi; printf 'overlay reads passed\\n'"
         }
     };
@@ -126,8 +222,12 @@ async fn overlay_case(case: &str) {
         args: vec!["-c".into(), script.into()],
         cwd: "".into(),
     };
-    let dispatched = matches!(case, "host-edit" | "host-create")
-        .then(|| arany::FaultPlan::observe_guard_dispatch(command.clone()));
+    let dispatched = case.host_path().map(|path| {
+        (
+            path,
+            arany::FaultPlan::observe_guard_dispatch(command.clone()),
+        )
+    });
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(command),
         arany::test_support::goals::finish_with("Done"),
@@ -142,16 +242,9 @@ async fn overlay_case(case: &str) {
         },
     );
     let mutate = async {
-        if let Some(dispatched) = dispatched {
+        if let Some((path, dispatched)) = dispatched {
             dispatched.await.unwrap();
-            private_file(
-                &fixture.workspace.join(if case == "host-edit" {
-                    "src/current.txt"
-                } else {
-                    "created"
-                }),
-                b"host",
-            );
+            private_file(&fixture.workspace.join(path), b"host");
             private_file(&fixture.workspace.join("released"), b"release\n");
         }
     };
@@ -163,9 +256,9 @@ async fn check_overlay_case(
     fixture: SpillFixture,
     provider: &Arc<arany::test_support::scenario::ScriptedProvider>,
     outcome: arany::RunOutcome,
-    case: &str,
+    case: OverlayCase,
 ) {
-    let publishes = matches!(case, "writes" | "mode-zero" | "no-space" | "spill-merge");
+    let publishes = case.publishes();
     check_overlay_result(&fixture, &outcome, case);
     fixture.engine.close().await.unwrap();
     let (events, view) =
@@ -183,7 +276,7 @@ async fn check_overlay_case(
         );
     }
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
-    if case == "spill-merge" {
+    if case == OverlayCase::SpillMerge {
         let spill = outcome.run.tools[0]
             .observation
             .as_ref()
@@ -218,21 +311,10 @@ async fn check_overlay_case(
     }
 }
 
-fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, case: &str) {
+fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, case: OverlayCase) {
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
-    let refused = matches!(
-        case,
-        "deletion" | "recreation" | "host-edit" | "host-create"
-    );
-    let expected = if matches!(case, "host-edit" | "host-create") {
-        ToolDisposition::Conflict
-    } else if refused {
-        ToolDisposition::Denied
-    } else if case == "no-space" {
-        ToolDisposition::Failed
-    } else {
-        ToolDisposition::Succeeded
-    };
+    let refused = case.refused();
+    let expected = case.disposition();
     if observation.disposition != expected {
         let exit = serde_json::from_str::<Value>(&observation.output)
             .ok()
@@ -243,17 +325,17 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         ));
     }
     assert_eq!(observation.disposition, expected, "{case}");
-    let publishes = matches!(case, "writes" | "mode-zero" | "no-space" | "spill-merge");
+    let publishes = case.publishes();
     if !refused {
         let result: Value = serde_json::from_str(&observation.output).unwrap();
         assert_eq!(
             result["exit_code"],
-            if case == "no-space" { 1 } else { 0 },
+            if case == OverlayCase::NoSpace { 1 } else { 0 },
             "{case}"
         );
         assert_eq!(result["selection"]["pruned_directories"], 0);
         assert_eq!(result["selection"]["oversized_inputs"], 0);
-        if case == "reads" {
+        if case == OverlayCase::Reads {
             assert!(observation.spill.is_none());
             assert_eq!(result["stdout"], "overlay reads passed\n");
         }
@@ -268,25 +350,31 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
     check_overlay_files(&fixture.workspace, case);
 }
 
-fn check_overlay_files(workspace: &std::path::Path, case: &str) {
+fn check_overlay_files(workspace: &std::path::Path, case: OverlayCase) {
     let expected: &[u8] = match case {
-        "writes" => b"private edit",
-        "no-space" => b"partial",
-        "host-edit" => b"host",
-        _ => b"current",
+        OverlayCase::Writes => b"private edit",
+        OverlayCase::NoSpace => b"partial",
+        OverlayCase::HostEdit => b"host",
+        OverlayCase::Reads
+        | OverlayCase::SpillMerge
+        | OverlayCase::IgnoredClean
+        | OverlayCase::ModeZero
+        | OverlayCase::Deletion
+        | OverlayCase::Recreation
+        | OverlayCase::HostCreate => b"current",
     };
     assert_eq!(
         std::fs::read(workspace.join("src/current.txt")).unwrap(),
         expected,
         "{case}"
     );
-    if case == "mode-zero" {
+    if case == OverlayCase::ModeZero {
         assert_eq!(
             std::fs::read(workspace.join("created")).unwrap(),
             b"readable"
         );
     }
-    if case == "host-create" {
+    if case == OverlayCase::HostCreate {
         assert_eq!(std::fs::read(workspace.join("created")).unwrap(), b"host");
     }
     assert_eq!(
