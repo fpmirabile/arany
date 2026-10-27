@@ -1,6 +1,8 @@
 use super::*;
 use cap_std::fs::Dir;
 
+pub(super) const CAPTURE_TIME: Duration = Duration::from_secs(5);
+
 pub(in crate::tools) struct Session {
     pub(super) lower: Dir,
     pub(super) upper: Option<Dir>,
@@ -82,7 +84,7 @@ pub(super) fn publish(cache: BuildCacheSession) -> CacheUpdate {
         &session.lower,
         &upper,
         &cache.transfer.exclusions,
-        std::time::Instant::now() + super::super::selection::PHASE_TIME,
+        std::time::Instant::now() + CAPTURE_TIME,
         cache.transfer.candidate_bytes,
     ) {
         Ok(changes) => changes,
