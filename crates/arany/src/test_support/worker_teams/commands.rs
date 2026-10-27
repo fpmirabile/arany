@@ -2,6 +2,45 @@ use super::*;
 
 pub(super) mod overlay;
 
+pub(super) struct CacheFailure {
+    identity: crate::store::BuildCacheIdentity,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl CacheFailure {
+    pub(super) fn new(workspace: &Path, intent: &EffectIntent) -> Self {
+        let identity = crate::store::BuildCacheIdentity::new(
+            workspace,
+            intent.workspace_device,
+            intent.workspace_inode,
+        )
+        .unwrap();
+        let (entered, release) = FaultPlan::gate_guard_cache_publication(intent.id);
+        Self {
+            identity,
+            entered,
+            release: Some(release),
+        }
+    }
+
+    pub(super) async fn inject(&mut self) {
+        (&mut self.entered)
+            .await
+            .expect("editor command reached cache publication");
+        // Preparation also syncs the root, so arm this fault only at publication.
+        #[cfg(target_os = "linux")]
+        FaultPlan::fail_record_sync(self.identity.token().into(), "");
+        #[cfg(not(target_os = "linux"))]
+        FaultPlan::fail_commit_marker(&self.identity);
+        self.release
+            .take()
+            .unwrap()
+            .send(())
+            .expect("cache publication is held until its fault is armed");
+    }
+}
+
 pub(super) fn is_case(case: &str) -> bool {
     case.starts_with("command")
 }
