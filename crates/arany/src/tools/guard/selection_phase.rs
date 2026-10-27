@@ -131,9 +131,7 @@ fn monotonic_nanos() -> Result<u64, ToolError> {
 
 pub(super) fn encode_deadline(deadline: tokio::time::Instant) -> Result<[u8; 8], ToolError> {
     let clock = monotonic_nanos()?;
-    let remaining = deadline
-        .into_std()
-        .saturating_duration_since(Instant::now());
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let nanos = u64::try_from(remaining.as_nanos()).map_err(|_| ToolError::Limit)?;
     Ok(clock
         .checked_add(nanos)
@@ -323,8 +321,10 @@ pub(in crate::tools::guard) mod tests {
         }
     }
 
-    #[test]
-    fn transported_deadline_never_restarts_the_action_budget() {
+    #[tokio::test(start_paused = true)]
+    async fn transported_deadline_never_restarts_the_action_budget() {
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        tokio::time::resume();
         for runtime in [
             Duration::from_millis(25),
             TEST_RUNTIME,
@@ -332,13 +332,20 @@ pub(in crate::tools::guard) mod tests {
         ] {
             let now = tokio::time::Instant::now();
             let action = now + runtime;
+            let host_now = Instant::now();
             let decoded = decode_deadline(encode_deadline(action).unwrap()).unwrap();
-            assert!(decoded <= action.into_std());
-            assert!(decoded > now.into_std());
+            assert!(decoded <= host_now + runtime);
+            assert!(decoded > host_now);
             if runtime >= TEST_RUNTIME {
-                assert!(decoded > (now + Duration::from_secs(5)).into_std());
+                assert!(decoded > host_now + Duration::from_secs(5));
             }
         }
+        let expired =
+            decode_deadline(encode_deadline(tokio::time::Instant::now()).unwrap()).unwrap();
+        assert!(matches!(
+            Selector::new(0, expired).add("", b"ignored"),
+            Err(ToolError::Timeout(_))
+        ));
         let expired = decode_deadline([0; 8]).unwrap();
         assert!(matches!(
             Selector::new(0, expired).add("", b"ignored"),
