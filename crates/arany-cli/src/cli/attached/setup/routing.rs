@@ -1,8 +1,6 @@
 use super::custom::custom_status_label;
-use super::{
-    SetupError, SetupJournal, await_operation, await_setup_ack, choose, read_setup_value,
-    review_warning,
-};
+use super::prompts::read_setup_value;
+use super::{SetupError, SetupJournal, await_operation, await_setup_ack, choose, review_warning};
 use crate::accounts::{chatgpt, credentials};
 use crate::cli::provider::routing::{MAX_ROLE_MODEL_BYTES, Route, RoutingDraft};
 use crate::presentation::escape_terminal;
