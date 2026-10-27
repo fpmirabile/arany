@@ -813,7 +813,7 @@ async fn handle_compaction_input(
             .map_err(|error| error.to_string())?;
         return Ok(None);
     }
-    if ui.terminal.take_graphics_hover_changed() {
+    if ui.terminal.take_graphics_hover_changed() || input == TerminalInput::PanelSelectionChanged {
         ui.terminal
             .draw_busy(ui.view, ui.composer, None)
             .map_err(|error| error.to_string())?;
