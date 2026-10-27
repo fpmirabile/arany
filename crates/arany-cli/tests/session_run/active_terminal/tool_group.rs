@@ -1,5 +1,5 @@
 use super::write_input;
-use crate::loopback::{ChildGuard, wait_product};
+use crate::loopback::{ChildGuard, PRODUCT_EXIT_WAIT, wait_product};
 use arany::StateRoot;
 use serde_json::{Value, json};
 use std::{
@@ -54,6 +54,11 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
+    let fixture_deadline = crate::isolation::native_test_deadline() - PRODUCT_EXIT_WAIT;
+    assert!(
+        Instant::now() < fixture_deadline,
+        "native fixture startup deadline"
+    );
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let tls = crate::tls_fixture::build(root);
@@ -184,15 +189,23 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
             );
             let text = String::from_utf8_lossy(&bytes);
             if !closed
-                && let Some(answer) = text.find("TP7_FINAL_ANSWER")
-                && text[answer..].contains("Input:")
+                && let (Some(answer), Some(settled)) = (
+                    text.find("TP7_FINAL_ANSWER"),
+                    text.find("Last task: finished\r\n"),
+                )
+                && text[answer.max(settled)..].contains("Input:\r\n")
             {
                 closed = true;
                 done.send(()).unwrap();
             }
         }
     });
-    let waited = finished.recv_timeout(Duration::from_secs(30));
+    let waited = finished.recv_timeout(fixture_deadline.saturating_duration_since(Instant::now()));
+    if waited.is_err() {
+        crate::process::annotate_native_fixture(&format!(
+            "fixture=tool_group; stage=settled_prompt; wait={waited:?}"
+        ));
+    }
     if waited.is_ok() {
         write_input(&input, b"\x04");
     }

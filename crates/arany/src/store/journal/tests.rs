@@ -824,14 +824,14 @@ fn assert_tool_tail_capacity(prepared: bool) {
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .unwrap();
     let admits = |t: &Transaction<'_>, observations: usize| {
-        let results = [AdmissionKind::Operation, AdmissionKind::SealedData].map(|kind| {
-            admit_in_transaction(t, session_id, tail_slots, observations, kind).is_ok()
-        });
-        assert_eq!(
-            results[0], results[1],
-            "worker sealed-data admission reserves the same bytes"
-        );
-        results[0]
+        admit_in_transaction(
+            t,
+            session_id,
+            tail_slots,
+            observations,
+            AdmissionKind::Operation,
+        )
+        .is_ok()
     };
     let tail_commits = |t: &Transaction<'_>| {
         t.execute_batch("SAVEPOINT pair").unwrap();
@@ -923,10 +923,7 @@ fn every_event_slot_admits_a_current_tool_observation() {
 
 #[test]
 fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
-    for f in [
-        crate::session::worker_protocol_fixture(),
-        crate::session::worker_command_protocol_fixture(),
-    ] {
+    for f in [crate::session::worker_protocol_fixture()] {
         let temp = tempfile::tempdir().unwrap();
         let root = StateRoot::admit(&temp.path().join("state")).expect("private worker State root");
         let mut connection = open_connection(&root, false).unwrap();
@@ -946,10 +943,6 @@ fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
             "AgentFinished",
             "ToolStarted",
             "ToolFinished",
-            "WorkerDataChunk",
-            "WorkerDataSealed",
-            "WorkerHandoverRecorded",
-            "WorkerIntegrationRecorded",
             "WorkerLeaseReleased",
             "WorkerVerificationRecorded",
         ] {

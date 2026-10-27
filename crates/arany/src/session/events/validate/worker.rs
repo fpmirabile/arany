@@ -48,12 +48,18 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
-            Self::WorkerHandoverDiscarded { record, .. }
-            | Self::WorkerLeaseReleased { record, .. } => {
+            Self::WorkerHandoverDiscarded { record, .. } => {
                 if record.assignment_id.valid()
                     && record.cause_sequence > 0
                     && record.handover_sequence != Some(0)
                 {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::WorkerLeaseReleased { record, .. } => {
+                if record.assignment_id.valid() && record.cause_sequence > 0 {
                     Ok(())
                 } else {
                     Err(ReplayError::InvalidPayload)

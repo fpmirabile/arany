@@ -241,18 +241,6 @@ pub enum AdmissionKind {
     Compaction,
     // Reserve the objective and image envelopes.
     RunStart,
-    // The allowance budgets its own sealed-data chunks, so it is not headroom for later Events.
-    SealedData,
-}
-
-impl AdmissionKind {
-    pub(crate) fn for_chunks(chunks: usize) -> Self {
-        if chunks > 0 {
-            Self::SealedData
-        } else {
-            Self::Operation
-        }
-    }
 }
 
 enum Request {

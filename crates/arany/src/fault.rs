@@ -232,6 +232,16 @@ pub(crate) fn guard_result(
     result
 }
 
+#[cfg(target_os = "linux")]
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn guard_completion(intent: uuid::Uuid) -> Result<(), ToolError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if FaultPlan::guard_completion_lost(intent) {
+        return Err(ToolError::Operation);
+    }
+    Ok(())
+}
+
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     #[cfg(any(test, feature = "test-support"))]
@@ -378,6 +388,8 @@ mod injection {
         SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
+        #[cfg(target_os = "linux")]
+        GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
         GuardCacheReport(
@@ -703,6 +715,25 @@ mod injection {
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {
             plan().push(Fault::GuardReceipt(intent));
+        }
+
+        #[cfg(target_os = "linux")]
+        pub fn lose_guard_completion(intent: uuid::Uuid) -> oneshot::Receiver<()> {
+            let (entered, wait) = oneshot::channel();
+            plan().push(Fault::GuardCompletion(intent, entered));
+            wait
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn guard_completion_lost(intent: uuid::Uuid) -> bool {
+            if let Some(Fault::GuardCompletion(_, entered)) =
+                take(|fault| matches!(fault, Fault::GuardCompletion(id, _) if *id == intent))
+            {
+                let _ = entered.send(());
+                true
+            } else {
+                false
+            }
         }
 
         pub fn observe_guard_dispatch(call: crate::tools::ToolCall) -> oneshot::Receiver<()> {
