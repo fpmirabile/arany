@@ -251,9 +251,18 @@ fn supervisor_namespace(state: &Path) -> PathBuf {
         .collect::<Vec<_>>();
     assert_eq!(markers.len(), 1);
     let id = uuid::Uuid::parse_str(&std::fs::read_to_string(&markers[0]).unwrap()).unwrap();
+    let runtime = format!("/run/user/{}", nix::unistd::geteuid().as_raw());
     let output = Command::new("/usr/bin/systemctl")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={runtime}/bus"),
+        )
         .args([
             "--user",
+            "--no-ask-password",
             "show",
             "--property=MainPID",
             "--value",
