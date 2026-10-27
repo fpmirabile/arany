@@ -34,7 +34,6 @@ pub(crate) mod types;
 pub use types::{DEFAULT_PR_LIMIT, PrState};
 pub(crate) mod unguarded;
 pub(crate) mod unguarded_rules;
-pub(crate) mod worker;
 mod workspace;
 
 #[cfg(test)]
@@ -232,7 +231,6 @@ pub(crate) struct ToolRuntime {
     process_enforcement_digest: [u8; 32],
     context_limit_bytes: usize,
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
-    queue_wait: Option<std::sync::Arc<std::sync::Mutex<QueueWait>>>,
     active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
     hook_stdin: Option<std::sync::Arc<str>>,
     checkpoint_gate: Option<tokio::sync::mpsc::Sender<CheckpointRequest>>,
@@ -354,12 +352,6 @@ fn process_policy(config: &Config, guard_available: bool) -> Result<ProcessPolic
             digest: guard::enforcement_digest(&config.runtime_grants)?,
         })
     }
-}
-
-#[derive(Default)]
-struct QueueWait {
-    waiting: Option<std::time::Instant>,
-    elapsed: Duration,
 }
 
 pub(crate) struct RewindPin {
@@ -488,25 +480,6 @@ impl ToolRuntime {
     ) -> Self {
         self.queue_progress = sender;
         self
-    }
-
-    pub(crate) fn with_queue_accounting(mut self) -> Self {
-        self.queue_wait = Some(Default::default());
-        self
-    }
-
-    pub(crate) fn queued_duration(&self) -> Result<Duration, ToolError> {
-        let timing = self
-            .queue_wait
-            .as_ref()
-            .ok_or(ToolError::Configuration)?
-            .lock()
-            .map_err(|_| ToolError::Operation)?;
-        Ok(timing.elapsed.saturating_add(
-            timing
-                .waiting
-                .map_or(Duration::ZERO, |started| started.elapsed()),
-        ))
     }
 
     pub(crate) fn with_active_action_gate(
@@ -733,15 +706,6 @@ impl ToolRuntime {
     }
 
     pub(crate) fn queue_changed(&self, id: uuid::Uuid, queued: bool) {
-        if let Some(timing) = &self.queue_wait
-            && let Ok(mut timing) = timing.lock()
-        {
-            if queued {
-                timing.waiting.get_or_insert_with(std::time::Instant::now);
-            } else if let Some(started) = timing.waiting.take() {
-                timing.elapsed = timing.elapsed.saturating_add(started.elapsed());
-            }
-        }
         if let Some(sender) = &self.queue_progress {
             sender.send_replace(queued.then_some(id));
         }
@@ -1040,7 +1004,6 @@ impl ToolRuntime {
             result_filter: None,
             unguarded_rules,
             queue_progress: None,
-            queue_wait: None,
             active_action_gate: None,
             hook_stdin: None,
             checkpoint_gate: None,
@@ -1524,17 +1487,6 @@ impl ToolRuntime {
         }
     }
 
-    pub(crate) async fn apply_worker_handover(
-        &self,
-        intent: EffectIntent,
-        bytes: std::sync::Arc<[u8]>,
-        cancellation: Cancellation,
-    ) -> ToolObservation {
-        let mut runtime = self.clone();
-        runtime.handover = Some(bytes);
-        runtime.run_file(intent, cancellation).await
-    }
-
     pub(crate) async fn execute_concurrent_read(
         &self,
         intent: EffectIntent,
@@ -1582,17 +1534,24 @@ impl ToolRuntime {
         if matches!(
             intent.call,
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                    | crate::session::worker::ChangesetSource::Rewind { .. }
+                source: crate::session::worker::ChangesetSource::Rewind { .. }
             }
         ) && let Some(bytes) = &self.handover
         {
             return self
-                .apply_worker_handover(intent, bytes.clone(), cancellation)
+                .clone()
+                .with_handover(bytes.clone())
+                .run_file(intent, cancellation)
                 .await;
         }
         if intent.target != crate::session::worker::EffectTarget::Workspace
             || !self.config.allows(&intent.call)
+            || matches!(
+                intent.call,
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
+            )
         {
             return ToolObservation {
                 spill: None,
@@ -2143,6 +2102,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
             _ => failure_stage(&error),
         });
         let next = match &error {
+            ToolError::GuardBootstrap(failure) if failure.namespace_remedy().is_some() => {
+                failure.namespace_remedy().unwrap_or_default()
+            }
             ToolError::GuardRejected(guard::GuardStage::NamespaceBootstrap) => {
                 "Enable unprivileged user namespaces and Bubblewrap for Arany, then resend your message."
             }

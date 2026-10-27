@@ -1,7 +1,7 @@
 pub(crate) mod corpus;
 pub use corpus::{CorpusError, export_corpus};
 
-use crate::session::worker::{WorkerBaseVersion, WorkerDataFacts, WorkerDataPurpose};
+use crate::session::worker::{WorkerBaseVersion, WorkerDataPurpose};
 use crate::session::{AgentRunId, Event, EventEnvelope, ReplayError, RunId, RunView, SessionView};
 use crate::tools::permissions::{HookEvent, HookResult};
 use crate::tools::types::CommandResult;
@@ -788,29 +788,6 @@ fn subject(
         Event::ToolFinished { observation, .. } => {
             footprint = tool_step(run, actor, observation, roots, &mut step);
         }
-        Event::WorkerDataSealed { record, .. } => {
-            let data = run
-                .workers
-                .data
-                .iter()
-                .find(|d| d.reference == record.data)?;
-            let WorkerDataFacts::Changes(facts) = &data.facts else {
-                return None;
-            };
-            footprint = Some(capture_features(run, actor, facts, roots));
-            capture_edits(&mut step, facts);
-        }
-        Event::WorkerHandoverRecorded { record, .. } => {
-            let data = run
-                .workers
-                .data
-                .iter()
-                .find(|d| d.reference == record.data)?;
-            let WorkerDataFacts::Changes(facts) = &data.facts else {
-                return None;
-            };
-            footprint = Some(capture_features(run, record.assignment_id, facts, roots));
-        }
         Event::ProviderCallRecorded { .. } | Event::HookFinished { .. } => {
             step.stall = true;
         }
@@ -958,21 +935,7 @@ fn capture_features(
     let roots = worker
         .map_or(usize::from(declared_roots), |w| w.pins.request.lease.len())
         .max(1);
-    let base = worker
-        .and_then(|w| run.workers.data.iter().find(|d| d.reference == w.pins.base))
-        .and_then(|d| match &d.facts {
-            WorkerDataFacts::Manifest(entries) => Some(
-                entries
-                    .iter()
-                    .filter(|e| {
-                        worker.is_some_and(|w| {
-                            crate::session::worker::within(&e.path, &w.pins.request.lease)
-                        })
-                    })
-                    .fold(0u64, |n, e| n.saturating_add(bytes(&e.version))),
-            ),
-            _ => None,
-        });
+    let base: Option<u64> = None;
     DisproportionFeatures {
         files: count(facts.len()),
         deleted_files: count(deleted),

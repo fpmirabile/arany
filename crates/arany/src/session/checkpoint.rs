@@ -1,5 +1,5 @@
 use super::{RunId, RunView, SessionView};
-use crate::session::worker::{ChangesetSource, EffectTarget, WorkerBaseVersion, WorkerDataFacts};
+use crate::session::worker::{ChangesetSource, EffectTarget};
 use crate::tools::{EffectIntent, ToolCall, ToolDisposition};
 use serde::{Deserialize, Serialize};
 
@@ -80,7 +80,7 @@ pub(crate) fn publication(intent: &EffectIntent) -> bool {
         )
 }
 
-pub(crate) fn before_versions(run: &RunView, call: &ToolCall) -> Vec<(String, Option<String>)> {
+pub(crate) fn before_versions(_run: &RunView, call: &ToolCall) -> Vec<(String, Option<String>)> {
     match call {
         ToolCall::Write {
             path,
@@ -116,31 +116,7 @@ pub(crate) fn before_versions(run: &RunView, call: &ToolCall) -> Vec<(String, Op
             .iter()
             .map(|f| (f.path.clone(), f.before.as_ref().map(|v| v.sha256.clone())))
             .collect(),
-        ToolCall::ApplyChangeset {
-            source: ChangesetSource::WorkerHandover { data, .. },
-        } => run
-            .workers
-            .data
-            .iter()
-            .find(|sealed| &sealed.reference == data)
-            .and_then(|sealed| match &sealed.facts {
-                WorkerDataFacts::Changes(files) => Some(
-                    files
-                        .iter()
-                        .map(|f| (f.path.clone(), version_digest(&f.before)))
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default(),
         _ => Vec::new(),
-    }
-}
-
-fn version_digest(version: &WorkerBaseVersion) -> Option<String> {
-    match version {
-        WorkerBaseVersion::File { sha256, .. } => Some(sha256.clone()),
-        _ => None,
     }
 }
 
@@ -151,6 +127,13 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
     let previous = run
         .tools
         .iter()
+        .chain(run.agents.iter().flat_map(|a| &a.tools))
+        .filter(|t| t.finished_sequence.is_some())
+        .collect::<Vec<_>>();
+    let mut previous = previous;
+    previous.sort_by_key(|t| t.finished_sequence);
+    let previous = previous
+        .into_iter()
         .rev()
         .filter_map(|tool| tool.observation.as_ref())
         .filter(|o| o.disposition == ToolDisposition::Succeeded && publication(&o.intent))
@@ -189,20 +172,6 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
                 .iter()
                 .find(|f| f.path == path)
                 .map(|f| f.after.as_ref().map(|v| v.sha256.clone())),
-            ToolCall::ApplyChangeset {
-                source: ChangesetSource::WorkerHandover { data, .. },
-            } => run
-                .workers
-                .data
-                .iter()
-                .find(|s| &s.reference == data)
-                .and_then(|s| match &s.facts {
-                    WorkerDataFacts::Changes(files) => files
-                        .iter()
-                        .find(|f| f.path == path)
-                        .map(|f| version_digest(&f.after)),
-                    _ => None,
-                }),
             _ => None,
         });
     previous != Some(Some(before.to_owned()))

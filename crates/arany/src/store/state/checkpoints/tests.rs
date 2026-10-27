@@ -555,7 +555,6 @@ fn checkpoints_expiry_persists_even_when_the_capture_itself_fails() {
 
 #[tokio::test]
 async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_commit() {
-    use crate::session::worker::{WorkerIntegrationOutcome, WorkerSettlementReason};
     use crate::session::{Event, SessionView};
     use crate::store::Store;
     use crate::tools::{Attestation, ToolCall, ToolDisposition};
@@ -568,7 +567,13 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
             assert_eq!(
                 capture(
                     &root,
-                    batch(f.session, f.goal, f.run, sequence, &[sequence as u8]),
+                    batch(
+                        f.session,
+                        f.goal,
+                        f.run,
+                        f.events.len() as u64 + sequence,
+                        &[sequence as u8]
+                    ),
                     if startup { 0 } else { now },
                 )
                 .status,
@@ -617,54 +622,59 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
                 f.session,
                 Event::ToolFinished {
                     run_id: f.run,
-                    agent_run_id: f.primary,
+                    agent_run_id: observation.intent.agent_run_id,
                     observation: denied,
                     checkpoint: None,
                 },
             )
             .await
             .unwrap();
-        let mut integration = f.events[finished + 1].clone();
-        let Event::WorkerIntegrationRecorded { record, .. } = &mut integration else {
+        let mut failed = f.events.iter().find(|event| matches!(event,
+            Event::AgentFinished { agent_run_id, worker: Some(_), .. } if *agent_run_id == f.child
+        )).unwrap().clone();
+        let Event::AgentFinished {
+            disposition,
+            summary,
+            result,
+            worker: Some(outcome),
+            ..
+        } = &mut failed
+        else {
             unreachable!()
         };
-        record.outcome = WorkerIntegrationOutcome::Denied;
-        let integrated = store.append(f.session, integration).await.unwrap();
-        let Event::WorkerLeaseReleased { mut record, .. } = f.events[finished + 2].clone() else {
-            unreachable!()
-        };
-        record.reason = WorkerSettlementReason::Denied;
-        record.cause_sequence = integrated.sequence;
-        let discarded = store
-            .append(
-                f.session,
-                Event::WorkerHandoverDiscarded {
-                    run_id: f.run,
-                    agent_run_id: f.primary,
-                    record: record.clone(),
-                },
-            )
-            .await
-            .unwrap();
-        record.cause_sequence = discarded.sequence;
+        *disposition = crate::session::AgentDisposition::Failed;
+        *summary = None;
+        *result = None;
+        outcome.disposition = crate::worker::WorkerDisposition::Failed;
+        outcome.cause = crate::worker::WorkerCause::ToolFailed;
+        let finished = store.append(f.session, failed).await.unwrap();
         store
             .append(
                 f.session,
                 Event::WorkerLeaseReleased {
                     run_id: f.run,
                     agent_run_id: f.primary,
-                    record,
+                    record: crate::worker::WorkerLeaseRelease {
+                        assignment_id: f.child,
+                        cause_sequence: finished.sequence,
+                    },
                 },
             )
             .await
             .unwrap();
-
+        let primary_call = f.events.iter().find(|event| matches!(event,
+            Event::ProviderCallRecorded { agent_run_id, record, .. }
+                if *agent_run_id == f.primary && record.phase == crate::AgentPhase::RootSynthesis
+                    && record.disposition == crate::ProviderCallDisposition::ToolRequested
+        )).unwrap().clone();
+        let primary_reserve = f.events.iter().rev().find(|e| matches!(e, Event::GoalProviderCallReserved { agent_run_id, .. } if *agent_run_id == f.primary)).unwrap().clone();
         for index in 0..2 {
-            for event in &f.events[finished + 3..finished + 5] {
+            for event in [&primary_reserve, &primary_call] {
                 store.append(f.session, event.clone()).await.unwrap();
             }
             let mut intent = observation.intent.clone();
             intent.id = uuid::Uuid::now_v7();
+            intent.agent_run_id = f.primary;
             let path = format!("src/changed{index}");
             intent.call = ToolCall::Write {
                 path: path.clone(),

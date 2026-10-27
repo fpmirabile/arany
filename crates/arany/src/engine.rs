@@ -1889,23 +1889,6 @@ impl Engine {
                 .await?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
-        if goal.entry == GoalEntry::Resume {
-            let view = history.as_ref().ok_or(EngineError::InvalidHistory)?;
-            let stored = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
-            let ids: Vec<_> = view
-                .runs
-                .iter()
-                .filter(|r| stored.run_ids.contains(&r.id))
-                .flat_map(|r| r.private_recovery_tools())
-                .map(|t| t.intent.id)
-                .collect();
-            if !ids.is_empty() {
-                if submission.tools.is_none() {
-                    return Err(EngineError::GoalUnavailable);
-                }
-                crate::tools::recover_private(&ids).await?;
-            }
-        }
         if entry == GoalEntry::Resume {
             let previous = history
                 .as_ref()
