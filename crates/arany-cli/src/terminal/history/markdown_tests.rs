@@ -3,6 +3,7 @@ use super::*;
 use crate::presentation::{Output, render_exec};
 use crate::terminal::markdown;
 use crate::terminal::view::{Palette, draw_history_rows, native_line};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 
 const MARKDOWN_CASES: &[(&str, &str, bool, &str)] = &[
@@ -374,6 +375,7 @@ fn tables_fit_or_use_records_with_source_copy_find_and_exact_classic_costs() {
 
 #[test]
 fn table_matrix_padding_and_output_limits_fall_back_as_whole_messages() {
+    const MAX_AUTOCOMPLETED_CELLS: usize = 1 << 18;
     let columns = markdown::MAX_MARKDOWN_TABLE_COLUMNS;
     let rows = markdown::MAX_MARKDOWN_TABLE_ROWS;
     let table = |columns, rows| {
@@ -388,6 +390,17 @@ fn table_matrix_padding_and_output_limits_fall_back_as_whole_messages() {
     let too_wide = table(columns + 1, 1);
     let too_tall = table(1, rows + 1);
     let padding = table(columns * rows, rows + 1);
+    assert!(padding.len() <= markdown::MAX_MARKDOWN_PARSE_BYTES);
+    assert!((columns * rows - 1) * (rows + 1) > MAX_AUTOCOMPLETED_CELLS);
+    assert_eq!(
+        Parser::new_ext(&padding, Options::ENABLE_TABLES)
+            .into_offset_iter()
+            .filter(
+                |(event, range)| matches!(event, Event::Start(Tag::TableCell)) && range.is_empty()
+            )
+            .count(),
+        MAX_AUTOCOMPLETED_CELLS
+    );
     let long_header = format!(
         "{} | Value\n--- | ---\n{}",
         "heading ".repeat(160),
