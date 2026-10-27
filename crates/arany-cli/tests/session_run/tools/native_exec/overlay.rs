@@ -327,9 +327,7 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
         OverlayCase::Narrow => {
             "set -eu; test \"$(cat Cargo.toml)\" = manifest; test \"$(wc -c < large)\" -eq 2097152; test ! -s src/.env; test ! -e sibling; test ! -e node_modules; test ! -e lib/sibling; test ! -e /seed/namespace; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch lib/sibling 2>/dev/null; then exit 1; fi; printf 'private edit' > src/current.txt; printf 'private create' > lib/deep/created; printf ignored > src/node_modules/generated; printf selected > src/gen/output; printf 'narrow grants passed\\n'"
         }
-        OverlayCase::NarrowReplacement => {
-            "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt"
-        }
+        OverlayCase::NarrowReplacement => "printf candidate > src/current.txt",
         OverlayCase::NarrowNoSpace => {
             "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=src/node_modules/fill bs=1M count=160; LC_ALL=C dd if=/dev/zero of=lib/deep/node_modules/fill bs=1M count=160"
         }
@@ -369,11 +367,17 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
 async fn overlay_case(case: OverlayCase) {
     let fixture = overlay_fixture(case);
     let command = overlay_command(case);
-    let dispatched = case.host_path().map(|path| {
-        (
-            path,
-            arany::FaultPlan::observe_guard_dispatch(command.clone()),
-        )
+    let mutation = case.host_path().map(|path| {
+        let (entered, release) = if case == OverlayCase::NarrowReplacement {
+            let (entered, release) = arany::FaultPlan::gate_guard_capture(command.clone());
+            (entered, Some(release))
+        } else {
+            (
+                arany::FaultPlan::observe_guard_dispatch(command.clone()),
+                None,
+            )
+        };
+        (path, entered, release)
     });
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(command),
@@ -389,8 +393,8 @@ async fn overlay_case(case: OverlayCase) {
         },
     );
     let mutate = async {
-        if let Some((path, dispatched)) = dispatched {
-            dispatched.await.unwrap();
+        if let Some((path, entered, release)) = mutation {
+            entered.await.unwrap();
             if case == OverlayCase::NarrowReplacement {
                 std::fs::rename(
                     fixture.workspace.join("src"),
@@ -400,7 +404,11 @@ async fn overlay_case(case: OverlayCase) {
                 std::fs::create_dir(fixture.workspace.join("src")).unwrap();
             }
             private_file(&fixture.workspace.join(path), b"host");
-            private_file(&fixture.workspace.join("released"), b"release\n");
+            if let Some(release) = release {
+                release.send(()).unwrap();
+            } else {
+                private_file(&fixture.workspace.join("released"), b"release\n");
+            }
         }
     };
     let (outcome, ()) = tokio::join!(running, mutate);

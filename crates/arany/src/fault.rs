@@ -254,6 +254,13 @@ pub(crate) fn guard_dispatched(intent: &crate::tools::EffectIntent) {
     FaultPlan::guard_dispatched(&intent.call);
 }
 
+#[cfg(target_os = "linux")]
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn guard_capture(intent: &crate::tools::EffectIntent) {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::guard_capture_gate(&intent.call).await;
+}
+
 pub(crate) struct CandidateSync {
     #[cfg(any(test, feature = "test-support"))]
     finished: Option<tokio::sync::oneshot::Sender<()>>,
@@ -391,6 +398,12 @@ mod injection {
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
+        #[cfg(target_os = "linux")]
+        GuardCapture(
+            crate::tools::ToolCall,
+            oneshot::Sender<()>,
+            oneshot::Receiver<()>,
+        ),
         GuardCacheReport(
             uuid::Uuid,
             oneshot::Sender<crate::tools::ToolObservation>,
@@ -737,6 +750,26 @@ mod injection {
             let (entered, wait) = oneshot::channel();
             plan().push(Fault::GuardDispatch(call, entered));
             wait
+        }
+
+        #[cfg(target_os = "linux")]
+        pub fn gate_guard_capture(
+            call: crate::tools::ToolCall,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            plan().push(Fault::GuardCapture(call, entered, released));
+            (wait, release)
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) async fn guard_capture_gate(call: &crate::tools::ToolCall) {
+            if let Some(Fault::GuardCapture(_, entered, release)) = take(
+                |fault| matches!(fault, Fault::GuardCapture(candidate, ..) if candidate == call),
+            ) {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
         }
 
         pub(crate) fn guard_dispatched(call: &crate::tools::ToolCall) {
