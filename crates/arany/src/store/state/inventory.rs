@@ -329,10 +329,9 @@ impl Scan<'_> {
         }
         if metadata.is_dir() {
             if walk.category == Category::BuildCache && walk.depth == 1 {
-                if !name
-                    .to_str()
-                    .is_some_and(|name| name.starts_with("directory-") && name.ends_with(".tree"))
-                {
+                if !name.to_str().is_some_and(|name| {
+                    name.starts_with(super::build_cache::TREE_PREFIX) && name.ends_with(".tree")
+                }) {
                     return Err(StorageReason::UnexpectedCacheObject);
                 }
                 Self::cache_record(name, cache_tokens, &mut rows[walk.category as usize])?;
