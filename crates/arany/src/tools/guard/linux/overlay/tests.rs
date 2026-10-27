@@ -80,7 +80,8 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
         verify_overlay(
             &parse_mountinfo(topology).unwrap(),
             Path::new("/workspace"),
-            &masks
+            &masks,
+            Path::new("/"),
         )
         .is_ok()
     );
@@ -88,6 +89,7 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
     for invalid in [
         text.replace("overlay overlay", "tmpfs tmpfs"),
         text.replace("ro,nosuid", "rw,nosuid"),
+        text.replace("/empty-file", "/other-grant/empty-file"),
         text.replace(",userxattr", ""),
         format!("{text}4 2 0:4 / /workspace/extra rw - tmpfs tmpfs rw\n"),
     ] {
@@ -95,7 +97,8 @@ fn overlay_topology_rejects_wrong_types_writable_masks_and_extra_mounts() {
             verify_overlay(
                 &parse_mountinfo(invalid.as_bytes()).unwrap(),
                 Path::new("/workspace"),
-                &masks
+                &masks,
+                Path::new("/"),
             )
             .is_err()
         );
@@ -119,6 +122,18 @@ fn overflowing_mask_arguments_replace_the_entire_enclosing_view() {
     )
     .unwrap();
     assert_eq!(inventory.paths(), vec![PathBuf::new()]);
+    let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+    let allowance = serde_json::to_vec(&["narrow/"]).unwrap().len();
+    let inventory = masks::Inventory::read_shared(
+        &lower,
+        ("narrow", allowance),
+        &mut Default::default(),
+        &mut crate::tools::selection::Selector::new(0, deadline),
+        deadline,
+    )
+    .unwrap();
+    assert_eq!(inventory.paths(), vec![PathBuf::new()]);
+    assert!(inventory.argument_bytes().unwrap() <= allowance);
 }
 
 #[tokio::test]

@@ -22,6 +22,10 @@ fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
         .block_on(async {
             for case in [
                 "reads",
+                "narrow",
+                "file-only",
+                "narrow-replacement",
+                "narrow-no-space",
                 "writes",
                 "spill-merge",
                 "ignored-clean",
@@ -43,6 +47,7 @@ fn overlay_fixture(case: &str) -> SpillFixture {
     let path = fixture.state.join("tools.json");
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     config["write"] = true.into();
+    configure_narrow_grants(&fixture, &mut config, case);
     private_file(&path, &serde_json::to_vec(&config).unwrap());
     std::fs::create_dir_all(fixture.workspace.join("node_modules/package/deep")).unwrap();
     std::fs::create_dir_all(fixture.workspace.join("node_modules/cache")).unwrap();
@@ -94,6 +99,27 @@ fn overlay_fixture(case: &str) -> SpillFixture {
     fixture
 }
 
+fn configure_narrow_grants(fixture: &SpillFixture, config: &mut Value, case: &str) {
+    if case.starts_with("narrow") || case == "file-only" {
+        std::fs::create_dir_all(fixture.workspace.join("lib/deep/node_modules")).unwrap();
+        std::fs::create_dir_all(fixture.workspace.join("src/node_modules")).unwrap();
+        private_file(&fixture.workspace.join("Cargo.toml"), b"manifest");
+        private_file(
+            &fixture.workspace.join("src/.env"),
+            b"PRIVATE_OVERLAY_CANARY",
+        );
+        private_file(
+            &fixture.workspace.join("sibling"),
+            b"PRIVATE_SIBLING_CANARY",
+        );
+        config["workspace_paths"] = if case == "file-only" {
+            json!(["Cargo.toml"])
+        } else {
+            json!(["src", "lib/deep", "Cargo.toml", "large", "released"])
+        };
+    }
+}
+
 async fn overlay_case(case: &str) {
     let fixture = overlay_fixture(case);
     let spill_script = format!(
@@ -102,6 +128,19 @@ async fn overlay_case(case: &str) {
     );
     let script = match case {
         "spill-merge" => spill_script.as_str(),
+        "file-only" => {
+            "set -eu; test \"$(cat Cargo.toml)\" = manifest; test ! -e src; test ! -e sibling; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch created 2>/dev/null; then exit 1; fi"
+        }
+        "narrow" => {
+            "set -eu; test \"$(cat Cargo.toml)\" = manifest; test \"$(wc -c < large)\" -eq 2097152; test ! -s src/.env; test ! -e sibling; test ! -e node_modules; test ! -e lib/sibling; test ! -e /seed/namespace; if printf write > Cargo.toml 2>/dev/null; then exit 1; fi; if touch lib/sibling 2>/dev/null; then exit 1; fi; printf 'private edit' > src/current.txt; printf 'private create' > lib/deep/created; printf ignored > src/node_modules/generated; printf 'narrow grants passed\\n'"
+        }
+        "narrow-replacement" => {
+            "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt"
+        }
+        "narrow-no-space" => {
+            "printf partial > src/current.txt; dd if=/dev/zero of=src/node_modules/fill bs=1M count=160 2>/dev/null; dd if=/dev/zero of=lib/deep/node_modules/fill bs=1M count=160 2>/dev/null"
+        }
+
         "writes" => {
             "printf 'private edit' > src/current.txt; printf 'private create' > created; printf 'src/current.txt\\n' > .gitignore"
         }
@@ -126,7 +165,7 @@ async fn overlay_case(case: &str) {
         args: vec!["-c".into(), script.into()],
         cwd: "".into(),
     };
-    let dispatched = matches!(case, "host-edit" | "host-create")
+    let dispatched = matches!(case, "host-edit" | "host-create" | "narrow-replacement")
         .then(|| arany::FaultPlan::observe_guard_dispatch(command.clone()));
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(command),
@@ -144,19 +183,33 @@ async fn overlay_case(case: &str) {
     let mutate = async {
         if let Some(dispatched) = dispatched {
             dispatched.await.unwrap();
-            private_file(
-                &fixture.workspace.join(if case == "host-edit" {
-                    "src/current.txt"
-                } else {
-                    "created"
-                }),
-                b"host",
-            );
+            mutate_overlay_lower(&fixture, case);
             private_file(&fixture.workspace.join("released"), b"release\n");
         }
     };
     let (outcome, ()) = tokio::join!(running, mutate);
     check_overlay_case(fixture, &provider, outcome.unwrap(), case).await;
+}
+
+fn mutate_overlay_lower(fixture: &SpillFixture, case: &str) {
+    if case == "narrow-replacement" {
+        std::fs::rename(
+            fixture.workspace.join("src"),
+            fixture.workspace.join("old-source"),
+        )
+        .unwrap();
+        std::fs::create_dir(fixture.workspace.join("src")).unwrap();
+        private_file(&fixture.workspace.join("src/current.txt"), b"host");
+    } else {
+        private_file(
+            &fixture.workspace.join(if case == "host-edit" {
+                "src/current.txt"
+            } else {
+                "created"
+            }),
+            b"host",
+        );
+    }
 }
 
 async fn check_overlay_case(
@@ -165,7 +218,10 @@ async fn check_overlay_case(
     outcome: arany::RunOutcome,
     case: &str,
 ) {
-    let publishes = matches!(case, "writes" | "mode-zero" | "no-space" | "spill-merge");
+    let publishes = matches!(
+        case,
+        "writes" | "mode-zero" | "no-space" | "spill-merge" | "narrow" | "narrow-no-space"
+    );
     check_overlay_result(&fixture, &outcome, case);
     fixture.engine.close().await.unwrap();
     let (events, view) =
@@ -222,11 +278,11 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
     let refused = matches!(
         case,
-        "deletion" | "recreation" | "host-edit" | "host-create"
+        "deletion" | "recreation" | "host-edit" | "host-create" | "narrow-replacement"
     );
     assert_eq!(
         observation.disposition,
-        if matches!(case, "host-edit" | "host-create") {
+        if matches!(case, "host-edit" | "host-create" | "narrow-replacement") {
             ToolDisposition::Conflict
         } else if refused {
             ToolDisposition::Denied
@@ -236,12 +292,19 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         "{case}: {}",
         observation.output
     );
-    let publishes = matches!(case, "writes" | "mode-zero" | "no-space" | "spill-merge");
+    let publishes = matches!(
+        case,
+        "writes" | "mode-zero" | "no-space" | "spill-merge" | "narrow" | "narrow-no-space"
+    );
     if !refused {
         let result: Value = serde_json::from_str(&observation.output).unwrap();
         assert_eq!(
             result["exit_code"],
-            if case == "no-space" { 1 } else { 0 },
+            if matches!(case, "no-space" | "narrow-no-space") {
+                1
+            } else {
+                0
+            },
             "{case}"
         );
         assert_eq!(result["selection"]["pruned_directories"], 0);
@@ -249,6 +312,19 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         if case == "reads" {
             assert!(observation.spill.is_none());
             assert_eq!(result["stdout"], "overlay reads passed\n");
+        }
+        if case == "narrow" {
+            assert_eq!(result["stdout"], "narrow grants passed\n");
+            assert_eq!(
+                std::fs::read(fixture.workspace.join("lib/deep/created")).unwrap(),
+                b"private create"
+            );
+            assert!(
+                !fixture
+                    .workspace
+                    .join("src/node_modules/generated")
+                    .exists()
+            );
         }
         if !publishes {
             assert_eq!(result["changeset"]["files"], json!([]));
@@ -258,14 +334,15 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
         matches!(&observation.attestation, Some(arany::Attestation::Guard(receipt)) if receipt.intent_digest == Sha256::digest(serde_json::to_vec(&outcome.run.tools[0].intent).unwrap()).as_slice())
     );
     assert!(!observation.output.contains("PRIVATE_OVERLAY_CANARY"));
+    assert!(!observation.output.contains("PRIVATE_SIBLING_CANARY"));
     check_overlay_files(&fixture.workspace, case);
 }
 
 fn check_overlay_files(workspace: &std::path::Path, case: &str) {
     let expected: &[u8] = match case {
-        "writes" => b"private edit",
-        "no-space" => b"partial",
-        "host-edit" => b"host",
+        "writes" | "narrow" => b"private edit",
+        "no-space" | "narrow-no-space" => b"partial",
+        "host-edit" | "narrow-replacement" => b"host",
         _ => b"current",
     };
     assert_eq!(
