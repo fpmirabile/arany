@@ -161,7 +161,7 @@ Event decoding retains owned payload records and strict current-field validation
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 24; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 30 |
+| `ToolFinished` | 31 |
 | `ToolStarted` | 24; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
 | `AgentSpawned` | 17 |
@@ -183,7 +183,7 @@ Event decoding retains owned payload records and strict current-field validation
 | `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
 | `HookStarted` | 13 |
-| `HookFinished` | 19 |
+| `HookFinished` | 20 |
 | All other supported Event kinds | 6 |
 
 `ProviderCallRecorded` wire provenance remains an optional closed enum. `chat_completions_stop_storage_unspecified` records acceptance of a Chat Completions `stop` or `tool_calls` finish with the local non-streaming request; it claims nothing about remote retention. This additive enum value preserves the payload version and existing record bytes. An older reader rejects a record carrying the new value as unsupported history and follows the existing archive path.
@@ -320,6 +320,8 @@ The migration accepts only a recognized native profile or a validated `custom:NA
 The current Tool and hook intent payloads omit absolute approval expiry. The expiry-removal steps follow the primary generic-host steps. ToolFinished and HookFinished also require nullable `approval_cause`; migration sets it to `null` because older history cannot prove why approval was absent. The migration removes the intent expiry, validates and rebinds intent references in verdicts, hook subjects, receipts and command integrations, retaining content hashes. Historical prefix hashes are verified before replacement. A migrated pending intent is interrupted history, never a restored live approval.
 
 `WorkspaceRewindStarted` 1 → 2 removes the preview-expiry field. Its v1 canonical payload is validated before conversion, and the migration recomputes each affected prefix binding through the standard migration path; it creates no live preview or receipt.
+
+`ToolFinished` 30 → 31 and `HookFinished` 19 → 20 add required nullable `elapsed_ms` to existing command selection summaries. Historical timing is unknown and migrates to `null`; results are refitted within their pinned output budget while preserving totals, exit status, changesets and hook verdicts. Source payloads already carrying timing refuse migration. The [selection timing migration corpus](../../crates/arany/src/store/migrate/selection_timing_tests.rs) owns canonical source preservation and bounded refitting.
 
 `ToolFinished` 25 → 26 and `HookFinished` 14 → 15 add `selection: null` to prior complete command results because historical selection counts were not recorded. A near-limit result is refitted within its original `result_bytes` budget with explicit omission markers. The migration preserves output totals, exit status, changesets and hook verdicts. It refuses a result that already exceeds `result_bytes` or already contains `selection`, or whose converted result cannot fit or validate; non-command observations keep their bytes.
 

@@ -206,6 +206,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         output: "````\n<script>data</script>\u{001b}[2J".into(),
         attestation: None,
         approval_cause: None,
+        guard_stage: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;

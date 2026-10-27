@@ -278,6 +278,7 @@ mod tests {
             limit_cause: None,
             output,
             approval_cause: None,
+            guard_stage: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         observation.spill = OutputSpill::captured(&observation, Some(streams(&stdout, &stderr)));

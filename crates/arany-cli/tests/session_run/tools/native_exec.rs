@@ -137,6 +137,15 @@ fn cache_public_failure_stage(output: &str) -> &'static str {
         "Guard control protocol unavailable before dispatch; no operation was dispatched." => {
             "control-protocol"
         }
+        "Guard project selection timed out before dispatch; no operation was dispatched." => {
+            "selection-timed-out"
+        }
+        "Guard project input vanished before dispatch; no operation was dispatched." => {
+            "selection-input-vanished"
+        }
+        "Guard project input conflict before dispatch; no operation was dispatched." => {
+            "selection-input-conflict"
+        }
         "Guard waiting queue is full; retry when capacity is available. No operation was dispatched." => {
             "queue-full"
         }

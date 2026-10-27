@@ -26,7 +26,7 @@ fn selection_timing_migration_preserves_output_and_marks_old_timing_unknown() {
             .unwrap()
             .unwrap();
         let migrated: Value = serde_json::from_str(&migrated).unwrap();
-        assert_decodes_after_migration(kind, from + 1, &migrated);
+        assert_decodes_after_migration(kind, crate::test_support::payload_version(kind), &migrated);
         let observation = if kind == "HookFinished" {
             &migrated["observation"]
         } else {
@@ -79,7 +79,11 @@ fn selection_timing_migration_refits_a_full_result_without_losing_totals() {
     source["output"] = result.to_string().into();
     let step = REGISTRY.event_step("ToolFinished", 30).unwrap();
     let migrated = (step.transform)(source).unwrap();
-    assert_decodes_after_migration("ToolFinished", 31, &migrated);
+    assert_decodes_after_migration(
+        "ToolFinished",
+        crate::test_support::payload_version("ToolFinished"),
+        &migrated,
+    );
     let output = migrated["output"].as_str().unwrap();
     assert!(output.len() <= budget);
     let command: crate::tools::types::CommandResult = serde_json::from_str(output).unwrap();

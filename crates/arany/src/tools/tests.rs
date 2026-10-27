@@ -283,6 +283,7 @@ pub(super) async fn inspect_read(
         enforcement_cause,
         limit_cause,
         approval_cause: None,
+        guard_stage: None,
         cache_update: super::CacheUpdate::NotApplicable,
     }
 }
@@ -474,6 +475,125 @@ fn undispatched_guard_failures_explain_safe_causes_and_recovery() {
         );
         assert!(observation.output.contains("no operation was dispatched"));
     }
+}
+
+#[test]
+fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
+    use super::{FailureStage, SelectionCause, ToolError};
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    let command = || {
+        runtime.intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "script".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        )
+    };
+    for (error, stage, label) in [
+        (
+            ToolError::Timeout(String::new()).in_selection(),
+            FailureStage::SelectionTimedOut,
+            "project selection timed out",
+        ),
+        (
+            ToolError::NotFound.in_selection(),
+            FailureStage::SelectionInputVanished,
+            "project input vanished",
+        ),
+        (
+            ToolError::Conflict.in_selection(),
+            FailureStage::SelectionInputConflict,
+            "project input conflict",
+        ),
+    ] {
+        assert!(matches!(
+            error,
+            ToolError::ProjectSelection(
+                SelectionCause::TimedOut
+                    | SelectionCause::InputVanished
+                    | SelectionCause::InputConflict
+            )
+        ));
+        let observation = super::unstarted_observation(command(), error);
+        assert_eq!(
+            observation.guard_stage,
+            Some(super::GuardStageFact { stage, check: None })
+        );
+        assert_eq!(
+            observation.guard_stage_diagnostic().as_deref(),
+            Some(format!("Guard stage: {label}").as_str())
+        );
+        assert!(observation.valid() && observation.stops_run());
+        assert!(
+            observation
+                .output
+                .starts_with(&format!("Guard {label} before dispatch;"))
+        );
+        assert!(
+            observation.output.contains("Cause: ")
+                && observation.output.contains(&format!(
+                    "Cause: {label}. Resend your message; the Guard executable is not involved."
+                ))
+        );
+        assert!(!observation.output.contains("native sandbox prerequisites"));
+        let json = serde_json::to_string(&observation).unwrap();
+        assert!(json.contains("\"guard_stage\":{\"stage\":\"selection_"));
+        assert_eq!(
+            serde_json::from_str::<super::ToolObservation>(&json).unwrap(),
+            observation
+        );
+    }
+    for (error, stage) in [
+        (ToolError::Timeout(String::new()), FailureStage::Execution),
+        (ToolError::NotFound, FailureStage::Execution),
+        (ToolError::Conflict, FailureStage::Execution),
+        (ToolError::Cancelled, FailureStage::Cancelled),
+    ] {
+        assert_eq!(super::failure_stage(&error), stage);
+    }
+    for error in [
+        ToolError::Timeout(String::new()),
+        ToolError::NotFound,
+        ToolError::Conflict,
+    ] {
+        let observation = super::unstarted_observation(command(), error);
+        assert!(
+            observation
+                .output
+                .starts_with("Guard execution unavailable before dispatch;")
+        );
+        assert!(
+            observation
+                .output
+                .contains("Check the Guard executable and native sandbox prerequisites")
+        );
+        assert_eq!(
+            observation.guard_stage.map(|fact| fact.stage),
+            Some(FailureStage::Execution)
+        );
+    }
+    let read = super::unstarted_observation(
+        runtime.intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Read {
+                path: "a".into(),
+                offset: Some(0),
+                limit: Some(10),
+            },
+        ),
+        ToolError::NotFound,
+    );
+    assert_eq!(read.guard_stage, None);
+    assert!(
+        !serde_json::to_string(&read)
+            .unwrap()
+            .contains("guard_stage")
+    );
 }
 
 #[test]
