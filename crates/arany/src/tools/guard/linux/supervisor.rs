@@ -97,6 +97,8 @@ pub(super) struct Launch {
     probe: Option<ProjectProbe>,
     #[serde(default)]
     pub(super) overlay: Option<overlay::Grant>,
+    #[serde(default)]
+    pub(super) cache: Option<overlay::cache::Grant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,6 +143,7 @@ impl Launch {
                 pin,
                 probe,
                 overlay: None,
+                cache: None,
             },
             executable,
         ))
@@ -296,7 +299,7 @@ fn mount_view(
     launch: &mut Launch,
     arguments: &mut [std::ffi::OsString],
 ) -> Result<Option<overlay::View>, ToolError> {
-    let view = match launch.overlay.take() {
+    let mut view = match launch.overlay.take() {
         Some(grant) => Some(overlay::View::mount(
             &launch.probe.as_ref().ok_or(ToolError::Configuration)?.root,
             grant,
@@ -304,6 +307,11 @@ fn mount_view(
         )?),
         None => None,
     };
+    if let Some(cache) = launch.cache.take() {
+        view.as_mut()
+            .ok_or(ToolError::Configuration)?
+            .install_cache(cache.mount()?);
+    }
     if let Some(view) = &view {
         let helper = arguments.last_mut().ok_or(ToolError::Configuration)?;
         *helper = serde_json::to_string(&Helper {
@@ -378,6 +386,16 @@ fn mount_probe(probe: &ProjectProbe) -> Result<(), ToolError> {
     probe_xattr(&file)?;
     drop(file);
     std::fs::remove_file(path).map_err(|_| ToolError::ProtectionUnavailable)
+}
+
+pub(in crate::tools::guard::linux) fn mount_tmpfs(
+    root: &Path,
+    bytes: u64,
+) -> Result<(), ToolError> {
+    mount_probe(&ProjectProbe {
+        root: root.into(),
+        bytes,
+    })
 }
 
 fn probe_xattr(file: &std::fs::File) -> Result<(), ToolError> {

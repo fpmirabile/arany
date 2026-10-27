@@ -1,11 +1,13 @@
 use super::*;
 
 #[test]
-fn nested_ancestor_sync_failure_keeps_conversion_unavailable_on_reopen() {
+fn nested_ancestor_sync_failure_keeps_conversion_and_application_unavailable_on_reopen() {
     if crate::test_process::isolate_test() {
         return;
     }
-    for ancestor in ["cargo", "cargo/registry", ".npm", ".cache/pip"] {
+    for (conversion, ancestor) in [true, false].into_iter().flat_map(|conversion| {
+        ["cargo", "cargo/registry", ".npm", ".cache/pip"].map(|ancestor| (conversion, ancestor))
+    }) {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         private_dir(&workspace);
@@ -28,9 +30,25 @@ fn nested_ancestor_sync_failure_keeps_conversion_unavailable_on_reopen() {
             &archive(&identity, &source, &[]),
             &[],
         );
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        crate::fault::FaultPlan::fail_record_sync(identity.token().into(), ancestor);
-        assert!(lease.prepare_directory().is_err(), "conversion {ancestor}");
+        let mut lease = state.begin_build_cache(identity.clone()).unwrap();
+        if conversion {
+            crate::fault::FaultPlan::fail_record_sync(identity.token().into(), ancestor);
+            assert!(lease.prepare_directory().is_err(), "conversion {ancestor}");
+        } else {
+            let lower = lease.prepare_directory().unwrap();
+            std::fs::write(source.join(paths[0]), b"updated").unwrap();
+            let upper = Dir::open_ambient_dir(&source, cap_std::ambient_authority()).unwrap();
+            crate::fault::FaultPlan::fail_record_sync(identity.token().into(), ancestor);
+            assert!(
+                lease
+                    .publish_directory(&lower, &upper, &[CacheChange::File(paths[0].into())], &[])
+                    .is_err(),
+                "application {ancestor}"
+            );
+            assert!(lease.publication_uncertain());
+            assert!(!file_exists(&lease.dir, &stamp_name(&identity.token())).unwrap());
+            assert!(!file_exists(&lease.dir, &archive_name(&identity.token())).unwrap());
+        }
         drop(lease);
         let state = StateRoot::open_existing(&state_path).unwrap();
         assert!(

@@ -41,8 +41,8 @@ fn editor_build_jobs_bind_selected_rust_before_guard_dispatch() {
     assert!(runtime.pinned_root(&intent).is_ok());
 }
 
-#[test]
-fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_reuse() {
+#[tokio::test]
+async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_reuse() {
     if crate::test_process::isolate_test() {
         return;
     }
@@ -94,4 +94,19 @@ fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_reuse(
     drop(next);
     state.clear_all_build_caches().unwrap();
     assert!(build_cache_session(&runtime, &editor).unwrap().is_some());
+    #[cfg(target_os = "linux")]
+    for class in [ToolResourceClass::Default, ToolResourceClass::Build] {
+        editor.limits.resource_class = class;
+        editor.limits.cache_bytes = 0;
+        editor.limits.cache_candidate_bytes = 0;
+        for requested in [0, crate::store::BUILD_CACHE_ARCHIVE_BYTES] {
+            editor.limits.cache_requested_bytes = requested;
+            let admitted = cache_directory::session(&runtime, &editor, far_deadline()).await;
+            if requested == 0 {
+                assert!(admitted.unwrap().is_none());
+            } else {
+                assert!(matches!(admitted, Err(ToolError::Limit)));
+            }
+        }
+    }
 }

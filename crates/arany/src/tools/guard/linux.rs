@@ -67,8 +67,9 @@ const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-w
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v24:default-cache-directory-admission-durable-guard-ownership-unavailable-conversion-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v24:primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear-worker-only-archive;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
+    bytes.extend_from_slice(&overlay::cache::HANDOFF_BYTES.to_le_bytes());
     bytes.extend_from_slice(&supervisor::MAX_PIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
@@ -671,6 +672,7 @@ fn unit_command(
     if overlay::selected(intent, &runtime.config) {
         launch.overlay = Some(overlay::Grant::new(runtime, intent)?);
     }
+    let cache_view = launch.cache.as_ref().map(overlay::cache::Grant::merged);
     let executable_path = supervisor::executable_path(&executable);
     let mut command = manager_command("/usr/bin/systemd-run");
     command.args([
@@ -729,6 +731,7 @@ fn unit_command(
             .as_ref()
             .map(|(path, write)| (path.as_path(), *write)),
         &intent.limits,
+        cache_view.as_deref(),
     );
     if let Some(overlay) = &launch.overlay {
         overlay.arguments(&mut command, seed_path);
@@ -1025,8 +1028,9 @@ pub(super) async fn execute_inner(
     let (runtime_directories, mounts) =
         runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
-    let mut cache = super::cache_directory::session(runtime, intent, go_deadline).await?;
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
+    let (mut cache, launch) =
+        overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
     let preparation_deadline =
         preparation_deadline.min(tokio::time::Instant::now() + RESERVATION_OVERHEAD);
     let mut unit = Unit {
@@ -1037,7 +1041,7 @@ pub(super) async fn execute_inner(
         limits: Some(intent.limits.clone()),
     };
     let filesystem = UnitFilesystem {
-        launch: supervisor::Launch::prepare(&runtime.guard_executable, &seed_path, intent).await?,
+        launch,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
         runtime_directories,
@@ -1097,7 +1101,6 @@ pub(super) async fn execute_inner(
                 runtime,
                 intent,
                 cache.as_ref(),
-                active_window.map(|window| window.completion_deadline),
                 report_deadline,
             )
             .await?;
@@ -1109,6 +1112,7 @@ pub(super) async fn execute_inner(
                     (&mut observation, &mut candidate),
                 )
                 .await?;
+                overlay::cache::complete(&mut cache, &mut candidate, &mut stdout, stdin).await?;
             }
             if candidate == super::CacheCandidate::Uncertain {
                 return Ok((observation, candidate));
@@ -1224,6 +1228,7 @@ fn profile_arguments(
     folders: &[&str],
     workspace: Option<(&Path, bool)>,
     limits: &ToolLimits,
+    cache_view: Option<&Path>,
 ) {
     command.args([
         "--unshare-all",
@@ -1270,10 +1275,14 @@ fn profile_arguments(
         .arg(limits.scratch_bytes.to_string())
         .args(["--tmpfs", "/scratch"]);
     if limits.cache_bytes > 0 {
-        command
-            .args(["--size"])
-            .arg(limits.cache_bytes.to_string())
-            .args(["--tmpfs", "/cache"]);
+        if let Some(view) = cache_view {
+            command.args(["--bind"]).arg(view).arg("/cache");
+        } else {
+            command
+                .args(["--size"])
+                .arg(limits.cache_bytes.to_string())
+                .args(["--tmpfs", "/cache"]);
+        }
     }
     command
         .args(["--dir", "/seed", "--ro-bind"])
@@ -1659,7 +1668,6 @@ async fn receive_result(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     cache: Option<&super::BuildCacheSession>,
-    deadline: Option<tokio::time::Instant>,
     report_deadline: Option<tokio::time::Instant>,
 ) -> Result<(ToolObservation, super::CacheCandidate), ToolError> {
     if let Some(session) = cache.filter(|_| runtime.worker.is_none()) {
@@ -1671,16 +1679,10 @@ async fn receive_result(
         } else {
             read.await?
         };
-        let candidate = match tokio::time::timeout_at(
-            super::cache_transfer_deadline(intent, deadline),
-            super::receive_cache_candidate(stdout, &session.lease),
-        )
-        .await
-        {
-            Ok(Ok(candidate)) => candidate,
-            Ok(Err(_)) | Err(_) => super::CacheCandidate::Uncertain,
-        };
-        Ok((observation, candidate))
+        if session.directory.is_none() {
+            return Err(ToolError::Configuration);
+        }
+        Ok((observation, super::CacheCandidate::Received))
     } else {
         let read = async {
             if overlay::selected(intent, &runtime.config) {
@@ -1731,7 +1733,26 @@ async fn prepare_ready(
     })
     .await
     .map_err(|_| ToolError::Limit)??;
+    if ready_bytes == b"CACHE_HANDLE_READY\n" {
+        if cache.is_none_or(|cache| cache.directory.is_none()) {
+            return Err(ToolError::Configuration);
+        }
+        let (upper, candidate) =
+            tokio::time::timeout_at(go_deadline, overlay::cache::receive(stdout, stdin))
+                .await
+                .map_err(|_| ToolError::Limit)??;
+        if upper.is_none() || candidate != super::CacheCandidate::Received {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        drop(upper);
+        ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(stdout, 2048))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    }
     if ready_bytes == b"CACHE_READY\n" {
+        if runtime.worker.is_none() {
+            return Err(ToolError::Configuration);
+        }
         let session = cache.ok_or(ToolError::Operation)?;
         let transfer_deadline = super::cache_transfer_deadline(intent, Some(go_deadline));
         tokio::time::timeout_at(
@@ -2114,6 +2135,7 @@ mod tests {
                 &folders,
                 mount,
                 &ToolLimits::default(),
+                None,
             );
             command.args(["--ro-bind", "/host/guard", "/arany"]);
             let arguments = command
@@ -2182,6 +2204,7 @@ mod tests {
             &[],
             Some((&workspace, false)),
             &ToolLimits::default(),
+            None,
         );
         command
             .args(["--ro-bind"])
@@ -2969,6 +2992,7 @@ mod tests {
                     &[],
                     None,
                     &ToolLimits::default(),
+                    None,
                 );
                 command.args(["--ro-bind"]).arg(&binary).arg("/arany");
                 for directory in mount_directories(Path::new(&target), Path::new("/")) {

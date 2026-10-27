@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 #[cfg(target_os = "linux")]
 mod directory;
 #[cfg(target_os = "linux")]
-pub(crate) use directory::CacheGuardRecovery;
+pub(crate) use directory::{CacheChange, CacheGuardRecovery};
 
 pub(super) const DIRECTORY: &str = "build-cache";
 const ARCHIVE_PREFIX: &str = "cache-";
@@ -49,11 +49,11 @@ pub(crate) const AGGREGATE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const IDENTITY_METADATA_BYTES: u64 = 1024;
 const GENERATION_BYTES: usize = 32;
 const MAX_DIRECTORY_ENTRIES: usize = MAX_IDENTITIES * IDENTITY_FILE_KINDS.len() + 2;
-const MAX_ARCHIVE_ENTRIES: usize = 16_384;
+pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 16_384;
 const MAX_PATH_DEPTH: usize = 32;
 const MAX_PATH_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAGIC: &[u8; 12] = b"ARANYCACHE\0\x01";
-const CACHE_ROOTS: &[&str] = &[
+pub(crate) const CACHE_ROOTS: &[&str] = &[
     "target",
     "cargo/registry/cache",
     "cargo/registry/src",
@@ -365,7 +365,7 @@ impl BuildCacheLease {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(target_os = "macos", feature = "test-support")))]
     pub(crate) fn token(&self) -> &str {
         &self.token
     }
@@ -377,6 +377,7 @@ impl BuildCacheLease {
         create_private_file(&self.dir, &candidate_name(&self.token))
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn open_candidate(&self) -> Result<File, StoreError> {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
@@ -430,6 +431,8 @@ impl StateRoot {
         self.admit_identity(&identity)?;
         let dir = cache_directory(self, true)?;
         let token = identity.token();
+        #[cfg(target_os = "linux")]
+        directory::prepare_worker_archive(self, &dir, &identity, archive_limit)?;
         let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
         if identity_count(&dir)? >= MAX_IDENTITIES && !contains_cache_identity(&dir, &token)? {
             return Err(StoreError::StorageFull);
@@ -446,7 +449,6 @@ impl StateRoot {
             directory::guard::admit(&dir, &token)?;
             directory::directory_available(&dir, &token)?;
         }
-        // Readers never recover, reserve, collect or publish an archive.
         if file_exists(&dir, &transaction_name(&token))?
             || file_exists(&dir, &transaction_next_name(&token))?
         {
@@ -457,6 +459,10 @@ impl StateRoot {
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => None,
             Err(error) => return Err(error),
         };
+        #[cfg(target_os = "linux")]
+        if archive.is_none() && file_exists(&dir, &directory::tree_name(&token))? {
+            return Err(StoreError::BuildCacheBusy);
+        }
         Ok(BuildCacheLease {
             dir,
             _identity_lock: identity_lock,
@@ -506,6 +512,8 @@ impl StateRoot {
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => 0,
             Err(error) => return Err(error),
         };
+        #[cfg(target_os = "linux")]
+        let archive_size = directory::committed_bytes(&dir, &token, archive_size)?;
         let metadata_reserve = if contains_cache_identity(&dir, &token)? {
             0
         } else {
@@ -518,14 +526,17 @@ impl StateRoot {
             return Ok((0, 0));
         }
         let candidate = effective_candidate_capacity(requested, available);
-        Ok((
-            requested,
-            if archive_size > candidate {
-                0
-            } else {
-                candidate
-            },
-        ))
+        let candidate = if archive_size > candidate {
+            0
+        } else {
+            candidate
+        };
+        let view = if cfg!(target_os = "linux") && candidate > 0 {
+            candidate
+        } else {
+            requested
+        };
+        Ok((view, candidate))
     }
 
     pub(crate) fn begin_build_cache_with_limits(
@@ -2091,7 +2102,7 @@ fn validate_component(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn validate_path(path: &str) -> Result<(), StoreError> {
+pub(crate) fn validate_path(path: &str) -> Result<(), StoreError> {
     if path.len() > MAX_PATH_BYTES || path.split('/').count() > MAX_PATH_DEPTH || !allowed(path) {
         return Err(StoreError::InvalidBuildCache);
     }
