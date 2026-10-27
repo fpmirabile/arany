@@ -853,57 +853,10 @@ fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
     fits
 }
 
+mod labels;
+
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
-    match call {
-        crate::tools::ToolCall::ParseAgentDefinition { .. } => {
-            "Agent definition preparation".into()
-        }
-        crate::tools::ToolCall::Read { path, .. }
-        | crate::tools::ToolCall::List { path }
-        | crate::tools::ToolCall::Search { path, .. }
-        | crate::tools::ToolCall::Mkdir { path }
-        | crate::tools::ToolCall::Write { path, .. }
-        | crate::tools::ToolCall::Edit { path, .. }
-        | crate::tools::ToolCall::Delete { path, .. }
-        | crate::tools::ToolCall::MultiEdit {
-            file_path: path, ..
-        } => format!("{} {path}", call.label()),
-        crate::tools::ToolCall::Move {
-            source,
-            destination,
-            ..
-        } => format!("move {source} to {destination}"),
-        crate::tools::ToolCall::Glob { pattern, path, .. } => format!("glob {pattern} in {path}"),
-        crate::tools::ToolCall::Command { program, .. } => format!("Command {program}"),
-        crate::tools::ToolCall::CommandUnguarded { program, .. } => {
-            format!("Unguarded command {program}")
-        }
-        crate::tools::ToolCall::ApplyChangeset { .. } => "Command changeset publication".into(),
-        crate::tools::ToolCall::Skill { name, .. } => format!("Skill {name}"),
-        crate::tools::ToolCall::McpList { server } => format!("MCP catalog {server}"),
-        crate::tools::ToolCall::McpCall { server, tool, .. } => format!("MCP {server}.{tool}"),
-        crate::tools::ToolCall::GitStatus { path } => format!("Git status {path}"),
-        crate::tools::ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
-        crate::tools::ToolCall::GitLog { path, .. } => format!("Git log {path}"),
-        crate::tools::ToolCall::GitPush { remote, branch } => {
-            format!("host Git push {branch} to {remote}")
-        }
-        crate::tools::ToolCall::GhPrCreate { repository, .. } => {
-            format!("host PR creation in {repository}")
-        }
-        crate::tools::ToolCall::GhPrList { repository, .. } => {
-            format!("host PR list in {repository}")
-        }
-        crate::tools::ToolCall::GhPrView { repository, number } => {
-            format!("host PR view #{number} in {repository}")
-        }
-        crate::tools::ToolCall::GitCommit { .. } => "Git commit".into(),
-        crate::tools::ToolCall::GitBranch { name: None, .. } => "Git branch list".into(),
-        crate::tools::ToolCall::GitBranch {
-            name: Some(name), ..
-        } => format!("Git branch {name}"),
-        crate::tools::ToolCall::GitSwitch { branch } => format!("Git switch {branch}"),
-    }
+    labels::format(call)
 }
 
 fn goal_report_evidence(

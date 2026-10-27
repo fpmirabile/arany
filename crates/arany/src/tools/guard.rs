@@ -70,6 +70,10 @@ pub(super) use macos::{
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
+#[cfg(target_os = "linux")]
+mod cache_directory;
+mod cache_recovery;
+pub use cache_recovery::recover_build_cache;
 pub(super) mod selection_phase;
 pub(super) mod transfer;
 
@@ -112,7 +116,6 @@ pub(super) use macos::RESERVATION_OVERHEAD;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Task {
-    preparation: bool,
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
@@ -180,6 +183,8 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
+    #[cfg(target_os = "linux")]
+    pub(super) directory: Option<cap_std::fs::Dir>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
 }
@@ -221,6 +226,8 @@ pub(super) fn build_cache_session(
             return Err(ToolError::ChangedInput);
         }
         return Ok(Some(BuildCacheSession {
+            #[cfg(target_os = "linux")]
+            directory: None,
             lease: Arc::new(lease),
             transfer: BuildCacheTransfer {
                 identity,
@@ -236,6 +243,10 @@ pub(super) fn build_cache_session(
         intent.limits.cache_candidate_bytes,
     ) {
         Ok(lease) => lease,
+        #[cfg(target_os = "linux")]
+        Err(StoreError::StorageFull) if cache_directory::selected(intent) => {
+            return Err(ToolError::Limit);
+        }
         Err(StoreError::StorageFull) if intent.limits.cache_candidate_bytes > 0 => {
             match state.begin_build_cache_with_limits(
                 identity.clone(),
@@ -252,6 +263,8 @@ pub(super) fn build_cache_session(
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
+        #[cfg(target_os = "linux")]
+        directory: None,
         lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
             identity,
@@ -720,7 +733,7 @@ fn attest_task_mounts(
     #[cfg(target_os = "linux")]
     if matches!(task.intent.call, ToolCall::Command { .. }) && task.worker.is_none() {
         *stage = BootstrapStage::RuntimeMounts;
-        if linux::overlay::selected(&task.intent, &task.config) && !task.preparation {
+        if linux::overlay::selected(&task.intent, &task.config) {
             linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
         } else {
             linux::verify_copy_mount(task.intent.limits.project_bytes)?;
@@ -735,7 +748,6 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
-                preparation: false,
                 config: runtime.config.clone(),
                 intent: intent.clone(),
                 cache: None,
@@ -1684,13 +1696,6 @@ impl GuardContext<'_> {
 
 fn validate_task(task: &Task) -> Result<(), ToolError> {
     task.config.validate()?;
-    if task.preparation
-        && (!cfg!(target_os = "linux")
-            || task.worker.is_some()
-            || !matches!(task.intent.call, ToolCall::Command { .. }))
-    {
-        return Err(ToolError::Configuration);
-    }
     if let Some(cache) = &task.cache {
         cache.validate(&task.intent, &task.config)?;
     }
@@ -1838,7 +1843,7 @@ fn receive_bulk(
         .write_all(b"WORKER_READY\n")
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
-    let bytes = transfer::read_frame(stdin)?;
+    let bytes = transfer::read_frame(stdin, crate::session::worker::WORKER_DATA_BYTES)?;
     if !stdin.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
@@ -1991,7 +1996,7 @@ fn send_result(
         .and_then(|()| stdout.flush())
         .map_err(|_| ToolError::Operation)?;
     if let Some(bytes) = candidate {
-        transfer::write_frame(stdout, &bytes)?;
+        transfer::write_frame(stdout, &bytes, crate::session::worker::WORKER_DATA_BYTES)?;
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
     #[cfg(target_os = "linux")]
@@ -2017,10 +2022,6 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         validate_task(&task)?;
-        #[cfg(target_os = "linux")]
-        if task.preparation {
-            return linux::prepare_main(&task, &mut stdin);
-        }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         attest_task_mounts(
             &task,
@@ -2694,7 +2695,6 @@ mod tests {
         };
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
-            preparation: false,
             config,
             intent: intent(call),
             cache: None,
@@ -2756,7 +2756,6 @@ mod tests {
             .collect();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
-            preparation: false,
             config,
             intent: intent(call.clone()),
             cache: None,
@@ -2788,7 +2787,6 @@ mod tests {
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
-            preparation: false,
             config,
             intent: intent(ToolCall::Write {
                 path: "\"".repeat(512),
@@ -3634,6 +3632,8 @@ mod tests {
         let lease = state.begin_build_cache(identity.clone()).unwrap();
         let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
+            #[cfg(target_os = "linux")]
+            directory: None,
             lease: Arc::new(lease),
             transfer: BuildCacheTransfer {
                 identity: identity.clone(),
@@ -4171,7 +4171,6 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
-                preparation: false,
                 definition: None,
                 worker: None,
                 handover: None,

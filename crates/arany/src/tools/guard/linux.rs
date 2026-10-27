@@ -67,7 +67,7 @@ const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-w
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v22:plain-baseline-whiteouts-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v24:default-cache-directory-admission-durable-guard-ownership-unavailable-conversion-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&supervisor::MAX_PIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
@@ -418,6 +418,7 @@ impl Unit {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn wait_unloaded(&self, deadline: tokio::time::Instant) -> Result<(), ToolError> {
         tokio::time::timeout_at(deadline, async {
             loop {
@@ -579,7 +580,7 @@ pub(super) async fn seed_unit_group(id: uuid::Uuid) -> cap_std::fs::Dir {
 }
 
 #[cfg(test)]
-pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Path) {
+pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Path, stage: &str) {
     let name = format!("arany-tool-{}.service", permit.id);
     let mut command = manager_command("/usr/bin/systemd-run");
     command
@@ -633,13 +634,12 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
         .unwrap()
         .unwrap();
     assert_eq!(ready, b"READY\n");
-    permit.seed_checkpoint("native");
+    permit.seed_checkpoint(stage);
     panic!("native seed controller must be killed by its parent");
 }
 
 struct UnitFilesystem<'a> {
     launch: (supervisor::Launch, std::fs::File),
-    preparation: bool,
     seed_path: &'a Path,
     seed_dir: &'a cap_std::fs::Dir,
     runtime_directories: Vec<PathBuf>,
@@ -655,17 +655,12 @@ fn unit_command(
 ) -> Result<(Command, std::fs::File), ToolError> {
     let UnitFilesystem {
         launch: (mut launch, executable),
-        preparation,
         seed_path,
         seed_dir,
         runtime_directories,
         mounts,
     } = filesystem;
-    let phase_limits = if preparation {
-        selection_limits(&intent.limits)
-    } else {
-        intent.limits.clone()
-    };
+    let phase_limits = &intent.limits;
     let memory_max = format!("--property=MemoryMax={}", phase_limits.memory_bytes);
     let tasks_max = format!("--property=TasksMax={}", phase_limits.max_processes);
     let cpu_quota = if phase_limits.resource_class == ToolResourceClass::Build {
@@ -673,7 +668,7 @@ fn unit_command(
     } else {
         "--property=CPUQuota=25%"
     };
-    if !preparation && overlay::selected(intent, &runtime.config) {
+    if overlay::selected(intent, &runtime.config) {
         launch.overlay = Some(overlay::Grant::new(runtime, intent)?);
     }
     let executable_path = supervisor::executable_path(&executable);
@@ -717,17 +712,13 @@ fn unit_command(
     let native = intent.call.is_git() || super::super::discovery::possible(&intent.call);
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
-        .filter(|folder| !preparation && seed_dir.symlink_metadata(folder).is_ok())
+        .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
         .collect::<Vec<_>>();
     let workspace_mount = if let Some(overlay) = &launch.overlay {
         Some(overlay.workspace_mount(seed_path))
     } else {
-        ((native || preparation) && runtime.worker.is_none()).then(|| {
-            (
-                runtime.workspace.clone(),
-                !preparation && intent.call.mutates(),
-            )
-        })
+        (native && runtime.worker.is_none())
+            .then(|| (runtime.workspace.clone(), intent.call.mutates()))
     };
     profile_arguments(
         &mut command,
@@ -741,12 +732,6 @@ fn unit_command(
     );
     if let Some(overlay) = &launch.overlay {
         overlay.arguments(&mut command, seed_path);
-    }
-    if preparation {
-        command
-            .args(["--bind"])
-            .arg(seed_path)
-            .arg(PREPARATION_ROOT);
     }
     for directory in runtime_directories {
         command.args(["--dir"]).arg(directory);
@@ -806,6 +791,9 @@ async fn settle_launch(
         private
             .contained
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+    if matches!(cleanup, Ok(Ok(()))) && matches!(reaped, Ok(Ok(_))) && drained.is_some() {
+        super::cache_directory::finished(cache.as_ref())?;
     }
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
@@ -925,12 +913,10 @@ fn guard_config<'a>(
     }
 }
 
-async fn prepare_seed(
+fn prepare_seed(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     permit: &super::admission::Permit,
-    deadline: tokio::time::Instant,
-    cancellation: &mut Cancellation,
 ) -> Result<(PathBuf, cap_std::fs::Dir), ToolError> {
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
     let (path, directory) = permit.prepare_seed(
@@ -938,18 +924,6 @@ async fn prepare_seed(
         &guard_config(runtime, intent),
         intent.call.is_process() && !primary_command(intent) && runtime.worker.is_none(),
     )?;
-    if primary_command(intent) && !overlay::selected(intent, &runtime.config) {
-        prepare_inputs(
-            runtime,
-            intent,
-            permit,
-            &path,
-            &directory,
-            deadline,
-            cancellation,
-        )
-        .await?;
-    }
     Ok((path, directory))
 }
 
@@ -1004,7 +978,6 @@ fn task_bytes(
     parent_namespaces: profile::Namespaces,
 ) -> Result<Vec<u8>, ToolError> {
     encode_task(&Task {
-        preparation: false,
         definition: runtime.definitions.payload(&intent.call)?,
         worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
         handover: runtime
@@ -1052,15 +1025,8 @@ pub(super) async fn execute_inner(
     let (runtime_directories, mounts) =
         runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
-    let mut cache = super::build_cache_session(runtime, intent)?;
-    let (seed_path, seed_dir) = prepare_seed(
-        runtime,
-        intent,
-        &permit,
-        preparation_deadline,
-        &mut cancellation,
-    )
-    .await?;
+    let mut cache = super::cache_directory::session(runtime, intent, go_deadline).await?;
+    let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let preparation_deadline =
         preparation_deadline.min(tokio::time::Instant::now() + RESERVATION_OVERHEAD);
     let mut unit = Unit {
@@ -1072,7 +1038,6 @@ pub(super) async fn execute_inner(
     };
     let filesystem = UnitFilesystem {
         launch: supervisor::Launch::prepare(&runtime.guard_executable, &seed_path, intent).await?,
-        preparation: false,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
         runtime_directories,
@@ -1081,11 +1046,13 @@ pub(super) async fn execute_inner(
     let (mut command, _executable) =
         unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
     let parent_namespaces = profile::Namespaces::read()?;
+    super::cache_directory::started(cache.as_ref(), permit.id)?;
     permit.launching()?;
     mark_contained(runtime, false);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
+            super::cache_directory::finished(cache.as_ref())?;
             permit.terminated()?;
             permit.cleanup().await?;
             mark_contained(runtime, true);
@@ -1644,162 +1611,6 @@ impl Unit {
     }
 }
 
-pub(super) fn prepare_main(task: &Task, stdin: &mut impl Read) -> Result<(), ToolError> {
-    let source = crate::tools::fs::open_directory(Path::new("/workspace"))?;
-    if crate::tools::fs::identity(&source)?
-        != (task.intent.workspace_device, task.intent.workspace_inode)
-    {
-        return Err(ToolError::ChangedInput);
-    }
-    verify_runtime_mounts(
-        &task.config.runtime_grants,
-        task.intent.limits.cache_bytes > 0,
-    )?;
-    harden()?;
-    profile::install_non_spawning()?;
-    let ready = super::Ready {
-        digest: task.intent.digest(),
-        pid: std::process::id(),
-        namespaces: profile::Namespaces::read()?,
-        profile_digest: task.enforcement_digest()?,
-    };
-    if !ready.namespaces.isolated_from(&task.parent_namespaces) {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer(&mut stdout, &ready).map_err(|_| ToolError::Operation)?;
-    stdout
-        .write_all(b"\n")
-        .and_then(|()| stdout.flush())
-        .map_err(|_| ToolError::Operation)?;
-    let mut go = [0; 3];
-    stdin
-        .read_exact(&mut go)
-        .map_err(|_| ToolError::Operation)?;
-    if go != *b"GO\n" {
-        return Err(ToolError::Configuration);
-    }
-    let mut frame = [0; 8];
-    stdin
-        .read_exact(&mut frame)
-        .map_err(|_| ToolError::Operation)?;
-    let deadline = super::selection_phase::decode_deadline(frame)?;
-    let target = crate::tools::fs::open_directory(Path::new("/prepared/workspace"))?;
-    let resources = crate::tools::fs::open_directory(Path::new("/prepared"))?;
-    let result =
-        crate::tools::fs::prepare_command(&source, &target, &resources, &task.config, deadline);
-    let message = super::selection_phase::response(&result);
-    stdout
-        .write_all(message)
-        .and_then(|()| stdout.flush())
-        .map_err(|_| ToolError::Operation)
-}
-
-async fn prepare_inputs(
-    runtime: &ToolRuntime,
-    intent: &EffectIntent,
-    permit: &super::admission::Permit,
-    seed_path: &Path,
-    seed_dir: &cap_std::fs::Dir,
-    deadline: tokio::time::Instant,
-    cancellation: &mut Cancellation,
-) -> Result<(), ToolError> {
-    let mut unit = Unit {
-        name: format!("arany-tool-{}.service", permit.id),
-        invocation: None,
-        group: None,
-        kill: None,
-        limits: Some(selection_limits(&intent.limits)),
-    };
-    let (runtime_directories, mounts) = runtime_mounts(
-        &runtime.config.runtime_grants,
-        intent.limits.cache_bytes > 0,
-    )?;
-    let filesystem = UnitFilesystem {
-        launch: supervisor::Launch::prepare(&runtime.guard_executable, seed_path, intent).await?,
-        preparation: true,
-        seed_path,
-        seed_dir,
-        runtime_directories,
-        mounts,
-    };
-    let (mut command, _executable) =
-        unit_command(runtime, intent, &unit.name, "/usr/bin:/bin", filesystem)?;
-    permit.launching()?;
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(_) => {
-            permit.terminated()?;
-            return Err(ToolError::ProtectionUnavailable);
-        }
-    };
-    let mut stdin = child.stdin.take().ok_or(ToolError::Operation)?;
-    let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
-    let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
-    let mut drain = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
-    let deadline = deadline.min(tokio::time::Instant::now() + crate::tools::selection::PHASE_TIME);
-    let execution = Box::pin(async {
-        let namespaces = profile::Namespaces::read()?;
-        let mut task: Task =
-            serde_json::from_slice(&task_bytes(runtime, intent, None, namespaces.clone())?)
-                .map_err(|_| ToolError::Operation)?;
-        task.preparation = true;
-        stdin
-            .write_all(&encode_task(&task)?)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        let ready = read_line_capped(&mut stdout, 2048).await?;
-        admit_ready(&mut unit, &ready, intent, &namespaces).await?;
-        stdin
-            .write_all(b"GO\n")
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        stdin
-            .write_all(&super::selection_phase::encode_deadline(deadline)?)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        drop(stdin);
-        let result = super::selection_phase::receive(&mut stdout, deadline).await;
-        if !child
-            .wait()
-            .await
-            .map_err(|_| ToolError::Operation)?
-            .success()
-        {
-            return Err(ToolError::Operation);
-        }
-        result
-    });
-    let result = super::selection_phase::wait(deadline, cancellation, execution).await;
-    let cleanup = tokio::time::Instant::now() + super::TEARDOWN_WAIT;
-    tokio::time::timeout_at(cleanup, unit.stop())
-        .await
-        .map_err(|_| ToolError::ProtectionUnavailable)??;
-    let _ = child.start_kill();
-    // Observe unloading even if another cleanup step consumes the teardown deadline.
-    let (reaped, drained, unloaded) = tokio::join!(
-        tokio::time::timeout_at(cleanup, child.wait()),
-        drain_stderr(&mut drain, cleanup),
-        unit.wait_unloaded(cleanup),
-    );
-    unloaded?;
-    let reaped = reaped
-        .map_err(|_| ToolError::ProtectionUnavailable)
-        .and_then(|status| status.map_err(|_| ToolError::Operation));
-    let bootstrap = drained.as_deref().and_then(bootstrap_failure);
-    if let Err(error) = reaped.and(drained.ok_or(ToolError::Operation)) {
-        permit.terminated()?;
-        return Err(error);
-    }
-    permit.prepared()?;
-    if result.is_err()
-        && let Some(error) = bootstrap
-    {
-        return Err(error);
-    }
-    result
-}
-
 async fn capture_phase(
     unit: &mut Unit,
     intent: &EffectIntent,
@@ -2190,6 +2001,7 @@ mod tests {
         let overlay = command && !private;
         assert_eq!(launch["probe"].is_object(), overlay);
         assert_eq!(launch["overlay"].is_object(), overlay);
+        assert!(!arguments.iter().any(|argument| argument == "/prepared"));
         let mounts = arguments
             .windows(3)
             .filter(|args| matches!(args[0].as_str(), "--ro-bind" | "--bind"))
@@ -2275,7 +2087,6 @@ mod tests {
             UnitFilesystem {
                 launch: supervisor::Launch::new(&runtime.guard_executable, fixture.path(), &intent)
                     .unwrap(),
-                preparation: false,
                 seed_path: fixture.path(),
                 seed_dir: &seed,
                 runtime_directories: Vec::new(),

@@ -384,6 +384,7 @@ enum LostEvidence {
 
 async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
     let fixture = SpillFixture::new();
+    let recorder = arany::test_support::engine::record_tool_latency(&fixture.engine);
     fixture.set_workspace_root(root);
     let session = fixture
         .engine
@@ -440,6 +441,15 @@ async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
         Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
     ));
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let samples = recorder.samples().unwrap();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(
+        samples[0].operation,
+        arany::test_support::latency::Operation::Command
+    );
+    assert!(!samples[0].successful());
+    assert!(samples[0].tool_receipt_to_commit_us.is_none());
+    assert!(!recorder.has_pending());
     assert_uncertain_guard_replay(fixture, session, &command).await;
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
 }

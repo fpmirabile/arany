@@ -1295,7 +1295,10 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             stream
                 .write_all(b"WORKER_READY\n")
                 .map_err(|_| ToolError::Operation)?;
-            let bytes = crate::tools::guard::transfer::read_frame(&mut stream)?;
+            let bytes = crate::tools::guard::transfer::read_frame(
+                &mut stream,
+                crate::session::worker::WORKER_DATA_BYTES,
+            )?;
             if let Some(transfer) = &task.worker {
                 transfer.decode(&bytes)?;
             } else {
@@ -3891,7 +3894,6 @@ int main(int argc, char **argv) {
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
-                    preparation: false,
                     definition: None,
                     worker: None,
                     handover: None,

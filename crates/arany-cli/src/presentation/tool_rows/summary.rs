@@ -63,12 +63,35 @@ fn file(call: &ToolCall) -> String {
 
 fn process(call: &ToolCall) -> String {
     match call {
-        ToolCall::Command { program, args, .. } => format!("Command({program} {})", args.join(" ")),
+        ToolCall::Command { program, args, .. } => {
+            format!("Command({program} {})", command_line(args))
+        }
         ToolCall::CommandUnguarded { program, args, .. } => {
-            format!("Unguarded command({program} {})", args.join(" "))
+            format!("Unguarded command({program} {})", command_line(args))
         }
         _ => unreachable!("process family operation"),
     }
+}
+
+fn command_line(args: &[String]) -> String {
+    let mut shown = Vec::with_capacity(args.len());
+    for (index, arg) in args.iter().enumerate() {
+        if !arg.contains('\n') {
+            shown.push(arg.clone());
+            continue;
+        }
+        let mut lines = arg.lines().skip_while(|line| line.trim().is_empty());
+        let first = lines.next().unwrap_or_default();
+        let more = lines.any(|line| !line.trim().is_empty())
+            || args[index + 1..].iter().any(|rest| !rest.trim().is_empty());
+        shown.push(if more {
+            format!("{first} …")
+        } else {
+            first.into()
+        });
+        break;
+    }
+    shown.join(" ")
 }
 
 fn simple(call: &ToolCall) -> String {
@@ -128,34 +151,29 @@ pub(super) enum ReadGroup {
 }
 
 pub(super) fn read_group(call: &ToolCall) -> Option<ReadGroup> {
-    match call {
-        ToolCall::Search { .. } | ToolCall::Glob { .. } => Some(ReadGroup::Pattern),
-        ToolCall::Read { .. } => Some(ReadGroup::File),
-        ToolCall::List { .. } => Some(ReadGroup::Directory),
-        ToolCall::GitStatus { .. }
-        | ToolCall::GitDiff { .. }
-        | ToolCall::GitLog { .. }
-        | ToolCall::GitBranch { name: None, .. } => Some(ReadGroup::Git),
-        ToolCall::Skill { .. } => Some(ReadGroup::Skill),
-        ToolCall::McpList { .. } => Some(ReadGroup::Mcp),
-        ToolCall::ParseAgentDefinition { .. }
-        | ToolCall::Mkdir { .. }
-        | ToolCall::Write { .. }
-        | ToolCall::Edit { .. }
-        | ToolCall::MultiEdit { .. }
-        | ToolCall::Delete { .. }
-        | ToolCall::Move { .. }
-        | ToolCall::Command { .. }
-        | ToolCall::CommandUnguarded { .. }
-        | ToolCall::ApplyChangeset { .. }
-        | ToolCall::McpCall { .. }
-        | ToolCall::GitCommit { .. }
-        | ToolCall::GitBranch { name: Some(_), .. }
-        | ToolCall::GitSwitch { .. }
-        | ToolCall::GitPush { .. }
-        | ToolCall::GhPrCreate { .. }
-        | ToolCall::GhPrList { .. }
-        | ToolCall::GhPrView { .. } => None,
+    match call.family() {
+        Family::File => {
+            if matches!(call, ToolCall::Search { .. } | ToolCall::Glob { .. }) {
+                Some(ReadGroup::Pattern)
+            } else if matches!(call, ToolCall::Read { .. }) {
+                Some(ReadGroup::File)
+            } else if matches!(call, ToolCall::List { .. }) {
+                Some(ReadGroup::Directory)
+            } else {
+                None
+            }
+        }
+        Family::Git => matches!(
+            call,
+            ToolCall::GitStatus { .. }
+                | ToolCall::GitDiff { .. }
+                | ToolCall::GitLog { .. }
+                | ToolCall::GitBranch { name: None, .. }
+        )
+        .then_some(ReadGroup::Git),
+        Family::Skill => Some(ReadGroup::Skill),
+        Family::Mcp => matches!(call, ToolCall::McpList { .. }).then_some(ReadGroup::Mcp),
+        Family::Process | Family::Preparation => None,
     }
 }
 

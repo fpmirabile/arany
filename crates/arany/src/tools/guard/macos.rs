@@ -958,7 +958,6 @@ impl Task {
         cache: Option<super::BuildCacheTransfer>,
     ) -> Result<Self, ToolError> {
         Ok(Self {
-            preparation: false,
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache,
@@ -1494,7 +1493,6 @@ mod tests {
             "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
-            preparation: false,
             definition: None,
             worker: None,
             handover: None,
@@ -1718,7 +1716,6 @@ mod tests {
         .unwrap();
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
-            preparation: false,
             definition: None,
             worker: None,
             handover: None,

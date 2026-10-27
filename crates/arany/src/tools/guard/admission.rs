@@ -498,17 +498,6 @@ impl Permit {
         replace_record(&self.dir, &self.seed_name(), &seed)
     }
 
-    pub(super) fn prepared(&self) -> Result<(), ToolError> {
-        let mut seed = self
-            .seed_record()?
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        let SeedPhase::LaunchRequested { root } = seed.phase else {
-            return Err(ToolError::ProtectionUnavailable);
-        };
-        seed.phase = SeedPhase::Ready { root };
-        replace_record(&self.dir, &self.seed_name(), &seed)
-    }
-
     pub(super) fn terminated(&self) -> Result<(), ToolError> {
         let mut seed = self
             .seed_record()?
@@ -1147,6 +1136,9 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use tokio::io::BufReader;
 
+    #[cfg(target_os = "linux")]
+    mod cache_recovery;
+
     const HELPER: &str = "tools::guard::admission::tests::admission_process";
 
     #[cfg(target_os = "linux")]
@@ -1178,7 +1170,23 @@ mod tests {
             .build()
             .unwrap();
         reactor.block_on(async {
-            let directory = open_directory(&path.join("guard"), true).unwrap();
+            let cache_stage = stage == "cache";
+            let directory_path = if cache_stage {
+                let account =
+                    PathBuf::from(std::env::var_os("ARANY_TEST_SEED_ACCOUNT_ROOT").unwrap());
+                crate::test_support::inherit_account_root(&account);
+                crate::store::StateRoot::account_path()
+                    .unwrap()
+                    .join("guard")
+            } else {
+                path.join("guard")
+            };
+            let seed_parent = if cache_stage {
+                Path::new("/tmp")
+            } else {
+                &path
+            };
+            let directory = open_directory(&directory_path, true).unwrap();
             if std::env::var_os("ARANY_TEST_SEED_RECOVER").is_some() {
                 recover_reservations(&directory.dir, &path, &mut 8)
                     .await
@@ -1193,7 +1201,7 @@ mod tests {
             workspace.dir.create_dir_all("nested/empty").unwrap();
             let permit = acquire_in(
                 &directory,
-                &path,
+                seed_parent,
                 id,
                 crate::tools::now_ms() + 60_000,
                 |_| {},
@@ -1220,8 +1228,13 @@ mod tests {
             } else {
                 prepared.unwrap();
             }
-            if stage == "native" {
-                super::super::linux::hold_seed_unit(&permit, &permit.seed_path()).await;
+            let _cache = if cache_stage {
+                Some(cache_recovery::owned_cache(&path, id))
+            } else {
+                None
+            };
+            if stage == "native" || cache_stage {
+                super::super::linux::hold_seed_unit(&permit, &permit.seed_path(), &stage).await;
                 return;
             }
             permit.launching().unwrap();
@@ -1268,6 +1281,10 @@ mod tests {
                 .env_clear()
                 .env("ARANY_TEST_ADMISSION", path)
                 .env("ARANY_TEST_SEED_STAGE", stage)
+                .env(
+                    "ARANY_TEST_SEED_ACCOUNT_ROOT",
+                    crate::test_support::isolate_account_root(),
+                )
                 .env("ARANY_TEST_SEED_ID", id.to_string())
                 .envs(recover.then_some(("ARANY_TEST_SEED_RECOVER", "1")))
                 .current_dir("/")
@@ -1276,7 +1293,7 @@ mod tests {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap(),
-            native: (stage == "native").then_some(id),
+            native: matches!(stage, "native" | "cache").then_some(id),
         };
         let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
         let (stream, _) = match accepted {

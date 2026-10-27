@@ -134,6 +134,7 @@ impl CommandSelection {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 struct Inputs<'a> {
     source: &'a Dir,
     target: &'a Dir,
@@ -145,6 +146,7 @@ struct Inputs<'a> {
     controls: BTreeMap<String, Option<(std::fs::Metadata, Vec<u8>)>>,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(in crate::tools) fn prepare_command(
     source: &Dir,
     target: &Dir,
@@ -258,6 +260,7 @@ fn safe_metadata(file: &File) -> Result<std::fs::Metadata, ToolError> {
     Ok(metadata)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 impl Inputs<'_> {
     fn control(&mut self, directory: &str) -> Result<(), ToolError> {
         let path = if directory.is_empty() {
