@@ -619,6 +619,7 @@ mod tests {
             output: String::new(),
             attestation: Some(arany::Attestation::Guard(guard)),
             approval_cause: None,
+            guard_stage: None,
             cache_update: arany::CacheUpdate::NotApplicable,
         });
         {
@@ -678,7 +679,7 @@ mod tests {
             assert!(
                 run_feedback(&finished)
                     .unwrap()
-                    .contains("inspect the Guard stage")
+                    .contains("its Command row names the Guard stage and cause")
             );
             let read = arany::ToolCall::Read {
                 path: "src/lib.rs".into(),

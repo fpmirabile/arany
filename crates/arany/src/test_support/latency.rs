@@ -619,6 +619,7 @@ mod tests {
                 output: String::new(),
                 attestation: Some(crate::Attestation::for_site(intent)),
                 approval_cause: None,
+                guard_stage: None,
                 cache_update: crate::CacheUpdate::NotApplicable,
                 enforcement_cause: None,
                 limit_cause: None,

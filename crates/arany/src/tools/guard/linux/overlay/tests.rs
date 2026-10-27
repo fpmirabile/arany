@@ -369,3 +369,18 @@ async fn completion_merges_candidates_with_totals_and_keeps_hook_output_fail_clo
         }
     }
 }
+
+#[test]
+fn an_expired_inventory_walk_names_the_selection_boundary() {
+    let lower = tempfile::tempdir().unwrap();
+    std::fs::write(lower.path().join("file"), b"x").unwrap();
+    let source = crate::tools::fs::open_directory(lower.path()).unwrap();
+    let deadline = std::time::Instant::now();
+    let result = masks::Inventory::read(&source, deadline);
+    assert!(matches!(
+        result,
+        Err(ToolError::ProjectSelection(
+            crate::tools::SelectionCause::TimedOut
+        ))
+    ));
+}

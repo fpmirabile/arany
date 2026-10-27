@@ -253,7 +253,10 @@ async fn conflicting_host_rules_name_the_saved_entry_and_remain_removable() {
         error,
         super::ToolError::HostPrefixConflict { rule: 2 }
     ));
-    assert_eq!(super::failure_stage(&error), "admission");
+    assert_eq!(
+        super::failure_stage(&error),
+        crate::tools::FailureStage::Admission
+    );
     assert_eq!(
         error.to_string(),
         "Saved host command rule 2 conflicts with a declared interpreter or Git executable; open /permissions > Host command rules to review and remove it"
