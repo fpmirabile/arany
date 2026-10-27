@@ -112,7 +112,6 @@ pub(super) use macos::RESERVATION_OVERHEAD;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Task {
-    preparation: bool,
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
@@ -720,7 +719,7 @@ fn attest_task_mounts(
     #[cfg(target_os = "linux")]
     if matches!(task.intent.call, ToolCall::Command { .. }) && task.worker.is_none() {
         *stage = BootstrapStage::RuntimeMounts;
-        if linux::overlay::selected(&task.intent, &task.config) && !task.preparation {
+        if linux::overlay::selected(&task.intent, &task.config) {
             linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
         } else {
             linux::verify_copy_mount(task.intent.limits.project_bytes)?;
@@ -735,7 +734,6 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
-                preparation: false,
                 config: runtime.config.clone(),
                 intent: intent.clone(),
                 cache: None,
@@ -1684,13 +1682,6 @@ impl GuardContext<'_> {
 
 fn validate_task(task: &Task) -> Result<(), ToolError> {
     task.config.validate()?;
-    if task.preparation
-        && (!cfg!(target_os = "linux")
-            || task.worker.is_some()
-            || !matches!(task.intent.call, ToolCall::Command { .. }))
-    {
-        return Err(ToolError::Configuration);
-    }
     if let Some(cache) = &task.cache {
         cache.validate(&task.intent, &task.config)?;
     }
@@ -2017,10 +2008,6 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         validate_task(&task)?;
-        #[cfg(target_os = "linux")]
-        if task.preparation {
-            return linux::prepare_main(&task, &mut stdin);
-        }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         attest_task_mounts(
             &task,
@@ -2694,7 +2681,6 @@ mod tests {
         };
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
-            preparation: false,
             config,
             intent: intent(call),
             cache: None,
@@ -2756,7 +2742,6 @@ mod tests {
             .collect();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
-            preparation: false,
             config,
             intent: intent(call.clone()),
             cache: None,
@@ -2788,7 +2773,6 @@ mod tests {
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
-            preparation: false,
             config,
             intent: intent(ToolCall::Write {
                 path: "\"".repeat(512),
@@ -4171,7 +4155,6 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
-                preparation: false,
                 definition: None,
                 worker: None,
                 handover: None,

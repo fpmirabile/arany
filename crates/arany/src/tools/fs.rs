@@ -14,7 +14,9 @@ use std::path::Path;
 
 pub(super) mod command;
 mod removal;
-pub(super) use command::{CommandSelection, prepare_command, selected_command_changeset};
+#[cfg(any(test, target_os = "macos"))]
+pub(super) use command::prepare_command;
+pub(super) use command::{CommandSelection, selected_command_changeset};
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
