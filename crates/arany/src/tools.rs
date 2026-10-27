@@ -1308,7 +1308,7 @@ impl ToolRuntime {
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
-                        "git_commit" => self.git_writes_available || guard::git_commit_available(),
+                        "git_commit" => self.git_writes_available || cfg!(target_os = "macos"),
                         "git_switch" => self.git_writes_available,
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),

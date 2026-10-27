@@ -459,7 +459,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
                 "git_branch",
                 "git_switch",
             ]
-        } else if super::guard::git_commit_available() {
+        } else if cfg!(target_os = "macos") {
             vec![
                 "git_status",
                 "git_diff",
