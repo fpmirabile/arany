@@ -3,6 +3,7 @@ use cap_std::fs::{Metadata, MetadataExt};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
 
+mod compare;
 mod metadata;
 #[cfg(test)]
 mod tests;
@@ -151,6 +152,7 @@ impl Baseline {
                 "",
             )],
             deadline,
+            DEFAULT_COMMAND_PROJECT_BYTES,
         )
     }
 }
@@ -163,11 +165,18 @@ struct Totals {
     retained: usize,
 }
 
+enum Output {
+    File { executable: bool },
+    Deletion,
+}
+
 pub(in crate::tools) fn capture_roots(
     roots: &[(&Baseline, Dir, Dir, &str)],
     deadline: Instant,
+    upper_bytes: u64,
 ) -> Result<(CommandChangeset, CommandSelectionSummary), ToolError> {
     let mut totals = Totals::default();
+    let mut comparison = compare::Comparison::new(upper_bytes)?;
     let mut selector = Selector::new(
         roots
             .iter()
@@ -195,9 +204,9 @@ pub(in crate::tools) fn capture_roots(
             return Err(ToolError::Path);
         }
         capture.scan()?;
-        for (path, executable) in std::mem::take(&mut capture.files) {
+        for (path, output) in std::mem::take(&mut capture.files) {
             capture.selector.check_time()?;
-            capture.file(&path, executable)?;
+            capture.file(&path, output, &mut comparison)?;
         }
     }
     totals.changes.files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -245,7 +254,7 @@ struct Capture<'a> {
     selector: &'a mut Selector,
     prefix: &'a str,
     totals: &'a mut Totals,
-    files: BTreeMap<String, bool>,
+    files: BTreeMap<String, Output>,
 }
 
 impl Capture<'_> {
@@ -322,7 +331,13 @@ impl Capture<'_> {
                     .get(path)
                     .is_some_and(Metadata::is_dir);
         let discard = ignored(&joined(self.prefix, path), directory_type, self.selector)?;
-        if whiteout || opaque {
+        let plain_deletion = whiteout
+            && self
+                .baseline
+                .entries
+                .get(path)
+                .is_some_and(Metadata::is_file);
+        if (whiteout && !plain_deletion) || opaque {
             let directory = if opaque || directory_type {
                 path
             } else {
@@ -336,22 +351,7 @@ impl Capture<'_> {
         if discard {
             self.totals.summary.discarded_outputs += 1;
         } else {
-            self.baseline.check(self.lower, path)?;
-            if metadata.is_dir() {
-                if self
-                    .baseline
-                    .entries
-                    .get(path)
-                    .is_some_and(|entry| !entry.is_dir())
-                {
-                    return Err(ToolError::Path);
-                }
-            } else {
-                if self.files.len() >= MAX_CHANGESET_FILES {
-                    return Err(ToolError::Limit);
-                }
-                self.files.insert(path.into(), metadata.mode() & 0o111 != 0);
-            }
+            self.select_output(path, &metadata, whiteout)?;
         }
         if metadata.is_dir() {
             pending.push(path.into());
@@ -359,7 +359,48 @@ impl Capture<'_> {
         Ok(())
     }
 
-    fn file(&mut self, path: &str, executable: bool) -> Result<(), ToolError> {
+    fn select_output(
+        &mut self,
+        path: &str,
+        metadata: &std::fs::Metadata,
+        whiteout: bool,
+    ) -> Result<(), ToolError> {
+        self.baseline.check(self.lower, path)?;
+        if metadata.is_dir() {
+            if self
+                .baseline
+                .entries
+                .get(path)
+                .is_some_and(|entry| !entry.is_dir())
+            {
+                return Err(ToolError::Path);
+            }
+        } else {
+            self.files.insert(
+                path.into(),
+                if whiteout {
+                    Output::Deletion
+                } else {
+                    Output::File {
+                        executable: metadata.mode() & 0o111 != 0,
+                    }
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn file(
+        &mut self,
+        path: &str,
+        output: Output,
+        comparison: &mut compare::Comparison,
+    ) -> Result<(), ToolError> {
+        if let Output::File { executable } = output
+            && comparison.identical(self, path, executable)?
+        {
+            return Ok(());
+        }
         self.totals.retained += 1;
         if self.totals.retained > COMMAND_SNAPSHOT_FILES {
             return Err(ToolError::Limit);
@@ -378,33 +419,26 @@ impl Capture<'_> {
         } else {
             None
         };
-        let content = read_regular(readable(self.upper, path)?, MAX_FILE_BYTES)?;
-        self.totals.budget.content(content.len())?;
+        let (after, content_bytes) = match output {
+            Output::File { executable } => {
+                let content = read_regular(readable(self.upper, path)?, MAX_FILE_BYTES)?;
+                self.totals.budget.content(content.len())?;
+                (
+                    Some(FileVersion::from_bytes(&content, executable)),
+                    content.len(),
+                )
+            }
+            Output::Deletion => (None, 0),
+        };
         self.baseline.check(self.lower, path)?;
-        let after = FileVersion::from_bytes(&content, executable);
-        // Identical copy-ups consume candidate caps until streaming comparison is introduced.
-        let bytes = content.len()
+        let bytes = content_bytes
             + before
                 .as_ref()
                 .and_then(|entry| entry.content.as_ref())
                 .map_or(0, Vec::len);
-        if self.totals.changes.bytes + bytes > MAX_CHANGESET_BYTES
-            || self.totals.changes.files.len() >= MAX_CHANGESET_FILES
-        {
-            return Err(ToolError::Limit);
-        }
-        if before.as_ref().is_some_and(|entry| {
-            entry.content.as_deref() == Some(&content) && entry.executable == executable
-        }) {
-            self.totals.changes.bytes += bytes;
-            return Ok(());
-        }
-        self.totals.changes.push(
-            &joined(self.prefix, path),
-            before.as_ref(),
-            Some(after),
-            bytes,
-        )
+        self.totals
+            .changes
+            .push(&joined(self.prefix, path), before.as_ref(), after, bytes)
     }
 }
 

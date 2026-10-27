@@ -224,39 +224,111 @@ fn capture_restores_private_readability_and_refuses_incomplete_absence_or_caps()
 }
 
 #[test]
-fn identical_copyups_still_consume_candidate_caps() {
+fn identical_copyups_do_not_consume_candidate_caps() {
     for files in [1, MAX_CHANGESET_FILES + 1] {
         let lower = tempfile::tempdir().unwrap();
         let upper = tempfile::tempdir().unwrap();
-        let content = vec![
-            b'a';
-            if files == 1 {
-                MAX_CHANGESET_BYTES / 2 + 1
-            } else {
-                1
-            }
-        ];
+        let bytes = if files == 1 {
+            COMMAND_SNAPSHOT_BYTES + 1
+        } else {
+            1
+        };
         for index in 0..files {
             for root in [lower.path(), upper.path()] {
-                std::fs::write(root.join(format!("file-{index}")), &content).unwrap();
+                std::fs::File::create(root.join(format!("file-{index}")))
+                    .unwrap()
+                    .set_len(bytes as u64)
+                    .unwrap();
             }
         }
         let source = open_directory(lower.path()).unwrap();
         let baseline = baseline(&source);
-        assert!(matches!(
-            baseline.capture(
+        let (changes, summary) = baseline
+            .capture(
                 &source,
                 &open_directory(upper.path()).unwrap(),
-                Instant::now() + crate::tools::selection::PHASE_TIME
-            ),
-            Err(ToolError::Limit)
-        ));
+                Instant::now() + crate::tools::selection::PHASE_TIME,
+            )
+            .unwrap();
+        assert!(changes.files.is_empty());
+        assert_eq!(summary.discarded_outputs, 0);
+    }
+}
+
+#[test]
+fn comparison_preserves_content_exec_drift_and_metadata_checks() {
+    for case in ["equal", "content", "exec", "drift", "metadata"] {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join("existing"), [0, 255]).unwrap();
+        let source = open_directory(lower.path()).unwrap();
+        let path = upper.path().join("existing");
+        std::fs::write(
+            &path,
+            if case == "content" {
+                [0, 254]
+            } else {
+                [0, 255]
+            },
+        )
+        .unwrap();
+        for root in [lower.path(), upper.path()] {
+            std::fs::set_permissions(
+                root.join("existing"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        let baseline = baseline(&source);
+        match case {
+            "exec" => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap()
+            }
+            "drift" => std::fs::write(lower.path().join("existing"), b"host").unwrap(),
+            "metadata" => rustix::fs::setxattr(
+                &path,
+                "user.overlay.whiteout",
+                b"",
+                rustix::fs::XattrFlags::CREATE,
+            )
+            .unwrap(),
+            _ => {}
+        }
+        let result = baseline.capture(
+            &source,
+            &open_directory(upper.path()).unwrap(),
+            Instant::now() + crate::tools::selection::PHASE_TIME,
+        );
+        match case {
+            "drift" => assert!(matches!(result, Err(ToolError::Conflict))),
+            "metadata" => assert!(matches!(result, Err(ToolError::Path))),
+            _ => {
+                let (changes, summary) = result.unwrap();
+                assert_eq!(summary.discarded_outputs, 0);
+                assert_eq!(changes.files.len(), usize::from(case != "equal"));
+                if let Some(change) = changes.files.first() {
+                    assert_eq!(change.after.as_ref().unwrap().executable, case == "exec");
+                    apply_files(&source, &changes.files).unwrap();
+                    assert_eq!(
+                        std::fs::read(lower.path().join("existing")).unwrap(),
+                        change.after.as_ref().unwrap().bytes().unwrap()
+                    );
+                }
+            }
+        }
     }
 }
 
 #[test]
 fn multiple_roots_keep_relative_selection_and_share_candidate_limits() {
-    for scenario in ["selection", "content-limit", "file-limit", "conflict"] {
+    for scenario in [
+        "selection",
+        "content-limit",
+        "file-limit",
+        "compare-limit",
+        "compare-bound",
+        "conflict",
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let mut sources = Vec::new();
         let mut baselines = Vec::new();
@@ -274,6 +346,9 @@ fn multiple_roots_keep_relative_selection_and_share_candidate_limits() {
             baseline.selection = CommandSelection::default();
             baseline.freeze_at(&source, prefix, &mut selector).unwrap();
             match scenario {
+                "compare-limit" | "compare-bound" => {
+                    std::fs::write(upper.join("existing"), b"before").unwrap()
+                }
                 "content-limit" => std::fs::write(
                     upper.join("created"),
                     vec![b'a'; MAX_CHANGESET_BYTES / 2 + 1],
@@ -300,12 +375,22 @@ fn multiple_roots_keep_relative_selection_and_share_candidate_limits() {
             .zip(&baselines)
             .map(|((lower, upper, prefix), baseline)| (baseline, lower, upper, prefix))
             .collect::<Vec<_>>();
-        let captured = capture_roots(&roots, deadline);
+        let upper_bytes = match scenario {
+            "compare-limit" => (roots.len() * b"before".len() - 1) as u64,
+            "compare-bound" => (roots.len() * b"before".len()) as u64,
+            _ => DEFAULT_COMMAND_PROJECT_BYTES,
+        };
+        let captured = capture_roots(&roots, deadline, upper_bytes);
         match scenario {
-            "content-limit" | "file-limit" => {
+            "content-limit" | "file-limit" | "compare-limit" => {
                 assert!(matches!(captured, Err(ToolError::Limit)), "{scenario}")
             }
             "conflict" => assert!(matches!(captured, Err(ToolError::Conflict))),
+            "compare-bound" => {
+                let (changes, summary) = captured.unwrap();
+                assert!(changes.files.is_empty());
+                assert_eq!(summary.discarded_outputs, 0);
+            }
             _ => {
                 let (changes, summary) = captured.unwrap();
                 assert_eq!(

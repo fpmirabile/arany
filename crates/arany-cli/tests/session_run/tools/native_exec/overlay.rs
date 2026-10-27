@@ -32,6 +32,8 @@ fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
                 "mode-zero",
                 "no-space",
                 "deletion",
+                "delete-drift",
+                "copy-ups",
                 "recreation",
                 "host-edit",
                 "host-create",
@@ -76,6 +78,18 @@ fn overlay_fixture(case: &str) -> SpillFixture {
     std::os::unix::fs::symlink("package/input", fixture.workspace.join("node_modules/link"))
         .unwrap();
     private_file(&fixture.workspace.join("released"), b"hold\n");
+    if case == "copy-ups" {
+        private_file(
+            &fixture.workspace.join(".gitignore"),
+            b"node_modules/\ndist/\nsrc/gen/\n",
+        );
+        for index in 0..=arany::test_support::max_changeset_files() {
+            private_file(
+                &fixture.workspace.join(format!("src/copy-{index}")),
+                b"unchanged",
+            );
+        }
+    }
     if case == "writes" {
         let mut acl = 2u32.to_le_bytes().to_vec();
         for (tag, permissions) in [(1u16, 6u16), (4, 4), (16, 4), (32, 0)] {
@@ -157,6 +171,12 @@ async fn overlay_case(case: &str) {
             "printf partial > src/current.txt; dd if=/dev/zero of=node_modules/fill bs=1M count=300 2>/dev/null"
         }
         "deletion" => "rm src/current.txt",
+        "copy-ups" => {
+            "set -eu; : >> large; for file in src/copy-*; do : >> \"$file\"; done; : >> src/current.txt"
+        }
+        "delete-drift" => {
+            "while read -r signal < released && test \"$signal\" = hold; do :; done; rm src/current.txt"
+        }
         "recreation" => "rm -rf src; mkdir src; printf recreated > src/current.txt",
         "host-edit" | "host-create" => {
             "while read -r signal < released && test \"$signal\" = hold; do :; done; printf candidate > src/current.txt; printf candidate > created"
@@ -170,8 +190,11 @@ async fn overlay_case(case: &str) {
         args: vec!["-c".into(), script.into()],
         cwd: "".into(),
     };
-    let dispatched = matches!(case, "host-edit" | "host-create" | "narrow-replacement")
-        .then(|| arany::FaultPlan::observe_guard_dispatch(command.clone()));
+    let dispatched = matches!(
+        case,
+        "host-edit" | "host-create" | "delete-drift" | "narrow-replacement"
+    )
+    .then(|| arany::FaultPlan::observe_guard_dispatch(command.clone()));
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(command),
         arany::test_support::goals::finish_with("Done"),
@@ -207,11 +230,13 @@ fn mutate_overlay_lower(fixture: &SpillFixture, case: &str) {
         private_file(&fixture.workspace.join("src/current.txt"), b"host");
     } else {
         private_file(
-            &fixture.workspace.join(if case == "host-edit" {
-                "src/current.txt"
-            } else {
-                "created"
-            }),
+            &fixture
+                .workspace
+                .join(if matches!(case, "host-edit" | "delete-drift") {
+                    "src/current.txt"
+                } else {
+                    "created"
+                }),
             b"host",
         );
     }
@@ -225,7 +250,13 @@ async fn check_overlay_case(
 ) {
     let publishes = matches!(
         case,
-        "writes" | "mode-zero" | "no-space" | "spill-merge" | "narrow" | "narrow-no-space"
+        "writes"
+            | "mode-zero"
+            | "no-space"
+            | "spill-merge"
+            | "narrow"
+            | "narrow-no-space"
+            | "deletion"
     );
     check_overlay_result(&fixture, &outcome, case);
     fixture.engine.close().await.unwrap();
@@ -234,6 +265,25 @@ async fn check_overlay_case(
     assert_eq!(view.runs[0], outcome.run);
     assert_eq!(events.iter().any(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))), publishes, "{case}");
     if publishes {
+        if case == "deletion" {
+            assert_eq!(
+                outcome.run.tools[1].checkpoint.as_ref().unwrap().status,
+                arany::CheckpointStatus::Captured
+            );
+            let ToolCall::ApplyChangeset {
+                source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            } = &outcome.run.tools[1].intent.call
+            else {
+                panic!("expected deletion integration")
+            };
+            assert_eq!(changeset.files.len(), 1);
+            assert_eq!(changeset.files[0].path, "src/current.txt");
+            assert_eq!(
+                changeset.files[0].before.as_ref().unwrap().bytes().unwrap(),
+                b"current"
+            );
+            assert!(changeset.files[0].after.is_none());
+        }
         assert!(
             outcome.run.tools[1]
                 .observation
@@ -283,11 +333,14 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
     let refused = matches!(
         case,
-        "deletion" | "recreation" | "host-edit" | "host-create" | "narrow-replacement"
+        "recreation" | "host-edit" | "host-create" | "delete-drift" | "narrow-replacement"
     );
     assert_eq!(
         observation.disposition,
-        if matches!(case, "host-edit" | "host-create" | "narrow-replacement") {
+        if matches!(
+            case,
+            "host-edit" | "host-create" | "delete-drift" | "narrow-replacement"
+        ) {
             ToolDisposition::Conflict
         } else if refused {
             ToolDisposition::Denied
@@ -299,7 +352,13 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
     );
     let publishes = matches!(
         case,
-        "writes" | "mode-zero" | "no-space" | "spill-merge" | "narrow" | "narrow-no-space"
+        "writes"
+            | "mode-zero"
+            | "no-space"
+            | "spill-merge"
+            | "narrow"
+            | "narrow-no-space"
+            | "deletion"
     );
     if !refused {
         let result: Value = serde_json::from_str(&observation.output).unwrap();
@@ -335,6 +394,9 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
                     .exists()
             );
         }
+        if case == "copy-ups" {
+            assert_eq!(result["selection"]["discarded_outputs"], 0);
+        }
         if !publishes {
             assert_eq!(result["changeset"]["files"], json!([]));
         }
@@ -351,14 +413,18 @@ fn check_overlay_files(workspace: &std::path::Path, case: &str) {
     let expected: &[u8] = match case {
         "writes" | "narrow" => b"private edit",
         "no-space" | "narrow-no-space" => b"partial",
-        "host-edit" | "narrow-replacement" => b"host",
+        "host-edit" | "delete-drift" | "narrow-replacement" => b"host",
         _ => b"current",
     };
-    assert_eq!(
-        std::fs::read(workspace.join("src/current.txt")).unwrap(),
-        expected,
-        "{case}"
-    );
+    if case == "deletion" {
+        assert!(!workspace.join("src/current.txt").exists());
+    } else {
+        assert_eq!(
+            std::fs::read(workspace.join("src/current.txt")).unwrap(),
+            expected,
+            "{case}"
+        );
+    }
     if case == "mode-zero" {
         assert_eq!(
             std::fs::read(workspace.join("created")).unwrap(),
