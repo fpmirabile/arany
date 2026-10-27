@@ -3891,7 +3891,6 @@ int main(int argc, char **argv) {
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
-                    preparation: false,
                     definition: None,
                     worker: None,
                     handover: None,
