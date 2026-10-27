@@ -31,6 +31,7 @@ pub(crate) fn run_limits() -> CommandOutput {
         .rows
         .iter()
         .chain(arany_cli::terminal::MARKDOWN_LIMITS)
+        .chain(arany_cli::terminal::SIXEL_LIMITS)
     {
         use std::fmt::Write as _;
         writeln!(
