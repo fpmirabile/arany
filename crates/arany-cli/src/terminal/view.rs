@@ -497,8 +497,16 @@ pub(super) fn draw_tool_approval_frame(
     }
     let rows = lines
         .iter()
-        .flat_map(|line| wrap_cells(line, width, 0))
-        .map(Line::raw)
+        .flat_map(|line| {
+            let style = if line == crate::presentation::HOST_SESSION_APPROVAL_HINT {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+            wrap_cells(line, width, 0)
+                .into_iter()
+                .map(move |row| Line::styled(row, style))
+        })
         .collect::<Vec<_>>();
     let body_height = usize::from(area.height) - chrome;
     let pages = rows.len().div_ceil(body_height).max(1);

@@ -1,6 +1,7 @@
 use crate::presentation::{
-    AgentInspectorModel, MAX_AGENT_ROWS, MAX_ROW_WIDTH, escape_terminal, image_message_lines,
-    linear_session_lines, safe_truncate, user_message_lines,
+    AgentInspectorModel, HOST_SESSION_APPROVAL_HINT, HOST_SESSION_APPROVAL_LINEAR_HINT,
+    MAX_AGENT_ROWS, MAX_ROW_WIDTH, escape_terminal, image_message_lines, linear_session_lines,
+    safe_truncate, user_message_lines,
 };
 #[cfg(test)]
 use arany::ModelEntry;
@@ -110,7 +111,16 @@ impl LinearState {
         choices: &[crate::presentation::ToolApprovalChoice],
         armed: bool,
     ) -> io::Result<()> {
-        let mut lines = lines.to_vec();
+        let mut lines: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                if line == HOST_SESSION_APPROVAL_HINT {
+                    HOST_SESSION_APPROVAL_LINEAR_HINT.into()
+                } else {
+                    line.clone()
+                }
+            })
+            .collect();
         lines.push("Do you want to proceed?".into());
         lines.extend(
             choices
@@ -826,7 +836,7 @@ mod tests {
     #[test]
     fn tool_approval_linear_corpus_numbers_only_supported_choices() {
         use crate::presentation::ToolApprovalChoice::{
-            AutoEdits, ExactCommand, GitPrefix, No, Yes,
+            AutoEdits, ExactCommand, GitPrefix, HostPrefix, No, Yes,
         };
         for (choices, expected) in [
             (
@@ -847,7 +857,11 @@ mod tests {
             ),
             (
                 vec![Yes, ExactCommand, No],
-                "1. Yes\n2. Yes, and don't ask again for: this identical command in this live session (unguarded)\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+                "1. Yes\n2. Yes, for this session\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+            ),
+            (
+                vec![Yes, ExactCommand, HostPrefix, No],
+                "1. Yes\n2. Yes, for this session\n3. Yes, and allow this host prefix in this folder from the next Run\n4. No\nSelect 1-4, yes or no; empty Enter denies:\n",
             ),
         ] {
             let mut state = LinearState::new("linear");
@@ -879,6 +893,36 @@ mod tests {
                 format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
             );
         }
+    }
+
+    #[test]
+    fn auto_edits_host_hint_is_plain_text_before_the_numbered_choices() {
+        use crate::presentation::{
+            ToolApprovalChoice::{No, Yes},
+            ToolApprovalPrompt,
+        };
+        let prompt = ToolApprovalPrompt {
+            intent_id: uuid::Uuid::now_v7(),
+            lines: vec!["Run outside the Guard? (unguarded)".into()],
+            choices: vec![Yes, No],
+            unguarded: true,
+        };
+        let displayed = prompt.for_mode(Some(arany::ApprovalMode::AutoEdits));
+        let mut state = LinearState::new("linear");
+        let mut output = Vec::new();
+        state
+            .write_tool_approval(
+                &mut output,
+                displayed.intent_id,
+                &displayed.lines,
+                &displayed.choices,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Run outside the Guard? (unguarded)\nSession approval for later eligible commands needs Request approvals, selected with Shift+Tab in a visual mode\nDo you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
+        );
     }
 
     #[test]

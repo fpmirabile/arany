@@ -684,11 +684,31 @@ pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>
     )
 }
 
+pub(crate) const HOST_SESSION_APPROVAL_HINT: &str =
+    "Shift+Tab to Request offers session approval for later eligible commands";
+// Linear input has no mode cycle, so it names the visual-mode route instead.
+pub(crate) const HOST_SESSION_APPROVAL_LINEAR_HINT: &str = "Session approval for later eligible commands needs Request approvals, selected with Shift+Tab in a visual mode";
+
+#[derive(Clone)]
 pub struct ToolApprovalPrompt {
     pub intent_id: uuid::Uuid,
     pub lines: Vec<String>,
     pub choices: Vec<ToolApprovalChoice>,
     pub unguarded: bool,
+}
+
+impl ToolApprovalPrompt {
+    pub fn for_mode(&self, mode: Option<arany::ApprovalMode>) -> Cow<'_, Self> {
+        if !self.unguarded
+            || mode != Some(arany::ApprovalMode::AutoEdits)
+            || self.choices.contains(&ToolApprovalChoice::ExactCommand)
+        {
+            return Cow::Borrowed(self);
+        }
+        let mut prompt = self.clone();
+        prompt.lines.push(HOST_SESSION_APPROVAL_HINT.into());
+        Cow::Owned(prompt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -706,9 +726,7 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes => "Yes",
             Self::AutoEdits => "Yes, and don't ask again for: file edits",
-            Self::ExactCommand => {
-                "Yes, and don't ask again for: this identical command in this live session (unguarded)"
-            }
+            Self::ExactCommand => "Yes, for this session",
             Self::HostPrefix => "Yes, and allow this host prefix in this folder from the next Run",
             Self::GitPrefix(prefix) => match prefix {
                 arany::permissions::TypedGitPrefix::Commit => {

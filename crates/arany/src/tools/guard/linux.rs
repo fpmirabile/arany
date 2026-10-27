@@ -67,7 +67,7 @@ const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-w
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v23:baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v24:default-cache-directory-admission-durable-guard-ownership-unavailable-conversion-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&supervisor::MAX_PIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
@@ -580,7 +580,7 @@ pub(super) async fn seed_unit_group(id: uuid::Uuid) -> cap_std::fs::Dir {
 }
 
 #[cfg(test)]
-pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Path) {
+pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Path, stage: &str) {
     let name = format!("arany-tool-{}.service", permit.id);
     let mut command = manager_command("/usr/bin/systemd-run");
     command
@@ -634,7 +634,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
         .unwrap()
         .unwrap();
     assert_eq!(ready, b"READY\n");
-    permit.seed_checkpoint("native");
+    permit.seed_checkpoint(stage);
     panic!("native seed controller must be killed by its parent");
 }
 
@@ -791,6 +791,9 @@ async fn settle_launch(
         private
             .contained
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+    if matches!(cleanup, Ok(Ok(()))) && matches!(reaped, Ok(Ok(_))) && drained.is_some() {
+        super::cache_directory::finished(cache.as_ref())?;
     }
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
@@ -1022,7 +1025,7 @@ pub(super) async fn execute_inner(
     let (runtime_directories, mounts) =
         runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
-    let mut cache = super::build_cache_session(runtime, intent)?;
+    let mut cache = super::cache_directory::session(runtime, intent, go_deadline).await?;
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let preparation_deadline =
         preparation_deadline.min(tokio::time::Instant::now() + RESERVATION_OVERHEAD);
@@ -1043,11 +1046,13 @@ pub(super) async fn execute_inner(
     let (mut command, _executable) =
         unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
     let parent_namespaces = profile::Namespaces::read()?;
+    super::cache_directory::started(cache.as_ref(), permit.id)?;
     permit.launching()?;
     mark_contained(runtime, false);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
+            super::cache_directory::finished(cache.as_ref())?;
             permit.terminated()?;
             permit.cleanup().await?;
             mark_contained(runtime, true);
