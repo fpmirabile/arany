@@ -186,7 +186,7 @@ impl BuildCacheTransfer {
 
 pub(super) struct BuildCacheSession {
     #[cfg(target_os = "linux")]
-    pub(super) directory: Option<cap_std::fs::Dir>,
+    pub(super) directory: Option<cache_directory::Session>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
 }
@@ -319,6 +319,7 @@ pub(super) async fn publish_cache_candidate(
     if !observation.cache_publication_eligible() {
         return;
     }
+    crate::fault::guard_cache_publication(observation.intent.id).await;
     let update = match (candidate, cache) {
         (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
         (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
@@ -332,25 +333,14 @@ pub(super) async fn publish_cache_candidate(
         }
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
-                    return CacheUpdate::Uncertain;
-                };
-                let mut candidate = match lease.open_candidate() {
-                    Ok(candidate) => candidate,
-                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
-                        return CacheUpdate::Rejected;
-                    }
-                    Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
-                    Err(_) => return CacheUpdate::Failed,
-                };
-                match lease.publish(&mut candidate, &cache.transfer.exclusions) {
-                    Ok(()) => CacheUpdate::Published,
-                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
-                        CacheUpdate::Rejected
-                    }
-                    Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
-                    Err(_) => CacheUpdate::Failed,
+                #[cfg(target_os = "linux")]
+                if cache.directory.is_some() {
+                    return cache_directory::publish(cache);
                 }
+                #[cfg(any(target_os = "macos", test))]
+                return publish_archive(cache);
+                #[cfg(all(not(target_os = "macos"), not(test)))]
+                CacheUpdate::Failed
             });
             match tokio::time::timeout_at(deadline, publication).await {
                 Ok(Ok(update)) => update,
@@ -365,6 +355,27 @@ pub(super) async fn publish_cache_candidate(
         observation.limit_cause = None;
     }
     debug_assert!(observation.valid());
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn publish_archive(cache: BuildCacheSession) -> CacheUpdate {
+    let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
+        return CacheUpdate::Uncertain;
+    };
+    let mut candidate = match lease.open_candidate() {
+        Ok(candidate) => candidate,
+        Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
+            return CacheUpdate::Rejected;
+        }
+        Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
+        Err(_) => return CacheUpdate::Failed,
+    };
+    match lease.publish(&mut candidate, &cache.transfer.exclusions) {
+        Ok(()) => CacheUpdate::Published,
+        Err(StoreError::StorageFull) if !lease.publication_uncertain() => CacheUpdate::Rejected,
+        Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
+        Err(_) => CacheUpdate::Failed,
+    }
 }
 
 impl Task {
@@ -1402,6 +1413,7 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     lease: &Arc<BuildCacheLease>,
@@ -1454,11 +1466,13 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 // Drop the file before the lease can reclaim its reservation and identity lock.
+#[cfg(any(target_os = "macos", test))]
 struct CandidateStaging {
     file: cap_std::fs::File,
     _lease: Arc<BuildCacheLease>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl Write for CandidateStaging {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.file.write(bytes)
@@ -1470,6 +1484,7 @@ impl Write for CandidateStaging {
 }
 
 // Keep draining after a staging write failure so the archive stream stays aligned.
+#[cfg(any(target_os = "macos", test))]
 async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
     reader: &mut R,
     length: u64,
@@ -1812,64 +1827,6 @@ fn restore_cache(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn send_cache_candidate(
-    cache: &BuildCacheTransfer,
-    observation: &ToolObservation,
-    stdout: &mut impl Write,
-    root: &Path,
-) -> Result<(), ToolError> {
-    if !observation.cache_publication_eligible() || cache.candidate_bytes == 0 {
-        stdout
-            .write_all(b"CACHE_REJECTED\n")
-            .and_then(|()| stdout.flush())
-            .map_err(|_| ToolError::Operation)?;
-    } else {
-        let cache_dir = super::fs::open_directory(&root.join("cache"))?;
-        match crate::store::archive_size_with_limit(
-            &cache_dir,
-            &cache.identity,
-            &cache.exclusions,
-            cache.candidate_bytes,
-        ) {
-            Ok(size) => {
-                stdout
-                    .write_all(b"CACHE_CANDIDATE\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-                stdout
-                    .write_all(&size.to_le_bytes())
-                    .map_err(|_| ToolError::Operation)?;
-                let captured = crate::store::capture_archive_with_limit(
-                    &cache_dir,
-                    &cache.identity,
-                    &cache.exclusions,
-                    &mut *stdout,
-                    cache.candidate_bytes,
-                )
-                .map_err(map_cache_error)?;
-                if captured != size {
-                    return Err(ToolError::Operation);
-                }
-                stdout.flush().map_err(|_| ToolError::Operation)?;
-            }
-            Err(StoreError::StorageFull) => {
-                stdout
-                    .write_all(b"CACHE_REJECTED\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-            }
-            Err(_) => {
-                stdout
-                    .write_all(b"CACHE_FAILED\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn receive_bulk(
     task: &Task,
     stdin: &mut std::io::BufReader<impl Read>,
@@ -1911,7 +1868,6 @@ fn send_result(
     workspace: &Path,
     result: (Result<String, ToolError>, Option<Vec<u8>>),
     stdout: &mut impl Write,
-    root: &Path,
     before: Option<&transfer::Image>,
 ) -> Result<(), ToolError> {
     let (disposition, output, enforcement_cause, limit_cause) =
@@ -2046,12 +2002,6 @@ fn send_result(
         transfer::write_frame(stdout, &bytes, crate::session::worker::WORKER_DATA_BYTES)?;
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
-    #[cfg(target_os = "linux")]
-    if let Some(cache) = &task.cache
-        && task.worker.is_none()
-    {
-        send_cache_candidate(cache, &observation, stdout, root)?;
-    }
     Ok(())
 }
 
@@ -2077,7 +2027,9 @@ pub(super) fn helper_main() -> ExitCode {
             overlay.as_ref(),
         )?;
         #[cfg(target_os = "linux")]
-        if let Some(cache) = &task.cache {
+        if let Some(cache) = &task.cache
+            && task.worker.is_some()
+        {
             restore_cache(cache, &mut stdin, &root)?;
         }
         let workspace = workspace.as_path();
@@ -2192,7 +2144,7 @@ pub(super) fn helper_main() -> ExitCode {
         let result = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
-        send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
+        send_result(task, workspace, result, &mut stdout, image.as_ref())?;
         Ok(())
     })();
     match result {
