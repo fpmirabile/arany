@@ -3483,3 +3483,6 @@ mod reference_tests;
 
 #[cfg(test)]
 mod fence_tests;
+
+#[cfg(test)]
+mod list_tests;
