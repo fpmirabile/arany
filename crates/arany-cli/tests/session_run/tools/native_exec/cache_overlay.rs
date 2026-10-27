@@ -1,5 +1,7 @@
 use super::*;
 
+const BUILD_CACHE_SCAN_LIMIT: usize = 16;
+
 #[test]
 #[cfg_attr(
     not(arany_ci),
@@ -211,7 +213,7 @@ fn assert_observations(
 fn cache_lower(state: &Path) -> PathBuf {
     let trees = std::fs::read_dir(state.join("build-cache"))
         .unwrap()
-        .take(16)
+        .take(BUILD_CACHE_SCAN_LIMIT)
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
             path.extension()
@@ -242,7 +244,7 @@ fn upper_handles() -> Vec<PathBuf> {
 fn supervisor_namespace(state: &Path) -> PathBuf {
     let markers = std::fs::read_dir(state.join("build-cache"))
         .unwrap()
-        .take(16)
+        .take(BUILD_CACHE_SCAN_LIMIT)
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
             path.extension()
