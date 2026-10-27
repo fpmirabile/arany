@@ -2,6 +2,9 @@ use super::*;
 use arany::permissions::{Decision, PermissionSource};
 use arany::test_support::goals::assert_action_bounds;
 use arany::{ApprovalMode, ApprovalReply, ToolCall, UnguardedPrompt};
+use arany_cli::presentation::{
+    ToolApprovalChoice, ToolApprovalPrompt, tool_approval_choices, unguarded_approval_lines,
+};
 use serde_json::{Value, json};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
@@ -77,6 +80,7 @@ struct Host {
 struct Seen {
     outcome: arany::RunOutcome,
     prompts: Vec<UnguardedPrompt>,
+    displayed_prompts: Vec<ToolApprovalPrompt>,
     requests: usize,
     unconsumed: usize,
     calls: Vec<ProviderRequest>,
@@ -165,6 +169,7 @@ impl Host {
         let running = run_with(&self.engine, &provider, input, controls);
         tokio::pin!(running);
         let mut prompts = Vec::new();
+        let mut displayed_prompts = Vec::new();
         let mut intents = Vec::new();
         replies.reverse();
         let result = loop {
@@ -178,6 +183,13 @@ impl Host {
                             tokio::time::pause();
                             tokio::time::advance(Duration::from_secs(3600)).await;
                             tokio::time::resume();
+                            let displayed = ToolApprovalPrompt {
+                                intent_id: approval.intent.id,
+                                lines: unguarded_approval_lines(&approval.intent, &prompt),
+                                choices: tool_approval_choices(&approval),
+                                unguarded: true,
+                            };
+                            displayed_prompts.push(displayed.for_mode(terminal).into_owned());
                             prompts.push(prompt);
                             intents.push(approval.intent.clone());
                             approval.decide(replies.pop().expect("a scripted reply"));
@@ -193,6 +205,7 @@ impl Host {
         let seen = Seen {
             outcome,
             prompts,
+            displayed_prompts,
             requests,
             unconsumed,
             calls: provider.requests.lock().unwrap().clone(),
@@ -623,7 +636,7 @@ async fn an_ask_rule_still_denies_headless_unguarded_runs_with_an_exact_rule() {
 
 #[tokio::test]
 async fn live_session_approval_reuses_identical_intents_without_writing_old_rules() {
-    let host = Host::new(None);
+    let host = Host::new(Some(&json!({"permissions":{"defaultMode":"default"}})));
     let call = unguarded(SCRIPT);
     let seen = host
         .run(
@@ -639,6 +652,15 @@ async fn live_session_approval_reuses_identical_intents_without_writing_old_rule
         )
         .await;
     assert_eq!(seen.prompts.len(), 1);
+    assert!(seen.prompts[0].remember);
+    assert_eq!(
+        seen.displayed_prompts[0].choices,
+        [
+            ToolApprovalChoice::Yes,
+            ToolApprovalChoice::ExactCommand,
+            ToolApprovalChoice::No
+        ]
+    );
     assert!(host.rules().is_none());
     let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
     assert_eq!(verdict.source, PermissionSource::SessionApproval);
@@ -698,9 +720,18 @@ async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
 
 #[tokio::test]
 async fn non_reusable_host_requests_offer_once_only() {
-    for rule in [false, true] {
-        let host = Host::new(rule.then_some(&json!({"permissions":{"ask":["command_unguarded"]}})));
-        let call = if rule {
+    for (rule, terminal) in [
+        (false, ApprovalMode::Request),
+        (true, ApprovalMode::Request),
+        (false, ApprovalMode::AutoEdits),
+        (false, ApprovalMode::Auto),
+        (true, ApprovalMode::AutoEdits),
+        (true, ApprovalMode::Auto),
+    ] {
+        let host = Host::new(Some(
+            &json!({"permissions":{"defaultMode":"default","ask": if rule {vec!["command_unguarded"]} else {vec![]}}}),
+        ));
+        let call = if rule || terminal != ApprovalMode::Request {
             unguarded("printf inspected")
         } else {
             ToolCall::CommandUnguarded {
@@ -719,12 +750,23 @@ async fn non_reusable_host_requests_offer_once_only() {
             .run(
                 &host.workspace,
                 vec![tool_outcome(call), finish("refused")],
-                Some(ApprovalMode::Request),
+                Some(terminal),
                 vec![ApprovalReply::Deny],
             )
             .await;
         assert_eq!(seen.prompts.len(), 1);
         assert!(!seen.prompts[0].remember);
+        assert_eq!(
+            seen.displayed_prompts[0].choices,
+            [ToolApprovalChoice::Yes, ToolApprovalChoice::No]
+        );
+        assert_eq!(
+            seen.displayed_prompts[0]
+                .lines
+                .iter()
+                .any(|line| line == "Session approval is offered in Request approvals (Shift+Tab)"),
+            terminal == ApprovalMode::AutoEdits
+        );
         denied(&seen, "user_declined");
         let (_, view) = host.reopen(seen.outcome.session_id).await;
         assert_eq!(view.runs[0].unguarded_tools(), 0);

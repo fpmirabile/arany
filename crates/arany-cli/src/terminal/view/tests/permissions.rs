@@ -373,6 +373,12 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 2,
             ),
             (
+                "auto-edits-host",
+                vec![crate::presentation::HOST_SESSION_APPROVAL_HINT.into()],
+                vec![Yes, No],
+                1,
+            ),
+            (
                 "hostile",
                 vec![
                     crate::presentation::escape_terminal(
@@ -433,6 +439,25 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 page += 1;
             }
             let squashed = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+            if name == "auto-edits-host" {
+                let buffer = terminal.backend().buffer();
+                let dimmed = (0..50)
+                    .flat_map(|y| (0..width).map(move |x| &buffer[(x, y)]))
+                    .filter(|cell| cell.modifier.contains(Modifier::DIM))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert_eq!(
+                    dimmed
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>(),
+                    crate::presentation::HOST_SESSION_APPROVAL_HINT
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>(),
+                    "hint wraps in dim text at width {width}"
+                );
+            }
             if name == "multi-page" {
                 for line in body {
                     assert!(seen.contains(&line), "missing {line} at {width}");
@@ -441,7 +466,7 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
             }
             if name == "unguarded" {
                 assert!(
-                    squashed.contains("this identical command in this live session (unguarded)"),
+                    squashed.contains("2. Yes, for this session"),
                     "{width}: {squashed}"
                 );
             }

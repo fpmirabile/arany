@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn tool_approval_linear_corpus_numbers_only_supported_choices() {
         use crate::presentation::ToolApprovalChoice::{
-            AutoEdits, ExactCommand, GitPrefix, No, Yes,
+            AutoEdits, ExactCommand, GitPrefix, HostPrefix, No, Yes,
         };
         for (choices, expected) in [
             (
@@ -847,7 +847,11 @@ mod tests {
             ),
             (
                 vec![Yes, ExactCommand, No],
-                "1. Yes\n2. Yes, and don't ask again for: this identical command in this live session (unguarded)\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+                "1. Yes\n2. Yes, for this session\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+            ),
+            (
+                vec![Yes, ExactCommand, HostPrefix, No],
+                "1. Yes\n2. Yes, for this session\n3. Yes, and allow this host prefix in this folder from the next Run\n4. No\nSelect 1-4, yes or no; empty Enter denies:\n",
             ),
         ] {
             let mut state = LinearState::new("linear");
@@ -879,6 +883,36 @@ mod tests {
                 format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
             );
         }
+    }
+
+    #[test]
+    fn auto_edits_host_hint_is_plain_text_before_the_numbered_choices() {
+        use crate::presentation::{
+            ToolApprovalChoice::{No, Yes},
+            ToolApprovalPrompt,
+        };
+        let prompt = ToolApprovalPrompt {
+            intent_id: uuid::Uuid::now_v7(),
+            lines: vec!["Run outside the Guard? (unguarded)".into()],
+            choices: vec![Yes, No],
+            unguarded: true,
+        };
+        let displayed = prompt.for_mode(Some(arany::ApprovalMode::AutoEdits));
+        let mut state = LinearState::new("linear");
+        let mut output = Vec::new();
+        state
+            .write_tool_approval(
+                &mut output,
+                displayed.intent_id,
+                &displayed.lines,
+                &displayed.choices,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Run outside the Guard? (unguarded)\nSession approval is offered in Request approvals (Shift+Tab)\nDo you want to proceed?\n1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n"
+        );
     }
 
     #[test]

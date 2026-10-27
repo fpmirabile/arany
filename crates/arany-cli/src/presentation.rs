@@ -27,12 +27,13 @@ pub(crate) use model::{
 };
 #[cfg(test)]
 pub(crate) use tool_rows::tool_summary;
+pub(crate) use tool_rows::{
+    HOST_SESSION_APPROVAL_HINT, plain_tool_summary, settled_tool_groups, tool_detail_parts,
+    tool_detail_text, tool_groups,
+};
 pub use tool_rows::{
     ToolApprovalChoice, ToolApprovalPrompt, tool_approval_choices, tool_approval_lines,
     unguarded_approval_lines,
-};
-pub(crate) use tool_rows::{
-    plain_tool_summary, settled_tool_groups, tool_detail_parts, tool_detail_text, tool_groups,
 };
 pub use usage::usage_pages;
 
