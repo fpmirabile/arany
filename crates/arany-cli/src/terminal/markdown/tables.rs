@@ -296,11 +296,8 @@ fn emit(
             let range = wrapped[column].get(line).cloned().unwrap_or(0..0);
             let mut columns = 0;
             for cell in &cell[range] {
-                let text = if cell.text.width() > widths[column] {
-                    if widths[column] == 0 { "" } else { "…" }
-                } else {
-                    &cell.text
-                };
+                let text =
+                    overflow_replacement(cell.text.width(), widths[column]).unwrap_or(&cell.text);
                 columns += text.width();
                 bytes += text.len();
                 if capture {
