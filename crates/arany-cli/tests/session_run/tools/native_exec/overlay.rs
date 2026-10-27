@@ -206,7 +206,7 @@ async fn overlay_case(case: OverlayCase) {
         }
         OverlayCase::ModeZero => "umask 0777; printf readable > created",
         OverlayCase::NoSpace => {
-            "printf partial > src/current.txt; dd if=/dev/zero of=node_modules/fill bs=1M count=300 2>/dev/null"
+            "printf partial > src/current.txt; LC_ALL=C dd if=/dev/zero of=node_modules/fill bs=1M count=300"
         }
         OverlayCase::Deletion => "rm src/current.txt",
         OverlayCase::Recreation => "rm -rf src; mkdir src; printf recreated > src/current.txt",
@@ -339,6 +339,14 @@ fn check_overlay_result(fixture: &SpillFixture, outcome: &arany::RunOutcome, cas
             assert!(observation.spill.is_none());
             assert_eq!(result["stdout"], "overlay reads passed\n");
         }
+        if case == OverlayCase::NoSpace {
+            assert!(
+                result["stderr"]
+                    .as_str()
+                    .unwrap()
+                    .contains("No space left on device")
+            );
+        }
         if !publishes {
             assert_eq!(result["changeset"]["files"], json!([]));
         }
@@ -368,6 +376,18 @@ fn check_overlay_files(workspace: &std::path::Path, case: OverlayCase) {
         expected,
         "{case}"
     );
+    if case == OverlayCase::Writes {
+        assert_eq!(
+            std::fs::read(workspace.join("created")).unwrap(),
+            b"private create"
+        );
+    }
+    if case == OverlayCase::SpillMerge {
+        assert_eq!(
+            std::fs::read(workspace.join("created")).unwrap(),
+            vec![b' '; MERGE_OUTPUT_BYTES]
+        );
+    }
     if case == OverlayCase::ModeZero {
         assert_eq!(
             std::fs::read(workspace.join("created")).unwrap(),
