@@ -70,18 +70,21 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
     if class == arany::ToolResourceClass::Build {
         scripts[0] = &switched;
     }
-    let mut steps = scripts
+    let calls = scripts
         .iter()
-        .map(|script| {
-            crate::tool_outcome(ToolCall::Command {
-                program: "bash".into(),
-                args: vec!["-c".into(), (*script).into()],
-                cwd: "".into(),
-            })
+        .map(|script| ToolCall::Command {
+            program: "bash".into(),
+            args: vec!["-c".into(), (*script).into()],
+            cwd: "".into(),
         })
         .collect::<Vec<_>>();
+    let mut steps = calls
+        .iter()
+        .cloned()
+        .map(crate::tool_outcome)
+        .collect::<Vec<_>>();
     steps.push(arany::test_support::goals::finish_with("Done"));
-    add_build_plan(&mut steps, class);
+    add_build_plan(&mut steps, class, calls.last().unwrap().clone());
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(steps));
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let inspect = inspect_lifecycle(fixture, &mut inbox, scripts.len());
@@ -335,7 +338,7 @@ async fn completion_loss(class: arany::ToolResourceClass) {
         cwd: String::new(),
     };
     let mut steps = vec![crate::tool_outcome(command.clone())];
-    add_build_plan(&mut steps, class);
+    add_build_plan(&mut steps, class, command.clone());
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(steps));
     let mut request = cache_request(&fixture.workspace, class);
     request.session_id = Some(session);
@@ -387,7 +390,11 @@ fn cache_request(workspace: &Path, class: arany::ToolResourceClass) -> RunReques
     request
 }
 
-fn add_build_plan(steps: &mut Vec<arany::ProviderOutcome>, class: arany::ToolResourceClass) {
+fn add_build_plan(
+    steps: &mut Vec<arany::ProviderOutcome>,
+    class: arany::ToolResourceClass,
+    success: ToolCall,
+) {
     if class == arany::ToolResourceClass::Build {
         steps.insert(
             0,
@@ -399,9 +406,8 @@ fn add_build_plan(steps: &mut Vec<arany::ProviderOutcome>, class: arany::ToolRes
                 command_timeout_ms: None,
                 skills: Vec::new(),
                 mcp_tools: Vec::new(),
-                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                    path: "src/current.txt".into(),
-                    content: "current".into(),
+                success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                    call: Box::new(success),
                 },
                 budget: arany::GoalBudget::default(),
             }),
