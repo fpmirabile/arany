@@ -43,6 +43,7 @@ pub(super) fn payload_report_deadline(
 mod landlock;
 #[cfg(target_os = "linux")]
 mod linux;
+mod network;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
 #[cfg(target_os = "linux")]
@@ -411,6 +412,11 @@ pub(super) fn intent_enforcement_digest(
             )
         }
     }?;
+    let profile = if is_process && limits.network == super::types::NetworkGrant::Proxy {
+        network::bind(profile)?
+    } else {
+        profile
+    };
     if !is_process || limits.build_cpu_cores == ToolLimits::default().build_cpu_cores {
         return Ok(profile);
     }
@@ -1781,6 +1787,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     {
         return Err(ToolError::Configuration);
     }
+    network::validate(task)?;
     #[cfg(target_os = "macos")]
     if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
         return Err(ToolError::Configuration);
@@ -1893,8 +1900,8 @@ fn send_result(
 
 pub(super) fn helper_main() -> ExitCode {
     #[cfg(target_os = "linux")]
-    if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--supervisor")) {
-        return linux::supervisor::main();
+    if let Some(code) = network::internal_mode() {
+        return code;
     }
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -1926,7 +1933,7 @@ pub(super) fn helper_main() -> ExitCode {
         #[cfg(target_os = "linux")]
         {
             stage = BootstrapStage::Capabilities;
-            linux::harden()?;
+            network::harden(&task)?;
             if handover.is_some() && !task.intent.call.is_process() {
                 profile::install_non_spawning()?;
             }
@@ -2031,6 +2038,7 @@ fn parser_config(config: &Config) -> Config {
         mcp: Vec::new(),
         git: None,
         git_identity: None,
+        network: None,
         runtime_grants: Vec::new(),
         ..config.clone()
     }
@@ -2161,6 +2169,7 @@ pub(super) fn payload(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    network::set_environment(&mut command, limits);
     #[cfg(target_os = "macos")]
     let payload_args = {
         let mut args = payload_args;
@@ -3359,6 +3368,7 @@ mod tests {
             runtime_grants,
             git: None,
             git_identity: None,
+            network: None,
         }
     }
 
@@ -3440,6 +3450,102 @@ mod tests {
         .unwrap();
         assert_eq!(non_process_profile, enforcement_digest(&[]).unwrap());
         assert_ne!(non_process_profile, process_profile);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capture_refusal_keeps_its_disposition_and_the_recorded_domains() {
+        let mut observation = ToolObservation {
+            spill: None,
+            intent: intent(ToolCall::Command {
+                program: "node".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            }),
+            disposition: ToolDisposition::Denied,
+            enforcement_cause: None,
+            limit_cause: None,
+            output: "Command overlay capture refused; nothing was published".into(),
+            attestation: None,
+            approval_cause: None,
+            guard_stage: None,
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+        };
+        crate::tools::network::annotate(
+            &mut observation,
+            ["evil.example", "[::1]"]
+                .map(|host| crate::tools::types::NetworkRefusal {
+                    host: host.into(),
+                    reason: crate::tools::types::NetworkRefusalReason::Unlisted,
+                    count: 2,
+                })
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Denied);
+        assert!(
+            observation
+                .output
+                .starts_with("Command overlay capture refused")
+        );
+        assert_eq!(observation.refused_domains(), ["evil.example", "::1"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proxy_routing_binds_a_distinct_enforcement_profile() {
+        let offline = ToolLimits::default();
+        let proxy = ToolLimits {
+            network: crate::NetworkGrant::Proxy,
+            ..ToolLimits::default()
+        };
+        let digest = |is_process, limits: &ToolLimits| {
+            intent_enforcement_digest(is_process, &[], limits).unwrap()
+        };
+        assert_eq!(digest(true, &offline), enforcement_digest(&[]).unwrap());
+        assert_ne!(digest(true, &offline), digest(true, &proxy));
+        assert_eq!(digest(false, &offline), digest(false, &proxy));
+        assert_ne!(
+            profile::profile_digest(profile::Routing::Offline).unwrap(),
+            profile::profile_digest(profile::Routing::Proxy).unwrap()
+        );
+    }
+
+    #[test]
+    fn proxy_task_requires_a_command_grant_and_no_worker() {
+        let mut command = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        });
+        command.policy_digest = [1; 32];
+        command.enforcement_digest = [2; 32];
+        command.limits.network = crate::NetworkGrant::Proxy;
+        assert!(command.valid());
+        for call in [
+            ToolCall::List { path: ".".into() },
+            ToolCall::Command {
+                program: "node".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        ] {
+            let mut other = command.clone();
+            other.call = call;
+            assert_eq!(
+                other.valid(),
+                matches!(other.call, ToolCall::Command { .. })
+            );
+        }
+        let mut private = serde_json::to_value(&command).unwrap();
+        private["target"] = serde_json::json!({
+            "kind": "worker_view",
+            "assignment_id": crate::session::AgentRunId::new(),
+            "base_digest": vec![1_u8; 32],
+            "revision": 1,
+            "cache_generation": null,
+        });
+        assert!(serde_json::from_value::<EffectIntent>(private).is_err());
     }
 
     #[test]

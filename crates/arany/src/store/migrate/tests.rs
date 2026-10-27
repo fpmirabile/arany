@@ -18,7 +18,7 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 82] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 87] = [
     (
         "AgentFinished",
         11,
@@ -356,7 +356,59 @@ const EVENT_FIXTURES: [EventFixture<'static>; 82] = [
         include_str!("runstarted-v24.json"),
         include_str!("runstarted-v24.json"),
     ),
+    (
+        "ToolProposed",
+        3,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        25,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        31,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        14,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        20,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
 ];
+
+#[test]
+fn proxy_network_class_never_appears_in_source_version_rows() {
+    for (kind, from, input) in [
+        ("ToolProposed", 3, include_str!("toolproposed-v1.json")),
+        ("ToolStarted", 25, include_str!("toolstarted-v23.json")),
+        ("ToolFinished", 31, SELECTION_TOOLFINISHED),
+        (
+            "HookStarted",
+            14,
+            include_str!("hookstarted-without-expiry.json"),
+        ),
+        ("HookFinished", 20, SELECTION_HOOKFINISHED),
+    ] {
+        let widened = input.replace(r#""network":"none""#, r#""network":"proxy""#);
+        assert_ne!(widened, input, "{kind} fixture carries a network class");
+        assert!(
+            REGISTRY.upgrade_payload(kind, from, &widened).is_err(),
+            "{kind} v{from} must refuse proxy"
+        );
+    }
+}
 
 #[test]
 fn migrated_intent_records_preserve_runtime_bytes() {

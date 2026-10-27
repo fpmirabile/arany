@@ -30,6 +30,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             disposition: ToolDisposition::Succeeded,
             output: serde_json::to_string(&super::types::CommandResult {
                 selection: Some(Default::default()),
+                network_refusals: Vec::new(),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),

@@ -2716,3 +2716,43 @@ fn typed_host_pr_list_allow_applies_in_every_mode() {
         assert_eq!(ordinary_allow.evaluate(&view).0, Decision::Ask);
     }
 }
+
+#[test]
+fn network_domain_rules_extend_a_grant_and_never_match_calls() {
+    let rules = config(json!({
+        "allow": ["Network(domain:*.pypi.org)", "Network(domain:example.com)", "Bash(git diff *)"],
+        "ask": ["Network(domain:ask.example.com)"],
+        "deny": ["Network(domain:bad.pypi.org)"],
+    }));
+    let (allow, restrict) = rules.network_domains();
+    assert_eq!(allow, ["*.pypi.org", "example.com"]);
+    assert_eq!(restrict, ["bad.pypi.org", "ask.example.com"]);
+    assert_eq!(
+        rules.decision(&command("curl", &["https://example.com"])),
+        Decision::Ask
+    );
+    for rule in [
+        "Network",
+        "Network(*)",
+        "Network(example.com)",
+        "Network(host:example.com)",
+        "Network(domain:)",
+        "Network(domain:*.com)",
+        "Network(domain:Example.com)",
+        "Network(domain:10.0.0.1)",
+    ] {
+        let parsed = PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions": {"allow": [rule]}})).unwrap(),
+        );
+        assert!(parsed.is_err(), "{rule}");
+    }
+    let too_many: Vec<String> = (0..=crate::tools::network::MAX_NETWORK_PATTERNS)
+        .map(|index| format!("Network(domain:h{index}.example.com)"))
+        .collect();
+    assert!(
+        PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions": {"allow": too_many}})).unwrap()
+        )
+        .is_err()
+    );
+}

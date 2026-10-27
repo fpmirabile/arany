@@ -1184,6 +1184,7 @@ mod tests {
             runtime_grants: Vec::new(),
             git: None,
             git_identity: None,
+            network: None,
         }
     }
 

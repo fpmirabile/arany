@@ -97,7 +97,16 @@ fn compile(
     Ok(program)
 }
 
-pub(super) fn programs() -> Result<[BpfProgram; 2], ToolError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Routing {
+    Offline,
+    Proxy,
+}
+
+const AF_INET: u64 = libc::AF_INET as u64;
+const AF_INET6: u64 = libc::AF_INET6 as u64;
+
+pub(super) fn programs(routing: Routing) -> Result<[BpfProgram; 2], ToolError> {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let clone3 = compile(
@@ -146,6 +155,36 @@ pub(super) fn programs() -> Result<[BpfProgram; 2], ToolError> {
         ] {
             rules.insert(syscall, Vec::new());
         }
+        if routing == Routing::Proxy {
+            // The private namespace holds only loopback and the bridge; named sockets stay unreachable.
+            rules.remove(&libc::SYS_connect);
+            let outside = |family| {
+                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, family)
+                    .map_err(|_| ToolError::ProtectionUnavailable)
+            };
+            // A datagram pair can reconnect to a visible named socket; stream and seqpacket pairs are already connected.
+            let datagram = SeccompCondition::new(
+                1,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::MaskedEq(0xf),
+                libc::SOCK_DGRAM as u64,
+            )
+            .map_err(|_| ToolError::ProtectionUnavailable)?;
+            rules.insert(
+                libc::SYS_socketpair,
+                vec![
+                    SeccompRule::new(vec![datagram])
+                        .map_err(|_| ToolError::ProtectionUnavailable)?,
+                ],
+            );
+            rules.insert(
+                libc::SYS_socket,
+                vec![
+                    SeccompRule::new(vec![outside(AF_INET)?, outside(AF_INET6)?])
+                        .map_err(|_| ToolError::ProtectionUnavailable)?,
+                ],
+            );
+        }
         let destination = SeccompCondition::new(4, SeccompCmpArgLen::Qword, SeccompCmpOp::Ne, 0)
             .map_err(|_| ToolError::ProtectionUnavailable)?;
         rules.insert(
@@ -192,9 +231,9 @@ pub(super) fn programs() -> Result<[BpfProgram; 2], ToolError> {
     }
 }
 
-pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
+pub(super) fn profile_digest(routing: Routing) -> Result<[u8; 32], ToolError> {
     let mut bytes = Vec::new();
-    for program in programs()?.into_iter().chain([
+    for program in programs(routing)?.into_iter().chain([
         non_spawning_program()?,
         metadata_program()?,
         ioctl_program()?,
@@ -211,8 +250,8 @@ pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
     Ok(digest(&bytes))
 }
 
-pub(super) fn install() -> Result<(), ToolError> {
-    for program in programs()? {
+pub(super) fn install(routing: Routing) -> Result<(), ToolError> {
+    for program in programs(routing)? {
         // TSYNC filters every thread; per-thread filters would leave others unfiltered.
         seccompiler::apply_filter_all_threads(&program)
             .map_err(|_| ToolError::ProtectionUnavailable)?;
