@@ -75,6 +75,13 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         ("request-cancel", ApprovalMode::Request, "", "cancel", false),
         ("auto-edit", ApprovalMode::AutoEdits, "", "none", false),
         ("auto-command", ApprovalMode::AutoEdits, "", "allow", true),
+        (
+            "auto-command-narrow",
+            ApprovalMode::AutoEdits,
+            "",
+            "allow",
+            true,
+        ),
         ("ai-approve", ApprovalMode::Auto, "approve", "none", false),
         ("ai-ask", ApprovalMode::Auto, "ask", "allow", false),
         ("ai-malformed", ApprovalMode::Auto, "maybe", "deny", false),
@@ -87,7 +94,18 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         std::fs::create_dir(&workspace).unwrap();
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
-        let config = json!({"version":1,"workspace_paths":["."],"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+        let command_path = if name == "auto-command-narrow" {
+            std::fs::create_dir(workspace.join("outputs")).unwrap();
+            "outputs/command-output.txt"
+        } else {
+            "command-output.txt"
+        };
+        let roots = if name == "auto-command-narrow" {
+            json!(["outputs"])
+        } else {
+            json!(["."])
+        };
+        let config = json!({"version":1,"workspace_paths":roots,"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
         private_file(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
@@ -97,7 +115,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 program: "bash".into(),
                 args: vec![
                     "-c".into(),
-                    "printf published > command-output.txt; printf approval-command-passed".into(),
+                    format!("printf published > {command_path}; printf approval-command-passed"),
                 ],
                 cwd: "".into(),
             }
@@ -189,13 +207,10 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 b"2026-10-06\n"
             );
         }
-        assert_eq!(
-            workspace.join("command-output.txt").exists(),
-            allowed && command
-        );
+        assert_eq!(workspace.join(command_path).exists(), allowed && command);
         if allowed && command {
             assert_eq!(
-                std::fs::read(workspace.join("command-output.txt")).unwrap(),
+                std::fs::read(workspace.join(command_path)).unwrap(),
                 b"published"
             );
         }
