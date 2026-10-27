@@ -81,6 +81,7 @@
 | <a id="max_command_timeout_ms"></a>[`MAX_COMMAND_TIMEOUT_MS`](#max_command_timeout_ms) | 600000 | ms | `crates/arany/src/tools/types.rs` |
 | <a id="default_command_timeout_ms"></a>[`DEFAULT_COMMAND_TIMEOUT_MS`](#default_command_timeout_ms) | 120000 | ms | `crates/arany/src/tools/types.rs` |
 | <a id="frame_bytes"></a>[`FRAME_BYTES`](#frame_bytes) | 131072 | bytes | `crates/arany/src/tools/mcp.rs` |
+| <a id="write_frame_bytes"></a>[`WRITE_FRAME_BYTES`](#write_frame_bytes) | 92774988 | bytes | `crates/arany/src/tools/git.rs` |
 | <a id="mcp_timeout_ms"></a>[`MCP_TIMEOUT_MS`](#mcp_timeout_ms) | 40000 | ms | `crates/arany/src/tools/types.rs` |
 | <a id="max_network_patterns"></a>[`MAX_NETWORK_PATTERNS`](#max_network_patterns) | 32 | domain patterns per source | `crates/arany/src/tools/network.rs` |
 | <a id="max_network_connections"></a>[`MAX_NETWORK_CONNECTIONS`](#max_network_connections) | 64 | connections | `crates/arany/src/tools/network.rs` |

@@ -22,6 +22,7 @@ pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
 mod network;
+pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
 pub(crate) use network::{
     MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, NETWORK_IDLE_MS,
@@ -1330,10 +1331,12 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.guard_available && self.config.git_available() {
-                let write = self.config.write && self.git_writes_available;
+                let write = self.config.write
+                    && (self.git_writes_available || guard::git_branch_creation_available());
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
+                        "git_commit" | "git_switch" => self.git_writes_available,
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
