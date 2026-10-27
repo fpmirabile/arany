@@ -3,6 +3,9 @@ use crate::tools::selection::{CONTROL_BYTES, Selector};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
+pub(in crate::tools) mod overlay;
+
 const SELECTION_FILE: &str = "command-selection.json";
 const SELECTION_BYTES: usize = 8 * 1024 * 1024;
 

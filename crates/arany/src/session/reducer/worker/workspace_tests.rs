@@ -51,6 +51,14 @@ fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
     let w = view.runs[0].agents[1].assignment.as_ref().unwrap();
     assert!(w.settled());
     assert!(w.verification.as_ref().unwrap().1.passed);
+    assert!(!f.events.iter().any(|event| matches!(
+        event.kind(),
+        "WorkerDataChunk"
+            | "WorkerDataSealed"
+            | "WorkerHandoverRecorded"
+            | "WorkerIntegrationRecorded"
+            | "WorkerHandoverDiscarded"
+    )));
     let plan = crate::session::rewind::plan(&view, &view.rewinds.checkpoints[0]).unwrap();
     assert_eq!(plan.files.len(), 1);
     assert_eq!(plan.files[0].path, "src/a");
@@ -183,7 +191,7 @@ fn editor_scope_and_primary_lease_admission_are_symmetric() {
 }
 
 #[test]
-fn live_replay_refuses_private_targets_and_old_release_fields() {
+fn live_replay_refuses_private_targets_data_and_old_release_fields() {
     let mut f = fixture();
     f.call(
         f.child,
@@ -214,6 +222,25 @@ fn live_replay_refuses_private_targets_and_old_release_fields() {
             active_ceiling_ms: 0,
             verdict: None,
         },
+    );
+    let chunk = serde_json::json!({
+        "assignment_id": f.child,
+        "purpose": "mutation",
+        "tool_id": uuid::Uuid::now_v7(),
+        "ordinal": 0,
+        "bytes": 3,
+        "sha256": crate::validate::digest(b"new"),
+        "content": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"new"),
+    });
+    assert!(
+        Event::decode(
+            "WorkerDataChunk",
+            1,
+            &chunk.to_string(),
+            Some(f.run),
+            Some(f.child)
+        )
+        .is_err()
     );
     let release = serde_json::json!({"assignment_id":f.child,"cause_sequence":1,"handover_sequence":null,"reason":"integrated"}).to_string();
     assert!(
@@ -248,8 +275,12 @@ fn background_assignments_are_admitted_but_ungranted_commands_refuse_before_spaw
             request.mode = WorkerMode::Background;
         }
         assert_eq!(
-            validate_editor_request(&view, &view.runs[0], &request, None).is_err(),
-            commands
+            validate_editor_request(&view, &view.runs[0], &request, None),
+            if commands {
+                Err(crate::session::ProposalRefusalCause::EditorCommands)
+            } else {
+                Ok(())
+            }
         );
     }
 }

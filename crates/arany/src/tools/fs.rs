@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-mod command;
+pub(super) mod command;
 pub(super) use command::{CommandSelection, prepare_command, selected_command_changeset};
 
 pub(super) fn valid(call: &ToolCall) -> bool {

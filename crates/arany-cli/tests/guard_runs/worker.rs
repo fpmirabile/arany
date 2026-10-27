@@ -75,7 +75,17 @@ pub(super) async fn worker_case(case: &'static str) {
                 .tools
                 .iter()
                 .filter(|t| matches!(t.intent.call, arany::ToolCall::Write { .. }))
-                .all(|t| t.checkpoint.is_some())
+                .all(|tool| {
+                    let observation = tool.observation.as_ref().unwrap();
+                    assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+                    assert_eq!(observation.intent, tool.intent);
+                    assert!(observation.attestation.is_some());
+                    assert!(bundle.events.iter().any(|event| {
+                        matches!(&event.event, Event::ToolFinished { observation: recorded, .. }
+                            if recorded == observation)
+                    }));
+                    tool.checkpoint.is_some()
+                })
         );
     }
 }

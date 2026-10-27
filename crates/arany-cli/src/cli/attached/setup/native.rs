@@ -1,13 +1,14 @@
+use super::prompts::{await_operation, await_setup_ack, choose, review_warning};
 use super::{
     AUTHORIZE_PROMPT, AUTHORIZE_TITLE, SavedDefaults, SetupError, SetupJournal, SetupSelection,
-    await_operation, await_setup_ack, choose, read_api_key, read_workspace_id, review_warning,
 };
 use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedAccount};
 use crate::presentation::escape_terminal;
-use crate::terminal::AttachedTerminal;
+use crate::terminal::{AttachedTerminal, Composer, TerminalInput};
 use arany::{
-    Effort, ModelEntry, NativeApiCredentials, ProviderKind, ProviderSetupDisposition,
-    ProviderSetupTargetKind, RecordKind, SessionDefaults, list_native_models_with_credentials,
+    Effort, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_NATIVE_API_KEY_BYTES, ModelEntry,
+    NativeApiCredentials, ProviderKind, ProviderSetupDisposition, ProviderSetupTargetKind,
+    RecordKind, SessionDefaults, list_native_models_with_credentials, validate_native_api_key,
 };
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -478,6 +479,172 @@ async fn load_catalog(
     .await?
     .transpose()
     .map_err(SetupError::recoverable)
+}
+
+async fn read_api_key(terminal: &mut AttachedTerminal) -> Result<Option<String>, SetupError> {
+    terminal.begin_secret_input()?;
+    let result = read_api_key_hidden(terminal).await;
+    terminal.end_secret_input()?;
+    result
+}
+
+async fn read_api_key_hidden(
+    terminal: &mut AttachedTerminal,
+) -> Result<Option<String>, SetupError> {
+    let mut key = String::new();
+    let mut rejected = 0u16;
+    let mut notice = None::<&str>;
+    let instruction = format!("Hidden input; up to {MAX_NATIVE_API_KEY_BYTES} ASCII characters");
+    loop {
+        terminal.draw_setup(3, "Enter API key", &instruction, key.len(), notice.take())?;
+        match terminal.next_input().await? {
+            TerminalInput::Character(character)
+                if rejected == 0
+                    && character.is_ascii_graphic()
+                    && key.len() < MAX_NATIVE_API_KEY_BYTES =>
+            {
+                key.push(character);
+            }
+            TerminalInput::Paste => match terminal.take_paste() {
+                Ok(text)
+                    if rejected == 0
+                        && key.len() + text.len() <= MAX_NATIVE_API_KEY_BYTES
+                        && text.bytes().all(|byte| byte.is_ascii_graphic()) =>
+                {
+                    key.push_str(&text);
+                }
+                _ => {
+                    rejected = rejected.saturating_add(1);
+                    notice = Some("Invalid or overlong API key paste; Backspace to correct");
+                }
+            },
+            TerminalInput::Character(_) => {
+                rejected = rejected.saturating_add(1);
+                notice = Some("Invalid or overlong API key");
+            }
+            TerminalInput::Backspace => {
+                if rejected > 0 {
+                    rejected -= 1;
+                } else {
+                    key.pop();
+                }
+            }
+            TerminalInput::Submit if rejected == 0 && validate_native_api_key(&key).is_ok() => {
+                return Ok(Some(key));
+            }
+            TerminalInput::Submit => {
+                key.clear();
+                rejected = 0;
+                notice = Some("Invalid or overlong API key; retry");
+            }
+            TerminalInput::LineRejected | TerminalInput::LineContinued => {
+                key.clear();
+                rejected = 0;
+                terminal.discard_draft_input();
+                notice = Some("Invalid or overlong API key line; retry");
+            }
+            TerminalInput::Suspend => {
+                terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
+                terminal.begin_secret_input()?;
+            }
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                terminal.discard_draft_input();
+                return Ok(None);
+            }
+            TerminalInput::Shutdown(signal) => {
+                return Err(SetupError::Shutdown(signal));
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn read_workspace_id(
+    terminal: &mut AttachedTerminal,
+    key: &str,
+) -> Result<Option<String>, SetupError> {
+    let mut draft = Composer::default();
+    let mut rejected = 0u16;
+    let mut notice = None;
+    let instruction = format!(
+        "From Claude Console; wrkspc_ followed by letters or digits, up to {MAX_ANTHROPIC_WORKSPACE_ID_BYTES} characters"
+    );
+    loop {
+        terminal.draw_setup_text_input("API workspace ID", &instruction, &draft, notice.take())?;
+        match terminal.next_input().await? {
+            TerminalInput::Character(character)
+                if rejected == 0
+                    && (character.is_ascii_graphic() || character == ' ')
+                    && draft.text().len() < MAX_ANTHROPIC_WORKSPACE_ID_BYTES =>
+            {
+                draft.apply(TerminalInput::Character(character));
+            }
+            TerminalInput::Paste => match terminal.take_paste() {
+                Ok(text)
+                    if rejected == 0
+                        && draft.text().len() + text.len() <= MAX_ANTHROPIC_WORKSPACE_ID_BYTES
+                        && text
+                            .bytes()
+                            .all(|byte| byte.is_ascii_graphic() || byte == b' ') =>
+                {
+                    if draft.insert_paste(&text).is_err() {
+                        notice = Some("Error: invalid workspace ID paste; unchanged");
+                    }
+                }
+                _ => {
+                    notice = Some("Error: invalid or overlong workspace ID paste; unchanged");
+                }
+            },
+            TerminalInput::Character(_) => {
+                if terminal.is_linear() {
+                    rejected = rejected.saturating_add(1);
+                }
+                notice = Some("Invalid or overlong workspace ID; use Backspace to correct");
+            }
+            TerminalInput::Backspace if rejected > 0 => rejected -= 1,
+            input @ (TerminalInput::Backspace
+            | TerminalInput::Delete
+            | TerminalInput::Left
+            | TerminalInput::Right
+            | TerminalInput::Home
+            | TerminalInput::End) => {
+                draft.apply(input);
+            }
+            TerminalInput::Submit => {
+                if rejected == 0
+                    && NativeApiCredentials::new(
+                        ProviderKind::Anthropic
+                            .native_name()
+                            .expect("native Provider name"),
+                        key.to_owned(),
+                        Some(draft.text().to_owned()),
+                    )
+                    .is_ok()
+                {
+                    return Ok(Some(draft.take()));
+                }
+                if terminal.is_linear() {
+                    draft.clear();
+                    rejected = 0;
+                    terminal.discard_draft_input();
+                }
+                notice = Some("Error: enter wrkspc_ followed by letters or digits");
+            }
+            TerminalInput::LineRejected | TerminalInput::LineContinued => {
+                draft.clear();
+                rejected = 0;
+                terminal.discard_draft_input();
+                notice = Some("Error: invalid workspace ID line; retry");
+            }
+            TerminalInput::Suspend => terminal.suspend_and_resume(draft.input_capacity())?,
+            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+                terminal.discard_draft_input();
+                return Ok(None);
+            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
