@@ -22,6 +22,7 @@ pub(in crate::tools::guard::linux) struct Grant {
     device: u64,
     inode: u64,
     digest: [u8; 32],
+    command_deadline: [u8; 8],
     roots: Vec<Root>,
 }
 
@@ -29,6 +30,7 @@ impl Grant {
     pub(in crate::tools::guard::linux) fn new(
         runtime: &ToolRuntime,
         intent: &EffectIntent,
+        deadline: tokio::time::Instant,
     ) -> Result<Self, ToolError> {
         let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
         let roots = runtime
@@ -62,6 +64,7 @@ impl Grant {
             device: intent.workspace_device,
             inode: intent.workspace_inode,
             digest: intent.digest(),
+            command_deadline: super::super::super::selection_phase::encode_deadline(deadline)?,
             roots,
         })
     }
@@ -125,6 +128,7 @@ pub(in crate::tools::guard::linux) struct View {
     root: PathBuf,
     grant: Grant,
     bytes: u64,
+    selection_ms: u64,
     directories: Vec<DirectoryView>,
     attestation: Attestation,
     pub(in crate::tools::guard::linux) cache: Option<super::cache::View>,
@@ -143,7 +147,9 @@ impl View {
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+        let started = std::time::Instant::now();
+        let deadline =
+            super::super::super::selection_phase::decode_deadline(grant.command_deadline)?;
         let mounts = read_mountinfo()?;
         for source in &grant.roots {
             no_submounts(&mounts, &grant.path.join(&source.relative))?;
@@ -197,6 +203,8 @@ impl View {
             root: root.to_owned(),
             grant,
             bytes,
+            selection_ms: u64::try_from(started.elapsed().as_millis())
+                .map_err(|_| ToolError::Limit)?,
             directories,
             attestation,
             cache: None,
@@ -339,7 +347,12 @@ impl View {
                     ))
                 })
                 .collect::<Result<Vec<_>, ToolError>>()?;
-            crate::tools::fs::command::overlay::capture_roots(&roots, deadline, self.bytes)
+            crate::tools::fs::command::overlay::capture_roots(&roots, deadline, self.bytes).map(
+                |(changeset, mut summary)| {
+                    summary.elapsed_ms = Some(self.selection_ms);
+                    (changeset, summary)
+                },
+            )
         })();
         let report = Completion {
             digest: self.grant.digest,

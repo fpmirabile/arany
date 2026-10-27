@@ -25,7 +25,7 @@ fn masks_keep_dependencies_and_large_inputs_but_refuse_known_protected_aliases()
         .unwrap();
     std::os::unix::fs::symlink("package/input", path.join("node_modules/link")).unwrap();
     let lower = crate::tools::fs::open_directory(path).unwrap();
-    let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+    let deadline = std::time::Instant::now() + crate::tools::selection::TEST_RUNTIME;
     let inventory = masks::Inventory::read(&lower, deadline).unwrap();
     assert_eq!(
         inventory.paths(),
@@ -41,7 +41,7 @@ fn masks_keep_dependencies_and_large_inputs_but_refuse_known_protected_aliases()
 
 #[test]
 fn ignored_controls_do_not_exhaust_publication_budgets() {
-    use crate::tools::selection::{CONTROL_FILES, PHASE_TIME};
+    use crate::tools::selection::{CONTROL_FILES, TEST_RUNTIME};
     for (prefix, directory, controls, accepted) in [
         ("", "node_modules", CONTROL_FILES + 1, true),
         ("", "ignored", CONTROL_FILES + 1, true),
@@ -59,7 +59,7 @@ fn ignored_controls_do_not_exhaust_publication_budgets() {
             std::fs::write(path.join(".gitignore"), b"generated\n").unwrap();
         }
         let source = crate::tools::fs::open_directory(lower.path()).unwrap();
-        let deadline = std::time::Instant::now() + PHASE_TIME;
+        let deadline = std::time::Instant::now() + TEST_RUNTIME;
         let inventory = masks::Inventory::read_shared(
             &source,
             (prefix, MASK_ARGUMENT_BYTES),
@@ -80,7 +80,7 @@ fn ignored_controls_do_not_exhaust_publication_budgets() {
         let target = crate::tools::fs::open_directory(upper.path()).unwrap();
         let (changeset, _) = crate::tools::fs::command::overlay::capture_roots(
             &[(&inventory.baseline, source, target, prefix)],
-            std::time::Instant::now() + PHASE_TIME,
+            std::time::Instant::now() + TEST_RUNTIME,
             crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES,
         )
         .unwrap();
@@ -101,7 +101,7 @@ fn protected_links_and_unwalkable_trees_mask_an_enclosing_subtree() {
     std::fs::write(path.join("target"), b"protected target").unwrap();
     std::os::unix::fs::symlink("../target", path.join("nested/.env")).unwrap();
     let lower = crate::tools::fs::open_directory(path).unwrap();
-    let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+    let deadline = std::time::Instant::now() + crate::tools::selection::TEST_RUNTIME;
     let inventory = masks::Inventory::read(&lower, deadline).unwrap();
     assert_eq!(
         inventory.paths(),
@@ -172,11 +172,11 @@ fn overflowing_mask_arguments_replace_the_entire_enclosing_view() {
     let lower = crate::tools::fs::open_directory(root.path()).unwrap();
     let inventory = masks::Inventory::read(
         &lower,
-        std::time::Instant::now() + crate::tools::selection::PHASE_TIME,
+        std::time::Instant::now() + crate::tools::selection::TEST_RUNTIME,
     )
     .unwrap();
     assert_eq!(inventory.paths(), vec![PathBuf::new()]);
-    let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+    let deadline = std::time::Instant::now() + crate::tools::selection::TEST_RUNTIME;
     let allowance = serde_json::to_vec(&["narrow/"]).unwrap().len();
     let inventory = masks::Inventory::read_shared(
         &lower,
@@ -312,6 +312,7 @@ async fn completion_merges_candidates_with_totals_and_keeps_hook_output_fail_clo
             }],
         };
         let selection = CommandSelectionSummary {
+            elapsed_ms: Some(6_000),
             ignored_entries: 3,
             discarded_outputs: 2,
             ..Default::default()
