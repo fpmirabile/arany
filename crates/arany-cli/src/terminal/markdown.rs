@@ -1,5 +1,6 @@
 use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_terminal_width};
 mod blocks;
+mod tables;
 use blocks::BlockLine;
 use ratatui::style::Modifier;
 use std::ops::Range;
@@ -11,8 +12,11 @@ pub(super) const MAX_MARKDOWN_DEPTH: usize = 32;
 pub(super) const MAX_MARKDOWN_EVENTS: usize = 65_536;
 pub(super) const MAX_MARKDOWN_OUTPUT_BYTES: usize = 16 * MAX_MARKDOWN_PARSE_BYTES;
 pub(super) const MAX_MARKDOWN_ROWS: usize = super::history::MAX_CLASSIC_HISTORY_ROWS;
+pub(super) const MAX_MARKDOWN_TABLE_COLUMNS: usize = 16;
+pub(super) const MAX_MARKDOWN_TABLE_ROWS: usize = 128;
 pub(super) const LIMIT_CUE: &str = "Markdown formatting limit; showing source";
 
+#[derive(Clone)]
 pub(super) struct Cell {
     pub(super) byte: usize,
     pub(super) source: Range<usize>,
@@ -52,7 +56,11 @@ fn layout(
         let line = projection.map(|lines| &lines[index]);
         if !line.is_some_and(|line| line.hidden) {
             let content = line.map_or(text, |line| &source[line.content.clone()]);
-            layout_line((start, content), line, width, capture, &mut record)?;
+            if let Some(table) = line.and_then(|line| line.table.as_ref()) {
+                tables::layout(table, width, capture, &mut record)?;
+            } else {
+                layout_line((start, content), line, width, capture, &mut record)?;
+            }
         }
         start += text.len() + 1;
     }
@@ -90,7 +98,7 @@ fn layout_line(
             (columns, bytes, row_start) = (0, 0, byte);
         }
         let available = width.saturating_sub(decoration.width());
-        let replacement = (size > available).then_some(if available == 0 { "" } else { "…" });
+        let replacement = overflow_replacement(size, available);
         columns += replacement.map_or(size, UnicodeWidthStr::width);
         bytes += match replacement {
             Some(value) => value.len(),
@@ -114,6 +122,13 @@ fn layout_line(
     }
     decorate(&mut cells, &decoration, line, row_start, capture);
     record(&mut cells, row_start, bytes + decoration.len())
+}
+fn overflow_replacement(size: usize, available: usize) -> Option<&'static str> {
+    match (size > available, available) {
+        (false, _) => None,
+        (true, 0) => Some(""),
+        (true, _) => Some("…"),
+    }
 }
 fn prefix(line: Option<&BlockLine>, continuation: bool, width: usize) -> String {
     let padding = line.map_or(0, |line| if continuation { 0 } else { line.padding });
@@ -197,4 +212,6 @@ pub(super) const LIMITS: &[arany::limits::Limit] = &[
     limit!(MAX_MARKDOWN_EVENTS, "events"),
     limit!(MAX_MARKDOWN_OUTPUT_BYTES, "bytes"),
     limit!(MAX_MARKDOWN_ROWS, "rows"),
+    limit!(MAX_MARKDOWN_TABLE_COLUMNS, "columns"),
+    limit!(MAX_MARKDOWN_TABLE_ROWS, "data rows"),
 ];

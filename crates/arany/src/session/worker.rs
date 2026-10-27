@@ -11,6 +11,7 @@ pub const WORKER_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 pub const WORKER_FILES: usize = 2048;
 pub const WORKER_CHUNKS: usize = WORKER_DATA_BYTES.div_ceil(WORKER_CHUNK_BYTES);
 pub const WORKER_MANIFEST_CHUNKS: usize = WORKER_MANIFEST_BYTES.div_ceil(WORKER_CHUNK_BYTES);
+pub(crate) const MAX_EDITOR_CONTINUATIONS: u8 = 3;
 pub(crate) const MAX_WORKER_EVIDENCE: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -210,10 +211,6 @@ pub struct WorkerPolicy {
     pub data_bytes: u32,
 }
 impl WorkerPolicy {
-    pub(crate) fn retained_bytes(&self) -> usize {
-        (64 * 1024 * 1024).min(256 * 1024 * 1024 / usize::from(self.concurrency))
-    }
-
     pub(crate) fn valid(&self) -> bool {
         self.parent_grant.valid()
             && (1..=8).contains(&self.concurrency)
@@ -318,10 +315,6 @@ pub struct WorkerAssignment {
     pub policy_digest: [u8; 32],
     #[serde(deserialize_with = "Option::deserialize")]
     pub permissions_digest: Option<[u8; 32]>,
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub cache_generation: Option<[u8; 32]>,
-    pub base: WorkerDataRef,
-    pub data_bytes: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -437,8 +430,6 @@ pub enum WorkerDisposition {
     NoChange,
     Failed,
     Cancelled,
-    Lost,
-    PrivateUncertain,
 }
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -453,18 +444,12 @@ pub enum WorkerCause {
     Budget,
     SnapshotDrift,
     CriterionUnverified,
-    PrivateUncertain,
-    Lost,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerOutcome {
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub cleanup: Option<WorkerCleanupReceipt>,
     pub disposition: WorkerDisposition,
     pub cause: WorkerCause,
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub data: Option<WorkerDataRef>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -492,10 +477,6 @@ pub struct WorkerHistory {
     pub status: String,
     pub cause: Option<WorkerCause>,
     pub publication: WorkerPublication,
-    pub integration: Option<WorkerIntegrationOutcome>,
-    pub discarded: Option<WorkerSettlementReason>,
-    pub private_outcome_unknown: bool,
-    pub cleanup_confirmed: bool,
     pub lease_released: bool,
     pub verified: bool,
     pub report: String,
@@ -504,15 +485,11 @@ pub struct WorkerHistory {
 impl WorkerHistory {
     pub fn description(&self) -> String {
         format!(
-            "Worker {}: {}; cause={:?}; publication={:?}; integration={:?}; discard={:?}; private_outcome_unknown={}; cleanup_confirmed={}; lease_released={}; verified={}; resumes={}; supersedes={}",
+            "Worker {}: {}; cause={:?}; publication={:?}; lease_released={}; verified={}; resumes={}; supersedes={}",
             self.assignment_id,
             self.status,
             self.cause,
             self.publication,
-            self.integration,
-            self.discarded,
-            self.private_outcome_unknown,
-            self.cleanup_confirmed,
             self.lease_released,
             self.verified,
             self.resumes
@@ -552,6 +529,13 @@ pub struct WorkerSettlement {
     pub reason: WorkerSettlementReason,
     pub cause_sequence: u64,
 }
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerLeaseRelease {
+    pub assignment_id: AgentRunId,
+    pub cause_sequence: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerVerification {
@@ -894,17 +878,6 @@ fn canonical(value: &impl Serialize, bytes: &[u8]) -> bool {
     serde_json::to_writer(&mut compare, value).is_ok() && compare.0.is_empty()
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerCleanupReceipt {
-    pub assignment_id: AgentRunId,
-    pub base_digest: [u8; 32],
-    pub revision: u32,
-    pub enforcement_digest: [u8; 32],
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub last_intent_digest: Option<[u8; 32]>,
-}
-
 fn bounded_files<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -935,23 +908,7 @@ impl WorkerOutcome {
                     | WorkerCause::SnapshotDrift
                     | WorkerCause::CriterionUnverified
             ) | (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
-                | (WorkerDisposition::Lost, WorkerCause::Lost)
-                | (
-                    WorkerDisposition::PrivateUncertain,
-                    WorkerCause::PrivateUncertain
-                )
-        ) && matches!(
-            self.disposition,
-            WorkerDisposition::Ready | WorkerDisposition::NoChange
-        ) == self.data.is_some()
-            && self.data.as_ref().is_none_or(WorkerDataRef::valid)
-            && self.cleanup.as_ref().is_none_or(|c| {
-                c.assignment_id.valid()
-                    && c.base_digest != [0; 32]
-                    && c.revision <= 16
-                    && c.enforcement_digest != [0; 32]
-                    && c.last_intent_digest != Some([0; 32])
-            })
+        )
     }
 }
 

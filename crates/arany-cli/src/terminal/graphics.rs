@@ -1,6 +1,10 @@
 use arany::ImageAttachment;
 use ratatui::layout::Rect;
 
+mod hover;
+pub(super) mod sixel;
+pub(super) use hover::{SixelPreview, preview_interior};
+
 pub(super) const PREVIEW_COLUMNS: u16 = 32;
 pub(super) const PREVIEW_ROWS: u16 = 10;
 pub(super) const PREVIEW_MIN_ROWS: u16 = 4;
@@ -168,7 +172,7 @@ mod tests {
         ImageAttachment::from_png(&bytes).expect("large PNG with ancillary text")
     }
 
-    fn png_crc32(bytes: &[u8]) -> u32 {
+    pub(super) fn png_crc32(bytes: &[u8]) -> u32 {
         let mut crc = !0_u32;
         for &byte in bytes {
             crc ^= u32::from(byte);

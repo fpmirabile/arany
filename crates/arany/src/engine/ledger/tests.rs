@@ -599,11 +599,7 @@ fn action_bounds_reserve_each_calls_switches_and_three_retry_facts() {
             3 * child + review,
             4 * r,
         ),
-        (
-            Action::Worker { chunks: 1093 },
-            review + 8 * child + primary,
-            10 * r,
-        ),
+        (Action::Worker, review + 8 * child + primary, 10 * r),
         (Action::Tool, review, r),
         (Action::Review, review, r),
         (Action::Compaction, compaction, r),

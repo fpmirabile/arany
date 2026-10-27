@@ -140,11 +140,14 @@ impl TerminalReader {
         graphics: bool,
     ) -> io::Result<KeyboardSupport> {
         match self {
-            Self::Keys(reader) => {
-                reader
-                    .queries
-                    .probe_keyboard_within(output, KEYBOARD_PROBE_TIMEOUT, graphics)
-            }
+            Self::Keys(reader) => reader.queries.probe_keyboard_within(
+                output,
+                KEYBOARD_PROBE_TIMEOUT,
+                graphics,
+                graphics
+                    .then(super::graphics::sixel::CellPixels::from_terminal)
+                    .flatten(),
+            ),
             Self::Lines(_) => Ok(KeyboardSupport::Legacy),
             #[cfg(test)]
             Self::Test(_) => Ok(KeyboardSupport::Legacy),
@@ -154,6 +157,14 @@ impl TerminalReader {
     #[cfg(unix)]
     pub(super) fn kitty_graphics_supported(&self) -> bool {
         matches!(self, Self::Keys(reader) if reader.queries.graphics_supported())
+    }
+
+    #[cfg(unix)]
+    pub(super) fn sixel_cell_pixels(&self) -> Option<super::graphics::sixel::CellPixels> {
+        let Self::Keys(reader) = self else {
+            return None;
+        };
+        reader.queries.sixel_cell_pixels()
     }
 
     pub(super) fn set_chat_input(&mut self, chat: bool, child: bool, primary_capacity: usize) {
@@ -671,6 +682,8 @@ enum ReaderEvent {
     KeyboardReply(KeyboardReply),
     #[cfg(unix)]
     GraphicsReply,
+    #[cfg(unix)]
+    CellPixels(super::graphics::sixel::CellPixels),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -711,6 +724,8 @@ struct QueryState {
     #[cfg(unix)]
     device_attributes: Option<Vec<u32>>,
     #[cfg(unix)]
+    cell_pixels: Option<super::graphics::sixel::CellPixels>,
+    #[cfg(unix)]
     waiting: bool,
     #[cfg(unix)]
     position: Option<(u16, u16)>,
@@ -724,6 +739,7 @@ impl TerminalQueries {
         output: &mut impl io::Write,
         timeout: Duration,
         graphics: bool,
+        cell_pixels: Option<super::graphics::sixel::CellPixels>,
     ) -> io::Result<KeyboardSupport> {
         let (state, ready) = &*self.0;
         let mut state = state
@@ -741,12 +757,19 @@ impl TerminalQueries {
         state.graphics = graphics;
         state.kitty_graphics = false;
         state.device_attributes = None;
+        state.cell_pixels = cell_pixels.filter(|_| graphics);
         let query = if graphics {
             super::KEYBOARD_QUERY
         } else {
             super::KEYBOARD_ONLY_QUERY
         };
-        if let Err(error) = output.write_all(query).and_then(|()| output.flush()) {
+        let mut write_query = || {
+            if graphics && state.cell_pixels.is_none() {
+                output.write_all(b"\x1b[16t")?;
+            }
+            output.write_all(query).and_then(|()| output.flush())
+        };
+        if let Err(error) = write_query() {
             state.keyboard = KeyboardProbe::Idle;
             return Err(error);
         }
@@ -801,6 +824,31 @@ impl TerminalQueries {
             && matches!(state.keyboard, KeyboardProbe::Waiting(_))
         {
             state.kitty_graphics = true;
+        }
+    }
+
+    #[cfg(unix)]
+    fn sixel_cell_pixels(&self) -> Option<super::graphics::sixel::CellPixels> {
+        let state = self.0.0.lock().ok()?;
+        (state.graphics
+            && state
+                .device_attributes
+                .as_ref()?
+                .iter()
+                .skip(1)
+                .any(|attribute| *attribute == 4))
+        .then_some(state.cell_pixels)
+        .flatten()
+    }
+
+    #[cfg(unix)]
+    fn cell_pixels_reply(&self, cell: super::graphics::sixel::CellPixels) {
+        if let Ok(mut state) = self.0.0.lock()
+            && state.graphics
+            && let KeyboardProbe::Waiting(deadline) = state.keyboard
+            && Instant::now() < deadline
+        {
+            state.cell_pixels = Some(cell);
         }
     }
 
@@ -979,7 +1027,9 @@ impl InputReader {
                 #[cfg(unix)]
                 ReaderEvent::CursorPosition(_, _) => {}
                 #[cfg(unix)]
-                ReaderEvent::KeyboardReply(_) | ReaderEvent::GraphicsReply => {}
+                ReaderEvent::KeyboardReply(_)
+                | ReaderEvent::GraphicsReply
+                | ReaderEvent::CellPixels(_) => {}
             }
         }
     }
@@ -1127,11 +1177,12 @@ mod tests {
         let mut query = Vec::new();
         assert_eq!(
             queries
-                .probe_keyboard_within(&mut query, Duration::ZERO, true)
+                .probe_keyboard_within(&mut query, Duration::ZERO, true, None)
                 .unwrap(),
             KeyboardSupport::Legacy
         );
-        assert_eq!(query, super::super::KEYBOARD_QUERY);
+        let expected = [b"\x1b[16t".as_slice(), super::super::KEYBOARD_QUERY].concat();
+        assert_eq!(query, expected);
     }
 
     #[cfg(unix)]
@@ -2000,7 +2051,7 @@ mod tests {
                         ReaderEvent::Paste(_) => panic!("ordinary sequence became a paste"),
                         ReaderEvent::CursorPosition(_, _)
                         | ReaderEvent::KeyboardReply(_)
-                        | ReaderEvent::GraphicsReply => {
+                        | ReaderEvent::GraphicsReply | ReaderEvent::CellPixels(_) => {
                             panic!("ordinary sequence became a cursor response")
                         }
                     })

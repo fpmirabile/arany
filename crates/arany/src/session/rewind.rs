@@ -1,5 +1,5 @@
 use super::{Checkpoint, CheckpointStatus, ReplayError, RunId, SessionView, WorkspaceIdentity};
-use crate::session::worker::{ChangesetSource, WorkerBaseVersion, WorkerDataFacts};
+use crate::session::worker::ChangesetSource;
 use crate::tools::{ToolCall, ToolDisposition};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -332,21 +332,6 @@ impl RewindPlan {
     }
 }
 
-fn worker_version(v: &WorkerBaseVersion) -> Result<Option<FileState>, ReplayError> {
-    match v {
-        WorkerBaseVersion::Absent => Ok(None),
-        WorkerBaseVersion::File {
-            sha256,
-            bytes,
-            executable,
-        } => Ok(Some(FileState {
-            sha256: sha256.clone(),
-            bytes: *bytes,
-            executable: *executable,
-        })),
-        WorkerBaseVersion::Directory => Err(ReplayError::InvalidTransition),
-    }
-}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FilePublicationResult {
@@ -372,7 +357,7 @@ fn removed_file(output: &str, expected: &str) -> Result<FileState, ReplayError> 
 }
 
 pub(crate) fn publication_files(
-    run: &super::RunView,
+    _run: &super::RunView,
     o: &crate::tools::ToolObservation,
 ) -> Result<Vec<FilePlan>, ReplayError> {
     let file = |path: String, before, after| FilePlan {
@@ -456,29 +441,6 @@ pub(crate) fn publication_files(
                 ))
             })
             .collect(),
-        ToolCall::ApplyChangeset {
-            source: ChangesetSource::WorkerHandover { data, .. },
-        } => {
-            let facts = run
-                .workers
-                .data
-                .iter()
-                .find(|s| &s.reference == data)
-                .ok_or(ReplayError::InvalidTransition)?;
-            let WorkerDataFacts::Changes(files) = &facts.facts else {
-                return Err(ReplayError::InvalidTransition);
-            };
-            files
-                .iter()
-                .map(|f| {
-                    Ok(file(
-                        f.path.clone(),
-                        worker_version(&f.before)?,
-                        worker_version(&f.after)?,
-                    ))
-                })
-                .collect()
-        }
         _ => Err(ReplayError::InvalidTransition),
     }
 }
@@ -531,7 +493,11 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
     let pruned_through = view
         .runs
         .iter()
-        .flat_map(|run| &run.tools)
+        .flat_map(|run| {
+            run.tools
+                .iter()
+                .chain(run.agents.iter().flat_map(|a| &a.tools))
+        })
         .filter_map(|tool| tool.checkpoint.as_ref())
         .chain(
             view.rewinds
@@ -564,7 +530,11 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
         let Some(started) = started.filter(|s| *s >= target.sequence()) else {
             continue;
         };
-        for t in &run.tools {
+        for t in run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|a| &a.tools))
+        {
             if t.started_sequence.is_some() && super::checkpoint::publication(&t.intent) {
                 match &t.observation {
                     None => blockers.push(t.finished_sequence.unwrap_or(started)),

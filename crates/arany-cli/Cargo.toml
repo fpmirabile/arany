@@ -20,6 +20,7 @@ crossterm.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
 pulldown-cmark.workspace = true
+png.workspace = true
 ratatui.workspace = true
 rusqlite.workspace = true
 reqwest.workspace = true
