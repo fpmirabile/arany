@@ -1,6 +1,7 @@
 use super::super::selection_phase::{primary_command, selection_limits};
-use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
+use super::super::{BootstrapFailure, GitStage, GuardStage, Task, read_line_capped};
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
+use super::git_write::GitLink;
 use super::storage::{
     cleanup_storage, cleanup_storage_until, prepare_command_storage, read_record, storage_mounted,
     write_record,
@@ -41,7 +42,7 @@ const HOST_PROCESS_CAP: usize = 65_536;
 const JOB_BYTES_CAP: usize = 128 * 1024;
 const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
-const UNIT_ROOT_PARENT: &str = "/private/tmp";
+pub(super) const UNIT_ROOT_PARENT: &str = "/private/tmp";
 const UNIT_ROOT_PREFIX: &str = "arany-u-";
 
 pub(super) fn private_recovered(parent: &Path, id: uuid::Uuid) -> Result<(), ToolError> {
@@ -87,7 +88,7 @@ fn recovery(directory: &PrivateDirectory) -> Result<Recovery, ToolError> {
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Identity {
+pub(super) struct Identity {
     pid: u32,
     version: u32,
     unique_id: u64,
@@ -226,6 +227,15 @@ impl Scope {
         Ok(members)
     }
 
+    pub(super) fn holds_only(&mut self, member: Identity) -> Result<bool, ToolError> {
+        let members = self.members()?;
+        Ok(matches!(members.as_slice(), [only] if only.same_process(member)))
+    }
+
+    pub(super) fn is_empty(&mut self) -> Result<bool, ToolError> {
+        Ok(self.members()?.is_empty())
+    }
+
     fn begin_capture(&mut self, limits: &ToolLimits) -> Result<(), ToolError> {
         let members = self.members()?;
         let [supervisor] = members.as_slice() else {
@@ -352,14 +362,14 @@ fn peer(stream: &UnixStream) -> Result<u32, ToolError> {
     Ok(pid as u32)
 }
 
-struct Unit {
+pub(super) struct Unit {
     root: PathBuf,
     _directory: PrivateDirectory,
     _liveness: cap_std::fs::File,
     domain: String,
     label: String,
-    scope: Option<Scope>,
-    limits: Option<ToolLimits>,
+    pub(super) scope: Option<Scope>,
+    pub(super) limits: Option<ToolLimits>,
     stopped: bool,
     _permit: Option<super::super::admission::Permit>,
 }
@@ -558,6 +568,21 @@ async fn manager(
 }
 
 impl Unit {
+    pub(super) fn take_capacity(&mut self) -> Result<super::super::admission::Permit, ToolError> {
+        self._permit.take().ok_or(ToolError::Configuration)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn fixture_witness(&self) -> Result<(PathBuf, u32), ToolError> {
+        Ok((self.root.clone(), self.supervisor()?.pid))
+    }
+
+    pub(super) fn supervisor(&self) -> Result<Identity, ToolError> {
+        recovery(&self._directory)?
+            .supervisor
+            .ok_or(ToolError::ProtectionUnavailable)
+    }
+
     #[cfg(test)]
     async fn new(fixture: &Path) -> Result<Self, ToolError> {
         let directory =
@@ -588,7 +613,10 @@ impl Unit {
         Ok((unit, active_window))
     }
 
-    fn create(permit: super::super::admission::Permit, parent: &Path) -> Result<Self, ToolError> {
+    pub(super) fn create(
+        permit: super::super::admission::Permit,
+        parent: &Path,
+    ) -> Result<Self, ToolError> {
         let name = format!("{UNIT_ROOT_PREFIX}{}", permit.id);
         let root = parent.join(&name);
         std::fs::DirBuilder::new()
@@ -886,7 +914,7 @@ fn action_deadlines(
                     u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
                 )
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-                + crate::tools::guard::transfer::transfer_overhead(intent)
+                + crate::tools::guard::transfer::transfer_time(intent)
                 + Duration::from_secs(10)
         },
         |window| window.completion_deadline,
@@ -946,25 +974,45 @@ fn git_storage_fault(
     Ok(())
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     mut cancellation: Cancellation,
     dispatched: &AtomicBool,
 ) -> Result<ToolObservation, ToolError> {
-    let (mut unit, active_window) = tokio::select! {
+    let admitted = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ToolError::Operation),
         unit = Unit::admit(runtime, intent) => unit?,
     };
+    run_unit(
+        runtime,
+        intent,
+        cancellation,
+        dispatched,
+        admitted,
+        &mut GitLink::default(),
+    )
+    .await
+}
+
+#[expect(clippy::too_many_lines, reason = "frozen until C2")]
+pub(super) async fn run_unit(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    mut cancellation: Cancellation,
+    dispatched: &AtomicBool,
+    admitted: (Unit, Option<crate::tools::ActiveToolWindow>),
+    link: &mut GitLink,
+) -> Result<ToolObservation, ToolError> {
+    let (mut unit, active_window) = admitted;
+    let git_stage = link.stage;
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
-    crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
+    if git_stage != Some(GitStage::Publish) {
+        crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
+    }
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    if let Some(private) = &runtime.worker {
-        private.contained.store(false, Ordering::Release);
-    }
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
     let go_cancellation = cancellation.clone();
@@ -987,7 +1035,16 @@ pub(super) async fn execute(
                 .coalition,
         )?);
         let phases = async {
-            let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer)?)?;
+            let mut task = Task::new(runtime, intent, cache_transfer)?;
+            task.git_stage = git_stage;
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                task.git_fault = crate::fault::git_write::take_mode(
+                    &intent.call,
+                    git_stage == Some(GitStage::Plan),
+                );
+            }
+            let task = super::super::encode_task(&task)?;
             let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
                 stream
                     .get_mut()
@@ -1046,7 +1103,9 @@ pub(super) async fn execute(
                             })??;
                 } else if bytes == b"WORKER_READY\n" && !image_sent {
                     image_sent = true;
-                    let input = crate::tools::guard::transfer::bulk_input(runtime)
+                    let input = runtime
+                        .handover
+                        .as_deref()
                         .ok_or(ToolError::Configuration)?;
                     tokio::time::timeout_at(
                         go_deadline,
@@ -1082,19 +1141,37 @@ pub(super) async fn execute(
                 .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
             capture.complete();
             let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
-            runtime
-                .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
+            if git_stage == Some(GitStage::Publish) {
+                link.feed_publisher(stream.get_mut()).await?;
+            }
+            if git_stage == Some(GitStage::Plan) {
+                if go_cancellation.is_cancelled() {
+                    return Err(ToolError::Operation);
+                }
+            } else {
+                runtime
+                    .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
+                    .await?;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if git_stage == Some(GitStage::Publish) {
+                super::git_write::fixture_gate(
+                    intent,
+                    crate::fault::git_write::GitWriteStage::BeforeGo,
+                    &unit,
+                )
                 .await?;
+            }
             payload_phase.store(true, Ordering::Release);
-            dispatched.store(true, Ordering::Release);
+            if git_stage != Some(GitStage::Plan) {
+                dispatched.store(true, Ordering::Release);
+            }
             let observation = async {
-                stream
-                    .get_mut()
-                    .write_all(b"GO\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                crate::fault::guard_dispatched(intent);
-                crate::fault::guard_dispatch_gate(intent).await;
+                super::git_write::send_go(stream.get_mut(), intent, &unit, git_stage).await?;
+                if git_stage != Some(GitStage::Plan) {
+                    crate::fault::guard_dispatched(intent);
+                    crate::fault::guard_dispatch_gate(intent).await;
+                }
                 if primary_command {
                     use tokio::io::AsyncBufReadExt;
                     if stream
@@ -1140,7 +1217,7 @@ pub(super) async fn execute(
                     }
                 }
                 let capture_result = async {
-                    if let Some(session) = cache.as_ref().filter(|_| runtime.worker.is_none()) {
+                    if let Some(session) = cache.as_ref() {
                         let observation =
                             super::super::read_observation_line(&mut stream, intent).await?;
                         let update_deadline = super::super::cache_transfer_deadline(
@@ -1186,20 +1263,12 @@ pub(super) async fn execute(
                             _ => return Err(ToolError::Operation),
                         }
                         Ok((observation, candidate))
-                    } else if runtime.worker.is_some() {
-                        if crate::tools::discovery::possible(&intent.call) {
-                            super::super::wait_discovery_completion(&mut stream, intent).await?;
-                        }
-                        super::super::read_worker_observation(
-                            &mut stream,
-                            runtime,
-                            intent,
-                            Duration::from_millis(u64::from(intent.limits.runtime_ms))
-                                + crate::tools::guard::transfer::transfer_time(intent)
-                                + TEARDOWN_WAIT,
-                        )
-                        .await
-                        .map(|observation| (observation, super::super::CacheCandidate::Received))
+                    } else if git_stage == Some(GitStage::Plan) {
+                        super::git_write::relay_plan(&mut stream, intent, &mut unit, link)
+                            .await
+                            .map(|observation| {
+                                (observation, super::super::CacheCandidate::Received)
+                            })
                     } else if crate::tools::discovery::possible(&intent.call) {
                         super::super::read_discovery_report(&mut stream, intent)
                             .await
@@ -1263,10 +1332,13 @@ pub(super) async fn execute(
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
+    #[cfg(any(test, feature = "test-support"))]
+    crate::fault::git_write::storage_finished(&unit.root, intent.id)
+        .map_err(|_| ToolError::Operation)?;
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
-    if let Some(private) = &runtime.worker {
-        private.contained.store(true, Ordering::Release);
+    if result.is_ok() {
+        link.release_publisher(&mut unit)?;
     }
     match result {
         Ok((mut observation, candidate)) => {
@@ -1339,13 +1411,16 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         if let Some(cache) = &task.cache {
             cache.validate(&task.intent, &task.config)?;
         }
+        let git_stage = task.git_stage;
+        #[cfg(any(test, feature = "test-support"))]
+        let git_fault = task.git_fault;
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let worker_input = if task.worker.is_some() || task.handover.is_some() {
+        let worker_input = if task.handover.is_some() {
             stream
                 .write_all(b"WORKER_READY\n")
                 .map_err(|_| ToolError::Operation)?;
@@ -1353,11 +1428,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 &mut stream,
                 crate::session::worker::WORKER_DATA_BYTES,
             )?;
-            if let Some(transfer) = &task.worker {
-                transfer.decode(&bytes)?;
-            } else {
-                crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
-            }
+            crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
             Some(bytes)
         } else {
             None
@@ -1387,18 +1458,14 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
             let mut command_before = None;
             let (capture_go, mut receive_capture) = tokio::sync::oneshot::channel();
+            let (plan_sender, plan_receiver) = tokio::sync::oneshot::channel();
+            let (relayed_sender, relayed_receiver) = tokio::sync::oneshot::channel();
+            let publishing = git_stage == Some(GitStage::Publish);
+            let result_cap = intent.limits.result_bytes as usize;
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if runtime.worker.is_some() && !intent.call.is_process() {
-                    Some(
-                        super::storage::prepare_worker_storage(
-                            path.parent().ok_or(ToolError::Path)?,
-                            &intent.limits,
-                        )
-                        .await?,
-                    )
-                } else if intent.call.is_git() {
+                storage = if intent.call.is_git() && git_stage != Some(GitStage::Publish) {
                     let root = path.parent().ok_or(ToolError::Path)?;
                     let volumes = super::storage::prepare_git_storage(root).await?;
                     git_storage_fault(root, &volumes, &intent)?;
@@ -1488,18 +1555,32 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 let (go, receive_go) = tokio::sync::oneshot::channel();
                 let watched = cancellation.clone();
                 reader = Some(tokio::spawn(async move {
+                    if publishing {
+                        match super::git_write::receive_plan(&mut input, result_cap).await {
+                            Ok(plan) => {
+                                let _ = plan_sender.send(plan);
+                            }
+                            Err(_) => {
+                                watched.cancel();
+                                return;
+                            }
+                        }
+                    }
                     let mut bytes = [0; 3];
                     if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
                         let _ = go.send(());
                         let mut capture = [0; 8];
-                        if input.read_exact(&mut capture).await.is_ok() && capture == *b"CAPTURE\n"
-                        {
-                            let mut frame = [0; 8];
-                            if input.read_exact(&mut frame).await.is_ok()
-                                && let Ok(deadline) =
-                                    super::super::selection_phase::decode_deadline(frame)
-                            {
-                                let _ = capture_go.send(deadline);
+                        if input.read_exact(&mut capture).await.is_ok() {
+                            if capture == *b"CAPTURE\n" {
+                                let mut frame = [0; 8];
+                                if input.read_exact(&mut frame).await.is_ok()
+                                    && let Ok(deadline) =
+                                        super::super::selection_phase::decode_deadline(frame)
+                                {
+                                    let _ = capture_go.send(deadline);
+                                }
+                            } else if capture == *super::git_write::RELAYED {
+                                let _ = relayed_sender.send(());
                             }
                             let _ = input.read(&mut [0; 1]).await;
                         }
@@ -1521,7 +1602,13 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     cancellation,
                     &mut scope,
                     &mut output,
-                    receive_go,
+                    super::GoGate {
+                        receive_go,
+                        git_stage,
+                        git_input: publishing.then_some(plan_receiver),
+                        #[cfg(any(test, feature = "test-support"))]
+                        git_fault,
+                    },
                     path.parent().ok_or(ToolError::Path)?,
                 )
                 .await
@@ -1555,7 +1642,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 Ok(())
             }
             .await;
+            let mut git_frame = None;
             let result = result.map(|mut worker| {
+                git_frame = worker.frame.take();
                 if let Err(error) = capture_handshake {
                     let (disposition, output, cause, limit_cause) =
                         crate::tools::dispatch::outcome(&intent, Err(error));
@@ -1572,15 +1661,13 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 |super::WorkerOutput {
                      mut observation,
                      windows,
+                     ..
                  }| {
-                    observation.cache_update =
-                        if runtime.worker.is_some() && intent.call.is_process() {
-                            crate::tools::CacheUpdate::Discarded
-                        } else if cache.is_some() {
-                            crate::tools::CacheUpdate::NotAttempted
-                        } else {
-                            crate::tools::CacheUpdate::NotApplicable
-                        };
+                    observation.cache_update = if cache.is_some() {
+                        crate::tools::CacheUpdate::NotAttempted
+                    } else {
+                        crate::tools::CacheUpdate::NotApplicable
+                    };
                     if cleanup.is_ok()
                         && let Some((before, selection)) = &command_before
                         && let Ok(command) =
@@ -1640,33 +1727,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                             }
                         }
                     }
-                    if cleanup.is_ok()
-                        && intent.call.is_process()
-                        && let Some(action) = &runtime.worker
-                    {
-                        let before = action.transfer.decode(&action.input)?;
-                        let (image, capture) = if observation.disposition
-                            == ToolDisposition::Succeeded
-                        {
-                            crate::tools::guard::transfer::command_capture(
-                                &before,
-                                &crate::tools::fs::open_directory(
-                                    &path.parent().ok_or(ToolError::Path)?.join("workspace/tree"),
-                                )?,
-                                &action.transfer.grant,
-                            )
-                        } else {
-                            (before, crate::session::worker::PrivateCapture::None {})
-                        };
-                        let mut command: crate::session::worker::WorkerCommandResult =
-                            serde_json::from_str(&observation.output)
-                                .map_err(|_| ToolError::Operation)?;
-                        command.private_capture = capture;
-                        observation.output =
-                            serde_json::to_string(&command).map_err(|_| ToolError::Operation)?;
-                        *action.output.lock().map_err(|_| ToolError::Operation)? =
-                            Some(image.encode()?);
-                    }
                     Ok(observation)
                 },
             );
@@ -1675,9 +1735,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             }
             let mut response_sent = false;
             let mut cache_transfer_failed = false;
-            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result)
-                && runtime.worker.is_none()
-            {
+            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result) {
                 let transfer = async {
                     let bytes = crate::tools::spill::encode_report(observation)?;
                     output
@@ -1763,11 +1821,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             } else {
                 Err(ToolError::ProtectionUnavailable)
             };
-            if let Some(reader) = reader {
-                reader.abort();
-                let _ = reader.await;
-            }
             if cache_transfer_failed {
+                if let Some(reader) = reader {
+                    reader.abort();
+                    let _ = reader.await;
+                }
                 output.shutdown().await.map_err(|_| ToolError::Operation)?;
                 return Err(ToolError::Operation);
             }
@@ -1837,15 +1895,14 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     .map_err(|_| ToolError::Operation)?;
             }
             if result.is_ok()
-                && let Some(action) = &runtime.worker
+                && let Some(frame) = &git_frame
             {
-                let bytes = action
-                    .output
-                    .lock()
-                    .map_err(|_| ToolError::Operation)?
-                    .take()
-                    .ok_or(ToolError::Operation)?;
-                crate::tools::guard::transfer::send_frame(&mut output, &bytes).await?;
+                super::git_write::send_plan(&mut output, frame, relayed_receiver).await?;
+            }
+            // The reader owns the relay acknowledgement, so it outlives the frame send.
+            if let Some(reader) = reader {
+                reader.abort();
+                let _ = reader.await;
             }
             output.shutdown().await.map_err(|_| ToolError::Operation)?;
             result.map(|_| ())
@@ -2473,7 +2530,6 @@ done
             guard_available: true,
             git_writes_available: false,
             host_authentication: Default::default(),
-            worker: None,
             handover: None,
             definitions: Default::default(),
             permissions: None,
@@ -2517,6 +2573,7 @@ done
                 git_identity: None,
                 locale: Default::default(),
                 environment_sha256: None,
+                network: None,
             },
             workspace: workspace.to_path_buf(),
             reads: None,
@@ -4021,7 +4078,6 @@ int main(int argc, char **argv) {
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
                     definition: None,
-                    worker: None,
                     handover: None,
                     config: runtime.config.clone(),
                     cache: None,
@@ -4049,6 +4105,8 @@ int main(int argc, char **argv) {
                     workspace: runtime.workspace.clone(),
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
+                    git_stage: None,
+                    git_fault: None,
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();

@@ -7,7 +7,7 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 const MIXED: &str = "Plain **bold** and *italic* with `code` &amp; \\*escaped\\*.\nsecond line  \nthird after hard break";
 const WIDTHS: [usize; 5] = [16, 40, 50, 80, 120];
 
-fn styled(row: &HistoryRow, modifier: Modifier) -> String {
+pub(super) fn styled(row: &HistoryRow, modifier: Modifier) -> String {
     row.spans
         .iter()
         .filter(|span| span.style.add_modifier.contains(modifier))
@@ -15,7 +15,7 @@ fn styled(row: &HistoryRow, modifier: Modifier) -> String {
         .collect()
 }
 
-fn body(source: &str, width: usize) -> Vec<String> {
+pub(super) fn body(source: &str, width: usize) -> Vec<String> {
     let rows = display_rows(MessageKind::Assistant, source, width, None);
     rows[1..rows.len() - 1]
         .iter()
@@ -23,12 +23,18 @@ fn body(source: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
-fn select(history: &mut History, view: &SessionView, row: usize, column: usize, clicks: u8) {
+pub(super) fn select(
+    history: &mut History,
+    view: &SessionView,
+    row: usize,
+    column: usize,
+    clicks: u8,
+) {
     history.top = history.messages[1].start;
     history.select_at(view, row, column, clicks);
 }
 
-fn copied(history: &History, view: &SessionView) -> String {
+pub(super) fn copied(history: &History, view: &SessionView) -> String {
     history.selection_text(view).unwrap().unwrap()
 }
 
@@ -44,7 +50,7 @@ fn assert_inline_styles(line: &[ratatui::buffer::Cell], spans: &[Span<'_>]) {
     }
 }
 
-fn assert_consumers_agree(source: &str) {
+pub(super) fn assert_consumers_agree(source: &str) {
     for width in WIDTHS {
         let mut view = session();
         view.runs.push(run("objective", source));
@@ -544,26 +550,39 @@ fn leading_hard_breaks_keep_exact_rows_find_and_reading_anchors() {
 }
 
 #[test]
-fn literal_links_and_images_keep_accumulated_styles_in_prose_and_tables() {
-    for (markup, literal, style) in [
-        ("**[label](dest)**", "[label](dest)", Modifier::BOLD),
-        ("*![alt](x.png)*", "![alt](x.png)", Modifier::ITALIC),
+fn links_and_images_keep_accumulated_styles_in_prose_and_tables() {
+    for (markup, shown, bold, italic) in [
+        ("**[label](dest)**", "label (dest)", "label (dest)", ""),
+        ("*![alt](x.png)*", "![alt](x.png)", "", "![alt](x.png)"),
         (
             "***[label](dest)***",
-            "[label](dest)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "label (dest)",
+            "label (dest)",
+            "label (dest)",
         ),
         (
             "***![alt](x.png)***",
             "![alt](x.png)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "![alt](x.png)",
+            "![alt](x.png)",
         ),
-        ("**[a *label*](dest)**", "[a *label*](dest)", Modifier::BOLD),
-        ("*![**alt**](x.png)*", "![**alt**](x.png)", Modifier::ITALIC),
+        (
+            "**[a *label*](dest)**",
+            "a label (dest)",
+            "a label (dest)",
+            "label",
+        ),
+        (
+            "*![**alt**](x.png)*",
+            "![**alt**](x.png)",
+            "",
+            "![**alt**](x.png)",
+        ),
         (
             "***[label](a&amp;b)***",
-            "[label](a&amp;b)",
-            Modifier::BOLD | Modifier::ITALIC,
+            "label (a&b)",
+            "label (a&b)",
+            "label (a&b)",
         ),
     ] {
         for source in [
@@ -578,18 +597,10 @@ fn literal_links_and_images_keep_accumulated_styles_in_prose_and_tables() {
                 MessageKind::Incomplete,
             ] {
                 let rows = display_rows(kind, &source, 120, None);
-                let row = rows.iter().find(|row| row.text.contains(literal)).unwrap();
-                assert_eq!(row.text, format!("  {literal} plain"));
-                assert_eq!(styled(row, style), literal);
-                for modifier in [Modifier::BOLD, Modifier::ITALIC] {
-                    assert_eq!(
-                        styled(row, modifier),
-                        if style.contains(modifier) {
-                            literal
-                        } else {
-                            ""
-                        }
-                    );
+                let row = rows.iter().find(|row| row.text.contains(shown)).unwrap();
+                assert_eq!(row.text, format!("  {shown} plain"));
+                for (modifier, expected) in [(Modifier::BOLD, bold), (Modifier::ITALIC, italic)] {
+                    assert_eq!(styled(row, modifier), expected);
                 }
             }
         }

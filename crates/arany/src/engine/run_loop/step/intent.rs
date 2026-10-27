@@ -107,10 +107,14 @@ impl RunLoop<'_> {
                 resource_settings,
                 timeout_limit.is_some(),
             )?;
+            if actor == self.primary_id {
+                runtime.grant_network(&mut intent);
+            }
+            runtime.bind_build_jobs(&mut intent)?;
         }
         let fixed_overhead_ms = duration_ms(
             runtime
-                .intent_reservation_overhead(&intent)
+                .reservation_overhead(&intent.call)
                 .saturating_add(TOOL_CLEANUP_OVERHEAD)
                 .saturating_add(STORE_ACTION_OVERHEAD),
         );
@@ -718,7 +722,7 @@ impl RunLoop<'_> {
 
 pub(super) fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
     runtime
-        .intent_reservation_overhead(intent)
+        .reservation_overhead(&intent.call)
         .saturating_add(
             Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
                 .saturating_add(crate::tools::transfer_time(intent))
@@ -834,7 +838,9 @@ fn command_limits(
         intent.limits.build_jobs = resource_settings
             .build_jobs
             .ok_or(EngineError::InvalidRequest)?;
-        runtime.bind_build_jobs(intent)?;
+        intent.limits.build_cpu_cores = resource_settings
+            .build_cpu_cores
+            .ok_or(EngineError::InvalidRequest)?;
         intent.limits.project_bytes = resource_settings.build_project_bytes;
     }
     Ok(())

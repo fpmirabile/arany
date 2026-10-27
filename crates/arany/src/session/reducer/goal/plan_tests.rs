@@ -262,20 +262,26 @@ fn plan_contract_counts_a_pre_plan_read_matching_its_digest() {
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
     };
-    let mut unavailable = view.clone();
-    unavailable.goals[0].resource_settings.build_jobs = None;
     let mut build = contract.clone();
     build.resource_class = crate::tools::ToolResourceClass::Build;
-    assert!(
-        unavailable
-            .record_goal_plan_contract(&goal_id, &run_id, &build)
-            .is_err()
-    );
-    assert!(
-        unavailable
-            .record_goal_plan_contract(&goal_id, &run_id, &contract)
-            .is_ok()
-    );
+    for cpu_unavailable in [false, true] {
+        let mut unavailable = view.clone();
+        if cpu_unavailable {
+            unavailable.goals[0].resource_settings.build_cpu_cores = None;
+        } else {
+            unavailable.goals[0].resource_settings.build_jobs = None;
+        }
+        assert!(
+            unavailable
+                .record_goal_plan_contract(&goal_id, &run_id, &build)
+                .is_err()
+        );
+        assert!(
+            unavailable
+                .record_goal_plan_contract(&goal_id, &run_id, &contract)
+                .is_ok()
+        );
+    }
     for path in ["unrelated", "src/main.rs"] {
         let mut after_rewind = view.clone();
         let mut rewind = super::super::rewind_tests::restored_operation();
@@ -534,9 +540,17 @@ fn unplanned_effects_obey_the_goal_phase() {
 
 #[test]
 fn build_jobs_are_bound_to_goal_resources_before_tool_admission() {
-    for (recorded, jobs, admitted) in [(Some(2), 2, true), (Some(2), 1, false), (None, 1, false)] {
+    for (recorded, jobs, cpu, limit_cpu, admitted) in [
+        (Some(2), 2, Some(1), 1, true),
+        (Some(2), 1, Some(1), 1, false),
+        (None, 1, Some(1), 1, false),
+        (Some(2), 2, Some(8), 8, true),
+        (Some(2), 2, Some(8), 1, false),
+        (Some(2), 2, None, 1, false),
+    ] {
         let (mut view, goal, run, agent) = primary_tool_session(false);
         view.goals[0].resource_settings.build_jobs = recorded;
+        view.goals[0].resource_settings.build_cpu_cores = cpu;
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         let mut intent = read_intent(run, agent, "src/main.rs");
@@ -547,6 +561,7 @@ fn build_jobs_are_bound_to_goal_resources_before_tool_admission() {
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = jobs;
+        intent.limits.build_cpu_cores = limit_cpu;
         intent.limits.cache_bytes = 0;
         intent.limits.cache_candidate_bytes = 0;
         assert_eq!(

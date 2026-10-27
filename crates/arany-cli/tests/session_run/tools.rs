@@ -23,6 +23,8 @@ mod containment;
 mod git;
 #[path = "tools/mcp.rs"]
 mod mcp;
+#[path = "tools/network.rs"]
+mod network;
 #[path = "tools/permissions.rs"]
 mod permissions;
 #[path = "tools/read_replay.rs"]

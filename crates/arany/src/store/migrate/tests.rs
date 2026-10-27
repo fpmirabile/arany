@@ -18,7 +18,7 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 87] = [
     (
         "AgentFinished",
         11,
@@ -320,7 +320,95 @@ const EVENT_FIXTURES: [EventFixture<'static>; 76] = [
         include_str!("supervisorverdictrecorded-v1.json"),
         include_str!("supervisorverdictrecorded-v1.json"),
     ),
+    (
+        "ToolProposed",
+        2,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        24,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        30,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        13,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        19,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "RunStarted",
+        24,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
+    ),
+    (
+        "ToolProposed",
+        3,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        25,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        31,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        14,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        20,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
 ];
+
+#[test]
+fn proxy_network_class_never_appears_in_source_version_rows() {
+    for (kind, from, input) in [
+        ("ToolProposed", 3, include_str!("toolproposed-v1.json")),
+        ("ToolStarted", 25, include_str!("toolstarted-v23.json")),
+        ("ToolFinished", 31, SELECTION_TOOLFINISHED),
+        (
+            "HookStarted",
+            14,
+            include_str!("hookstarted-without-expiry.json"),
+        ),
+        ("HookFinished", 20, SELECTION_HOOKFINISHED),
+    ] {
+        let widened = input.replace(r#""network":"none""#, r#""network":"proxy""#);
+        assert_ne!(widened, input, "{kind} fixture carries a network class");
+        assert!(
+            REGISTRY.upgrade_payload(kind, from, &widened).is_err(),
+            "{kind} v{from} must refuse proxy"
+        );
+    }
+}
 
 #[test]
 fn migrated_intent_records_preserve_runtime_bytes() {
@@ -822,18 +910,42 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
     });
 }
 
-fn downgrade_run_provider(connection: &Connection) {
+fn downgrade_run_provider(connection: &Connection, allowance: u32) {
     repin(connection, |row| {
         if let Event::RunStarted { config, .. } = decode_row(row) {
             let tagged = serde_json::to_string(&config.provider).unwrap();
             let profile = serde_json::to_string(&config.provider.profile()).unwrap();
-            row.payload = row.payload.replacen(&tagged, &profile, 1);
+            let payload = row.payload.replacen(&tagged, &profile, 1);
+            row.payload = restore_allowance(payload, &config, allowance);
             row.version = 23;
         }
     });
 }
 
-fn downgrade_run_started(connection: &Connection) {
+// Versions before 25 pinned the Worker data allowance after the last policy field.
+const WORKER_ALLOWANCE: u32 = crate::session::worker::WORKER_DATA_BYTES as u32;
+
+fn restore_allowance(
+    payload: String,
+    config: &crate::session::RunConfig,
+    allowance: u32,
+) -> String {
+    let Some(policy) = &config.worker_policy else {
+        return payload;
+    };
+    let last = format!(r#""max_tools":{}}}"#, policy.max_tools);
+    assert_eq!(payload.matches(&last).count(), 1);
+    payload.replacen(
+        &last,
+        &format!(
+            r#""max_tools":{},"data_bytes":{}}}"#,
+            policy.max_tools, allowance
+        ),
+        1,
+    )
+}
+
+fn downgrade_run_started(connection: &Connection, allowance: u32) {
     repin(connection, |row| {
         if row.kind == "RunStarted" {
             let event = decode_row(row);
@@ -842,11 +954,12 @@ fn downgrade_run_started(connection: &Connection) {
             };
             let tagged = serde_json::to_string(&config.provider).unwrap();
             let profile = serde_json::to_string(&config.provider.profile()).unwrap();
-            row.payload = row.payload.replacen(&tagged, &profile, 1).replacen(
+            let payload = row.payload.replacen(&tagged, &profile, 1).replacen(
                 r#""user_instruction_digest":null,"#,
                 "",
                 1,
             );
+            row.payload = restore_allowance(payload, config, allowance);
             row.version = 19;
         }
     });
@@ -1144,12 +1257,12 @@ fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
 
 #[test]
 fn run_started_migrations_preserve_identity_and_do_not_read_user_instructions() {
-    for version in [19, 23] {
-        migrate_run_started(version);
+    for (version, allowance) in [(19, WORKER_ALLOWANCE), (23, 512)] {
+        migrate_run_started(version, allowance);
     }
 }
 
-fn migrate_run_started(version: i64) {
+fn migrate_run_started(version: i64, allowance: u32) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
     let History { root, sessions } = history(&path, true, 0);
@@ -1163,9 +1276,9 @@ fn migrate_run_started(version: i64) {
     let current = stored_rows(&connection);
     let digests = fork_digests(&connection);
     if version == 19 {
-        downgrade_run_started(&connection);
+        downgrade_run_started(&connection, allowance);
     } else {
-        downgrade_run_provider(&connection);
+        downgrade_run_provider(&connection, allowance);
     }
     let downgraded = stored_rows(&connection);
     assert_ne!(downgraded, current);
@@ -1287,7 +1400,7 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         let path = temp.path().join("state");
         let History { root, sessions } = forked_history(&path);
         let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
-        downgrade_run_provider(&connection);
+        downgrade_run_provider(&connection, WORKER_ALLOWANCE);
         restore_pre_check_schema(&connection, 4);
         drop(connection);
         let database = path.join(DATABASE_FILE);
@@ -3022,7 +3135,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(upgraded, source);
         let event = Event::decode(
             "RunStarted",
-            24,
+            25,
             &upgraded.to_string(),
             Some(RunId::new()),
             None,
@@ -3036,7 +3149,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(config.provider.profile(), profile);
     }
     let fixture = include_str!("runstarted-v24.json");
-    let event = Event::decode("RunStarted", 24, fixture, Some(RunId::new()), None).unwrap();
+    let event = Event::decode("RunStarted", 25, fixture, Some(RunId::new()), None).unwrap();
     assert_eq!(event.payload().unwrap(), fixture);
     for profile in ["", "unknown", "custom:", "custom:Upper", "custom:bad/name"] {
         let source = GLOBAL_RUNSTARTED.replace(
@@ -3084,7 +3197,7 @@ fn migrate_provider_prefix(mut started: Event) {
         append(&mut connection, &mut hot, fixture.session, event).unwrap();
     }
     let original = stored_rows(&connection);
-    downgrade_run_provider(&connection);
+    downgrade_run_provider(&connection, WORKER_ALLOWANCE);
     drop(connection);
     assert!(
         root.upgrade_or_archive_history(&REGISTRY)

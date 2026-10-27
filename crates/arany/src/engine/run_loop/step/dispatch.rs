@@ -26,7 +26,6 @@ impl StepDispatch {
         reservation_overhead: Duration,
     ) -> Self {
         if calls > 1
-            && intent.target == crate::worker::EffectTarget::Workspace
             && intent.call.facts().site == crate::tools::catalog::Site::InProcess
             && !intent.call.facts().mutates
             && reservation_overhead.is_zero()
@@ -861,13 +860,6 @@ mod tests {
             args: Vec::new(),
             cwd: String::new(),
         };
-        let mut worker = read_intent();
-        worker.target = crate::worker::EffectTarget::WorkerView {
-            assignment_id: worker.agent_run_id,
-            base_digest: [1; 32],
-            revision: 0,
-            cache_generation: None,
-        };
         for (calls, intent, overhead, expected) in [
             (1, read_intent(), Duration::ZERO, Serial),
             (2, read_intent(), Duration::ZERO, ConcurrentRead),
@@ -878,7 +870,6 @@ mod tests {
             (2, skill, Duration::ZERO, ConcurrentRead),
             (2, mutation, Duration::ZERO, Serial),
             (2, guarded, Duration::ZERO, Serial),
-            (2, worker, Duration::ZERO, Serial),
         ] {
             assert_eq!(StepDispatch::decide(calls, &intent, overhead), expected);
         }

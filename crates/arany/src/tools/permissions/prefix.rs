@@ -213,10 +213,24 @@ pub struct TypedPrefixEntry {
     pub folder: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NetworkDomainEdit {
+    Insert { domain: String, decision: Decision },
+    Replace { index: usize, decision: Decision },
+    Remove { index: usize },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetworkDomainEntry {
+    pub domain: String,
+    pub decision: Decision,
+}
+
 #[derive(Clone, Debug)]
 pub struct PermissionSettings {
     entries: Vec<TypedRule>,
     host: Vec<super::HostPrefixRule>,
+    network: Vec<NetworkDomainEntry>,
     digest: Option<[u8; 32]>,
     folder: crate::session::WorkspaceIdentity,
 }
@@ -232,17 +246,23 @@ impl PermissionSettings {
         bytes: Option<&[u8]>,
         folder: crate::session::WorkspaceIdentity,
     ) -> Result<Self, SettingsError> {
-        let (entries, host) = match bytes {
-            None => (Vec::new(), Vec::new()),
+        let (entries, host, network) = match bytes {
+            None => (Vec::new(), Vec::new(), Vec::new()),
             Some(bytes) => {
                 let config =
                     super::PermissionConfig::parse(bytes).map_err(|_| SettingsError::Invalid)?;
-                (config.typed, config.host)
+                let network = config
+                    .network_rules()
+                    .into_iter()
+                    .map(|(decision, domain)| NetworkDomainEntry { domain, decision })
+                    .collect();
+                (config.typed, config.host, network)
             }
         };
         Ok(Self {
             entries,
             host,
+            network,
             digest: bytes.map(digest),
             folder,
         })
@@ -269,6 +289,26 @@ impl PermissionSettings {
 
     pub fn host_prefixes(&self) -> &[super::HostPrefixRule] {
         &self.host
+    }
+
+    pub fn network_domains(&self) -> &[NetworkDomainEntry] {
+        &self.network
+    }
+
+    pub fn save_network_edit(
+        &self,
+        state: &StateRoot,
+        workspace: &Path,
+        edit: NetworkDomainEdit,
+    ) -> Result<Self, SettingsError> {
+        save(
+            state,
+            workspace,
+            self.folder,
+            Some(self.digest),
+            false,
+            Edit::Network(edit),
+        )
     }
 
     pub fn save_host_edit(
@@ -377,6 +417,86 @@ pub enum HostPrefixEdit {
 enum Edit {
     Typed(TypedPrefixEdit),
     Host(HostPrefixEdit),
+    Network(NetworkDomainEdit),
+}
+
+fn decision_rank(decision: Decision) -> u8 {
+    match decision {
+        Decision::Deny => 0,
+        Decision::Ask => 1,
+        Decision::Allow => 2,
+    }
+}
+
+fn edit_network(
+    entries: &mut Vec<NetworkDomainEntry>,
+    edit: NetworkDomainEdit,
+) -> Result<(), SettingsError> {
+    match edit {
+        NetworkDomainEdit::Insert { domain, decision } => {
+            if !crate::tools::network::valid_pattern(&domain) {
+                return Err(SettingsError::Invalid);
+            }
+            let entry = NetworkDomainEntry { domain, decision };
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+        NetworkDomainEdit::Replace { index, decision } => {
+            entries
+                .get_mut(index)
+                .ok_or(SettingsError::Missing)?
+                .decision = decision;
+        }
+        NetworkDomainEdit::Remove { index } => {
+            if index >= entries.len() {
+                return Err(SettingsError::Missing);
+            }
+            entries.remove(index);
+        }
+    }
+    entries.sort_by_key(|entry| decision_rank(entry.decision));
+    let unique: std::collections::BTreeSet<_> = entries
+        .iter()
+        .map(|entry| (&entry.domain, decision_rank(entry.decision)))
+        .collect();
+    if unique.len() != entries.len() {
+        return Err(SettingsError::Invalid);
+    }
+    Ok(())
+}
+
+// Only `Network(domain:…)` strings are rewritten; every other rule keeps its place and spelling.
+fn rewrite_network(
+    permissions: &mut Map<String, Value>,
+    entries: &[NetworkDomainEntry],
+) -> Result<(), SettingsError> {
+    for (list, decision) in [
+        ("deny", Decision::Deny),
+        ("ask", Decision::Ask),
+        ("allow", Decision::Allow),
+    ] {
+        let mut rules = match permissions.remove(list) {
+            None => Vec::new(),
+            Some(Value::Array(rules)) => rules,
+            Some(_) => return Err(SettingsError::Invalid),
+        };
+        rules.retain(|rule| {
+            !rule
+                .as_str()
+                .is_some_and(|rule| rule.starts_with("Network(domain:"))
+        });
+        rules.extend(
+            entries
+                .iter()
+                .filter(|entry| entry.decision == decision)
+                .map(|entry| Value::String(format!("Network(domain:{})", entry.domain))),
+        );
+        if !rules.is_empty() {
+            permissions.insert(list.into(), Value::Array(rules));
+        }
+    }
+    Ok(())
 }
 
 fn edit_host(
@@ -506,9 +626,11 @@ fn save(
             let current = PermissionSettings::from_bytes(bytes.as_deref(), identity)?;
             let mut entries = current.entries;
             let mut host = current.host;
+            let mut network = current.network;
             match edit {
                 Edit::Host(edit) => edit_host(&mut host, edit, workspace)?,
                 Edit::Typed(edit) => edit_typed(&mut entries, edit, workspace, identity)?,
+                Edit::Network(edit) => edit_network(&mut network, edit)?,
             }
             let mut document = match &bytes {
                 Some(bytes) => crate::tools::parse_json(bytes, MAX_CONFIG_BYTES)
@@ -521,6 +643,7 @@ fn save(
                 .or_insert_with(|| Value::Object(Map::new()))
                 .as_object_mut()
                 .ok_or(SettingsError::Invalid)?;
+            rewrite_network(permissions, &network)?;
             if entries.is_empty() {
                 permissions.remove("typedPrefixes");
             } else {
@@ -539,7 +662,7 @@ fn save(
                 return Err(SettingsError::Invalid);
             }
             let parsed = PermissionSettings::from_bytes(Some(&updated), identity)?;
-            if parsed.entries != entries || parsed.host != host {
+            if parsed.entries != entries || parsed.host != host || parsed.network != network {
                 return Err(SettingsError::Invalid);
             }
             state
@@ -597,6 +720,7 @@ mod tests {
         PermissionSettings {
             entries: Vec::new(),
             host: Vec::new(),
+            network: Vec::new(),
             digest,
             folder: crate::tools::workspace_identity(workspace).unwrap(),
         }
@@ -889,5 +1013,91 @@ mod tests {
             .is_err()
         );
         assert!(!temp.path().join("state/permissions.json").exists());
+    }
+    #[test]
+    fn network_domain_edits_rewrite_only_domain_rules() {
+        let (_temp, state, workspace) = setup();
+        let loaded = PermissionSettings::load(&state, &workspace).unwrap();
+        let first = loaded
+            .save_network_edit(
+                &state,
+                &workspace,
+                NetworkDomainEdit::Insert {
+                    domain: "files.pypi.org".into(),
+                    decision: Decision::Allow,
+                },
+            )
+            .unwrap();
+        let file = state.path().join("permissions.json");
+        let mut document: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        document["permissions"]["allow"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!("Bash(git diff *)"));
+        std::fs::write(&file, serde_json::to_vec(&document).unwrap()).unwrap();
+        let reloaded = PermissionSettings::load(&state, &workspace).unwrap();
+        let second = reloaded
+            .save_network_edit(
+                &state,
+                &workspace,
+                NetworkDomainEdit::Insert {
+                    domain: "bad.example.com".into(),
+                    decision: Decision::Deny,
+                },
+            )
+            .unwrap();
+        assert!(first.network_domains().len() == 1);
+        let rows: Vec<_> = second
+            .network_domains()
+            .iter()
+            .map(|entry| (entry.domain.as_str(), entry.decision))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("bad.example.com", Decision::Deny),
+                ("files.pypi.org", Decision::Allow)
+            ]
+        );
+        let replaced = second
+            .save_network_edit(
+                &state,
+                &workspace,
+                NetworkDomainEdit::Replace {
+                    index: 0,
+                    decision: Decision::Allow,
+                },
+            )
+            .unwrap();
+        assert!(
+            replaced
+                .network_domains()
+                .iter()
+                .all(|entry| entry.decision == Decision::Allow)
+        );
+        let removed = replaced
+            .save_network_edit(&state, &workspace, NetworkDomainEdit::Remove { index: 0 })
+            .unwrap();
+        assert_eq!(removed.network_domains().len(), 1);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("Bash(git diff *)"), "{text}");
+        assert!(text.contains("Network(domain:"), "{text}");
+        for invalid in [
+            NetworkDomainEdit::Insert {
+                domain: "*.com".into(),
+                decision: Decision::Allow,
+            },
+            NetworkDomainEdit::Replace {
+                index: 9,
+                decision: Decision::Ask,
+            },
+            NetworkDomainEdit::Remove { index: 9 },
+        ] {
+            assert!(
+                removed
+                    .save_network_edit(&state, &workspace, invalid)
+                    .is_err()
+            );
+        }
     }
 }

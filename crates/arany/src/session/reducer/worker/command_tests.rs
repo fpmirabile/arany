@@ -100,6 +100,7 @@ fn command(f: &mut Fixture, paths: &[&str]) -> EffectIntent {
         stderr_total: OutputTotal::default(),
         changeset,
         selection: None,
+        network_refusals: Vec::new(),
     };
     f.observed(
         &intent,
@@ -143,6 +144,30 @@ fn rejected(f: &Fixture, intent: &EffectIntent) {
         SessionView::replay_open(f.session, &events),
         Err(ReplayError::InvalidTransition)
     ));
+}
+
+#[test]
+fn editor_commands_never_start_with_the_egress_proxy() {
+    let mut f = command_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let mut intent = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "build".into(),
+            args: vec![],
+            cwd: ".".into(),
+        },
+        EffectTarget::Workspace,
+    );
+    intent.limits.network = crate::NetworkGrant::Proxy;
+    rejected(&f, &intent);
+    intent.limits.network = crate::NetworkGrant::None;
+    f.started(&intent);
 }
 
 #[test]

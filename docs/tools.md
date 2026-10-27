@@ -23,6 +23,10 @@ Use the [minimal file-only configuration](./specs/tools.md#private-grants) to cr
 
 Follow the [executable and input pin format](./specs/tools.md#commands). Pin resolved executable paths and current SHA-256 digests. Command file changes return as bounded changesets and require a separate validated integration receipt; see the command changeset contract for limits and approval.
 
+## Network access
+
+Commands are offline unless `tools.json` has a [`network` grant](./specs/tools.md#network-grants-and-egress-proxy) (Linux only). Commands then reach the listed HTTPS domains through a Guard proxy; `cargo` and `npm` honor the preset proxy variables, and a tool that ignores them cannot connect. Refused connections appear in the command result. Add a refused domain in `/permissions` > Network domains; it applies from the next Run. Allowed hosts can still receive any data a command sends them.
+
 ## Portable Skills
 
 Install project Skills under `.agents/skills`. If a project lock exists without that directory, Arany advises `npx --yes skills@1.7.0 experimental_install`; it does not run the installer. See [Skill admission and private pins](./specs/tools.md#portable-skills) for supported metadata/resources and bounds.

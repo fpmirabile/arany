@@ -37,6 +37,7 @@ use tokio::io::{AsyncWriteExt, BufReader};
 #[allow(unsafe_code)]
 mod ffi;
 pub(crate) mod fixture;
+mod git_write;
 mod storage;
 mod unit;
 
@@ -218,6 +219,9 @@ const GIT_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"
 (allow signal (target self) (target children))
 ";
 
+// Mutating fcntls on a read-only descriptor bypass file-write* and file-ioctl; F_MAKECOMPRESSED is 80 and F_TRANSFEREXTENTS 110, as in Codex CLI's Seatbelt policy.
+const GIT_PLAN_FCNTL_DENY: &str = "(deny system-fcntl (fcntl-command 80 110))\n";
+
 fn profile(rules: &str, denied_syscalls: &[i32]) -> String {
     let mut profile =
         String::from("(version 1)\n(deny default)\n(allow syscall-unix)\n(deny syscall-unix");
@@ -241,7 +245,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     unit::check_available()
 }
 
-const MACOS_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
+const MACOS_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
 
 const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
@@ -249,10 +253,9 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v16:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
+    let mut bytes = b"arany-macos-guard-v17:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
-    bytes.extend_from_slice(MACOS_WORKER_CONTRACT);
-    bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
+    bytes.extend_from_slice(MACOS_REWIND_CONTRACT);
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
     bytes.extend_from_slice(super::DISCOVERY_DONE);
@@ -264,9 +267,17 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
         env!("CARGO_MANIFEST_DIR"),
         "/build.rs"
     )));
-    for kind in [ProfileKind::File, ProfileKind::Command, ProfileKind::Git] {
+    for kind in [
+        ProfileKind::File,
+        ProfileKind::Command,
+        ProfileKind::Git,
+        ProfileKind::GitPlan,
+        ProfileKind::GitPublish,
+    ] {
         bytes.extend_from_slice(SeatbeltProfile::new(kind).text.as_bytes());
     }
+    bytes.extend_from_slice(b";typed-git-write-two-units:executor-view-volume-write-only-fcntl-denied-publisher-workspace-write-no-exec-no-network;one-reservation-for-both-units;controller-relay-one-chunk-in-flight-hash-verified;executor-coalition-empty-before-publisher-go");
+    bytes.extend_from_slice(&(crate::tools::git::WRITE_FRAME_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(b";typed-git-read-pinned-clt-git-after-go-read-only-workspace-unit-root-view-no-repository-config-closed-env-coalition-supervised");
     bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
@@ -298,12 +309,17 @@ pub(super) fn bootstrap() -> Result<(), ToolError> {
         return Err(ToolError::ProtectionUnavailable);
     }
     // This single-threaded helper owns inherited descriptors before Rust creates any handles.
+    close_inherited_descriptors()?;
+    configure_resources()
+}
+
+fn close_inherited_descriptors() -> Result<(), ToolError> {
     for descriptor in ffi::open_descriptors()? {
         if descriptor >= 3 {
             nix::unistd::close(descriptor).map_err(|_| ToolError::ProtectionUnavailable)?;
         }
     }
-    configure_resources()
+    Ok(())
 }
 
 fn configure_resources() -> Result<(), ToolError> {
@@ -350,14 +366,20 @@ enum ProfileKind {
     File,
     Command,
     Git,
+    GitPlan,
+    GitPublish,
 }
 
 impl ProfileKind {
     fn denied_syscalls(self) -> &'static [i32] {
         match self {
-            Self::File => FILE_DENIED_SYSCALLS,
-            Self::Command | Self::Git => COMMAND_DENIED_SYSCALLS,
+            Self::File | Self::GitPublish => FILE_DENIED_SYSCALLS,
+            Self::Command | Self::Git | Self::GitPlan => COMMAND_DENIED_SYSCALLS,
         }
+    }
+
+    fn is_file_like(self) -> bool {
+        matches!(self, Self::File | Self::GitPublish)
     }
 }
 
@@ -369,12 +391,13 @@ struct SeatbeltProfile {
 impl SeatbeltProfile {
     fn new(kind: ProfileKind) -> Self {
         let rules = match kind {
-            ProfileKind::File => PROFILE,
-            ProfileKind::Command => COMMAND_PROFILE,
-            ProfileKind::Git => GIT_PROFILE,
+            ProfileKind::File | ProfileKind::GitPublish => PROFILE.to_owned(),
+            ProfileKind::Command => COMMAND_PROFILE.to_owned(),
+            ProfileKind::Git => GIT_PROFILE.to_owned(),
+            ProfileKind::GitPlan => format!("{GIT_PROFILE}{GIT_PLAN_FCNTL_DENY}"),
         };
         Self {
-            text: profile(rules, kind.denied_syscalls()),
+            text: profile(&rules, kind.denied_syscalls()),
             kind,
         }
     }
@@ -398,8 +421,10 @@ impl SeatbeltProfile {
 
     fn install(self) -> Result<(), ToolError> {
         let operations: &[(&CStr, i32)] = match self.kind {
-            ProfileKind::File => &[(c"process-fork", 1), (c"network-outbound", 1)],
-            ProfileKind::Command | ProfileKind::Git => &[
+            ProfileKind::File | ProfileKind::GitPublish => {
+                &[(c"process-fork", 1), (c"network-outbound", 1)]
+            }
+            ProfileKind::Command | ProfileKind::Git | ProfileKind::GitPlan => &[
                 (c"process-fork", 0),
                 (c"network-outbound", 1),
                 (c"mach-lookup", 1),
@@ -407,12 +432,12 @@ impl SeatbeltProfile {
                 (c"process-exec-update-label", 1),
             ],
         };
-        if !matches!(self.kind, ProfileKind::File) && !ffi::detach_bootstrap_ports() {
+        if !self.kind.is_file_like() && !ffi::detach_bootstrap_ports() {
             return Err(ToolError::ProtectionUnavailable);
         }
         install_profile(self.text)?;
         attest_policy(operations, self.kind.denied_syscalls())?;
-        if matches!(self.kind, ProfileKind::File) {
+        if self.kind.is_file_like() {
             verify_cpu_controls()?;
         }
         Ok(())
@@ -438,28 +463,20 @@ pub(super) fn install(
         return install_command(task, stage);
     }
     if task.intent.call.is_git() {
-        return install_git(task, stage);
+        return if task.git_stage == Some(super::GitStage::Publish) {
+            install_git_publish(task, stage)
+        } else {
+            install_git(task, stage)
+        };
     }
     configure_file_cpu()?;
     let mut profile = SeatbeltProfile::new(ProfileKind::File);
-    let worker_root = if task.worker.is_some() {
-        Some(std::env::current_dir().map_err(|_| ToolError::Path)?)
-    } else {
-        None
-    };
-    if let Some(root) = &worker_root {
-        super::super::fs::reject_overlap(root, &task.workspace)?;
-        storage::verify_storage(root, &task.intent.limits)?;
-        for name in ["workspace", "scratch"] {
-            let path = root.join(name);
-            profile.grant("allow file-read* file-write*", "subpath", &path)?;
-        }
-    } else if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
+    if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
         profile.grant("allow file-read*", "subpath", &task.workspace)?;
     }
     profile.protect_guard(&task.guard_executable)?;
     profile.install()?;
-    Ok(worker_root.unwrap_or_else(|| PathBuf::from("/")))
+    Ok(PathBuf::from("/"))
 }
 
 fn unit_root(task: &Task) -> Result<PathBuf, ToolError> {
@@ -633,7 +650,11 @@ fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf
     let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
     crate::tools::git::verify_host_executable(git)?;
     let git_path = Path::new(&git.executable);
-    let mut profile = SeatbeltProfile::new(ProfileKind::Git);
+    let mut profile = SeatbeltProfile::new(if task.git_stage == Some(super::GitStage::Plan) {
+        ProfileKind::GitPlan
+    } else {
+        ProfileKind::Git
+    });
     profile.grant(
         "allow file-read* file-map-executable process-exec",
         "literal",
@@ -651,6 +672,32 @@ fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf
     *stage = super::BootstrapStage::Capabilities;
     profile.install()?;
     Ok(root)
+}
+
+// The publisher is Arany code that spawns nothing and may write only the admitted Workspace, never Git's configuration or hooks.
+fn install_git_publish(
+    task: &Task,
+    stage: &mut super::BootstrapStage,
+) -> Result<PathBuf, ToolError> {
+    unprivileged_helper()?;
+    let unit = unit_root(task)?;
+    configure_file_cpu()?;
+    let mut profile = SeatbeltProfile::new(ProfileKind::GitPublish);
+    profile.grant("allow file-read* file-write*", "subpath", &task.workspace)?;
+    profile.rule(
+        "deny file-write*",
+        "literal",
+        &task.workspace.join(".git/config"),
+    )?;
+    profile.rule(
+        "deny file-write*",
+        "subpath",
+        &task.workspace.join(".git/hooks"),
+    )?;
+    profile.protect_guard(&task.guard_executable)?;
+    *stage = super::BootstrapStage::Capabilities;
+    profile.install()?;
+    Ok(unit)
 }
 
 pub(super) fn verify_runtime_mounts(
@@ -930,12 +977,21 @@ pub(super) async fn execute_inner(
     let mut handle = tokio::task::spawn_blocking(move || {
         crate::tools::fs::validate_workspace(&runtime)?;
         // Admission and Engine deadlines must use the same runtime clock.
-        reactor.block_on(unit::execute(
-            &runtime,
-            &intent,
-            worker_cancellation,
-            &worker_started,
-        ))
+        if intent.call.is_git() && intent.call.mutates() {
+            reactor.block_on(git_write::execute(
+                &runtime,
+                &intent,
+                worker_cancellation,
+                &worker_started,
+            ))
+        } else {
+            reactor.block_on(unit::execute(
+                &runtime,
+                &intent,
+                worker_cancellation,
+                &worker_started,
+            ))
+        }
     });
     let result = tokio::select! {
         result = &mut handle => result,
@@ -966,7 +1022,6 @@ impl Task {
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
             hidden: runtime.hidden_paths(&intent.call),
             definition: runtime.definitions.payload(&intent.call)?,
-            worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
             handover: runtime
                 .handover
                 .as_ref()
@@ -978,6 +1033,9 @@ impl Task {
             } else {
                 None
             },
+            git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         })
     }
 
@@ -998,14 +1056,6 @@ impl Task {
             git_writes_available: false,
             host_authentication: Default::default(),
             handover,
-            worker: self.worker.zip(worker_input).map(|(transfer, input)| {
-                Arc::new(super::transfer::Action {
-                    transfer,
-                    input: input.into(),
-                    output: std::sync::Mutex::new(None),
-                    contained: AtomicBool::new(false),
-                })
-            }),
             definitions: super::super::definitions::DefinitionSnapshots::from_payload(
                 &self.intent.call,
                 self.definition,
@@ -1055,7 +1105,10 @@ async fn worker_ready(
                 .map_err(|_| ToolError::Operation)?;
             let mut bytes = read_line_capped(stdout, 2048).await?;
             if bytes == b"WORKER_READY\n" {
-                let input = super::transfer::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+                let input = runtime
+                    .handover
+                    .as_deref()
+                    .ok_or(ToolError::Configuration)?;
                 super::transfer::send_frame(stdin, input).await?;
                 bytes = read_line_capped(stdout, 2048).await?;
             }
@@ -1069,15 +1122,39 @@ async fn worker_ready(
 struct WorkerOutput {
     observation: ToolObservation,
     windows: Option<crate::tools::output::CommandWindows>,
+    frame: Option<Vec<u8>>,
+}
+
+// What the supervisor waits for before GO: the controller's signal and, for a publisher, the frame it must forward first.
+struct GoGate {
+    receive_go: tokio::sync::oneshot::Receiver<()>,
+    git_stage: Option<super::GitStage>,
+    git_input: Option<tokio::sync::oneshot::Receiver<(Vec<u8>, Vec<u8>)>>,
+    #[cfg(any(test, feature = "test-support"))]
+    git_fault: Option<crate::fault::git_write::GitWriteStage>,
+}
+
+impl GoGate {
+    async fn wait(
+        self,
+        stdin: &mut tokio::process::ChildStdin,
+        result_bytes: usize,
+    ) -> Result<(), ToolError> {
+        if let Some(input) = self.git_input {
+            let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
+            super::transfer::send_frame_capped(stdin, &result, result_bytes).await?;
+            super::transfer::send_frame_capped(stdin, &frame, crate::tools::git::WRITE_FRAME_BYTES)
+                .await?;
+        }
+        self.receive_go.await.map_err(|_| ToolError::Operation)
+    }
 }
 
 async fn read_command_windows(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
-    runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<Option<crate::tools::output::CommandWindows>, ToolError> {
-    if runtime.worker.is_none()
-        && matches!(intent.call, ToolCall::Command { .. })
+    if matches!(intent.call, ToolCall::Command { .. })
         && tokio::io::AsyncBufReadExt::fill_buf(stdout)
             .await
             .map_err(|_| ToolError::Operation)?
@@ -1103,9 +1180,9 @@ async fn read_command_windows(
 async fn worker_receipt(
     mut stdin: tokio::process::ChildStdin,
     stdout: &mut BufReader<tokio::process::ChildStdout>,
-    runtime: &ToolRuntime,
     intent: &EffectIntent,
     control: &mut tokio::net::unix::OwnedWriteHalf,
+    git_stage: Option<super::GitStage>,
 ) -> Result<WorkerOutput, ToolError> {
     let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
     stdin
@@ -1113,15 +1190,20 @@ async fn worker_receipt(
         .await
         .map_err(|_| ToolError::Operation)?;
     drop(stdin);
-    let windows = read_command_windows(stdout, runtime, intent).await?;
-    let observation = if runtime.worker.is_some() {
-        super::read_worker_observation(
-            stdout,
-            runtime,
-            intent,
-            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
-        )
-        .await?
+    let windows = read_command_windows(stdout, intent).await?;
+    let mut frame = None;
+    let observation = if git_stage == Some(super::GitStage::Plan) {
+        let (observation, framed) = super::read_plan_report(stdout, intent).await?;
+        if framed {
+            frame = Some(
+                super::transfer::receive_frame_capped(stdout, crate::tools::git::WRITE_FRAME_BYTES)
+                    .await?,
+            );
+            if !read_capped(&mut *stdout, 1).await?.is_empty() {
+                return Err(ToolError::Operation);
+            }
+        }
+        observation
     } else {
         read_observation(stdout, intent).await?
     };
@@ -1135,6 +1217,7 @@ async fn worker_receipt(
     Ok(WorkerOutput {
         observation,
         windows,
+        frame,
     })
 }
 
@@ -1144,21 +1227,28 @@ async fn execute_worker(
     mut cancellation: Cancellation,
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
-    receive_go: tokio::sync::oneshot::Receiver<()>,
+    gate: GoGate,
     root: &Path,
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let task = super::encode_task(&Task::new(runtime, intent, None)?)?;
+    let git_stage = gate.git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    let git_fault = gate.git_fault;
+    let mut task = Task::new(runtime, intent, None)?;
+    task.git_stage = git_stage;
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        task.git_fault = git_fault;
+    }
+    let task = super::encode_task(&task)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
-        .current_dir(
-            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git() {
-                root
-            } else {
-                Path::new("/")
-            },
-        )
+        .current_dir(if intent.call.is_process() || intent.call.is_git() {
+            root
+        } else {
+            Path::new("/")
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1193,19 +1283,30 @@ async fn execute_worker(
                 .map_err(|_| ToolError::Operation)?;
             capture.complete();
             let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
-            receive_go.await.map_err(|_| ToolError::Operation)?;
+            gate.wait(&mut stdin, intent.limits.result_bytes as usize)
+                .await?;
+            #[cfg(any(test, feature = "test-support"))]
+            if matches!(
+                git_fault,
+                Some(
+                    crate::fault::git_write::GitWriteStage::PublisherHeld
+                        | crate::fault::git_write::GitWriteStage::ExecutorTimeout
+                )
+            ) {
+                control
+                    .write_all(b"GIT_HELD\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                std::future::pending::<()>().await;
+            }
             capture.complete();
             let payload_deadline = super::payload_report_deadline(
                 tokio::time::Instant::now(),
                 intent.limits.runtime_ms,
-            ) + if runtime.worker.is_some() {
-                super::transfer::transfer_time(intent)
-            } else {
-                Duration::ZERO
-            };
+            );
             tokio::time::timeout_at(
                 payload_deadline,
-                worker_receipt(stdin, &mut stdout, runtime, intent, control),
+                worker_receipt(stdin, &mut stdout, intent, control, git_stage),
             )
             .await
             .map_err(|_| ToolError::Limit)?
@@ -1213,7 +1314,7 @@ async fn execute_worker(
         let deadline = tokio::time::Instant::now()
             + RESERVATION_OVERHEAD
             + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-            + super::transfer::transfer_overhead(intent);
+            + super::transfer::transfer_time(intent);
         let execution = tokio::time::timeout_at(deadline, execution);
         tokio::pin!(execution);
         let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
@@ -1278,8 +1379,8 @@ mod tests {
         use crate::validate::hex_digest;
 
         assert_eq!(
-            hex_digest(MACOS_WORKER_CONTRACT),
-            "798b3db8dab2b75accfbc4eabdc643f5275248da221a78edfe572e96ae9f9db2"
+            hex_digest(MACOS_REWIND_CONTRACT),
+            "6417dc6f02793f6d31d0e1b108b019982e2f49b74d5b23b23fab35a1780df097"
         );
         assert_eq!(
             hex_digest(MACOS_SELECTION_CONTRACT),
@@ -1287,7 +1388,7 @@ mod tests {
         );
         super::super::tests::assert_enforcement_prose(
             MACOS_SELECTION_CONTRACT,
-            MACOS_WORKER_CONTRACT,
+            MACOS_REWIND_CONTRACT,
         );
     }
 
@@ -1351,6 +1452,27 @@ mod tests {
             actual.protect_guard(Path::new("/guard/arany")).unwrap();
             assert_eq!(&actual.text.as_bytes()[base_len..], expected.as_bytes());
         }
+        assert_eq!(
+            SeatbeltProfile::new(ProfileKind::GitPlan).text,
+            profile(
+                &format!("{GIT_PROFILE}{GIT_PLAN_FCNTL_DENY}"),
+                COMMAND_DENIED_SYSCALLS
+            )
+        );
+        assert!(
+            SeatbeltProfile::new(ProfileKind::GitPlan)
+                .text
+                .ends_with("(deny system-fcntl (fcntl-command 80 110))\n")
+        );
+        assert_eq!(
+            SeatbeltProfile::new(ProfileKind::GitPublish).text,
+            profile(PROFILE, FILE_DENIED_SYSCALLS)
+        );
+        assert!(
+            !SeatbeltProfile::new(ProfileKind::GitPublish)
+                .text
+                .contains("process-exec")
+        );
     }
 
     #[test]
@@ -1497,7 +1619,6 @@ mod tests {
         .unwrap();
         let task = Task {
             definition: None,
-            worker: None,
             handover: None,
             intent: EffectIntent {
                 host: None,
@@ -1526,6 +1647,9 @@ mod tests {
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
+            git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         };
         assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
@@ -1755,6 +1879,198 @@ mod tests {
         assert!(!mounted.unwrap());
     }
 
+    fn write_profile_probe(phase: &str) -> std::process::Output {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["workspace/.git/hooks", "workspace/.git/refs/heads", "view"] {
+            std::fs::create_dir_all(temp.path().join(directory)).unwrap();
+        }
+        for name in [
+            "workspace/a.txt",
+            "workspace/donor",
+            "workspace/receiver",
+            "control",
+        ] {
+            std::fs::write(temp.path().join(name), b"synthetic input").unwrap();
+        }
+        std::fs::write(temp.path().join("workspace/.git/config"), b"[core]\n").unwrap();
+        std::fs::write(temp.path().join("outside"), b"synthetic excluded data").unwrap();
+        let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::guard::macos::tests::native_git_write_profile_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("ARANY_TEST_GIT_WRITE_PROFILE_PHASE", phase)
+            .env("ARANY_TEST_GIT_WRITE_PROFILE_ROOT", temp.path())
+            .env(
+                "ARANY_TEST_GIT_WRITE_PROFILE_PORT",
+                network.local_addr().unwrap().port().to_string(),
+            )
+            .current_dir(temp.path())
+            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
+            .unwrap()
+    }
+
+    #[test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+    fn native_git_executor_and_publisher_profiles_confine_their_writes() {
+        for phase in ["plan", "publish"] {
+            let output = write_profile_probe(phase);
+            assert!(
+                output.status.success(),
+                "native git write profile {phase}: {:?}; stdout={:?}; stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            crate::test_process::assert_single_test_completed(
+                &output.stdout,
+                "native git write profile",
+            );
+            assert!(output.stderr.is_empty());
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated native git write profile helper"]
+    fn native_git_write_profile_helper() {
+        let root = PathBuf::from(
+            std::env::var_os("ARANY_TEST_GIT_WRITE_PROFILE_ROOT").expect("private fixture root"),
+        );
+        let port = std::env::var("ARANY_TEST_GIT_WRITE_PROFILE_PORT")
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        let phase = std::env::var("ARANY_TEST_GIT_WRITE_PROFILE_PHASE").unwrap();
+        let (workspace, view) = (root.join("workspace"), root.join("view"));
+        let plan = phase == "plan";
+        let mut profile = SeatbeltProfile::new(if plan {
+            ProfileKind::GitPlan
+        } else {
+            ProfileKind::GitPublish
+        });
+        profile
+            .grant("allow file-read*", "subpath", &workspace)
+            .unwrap();
+        profile
+            .grant(
+                "allow file-read* file-write*",
+                "subpath",
+                if plan { &view } else { &workspace },
+            )
+            .unwrap();
+        if !plan {
+            profile
+                .rule(
+                    "deny file-write*",
+                    "literal",
+                    &workspace.join(".git/config"),
+                )
+                .unwrap();
+            profile
+                .rule("deny file-write*", "subpath", &workspace.join(".git/hooks"))
+                .unwrap();
+        }
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::macos::fs::MetadataExt;
+        let snapshot = |name: &str| {
+            let metadata = std::fs::metadata(workspace.join(name)).unwrap();
+            (
+                std::fs::read(workspace.join(name)).unwrap(),
+                metadata.st_blocks(),
+                metadata.st_flags(),
+                (metadata.st_mtime(), metadata.st_mtime_nsec()),
+                (metadata.st_ctime(), metadata.st_ctime_nsec()),
+            )
+        };
+        let before = ["a.txt", "donor", "receiver"].map(snapshot);
+        // An inherited writable Workspace descriptor must not survive the helper's real closure path.
+        let inherited = std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.join("a.txt"))
+            .unwrap()
+            .into_raw_fd();
+        assert!(ffi::open_descriptors().unwrap().contains(&inherited));
+        close_inherited_descriptors().unwrap();
+        assert!(!ffi::open_descriptors().unwrap().contains(&inherited));
+        assert!(
+            ffi::open_descriptors()
+                .unwrap()
+                .iter()
+                .all(|descriptor| *descriptor < 3)
+        );
+        let control = std::fs::File::open(root.join("control")).unwrap();
+        let transfer = |receiver: &std::fs::File, donor: &std::fs::File| {
+            nix::fcntl::fcntl(
+                receiver,
+                nix::fcntl::FcntlArg::F_TRANSFEREXTENTS(donor.as_raw_fd()),
+            )
+        };
+        let baseline = transfer(&control, &control);
+        configure_resources().unwrap();
+        if !plan {
+            configure_file_cpu().unwrap();
+        }
+        profile.install().unwrap();
+        let denied = |result: std::io::Result<()>, what: &str| {
+            assert_eq!(
+                result.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{what}"
+            );
+        };
+        denied(
+            std::fs::write(root.join("outside"), b"forbidden"),
+            "outside write",
+        );
+        denied(
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).map(|_| ()),
+            "network",
+        );
+        // macOS 15 reports denied execs as ENOENT; later releases report EPERM.
+        let exec = std::process::Command::new("/usr/bin/true")
+            .bounded_output_for(Duration::from_secs(10), 1024)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            matches!(
+                exec.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            ),
+            "exec: {exec}"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("a.txt")).unwrap(),
+            b"synthetic input"
+        );
+        if plan {
+            // Seatbelt checks at open, so these read-only descriptors open under the installed profile.
+            let donor = std::fs::File::open(workspace.join("donor")).unwrap();
+            let receiver = std::fs::File::open(workspace.join("receiver")).unwrap();
+            assert_ne!(baseline, Err(nix::errno::Errno::EPERM));
+            assert_eq!(transfer(&receiver, &donor), Err(nix::errno::Errno::EPERM));
+            assert_eq!(["a.txt", "donor", "receiver"].map(snapshot), before);
+            for path in ["a.txt", "new.txt", ".git/refs/heads/topic"] {
+                denied(std::fs::write(workspace.join(path), b"forbidden"), path);
+            }
+            std::fs::write(view.join("probe"), b"allowed").unwrap();
+        } else {
+            std::fs::write(workspace.join(".git/refs/heads/topic"), b"allowed").unwrap();
+            std::fs::rename(
+                workspace.join(".git/refs/heads/topic"),
+                workspace.join(".git/refs/heads/renamed"),
+            )
+            .unwrap();
+            for path in [".git/config", ".git/hooks/pre-commit"] {
+                denied(std::fs::write(workspace.join(path), b"forbidden"), path);
+            }
+        }
+    }
+
     #[test]
     #[ignore = "isolated native git profile helper"]
     fn native_git_profile_helper() {
@@ -1782,7 +2098,6 @@ mod tests {
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
             definition: None,
-            worker: None,
             handover: None,
             intent: EffectIntent {
                 host: None,
@@ -1806,6 +2121,9 @@ mod tests {
             workspace: workspace.clone(),
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
+            git_stage: None,
+            #[cfg(any(test, feature = "test-support"))]
+            git_fault: None,
         };
         let phase = std::env::var("ARANY_TEST_GIT_PROFILE_PHASE").unwrap();
         if phase == "bare" {

@@ -5,6 +5,9 @@ use reqwest::redirect::Policy;
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct BoundedHttpClient {
     client: reqwest::Client,
     runtime: Runtime,
@@ -41,10 +44,15 @@ impl BoundedHttpClient {
 #[async_trait]
 impl HttpClient for BoundedHttpClient {
     async fn send_bytes(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
-        self.runtime
-            .block_on(async {
-                tokio::time::timeout(EXPORT_TIMEOUT, self.client.send_bytes(request)).await
-            })
-            .map_err(|error| Box::new(error) as HttpError)?
+        self.runtime.block_on(send_bounded(&self.client, request))
     }
+}
+
+async fn send_bounded(
+    client: &reqwest::Client,
+    request: Request<Bytes>,
+) -> Result<Response<Bytes>, HttpError> {
+    tokio::time::timeout(EXPORT_TIMEOUT, client.send_bytes(request))
+        .await
+        .map_err(|error| Box::new(error) as HttpError)?
 }

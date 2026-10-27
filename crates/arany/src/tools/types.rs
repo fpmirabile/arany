@@ -159,6 +159,37 @@ pub struct CommandResult {
     pub changeset: CommandChangeset,
     #[serde(deserialize_with = "Option::deserialize")]
     pub selection: Option<CommandSelectionSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_refusals: Vec<NetworkRefusal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkRefusal {
+    pub host: String,
+    pub reason: NetworkRefusalReason,
+    pub count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkRefusalReason {
+    Unlisted,
+    Unsupported,
+    Destination,
+    Limit,
+    ProxyUnavailable,
+}
+
+impl NetworkRefusal {
+    fn valid(&self) -> bool {
+        self.count > 0
+            && self.host.len() <= super::network::MAX_HOST_BYTES
+            && self.host.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '.' | '-' | ':' | '[' | ']' | '?')
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -186,7 +217,6 @@ impl CommandSelectionSummary {
 #[serde(rename_all = "snake_case")]
 pub enum CacheUpdate {
     NotApplicable,
-    Discarded,
     NotAttempted,
     Published,
     Rejected,
@@ -196,7 +226,10 @@ pub enum CacheUpdate {
 
 impl CommandResult {
     pub(crate) fn fit_migrated(&self, budget: usize) -> Option<String> {
-        if !self.changeset.valid() || !self.selection.is_none_or(CommandSelectionSummary::valid) {
+        if !self.changeset.valid()
+            || !self.selection.is_none_or(CommandSelectionSummary::valid)
+            || !self.network_valid()
+        {
             return None;
         }
         let stdout = super::output::Window::from_recorded(&self.stdout, self.stdout_total)?;
@@ -212,9 +245,15 @@ impl CommandResult {
         .ok()
     }
 
+    fn network_valid(&self) -> bool {
+        self.network_refusals.len() <= super::network::NETWORK_REFUSAL_ENTRIES
+            && self.network_refusals.iter().all(NetworkRefusal::valid)
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
             && self.selection.is_none_or(CommandSelectionSummary::valid)
+            && self.network_valid()
             && self.stdout_total.valid_for(&self.stdout)
             && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
@@ -784,6 +823,9 @@ impl EffectIntent {
             && self.use_count == 1
             && self.call.valid()
             && (self.limits.network == NetworkGrant::Host) == self.call.is_host()
+            && (self.limits.network != NetworkGrant::Proxy
+                || matches!(self.call, ToolCall::Command { .. })
+                    && self.target == EffectTarget::Workspace)
             && self
                 .host
                 .as_ref()
@@ -809,6 +851,8 @@ pub struct ToolLimits {
     pub max_processes: u32,
     #[serde(default = "one_job", skip_serializing_if = "is_one_job")]
     pub build_jobs: u32,
+    #[serde(default = "one_job", skip_serializing_if = "is_one_job")]
+    pub build_cpu_cores: u32,
     pub scratch_bytes: u64,
     pub project_bytes: u64,
     pub cache_requested_bytes: u64,
@@ -837,6 +881,8 @@ pub struct ToolResourceSettings {
     pub build_processes: u32,
     #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
     pub build_jobs: Option<u32>,
+    #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
+    pub build_cpu_cores: Option<u32>,
     pub build_project_bytes: u64,
     pub build_cache_bytes: u64,
 }
@@ -849,6 +895,7 @@ impl Default for ToolResourceSettings {
             build_memory_bytes: MAX_BUILD_MEMORY_BYTES,
             build_processes: MAX_BUILD_PROCESSES_OR_THREADS,
             build_jobs: one_setting(),
+            build_cpu_cores: one_setting(),
             build_project_bytes: MAX_BUILD_PROJECT_BYTES,
             build_cache_bytes: MAX_BUILD_CACHE_BYTES,
         }
@@ -862,6 +909,7 @@ impl ToolResourceSettings {
             && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
             && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
             && self.build_jobs != Some(0)
+            && self.build_cpu_cores != Some(0)
             && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
             && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
             && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
@@ -894,6 +942,7 @@ pub(crate) fn command_timeout_limit_message(requested_ms: u32, maximum_ms: u32) 
 pub enum NetworkGrant {
     None,
     Host,
+    Proxy,
 }
 
 impl Default for ToolLimits {
@@ -905,6 +954,7 @@ impl Default for ToolLimits {
             memory_bytes: MEMORY_BYTES,
             max_processes: MAX_PROCESSES_OR_THREADS,
             build_jobs: one_job(),
+            build_cpu_cores: one_job(),
             scratch_bytes: SCRATCH_BYTES,
             project_bytes: SCRATCH_BYTES,
             cache_requested_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
@@ -922,11 +972,22 @@ impl Default for ToolLimits {
 }
 
 impl ToolLimits {
+    pub(crate) fn command_result_budget(&self) -> usize {
+        let reserve = if self.network == NetworkGrant::Proxy {
+            super::network::NETWORK_REFUSAL_RESERVE_BYTES
+        } else {
+            0
+        };
+        (self.result_bytes as usize).saturating_sub(reserve)
+    }
+
     fn valid(&self) -> bool {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
             && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
             && (1..=self.max_processes).contains(&self.build_jobs)
-            && (self.resource_class == ToolResourceClass::Build || self.build_jobs == one_job())
+            && self.build_cpu_cores > 0
+            && (self.resource_class == ToolResourceClass::Build
+                || self.build_jobs == one_job() && self.build_cpu_cores == one_job())
             && self.scratch_bytes == SCRATCH_BYTES
             && match self.resource_class {
                 ToolResourceClass::Default => {
@@ -1369,6 +1430,33 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
 }
 
 impl ToolObservation {
+    pub fn refused_domains(&self) -> Vec<String> {
+        if !matches!(self.intent.call, ToolCall::Command { .. }) {
+            return Vec::new();
+        }
+        let refusals = match serde_json::from_str::<CommandResult>(&self.output) {
+            Ok(result) => result.network_refusals,
+            Err(_) => self
+                .output
+                .split_once(super::network::REFUSAL_MARKER)
+                .and_then(|(_, rows)| serde_json::from_str(rows).ok())
+                .unwrap_or_default(),
+        };
+        refusals
+            .into_iter()
+            .filter(|entry| entry.reason == NetworkRefusalReason::Unlisted)
+            .filter_map(|entry| {
+                // A CONNECT authority brackets IPv6; the grant spells the bare address.
+                let host = entry
+                    .host
+                    .strip_prefix('[')
+                    .and_then(|inner| inner.strip_suffix(']'))
+                    .unwrap_or(&entry.host);
+                super::network::valid_pattern(host).then(|| host.to_owned())
+            })
+            .collect()
+    }
+
     pub(super) fn cache_publication_eligible(&self) -> bool {
         self.intent.target == EffectTarget::Workspace
             && self.intent.call.is_process()
@@ -1406,14 +1494,6 @@ impl ToolObservation {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
     pub(crate) fn stops_run(&self) -> bool {
-        if matches!(self.intent.target, EffectTarget::WorkerView { .. })
-            && matches!(self.intent.call, ToolCall::Command { .. })
-        {
-            return matches!(
-                self.disposition,
-                ToolDisposition::Uncertain | ToolDisposition::Cancelled
-            ) || self.cache_update == CacheUpdate::Uncertain;
-        }
         matches!(
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
@@ -1429,8 +1509,6 @@ impl ToolObservation {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
-            && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
             && self.spill.as_ref().is_none_or(|spill| spill.valid(self))
             && (self.guard_stage.is_none()
@@ -1448,41 +1526,18 @@ impl ToolObservation {
             && (self.disposition != ToolDisposition::Limit
                 || self.attestation.is_some()
                 || self.cache_update == CacheUpdate::NotApplicable)
-            && (private_command
-                || !matches!(
-                    self.intent.call,
-                    ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
-                )
-                || !(self.disposition == ToolDisposition::Succeeded
-                    || serde_json::from_str::<Value>(&self.output)
-                        .is_ok_and(|v| v.get("exit_code").is_some()))
+            && (!matches!(
+                self.intent.call,
+                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+            ) || !(self.disposition == ToolDisposition::Succeeded
+                || serde_json::from_str::<Value>(&self.output)
+                    .is_ok_and(|v| v.get("exit_code").is_some()))
                 || serde_json::from_str::<CommandResult>(&self.output).is_ok_and(|r| r.valid()))
             && (!matches!(
                 self.intent.call,
                 ToolCall::McpCall { .. } | ToolCall::McpList { .. }
             ) || self.disposition != ToolDisposition::Succeeded
                 || super::output::valid_mcp(&self.output))
-            && (!private_command
-                || matches!(
-                    self.cache_update,
-                    CacheUpdate::Discarded | CacheUpdate::NotApplicable | CacheUpdate::NotAttempted
-                ))
-            && (!private_command
-                || self.attestation.is_none()
-                || self.cache_update == CacheUpdate::Discarded)
-            && (!private_command
-                || self.attestation.is_none()
-                || serde_json::from_str::<crate::session::worker::WorkerCommandResult>(
-                    &self.output,
-                )
-                .is_ok_and(|r| {
-                    r.valid()
-                        && (self.disposition == ToolDisposition::Succeeded
-                            || matches!(
-                                r.private_capture,
-                                crate::session::worker::PrivateCapture::None {}
-                            ))
-                }))
             && self.output.len() <= self.intent.limits.result_bytes as usize
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_OBSERVATION_BYTES)
             && self
@@ -1559,7 +1614,6 @@ impl ToolObservation {
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
             && match self.cache_update {
-                CacheUpdate::Discarded => private_command && self.attestation.is_some(),
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
                 CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
@@ -1920,10 +1974,7 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
         o.remove("before");
         o.remove("executable");
     }
-    let private = matches!(observation.intent.target, EffectTarget::WorkerView { .. });
-    let effect = if private {
-        "none"
-    } else if observation.intent.call.is_host() {
+    let effect = if observation.intent.call.is_host() {
         match observation.disposition {
             ToolDisposition::Uncertain => "uncertain",
             ToolDisposition::Succeeded => "host",
@@ -1958,23 +2009,6 @@ fn model_observation_with_output(observation: &ToolObservation, output: &str) ->
         effect,
         observation.cache_update,
     );
-    if private {
-        value["target"] = json!(observation.intent.target);
-        let command_capture =
-            serde_json::from_str::<crate::worker::WorkerCommandResult>(&observation.output).ok();
-        value["private_effect"] = json!(match observation.disposition {
-            ToolDisposition::Succeeded
-                if (observation.intent.call.mutates()
-                    || command_capture.as_ref().is_some_and(|r| matches!(
-                        r.private_capture,
-                        crate::worker::PrivateCapture::Sealed { .. }
-                    )))
-                    && observation.attested_for(&observation.intent) =>
-                "applied",
-            ToolDisposition::Uncertain => "uncertain",
-            _ => "none",
-        });
-    }
     if let Some(spill) = &observation.spill {
         value["spill"] = json!(spill);
     }
@@ -2185,6 +2219,7 @@ mod unguarded_vocabulary_tests {
             limit_cause: None,
             output: serde_json::to_string(&CommandResult {
                 selection: Some(Default::default()),
+                network_refusals: Vec::new(),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),
