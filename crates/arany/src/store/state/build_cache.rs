@@ -448,6 +448,7 @@ impl StateRoot {
             Err(error) => return Err(StoreError::Io(io::Error::from(error))),
         }
         let identity_lock = FlockGuard(file);
+        // The shared lease never recovers, reserves, collects or publishes an archive.
         #[cfg(target_os = "linux")]
         {
             directory::guard::admit(&dir, &token)?;
@@ -584,10 +585,14 @@ impl StateRoot {
                 Err(error) => return Err(error),
             };
             if candidate_limit > 0 {
+                let tree_bytes = own_tree_bytes(&dir, &token)?;
                 let reservation_bytes = candidate_limit
                     .checked_mul(2)
+                    .and_then(|headroom| headroom.checked_add(tree_bytes))
                     .ok_or(StoreError::StorageFull)?;
                 let projected = inventory(&dir)?
+                    .checked_sub(tree_bytes)
+                    .ok_or(StoreError::StorageFull)?
                     .checked_add(reservation_bytes)
                     .ok_or(StoreError::StorageFull)?;
                 if projected > AGGREGATE_BYTES {
@@ -1554,6 +1559,20 @@ fn check_private(file: &File, max: usize) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn own_tree_bytes(dir: &Dir, token: &str) -> Result<u64, StoreError> {
+    let name = directory::tree_name(token);
+    if !file_exists(dir, &name)? {
+        return Ok(0);
+    }
+    directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn own_tree_bytes(_dir: &Dir, _token: &str) -> Result<u64, StoreError> {
+    Ok(0)
+}
+
 fn inventory(dir: &Dir) -> Result<u64, StoreError> {
     let mut total = 0u64;
     let mut reservations = BTreeSet::new();
@@ -1587,9 +1606,7 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
             #[cfg(target_os = "linux")]
             {
                 let bytes = directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)?;
-                if file_exists(dir, &format!("{DIRTY_PREFIX}{token}.pending"))?
-                    && file_exists(dir, &reservation_name(token))?
-                {
+                if file_exists(dir, &reservation_name(token))? {
                     let reserve = open_regular(dir, &reservation_name(token), 96)?;
                     if validate_reservation(&reserve, token)? < bytes {
                         return Err(StoreError::StorageFull);

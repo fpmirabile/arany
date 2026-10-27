@@ -434,7 +434,7 @@ The cache result is separate from command success. Text receipts surface rejecte
 
 `/cache clear` removes only the current Workspace cache, including unavailable directory data, and displays `Cleared this Workspace's private build cache`; `/cache clear all` reclaims all committed caches and displays `Cleared all private build caches`. A busy clear displays `Build cache is in use; retry after its command finishes` and keeps the cache. A malformed clear displays `Error: Usage: /cache clear [all]`; other failures display `Error: private build cache could not be cleared`.
 
-Archives capture regular files by content regardless of link count, so Cargo hard links restore as independent files. Competing operations return busy rather than wait. Publication builds the candidate beside the committed archive, syncs it, durably records rollback intent before renaming, and treats the committed marker with parent-directory sync as the commit point. A marker write or sync failure returns the error, skips Drop-time recovery and retains both archives and transaction records. Payload Task transport carries only the checked Workspace identity and the exact read-only exclusions, never a `StateRoot` path or handle; only the retained Linux supervisor receives the narrow admitted cache-directory location.
+Archives capture regular files by content regardless of link count, so Cargo hard links restore as independent files. Competing operations return busy rather than wait. Publication builds the candidate beside the committed archive, syncs it, durably records rollback intent before renaming, and treats the committed marker with parent-directory sync as the commit point. A marker write or sync failure returns the error, skips Drop-time recovery and retains both archives and transaction records. Payload Task transport carries only the checked Workspace identity and the exact read-only exclusions, never a `StateRoot` path or handle; only the retained Linux supervisor receives the pinned cache-directory identity.
 
 ## Command input selection
 
@@ -528,7 +528,7 @@ excludes that record and makes its category partial, without reading content or
 changing permissions.
 
 Build-cache inventory reuses the owner's closed record-name classification. It
-counts owned directory caches and their generation, Guard ownership and unavailable records, committed/previous archives, candidate/staging files, lock files and
+counts owned directory caches and generation, Guard ownership and unavailable records, committed/previous archives, candidate/staging files, lock files and
 reservation/transaction record bytes without parsing their contents, acquiring
 leases or performing recovery. Pending/candidate/reservation records label the
 category busy/retained and keep the report partial. A capacity reservation's
