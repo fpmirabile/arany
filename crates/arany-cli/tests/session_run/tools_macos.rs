@@ -470,32 +470,24 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
+    let mut timings = 0;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.starts_with("offline Cargo ")
-            || (registry.is_some() && line.starts_with("repository "))
-        {
+        if line.starts_with("offline Cargo ") {
+            timings += 1;
+            println!("{line}");
+        } else if registry.is_some() && line.starts_with("repository ") {
             println!("{line}");
         }
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if rust_sysroot.is_some() {
-        // The offline Cargo journey must report its timing lines; any other stderr is a failure.
-        assert!(
-            !stderr.is_empty()
-                && stderr
-                    .lines()
-                    .all(|line| line.starts_with("offline Cargo ")),
-            "native journey stderr: {stderr:?}"
-        );
-        for line in stderr.lines() {
-            eprintln!("{line}");
-        }
-    } else {
-        assert!(
-            output.stderr.is_empty(),
-            "native journey stderr: {stderr:?}"
-        );
-    }
+    assert!(
+        rust_sysroot.is_none() || timings > 0,
+        "the offline Cargo journey must report its timing lines"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "native journey stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn validate_rust_sysroot(path: &Path) -> std::path::PathBuf {
