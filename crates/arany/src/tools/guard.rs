@@ -2279,6 +2279,10 @@ pub(super) fn helper_main() -> ExitCode {
         send_plan(plan, &mut stdout)?;
         Ok(())
     })();
+    bootstrap_exit(stage, result)
+}
+
+fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
