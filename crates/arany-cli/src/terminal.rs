@@ -5300,13 +5300,14 @@ mod insert_rows_tests {
                 .iter()
                 .map(|row| native_line(row, width, Palette { color: false }));
             insert_rows_scrolling_screen(&mut terminal, 8, lines).unwrap();
-            assert_eq!(
-                text_rows(terminal.backend().scrollback()),
-                rows.iter()
-                    .map(|row| row.text.trim_end().to_owned())
-                    .collect::<Vec<_>>()
-            );
-            let scrollback = text_rows(terminal.backend().scrollback()).join("\n");
+            let mut expected = rows
+                .iter()
+                .map(|row| row.text.trim_end().to_owned())
+                .collect::<Vec<_>>();
+            expected[0].insert_str(0, "● ");
+            let actual = text_rows(terminal.backend().scrollback());
+            assert_eq!(actual, expected);
+            let scrollback = actual.join("\n");
             assert_eq!(scrollback.matches("│ • alpha").count(), 1);
             assert_eq!(scrollback.matches("code").count(), 1);
         }

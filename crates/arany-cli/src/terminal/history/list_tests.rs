@@ -57,7 +57,9 @@ fn lists_quotes_and_nested_code_share_consumers_counts_and_source_copy() {
             render_exec(&answer, &[], Output::Text, false),
             format!(
                 "Answer:\n  {}\n",
-                display_text(source).replace('\n', "\n  ")
+                display_text(source)
+                    .replace('\t', r"\u{0009}")
+                    .replace('\n', "\n  ")
             )
         );
     }

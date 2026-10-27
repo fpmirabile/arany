@@ -23,9 +23,14 @@ fn container_projection_matches_fullscreen_and_pager_frames_without_color() {
                     })
                     .unwrap();
                 for (index, row) in rows.iter().enumerate() {
+                    let expected = if row.heading && kind == MessageKind::Assistant {
+                        format!("● {}", row.text)
+                    } else {
+                        row.text.clone()
+                    };
                     assert_eq!(
                         buffer_row(terminal.backend().buffer(), index as u16).trim_end(),
-                        row.text.trim_end()
+                        expected.trim_end()
                     );
                 }
                 let screen = (0..23)
