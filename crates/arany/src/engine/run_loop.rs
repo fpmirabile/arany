@@ -1369,7 +1369,7 @@ impl<'a> RunLoop<'a> {
         } else if existing.is_some()
             || contract.validate().is_err()
             || contract.resource_class == crate::tools::ToolResourceClass::Build
-                && settings.build_jobs.is_none()
+                && (settings.build_jobs.is_none() || settings.build_cpu_cores.is_none())
         {
             Some(PlanInvalid)
         } else if !contract.budget.is_within(&budget) {
