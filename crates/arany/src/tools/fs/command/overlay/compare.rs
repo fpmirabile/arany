@@ -1,6 +1,5 @@
 use super::*;
 
-const COMMAND_COMPARE_BYTES_PER_UPPER_BYTE: u64 = 2;
 const COMPARE_BUFFER_BYTES: usize = 16 * 1024;
 
 pub(super) struct Comparison {
