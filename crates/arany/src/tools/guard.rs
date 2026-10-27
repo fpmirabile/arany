@@ -3163,14 +3163,15 @@ mod tests {
                 panic!("selection cause did not survive");
             };
             assert_eq!(decoded, cause);
-            let observation = crate::tools::unstarted_observation(
-                intent(ToolCall::Command {
-                    program: "sh".into(),
-                    args: vec![],
-                    cwd: String::new(),
-                }),
-                ToolError::ProjectSelection(decoded),
-            );
+            let mut command = intent(ToolCall::Command {
+                program: "sh".into(),
+                args: vec![],
+                cwd: String::new(),
+            });
+            command.policy_digest = [1; 32];
+            command.enforcement_digest = [2; 32];
+            let observation =
+                crate::tools::unstarted_observation(command, ToolError::ProjectSelection(decoded));
             let stored: ToolObservation =
                 serde_json::from_str(&serde_json::to_string(&observation).unwrap()).unwrap();
             assert!(stored.valid());
