@@ -83,7 +83,6 @@ fn supervisor_entry_helper() {
         submount_fixture(&root);
     }
     let namespace = root.join("namespace");
-    let helper = root.join("supervisor-executable");
     deny_entry(&mode);
     let path = if mode == "replacement" {
         PathBuf::from(format!(
@@ -94,7 +93,7 @@ fn supervisor_entry_helper() {
     } else {
         executable.clone()
     };
-    let mut command = entry_command(&path, &launch, &helper);
+    let mut command = entry_command(&path, &launch);
     if matches!(mode.as_str(), "replacement" | "mount-flags") {
         command.args(["/arany", "--version"]);
     }
@@ -153,7 +152,6 @@ fn supervisor_entry_helper() {
         std::fs::remove_dir_all(root.join("workspace")).unwrap();
     }
     std::fs::remove_dir(namespace).unwrap();
-    std::fs::remove_file(helper).unwrap();
     if matches!(mode.as_str(), "replacement" | "mount-flags") {
         std::fs::remove_file(executable).unwrap();
     }
@@ -167,8 +165,6 @@ fn supervisor_entry_helper() {
 fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
     let namespace = root.join("namespace");
     std::fs::create_dir(&namespace).unwrap();
-    let helper = root.join("supervisor-executable");
-    std::fs::File::create_new(&helper).unwrap();
     let installed = Path::new(env!("CARGO_BIN_EXE_arany"));
     let executable = if mode == "mount-flags" {
         restricted_executable(root, installed)
@@ -192,8 +188,7 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
     }
     let digest: [u8; 32] = hash.finalize().into();
     let mut launch = json!({"pin":{"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},
-        "probe":{"root":namespace,"bytes":arany::ToolLimits::default().project_bytes},
-        "helper":helper});
+        "probe":{"root":namespace,"bytes":arany::ToolLimits::default().project_bytes}});
     if matches!(mode, "overlay-probe-denied" | "submount") {
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -249,7 +244,7 @@ fn deny_entry(mode: &str) {
     }
 }
 
-fn entry_command(path: &Path, launch: &Value, helper: &Path) -> Command {
+fn entry_command(path: &Path, launch: &Value) -> Command {
     let mut command = Command::new(path);
     command
         .args(["--internal-tool-guard", "--supervisor"])
@@ -277,10 +272,9 @@ fn entry_command(path: &Path, launch: &Value, helper: &Path) -> Command {
             "/proc",
             "--dev",
             "/dev",
-            "--ro-bind",
-        ])
-        .arg(helper)
-        .args(["/arany", "--chdir", "/"]);
+            "--chdir",
+            "/",
+        ]);
     command
 }
 

@@ -67,7 +67,7 @@ const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-w
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v18:whole-root-overlay-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-empty-upper;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-private-readonly-helper-bind-preserved-vfs-flags-pinned-identity-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v18:whole-root-overlay-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-empty-upper;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
@@ -84,6 +84,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&(STATUS_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(super::TASK_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&supervisor::TMPFS_INODES.to_le_bytes());
+    bytes.extend_from_slice(&supervisor::MAX_SUPERVISOR_EXECUTABLE_BYTES.to_le_bytes());
     Ok(digest(&bytes))
 }
 
@@ -735,7 +736,6 @@ fn unit_command(
             .as_ref()
             .map(|(path, write)| (path.as_path(), *write)),
         &intent.limits,
-        launch.helper_path(),
     );
     if preparation {
         command
@@ -1252,7 +1252,6 @@ fn profile_arguments(
     folders: &[&str],
     workspace: Option<(&Path, bool)>,
     limits: &ToolLimits,
-    guard: &Path,
 ) {
     command.args([
         "--unshare-all",
@@ -1328,7 +1327,6 @@ fn profile_arguments(
                 .args(["--tmpfs", "/workspace"]);
         }
     }
-    command.args(["--ro-bind"]).arg(guard).arg("/arany");
 }
 
 pub(super) fn verify_runtime_mounts(
@@ -2240,8 +2238,8 @@ mod tests {
                 &folders,
                 mount,
                 &ToolLimits::default(),
-                Path::new("/host/guard"),
             );
+            command.args(["--ro-bind", "/host/guard", "/arany"]);
             let arguments = command
                 .as_std()
                 .get_args()
@@ -2308,8 +2306,11 @@ mod tests {
             &[],
             Some((&workspace, false)),
             &ToolLimits::default(),
-            &std::env::current_exe().unwrap(),
         );
+        command
+            .args(["--ro-bind"])
+            .arg(std::env::current_exe().unwrap())
+            .arg("/arany");
         command
             .args(["--setenv", "ARANY_TEST_GIT_HOST_CONFIG"])
             .arg(&host_config)
@@ -3068,8 +3069,8 @@ mod tests {
                     &[],
                     None,
                     &ToolLimits::default(),
-                    Path::new(&binary),
                 );
+                command.args(["--ro-bind"]).arg(&binary).arg("/arany");
                 for directory in mount_directories(Path::new(&target), Path::new("/")) {
                     command.args(["--dir"]).arg(directory);
                 }
