@@ -2824,7 +2824,13 @@ mod tests {
             catalog["git"]["operations"].clone()
         };
         let local: Vec<&str> = if cfg!(target_os = "macos") {
-            vec!["git_status", "git_diff", "git_log", "git_commit", "git_branch"]
+            vec![
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_commit",
+                "git_branch",
+            ]
         } else {
             vec!["git_status", "git_diff", "git_log", "git_branch"]
         };
@@ -2878,8 +2884,13 @@ mod tests {
         )
         .unwrap();
         runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
-        let with_pr_reads =
-            json!([local.as_slice(), &["gh_pr_create", "gh_pr_list", "gh_pr_view"]].concat());
+        let with_pr_reads = json!(
+            [
+                local.as_slice(),
+                &["gh_pr_create", "gh_pr_list", "gh_pr_view"]
+            ]
+            .concat()
+        );
         assert_eq!(operations(&runtime), with_pr_reads);
         runtime.config.commands.clear();
         assert_eq!(
