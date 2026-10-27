@@ -17,6 +17,7 @@ pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
+pub(super) const GIT_VOLUME: &str = "scratch";
 const CLEANUP_ATTEMPTS: usize = 8;
 const CLEANUP_PAUSE: Duration = Duration::from_millis(250);
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
@@ -270,20 +271,36 @@ pub(super) fn verify_storage(
     root: &Path,
     limits: &crate::tools::types::ToolLimits,
 ) -> Result<(), ToolError> {
+    verify_volumes(root, &command_volume_sizes(limits))
+}
+
+pub(super) fn verify_git_storage(root: &Path) -> Result<(), ToolError> {
+    verify_volumes(root, &git_volume_sizes())
+}
+
+fn git_volume_sizes() -> [(&'static str, u64); 1] {
+    [(GIT_VOLUME, STORAGE_BYTES_CAP)]
+}
+
+fn verify_volumes(root: &Path, sizes: &[(&str, u64)]) -> Result<(), ToolError> {
     use cap_fs_ext::DirExt;
 
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
-    for (name, bytes) in command_volume_sizes(limits) {
+    for (name, bytes) in sizes {
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.0, bytes)?;
+        verify_volume(&volume, parent.0, *bytes)?;
         if volume.dir_metadata().map_err(|_| ToolError::Path)?.mode() & 0o7777 != 0o700 {
             return Err(ToolError::ProtectionUnavailable);
         }
     }
     Ok(())
+}
+
+pub(super) async fn prepare_git_storage(root: &Path) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
+    prepare_storage_with_sizes(root, &git_volume_sizes()).await
 }
 
 pub(super) async fn prepare_worker_storage(

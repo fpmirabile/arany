@@ -154,6 +154,10 @@ pub(crate) fn workspace_identity(workspace: &Path) -> Result<WorkspaceIdentity, 
     fs::workspace_identity(&root)
 }
 use catalog::Site;
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub(crate) const GIT_STORAGE_FAULT: &str = "git-storage-fault";
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub(crate) const GIT_STORAGE_CANARY: &str = "git-storage-canary";
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{

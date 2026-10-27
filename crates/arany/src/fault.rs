@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 #[cfg(any(test, feature = "test-support"))]
-pub use injection::FaultPlan;
+pub use injection::{FaultPlan, GitStorageFault};
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
@@ -248,6 +248,14 @@ pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     FaultPlan::guard_cache_report_gate(observation).await;
 }
 
+#[cfg(target_os = "macos")]
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn git_storage(root: &std::path::Path, call: &crate::tools::ToolCall) -> io::Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    FaultPlan::git_storage(root, call)?;
+    Ok(())
+}
+
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_dispatched(intent: &crate::tools::EffectIntent) {
     #[cfg(any(test, feature = "test-support"))]
@@ -391,6 +399,8 @@ mod injection {
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
+        #[cfg(target_os = "macos")]
+        GitStorage(crate::tools::ToolCall, GitStorageFault, std::path::PathBuf),
         GuardCacheReport(
             uuid::Uuid,
             oneshot::Sender<crate::tools::ToolObservation>,
@@ -438,6 +448,12 @@ mod injection {
         let mut plan = plan();
         let index = plan.iter().position(&mut matches)?;
         Some(plan.remove(index))
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub enum GitStorageFault {
+        Refuse,
+        Exhaust,
     }
 
     pub struct FaultPlan;
@@ -731,6 +747,34 @@ mod injection {
             } else {
                 false
             }
+        }
+
+        /// Makes the macOS Git unit for `call` refuse after its volume attaches, or fill that volume.
+        pub fn fail_git_storage(
+            call: crate::tools::ToolCall,
+            fault: GitStorageFault,
+            refusal_evidence: std::path::PathBuf,
+        ) {
+            #[cfg(target_os = "macos")]
+            plan().push(Fault::GitStorage(call, fault, refusal_evidence));
+            #[cfg(not(target_os = "macos"))]
+            let _ = (call, fault, refusal_evidence);
+        }
+
+        #[cfg(target_os = "macos")]
+        pub(crate) fn git_storage(
+            root: &std::path::Path,
+            call: &crate::tools::ToolCall,
+        ) -> io::Result<()> {
+            let Some(Fault::GitStorage(_, fault, refusal_evidence)) = take(
+                |fault| matches!(fault, Fault::GitStorage(candidate, ..) if candidate == call),
+            ) else {
+                return Ok(());
+            };
+            let injection =
+                serde_json::to_vec(&(fault, refusal_evidence)).map_err(io::Error::other)?;
+            std::fs::write(root.join(crate::tools::GIT_STORAGE_CANARY), b"control")?;
+            std::fs::write(root.join(crate::tools::GIT_STORAGE_FAULT), injection)
         }
 
         pub fn observe_guard_dispatch(call: crate::tools::ToolCall) -> oneshot::Receiver<()> {
