@@ -324,18 +324,17 @@ pub(in crate::tools::guard) mod tests {
     #[tokio::test(start_paused = true)]
     async fn transported_deadline_never_restarts_the_action_budget() {
         tokio::time::advance(Duration::from_secs(3600)).await;
-        tokio::time::resume();
         for runtime in [
             Duration::from_millis(25),
             TEST_RUNTIME,
             Duration::from_millis(u64::from(crate::tools::types::MAX_COMMAND_TIMEOUT_MS)),
         ] {
-            let now = tokio::time::Instant::now();
-            let action = now + runtime;
+            let action = tokio::time::Instant::now() + runtime;
+            tokio::time::advance(runtime / 2).await;
+            let remaining = runtime - runtime / 2;
             let host_now = Instant::now();
             let decoded = decode_deadline(encode_deadline(action).unwrap()).unwrap();
-            assert!(decoded <= Instant::now() + runtime);
-            assert!(decoded > host_now);
+            assert!(decoded <= Instant::now() + remaining);
             if runtime >= TEST_RUNTIME {
                 assert!(decoded > host_now + Duration::from_secs(5));
             }
