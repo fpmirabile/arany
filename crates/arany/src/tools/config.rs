@@ -173,10 +173,13 @@ impl Config {
                 .environment_sha256
                 .as_deref()
                 .is_some_and(|digest| !valid_digest(digest))
-            || self
-                .network
-                .as_ref()
-                .is_some_and(|network| cfg!(not(target_os = "linux")) || !network.valid())
+        {
+            return Err(ToolError::Configuration);
+        }
+        if self
+            .network
+            .as_ref()
+            .is_some_and(|network| cfg!(not(target_os = "linux")) || !network.valid())
         {
             return Err(ToolError::Configuration);
         }
