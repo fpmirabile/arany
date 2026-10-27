@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::worker::*;
 use crate::session::{ChildGrant, GoalSuccessCriterion};
-use crate::tools::{Attestation, ToolCall, ToolDisposition};
+use crate::tools::{ToolCall, ToolDisposition};
 
 mod apply;
 mod before;
@@ -579,11 +579,6 @@ pub(super) fn apply(
         Event::WorkerStopObserved { record, .. } => {
             apply::stop_observed(run, record, actor, sequence)?
         }
-        Event::WorkerDataChunk { .. }
-        | Event::WorkerDataSealed { .. }
-        | Event::WorkerHandoverRecorded { .. }
-        | Event::WorkerIntegrationRecorded { .. }
-        | Event::WorkerHandoverDiscarded { .. } => return Err(ReplayError::InvalidTransition),
         Event::WorkerLeaseReleased { record, .. } => {
             apply::lease_release(run, record, actor, sequence)?
         }
@@ -599,7 +594,6 @@ pub(crate) fn evidence_admitted(
     o: &crate::tools::ToolObservation,
 ) -> bool {
     o.intent.target == EffectTarget::Workspace
-        && !matches!(o.intent.call, ToolCall::PrepareWorker { .. })
         && (!matches!(o.intent.call, ToolCall::ApplyChangeset { .. })
             || matches!((&contract.success_criterion, &o.intent.call), (GoalSuccessCriterion::ToolCallSucceeded { call }, ToolCall::ApplyChangeset { source: ChangesetSource::CommandReceipt { .. } }) if matches!(call.as_ref(), ToolCall::Command { .. })))
 }

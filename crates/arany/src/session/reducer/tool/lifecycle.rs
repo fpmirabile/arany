@@ -385,8 +385,6 @@ fn valid_origin(
             && run.tools.len() == run.parse_count()
             && super::super::definition_registry(run).is_ok()
             && run.provider_sequences.is_empty()
-    } else if matches!(intent.call, crate::tools::ToolCall::PrepareWorker { .. }) {
-        false
     } else if integration {
         super::valid_integration_source(run, intent)
     } else {

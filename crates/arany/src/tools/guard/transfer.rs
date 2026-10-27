@@ -1,4 +1,4 @@
-use crate::session::{AgentRunId, worker::*};
+use crate::session::worker::*;
 use crate::tools::{
     Attestation, Config, EffectIntent, FileChange, FileVersion, ToolCall, ToolDisposition,
     ToolError, ToolObservation, ToolResourceClass, ToolRuntime, fs, types::*,
@@ -410,9 +410,6 @@ pub(in crate::tools) fn edited_image(
     call: &ToolCall,
     grant: &WorkerGrant,
 ) -> Result<Image, ToolError> {
-    if matches!(call, ToolCall::PrepareWorker { .. }) {
-        return Ok(before.clone());
-    }
     if matches!(call, ToolCall::Delete { .. } | ToolCall::Move { .. }) {
         return removed_image(before, call, grant);
     }
@@ -498,8 +495,7 @@ impl Transfer {
             || !self.grant.valid()
             || self.target != intent.target
             || !matches!(self.target, EffectTarget::WorkerView { assignment_id, .. } if assignment_id == intent.agent_run_id)
-            || !(self.grant.allows(&intent.call) && config.allows(&intent.call)
-                || handover_call(&intent.call, intent.agent_run_id))
+            || !(self.grant.allows(&intent.call) && config.allows(&intent.call))
             || !(matches!(
                 intent.call,
                 ToolCall::Write { .. }
@@ -509,8 +505,7 @@ impl Transfer {
                     | ToolCall::Move { .. }
                     | ToolCall::Mkdir { .. }
             ) || crate::tools::discovery::possible(&intent.call)
-                || command
-                || handover_call(&intent.call, intent.agent_run_id))
+                || command)
             || self.bytes == 0
             || self.bytes as usize > WORKER_DATA_BYTES
             || self.sha256 == [0; 32]
@@ -549,19 +544,12 @@ pub(in crate::tools) struct PublicationTransfer {
 
 pub(in crate::tools) fn handover_ref(intent: &EffectIntent) -> Option<PublicationTransfer> {
     match &intent.call {
-        ToolCall::ApplyChangeset { source } if intent.target == EffectTarget::Workspace => {
-            match source {
-                ChangesetSource::WorkerHandover { data, .. } => Some(PublicationTransfer {
-                    bytes: data.bytes,
-                    sha256: data.sha256,
-                }),
-                ChangesetSource::Rewind { bytes, sha256, .. } => Some(PublicationTransfer {
-                    bytes: *bytes,
-                    sha256: *sha256,
-                }),
-                _ => None,
-            }
-        }
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind { bytes, sha256, .. },
+        } if intent.target == EffectTarget::Workspace => Some(PublicationTransfer {
+            bytes: *bytes,
+            sha256: *sha256,
+        }),
         _ => None,
     }
 }
@@ -579,21 +567,7 @@ pub(in crate::tools) fn decode_handover(
     {
         return Err(ToolError::ChangedInput);
     }
-    if matches!(
-        intent.call,
-        ToolCall::ApplyChangeset {
-            source: ChangesetSource::Rewind { .. }
-        }
-    ) {
-        crate::session::worker::decode_rewind_data(bytes).map_err(|_| ToolError::Limit)?;
-    } else if let ToolCall::ApplyChangeset {
-        source: ChangesetSource::WorkerHandover { data, .. },
-    } = &intent.call
-    {
-        decode_data(bytes, data.purpose).map_err(|_| ToolError::Limit)?;
-    } else {
-        return Err(ToolError::Configuration);
-    }
+    crate::session::worker::decode_rewind_data(bytes).map_err(|_| ToolError::Limit)?;
     let changes: WorkerChangeset =
         serde_json::from_slice(bytes).map_err(|_| ToolError::Configuration)?;
     if changes.files.is_empty()
@@ -633,10 +607,6 @@ pub(in crate::tools) fn bulk_input(runtime: &ToolRuntime) -> Option<&[u8]> {
         .as_ref()
         .map(|a| a.input.as_ref())
         .or(runtime.handover.as_deref())
-}
-
-pub(in crate::tools) fn handover_call(call: &ToolCall, assignment: AgentRunId) -> bool {
-    matches!(call, ToolCall::PrepareWorker { preparation } if preparation.valid() && preparation.assignment_id == assignment && preparation.purpose == WorkerDataPurpose::Handover)
 }
 
 pub(in crate::tools) fn capture_paths(grant: &WorkerGrant) -> Vec<String> {

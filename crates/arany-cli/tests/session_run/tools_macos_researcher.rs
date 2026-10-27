@@ -512,10 +512,6 @@ done
                 }
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
                 Attestation::Host(_) => panic!("researchers never run host Tools"),
-                Attestation::WorkerRead { .. }
-                | Attestation::WorkerMutation { .. }
-                | Attestation::WorkerData { .. }
-                | Attestation::WorkerCommand { .. } => panic!("researchers never run worker Tools"),
             }
         }
         let output =

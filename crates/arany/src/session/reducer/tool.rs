@@ -94,10 +94,7 @@ pub(crate) fn validate_primary_tool_scope(
     if !matches!(call, ToolCall::ParseAgentDefinition { .. })
         && let Some(contract) = &goal.plan_contract
         && (goal.awaiting_plan_contract
-            || !(matches!(
-                call,
-                ToolCall::PrepareWorker { .. } | ToolCall::ApplyChangeset { .. }
-            ) || contract.allows_call(call)))
+            || !(matches!(call, ToolCall::ApplyChangeset { .. }) || contract.allows_call(call)))
     {
         return Err(PlanScopeExcludesCall);
     }
@@ -436,23 +433,9 @@ fn post_target<'a>(
             .as_ref()
             .and_then(super::observed_command_changeset)
             .is_some_and(|changeset| !changeset.files.is_empty());
-    let capture_sequence = integration.observation.as_ref().and_then(|o| {
-        if !matches!(
-            o.attestation,
-            Some(crate::tools::Attestation::WorkerCommand { .. })
-        ) {
-            return None;
-        }
-        let result = crate::worker::WorkerCommandResult::parse(&o.output)?;
-        match result.private_capture {
-            crate::worker::PrivateCapture::Sealed { data } => Some(data.seal_sequence),
-            _ => None,
-        }
-    });
     let tail = integration
         .finished_sequence
-        .max(tools[index].hook_sequence)
-        .max(capture_sequence);
+        .max(tools[index].hook_sequence);
     let adjacent = !awaiting_integration
         && (tail == Some(previous) || concurrent && deferred_read_post(tools, index));
     Ok((&mut tools[index], adjacent))
@@ -784,11 +767,7 @@ pub(super) fn before_lifecycle_event(
                     | crate::session::AgentDisposition::Cancelled
                     | crate::session::AgentDisposition::StoppedByHook,
                 ..
-            } | Event::WorkerDataChunk { .. }
-                | Event::WorkerDataSealed { .. }
-                | Event::WorkerHandoverRecorded { .. }
-                | Event::WorkerHandoverDiscarded { .. }
-                | Event::WorkerLeaseReleased { .. }
+            } | Event::WorkerLeaseReleased { .. }
                 | Event::WorkerStopObserved { .. }
         )
     {

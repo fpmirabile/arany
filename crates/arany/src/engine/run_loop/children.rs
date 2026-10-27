@@ -3025,10 +3025,8 @@ fn child_tool_facts(tools: &[crate::session::ToolView]) -> String {
         .iter()
         .filter_map(|tool| {
             let observation = tool.observation.as_ref()?;
-            let command_failure = child_command_failure(tool);
             let cause = match observation.disposition {
-                ToolDisposition::Succeeded if command_failure.is_none() => return None,
-                ToolDisposition::Succeeded => "succeeded",
+                ToolDisposition::Succeeded => return None,
                 ToolDisposition::Denied => tool
                     .model_denial_output()
                     .or_else(|| {
@@ -3053,11 +3051,7 @@ fn child_tool_facts(tools: &[crate::session::ToolView]) -> String {
                 ToolDisposition::Cancelled => "cancelled",
                 ToolDisposition::Uncertain => "uncertain; outcome unknown and not retried",
             };
-            let mut fact = format!("Tool {}: {cause}", tool.intent.call.label());
-            if let Some(details) = command_failure {
-                fact.push_str("; ");
-                fact.push_str(&details);
-            }
+            let fact = format!("Tool {}: {cause}", tool.intent.call.label());
             Some(fact)
         })
         .collect();
@@ -3074,43 +3068,6 @@ fn child_tool_facts(tools: &[crate::session::ToolView]) -> String {
         report.push_str(&format!("\n- {omitted} earlier Tool outcome(s) omitted."));
     }
     report
-}
-
-fn child_command_failure(tool: &crate::session::ToolView) -> Option<String> {
-    use crate::worker::{PrivateCapture, PrivateCaptureRejection, WorkerCommandResult};
-
-    let observation = tool.observation.as_ref()?;
-    if !matches!(
-        observation.attestation,
-        Some(crate::tools::Attestation::WorkerCommand { .. })
-    ) || !observation.attested_for(&tool.intent)
-    {
-        return None;
-    }
-    let result =
-        WorkerCommandResult::parse(&observation.output).filter(WorkerCommandResult::valid)?;
-    let rejection = match result.private_capture {
-        PrivateCapture::Rejected { cause } => Some(match cause {
-            PrivateCaptureRejection::OutOfLease => "out_of_lease",
-            PrivateCaptureRejection::Overflow => "overflow",
-            PrivateCaptureRejection::UnsupportedEntry => "unsupported_entry",
-        }),
-        PrivateCapture::None {} | PrivateCapture::Sealed { .. } => None,
-    };
-    if result.exit_code == Some(0) && rejection.is_none() {
-        return None;
-    }
-    let mut details = format!(
-        "exit code {}",
-        result
-            .exit_code
-            .map_or_else(|| "unknown".into(), |code| code.to_string())
-    );
-    if let Some(cause) = rejection {
-        details.push_str("; private capture rejected: ");
-        details.push_str(cause);
-    }
-    Some(details)
 }
 
 fn classify_join(

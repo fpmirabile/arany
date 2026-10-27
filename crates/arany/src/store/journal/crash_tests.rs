@@ -343,11 +343,7 @@ fn worker_process_death_preserves_exact_recovery_prefixes() {
             Event::AgentSpawned {
                 assignment: Some(_),
                 ..
-            } | Event::WorkerDataChunk { .. }
-                | Event::WorkerDataSealed { .. }
-                | Event::WorkerHandoverRecorded { .. }
-                | Event::WorkerIntegrationRecorded { .. }
-                | Event::WorkerLeaseReleased { .. }
+            } | Event::WorkerLeaseReleased { .. }
                 | Event::ToolStarted { .. }
                 | Event::ToolFinished { .. }
                 | Event::AgentFinished {

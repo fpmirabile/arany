@@ -1,11 +1,11 @@
 pub(crate) mod corpus;
 pub use corpus::{CorpusError, export_corpus};
 
-use crate::session::worker::{WorkerBaseVersion, WorkerDataPurpose};
+use crate::session::worker::WorkerBaseVersion;
 use crate::session::{AgentRunId, Event, EventEnvelope, ReplayError, RunId, RunView, SessionView};
 use crate::tools::permissions::{HookEvent, HookResult};
 use crate::tools::types::CommandResult;
-use crate::tools::{Attestation, ToolCall, ToolDisposition};
+use crate::tools::{ToolCall, ToolDisposition};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
@@ -139,8 +139,6 @@ impl SupervisorPolicy {
 pub enum Site {
     ToolOutcome,
     CommandCapture,
-    WorkerCapture,
-    Handover,
     Stall,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -423,7 +421,7 @@ impl SupervisorState {
         }
         window.push_back(step);
         let signals = evaluate(window, footprint, policy);
-        let signals = new_facts(signals, site, sequence);
+        let signals = new_facts(signals, sequence);
         if !signals.is_empty() && self.verdicts < MAX_VERDICTS {
             SupervisorDecision::Record {
                 run_id,
@@ -458,12 +456,8 @@ fn declared_roots(view: &SessionView) -> u16 {
 }
 
 // Call-pattern signals report new facts only: the subject must be part of the evidence.
-fn new_facts(mut signals: Vec<Signal>, site: Site, subject: u64) -> Vec<Signal> {
-    signals.retain(|s| {
-        s.signal == SignalKind::Disproportion
-            || !matches!(site, Site::WorkerCapture | Site::Handover)
-                && s.evidence.contains(&subject)
-    });
+fn new_facts(mut signals: Vec<Signal>, subject: u64) -> Vec<Signal> {
+    signals.retain(|s| s.signal == SignalKind::Disproportion || s.evidence.contains(&subject));
     signals
 }
 
@@ -738,12 +732,6 @@ fn subject_site(run: &RunView, envelope: &EventEnvelope) -> Option<Site> {
                 Site::ToolOutcome
             })
         }
-        Event::WorkerDataSealed { record, .. }
-            if record.data.purpose == WorkerDataPurpose::Mutation =>
-        {
-            Some(Site::WorkerCapture)
-        }
-        Event::WorkerHandoverRecorded { .. } => Some(Site::Handover),
         Event::ProviderCallRecorded { record, .. }
             if record.disposition == crate::session::ProviderCallDisposition::InvalidResponse
                 || record.refusal.is_some() =>
@@ -801,19 +789,7 @@ fn outcome_key(o: &crate::tools::ToolObservation, command: Option<&CommandResult
     let object = projection.as_object_mut().expect("typed result");
     object.remove("call");
     object.remove("target");
-    if let Some(data) = object
-        .get_mut("output")
-        .and_then(|output| output.pointer_mut("/private_capture/data"))
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        data.remove("first_sequence");
-        data.remove("seal_sequence");
-    }
-    let exit_code = command.map(|c| c.exit_code).or_else(|| {
-        crate::worker::WorkerCommandResult::parse(&o.output)
-            .filter(crate::worker::WorkerCommandResult::valid)
-            .map(|c| c.exit_code)
-    });
+    let exit_code = command.map(|c| c.exit_code);
     let exit_class = exit_code.map(|code| match code {
         Some(0) => 0,
         Some(_) => 1,
@@ -858,9 +834,7 @@ fn tool_step(
     step.denied = o.disposition == ToolDisposition::Denied || o.enforcement_cause.is_some();
     step.alias = o.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied);
     if step.succeeded {
-        if let Some(Attestation::WorkerMutation { .. }) = o.attestation {
-            // The preceding seal already supplies the private edit facts.
-        } else if let ToolCall::Write { path, content, .. } = &o.intent.call {
+        if let ToolCall::Write { path, content, .. } = &o.intent.call {
             step.edits.push((
                 hash(path.as_bytes()),
                 hash(crate::validate::hex_digest(content.as_bytes()).as_bytes()),

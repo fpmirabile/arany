@@ -906,12 +906,6 @@ async fn native_file_journey_helper() {
             }
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
             arany::Attestation::Host(_) => panic!("macOS journeys never run host Tools"),
-            arany::Attestation::WorkerRead { .. }
-            | arany::Attestation::WorkerMutation { .. }
-            | arany::Attestation::WorkerData { .. }
-            | arany::Attestation::WorkerCommand { .. } => {
-                panic!("macOS journeys never run worker Tools")
-            }
         }
     }
     let command: serde_json::Value =
