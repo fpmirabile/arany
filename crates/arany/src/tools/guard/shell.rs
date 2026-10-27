@@ -10,12 +10,13 @@ pub(super) fn validate_command(config: &Config, call: &ToolCall) -> Result<(), T
         .iter()
         .find(|definition| &definition.name == program)
         .ok_or(ToolError::Configuration)?;
-    let shell = std::fs::canonicalize(crate::tools::executable::EXECUTABLES.shell.path)
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    if Path::new(&definition.executable) == shell {
-        script(args)?;
+    let executable = Path::new(&definition.executable);
+    let shell_path = crate::tools::executable::EXECUTABLES.shell.path;
+    match std::fs::canonicalize(shell_path) {
+        Ok(shell) if executable == shell => script(args).map(|_| ()),
+        Err(_) if executable == Path::new(shell_path) => Err(ToolError::ProtectionUnavailable),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 pub(super) fn script<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<&str, ToolError> {
