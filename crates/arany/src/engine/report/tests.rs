@@ -1369,19 +1369,42 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
 
 #[test]
 fn host_git_goal_evidence_names_the_separate_host_class() {
-    for call in [
-        ToolCall::GitPush {
-            remote: "https://github.com/o/r.git".into(),
-            branch: "topic".into(),
-        },
-        ToolCall::GhPrCreate {
-            repository: "github.com/o/r".into(),
-            base: "main".into(),
-            head: "topic".into(),
-            title: "T".into(),
-            body: String::new(),
-            draft: false,
-        },
+    for (call, label) in [
+        (
+            ToolCall::GitPush {
+                remote: "https://github.com/o/r.git".into(),
+                branch: "topic".into(),
+            },
+            "host Git push topic to https://github.com/o/r.git",
+        ),
+        (
+            ToolCall::GhPrCreate {
+                repository: "github.com/o/r".into(),
+                base: "main".into(),
+                head: "topic".into(),
+                title: "T".into(),
+                body: String::new(),
+                draft: false,
+            },
+            "host PR creation in github.com/o/r",
+        ),
+        (
+            ToolCall::GhPrList {
+                repository: "github.com/o/r".into(),
+                state: crate::tools::PrState::Open,
+                base: None,
+                head: None,
+                limit: 10,
+            },
+            "host PR list in github.com/o/r",
+        ),
+        (
+            ToolCall::GhPrView {
+                repository: "github.com/o/r".into(),
+                number: 17,
+            },
+            "host PR view #17 in github.com/o/r",
+        ),
     ] {
         let mut intent = read_intent(&call);
         intent.host = Some(crate::HostIntent {
@@ -1391,7 +1414,10 @@ fn host_git_goal_evidence_names_the_separate_host_class() {
         let receipt = Attestation::for_site(&intent);
         let evidence =
             goal_report_evidence(&call, "host: remote operation completed.", Some(&receipt));
-        assert!(evidence.starts_with("A human-approved host run attested host "));
+        assert_eq!(
+            evidence,
+            format!("A human-approved host run attested {label}.")
+        );
         assert!(!evidence.contains("Guard") && !evidence.contains("unguarded"));
     }
 }

@@ -52,7 +52,7 @@ owns Engine lifetime and admission.
 The binary's `serve` Server owns a bounded submission/response channel loop over
 that Engine. Its stdio adapter, ACP translator, attached terminal, headless `exec` and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
-vocabulary at the binary edge; its translator owns the exhaustive typed Tool
+vocabulary at the binary edge; its translator owns the family-specific Tool
 projection and preserves serve's Move FileChange path while giving GhPrList an
 explicit read projection. Each active submission has an owned task driving
 its RunHandle while the Server projects its committed Event subscription; bounded client backpressure
