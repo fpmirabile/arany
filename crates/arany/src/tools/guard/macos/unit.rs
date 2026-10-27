@@ -4149,6 +4149,7 @@ int main(int argc, char **argv) {
                     workspace: runtime.workspace.clone(),
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
+                    git_stage: None,
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();

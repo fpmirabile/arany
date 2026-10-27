@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, sleep, timeout};
 
 const HTTPS_PORT: u16 = 443;
 const HEAD_BYTES: usize = 8 * 1024;
@@ -24,6 +24,7 @@ const HEAD_DEADLINE: Duration = Duration::from_secs(10);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 const CHUNK_BYTES: usize = 16 * 1024;
 const STOP_DEADLINE: Duration = Duration::from_secs(2);
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
 
 pub(crate) struct Proxy {
     task: JoinHandle<()>,
@@ -111,8 +112,10 @@ async fn serve(listener: UnixListener, context: Arc<Context>, mut stopped: onesh
         tokio::select! {
             _ = &mut stopped => break,
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { break };
-                admit(stream, &context, &mut connections, &mut refusing);
+                match accepted {
+                    Ok((stream, _)) => admit(stream, &context, &mut connections, &mut refusing),
+                    Err(_) => sleep(ACCEPT_BACKOFF).await,
+                }
             }
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             Some(_) = refusing.join_next(), if !refusing.is_empty() => {}
@@ -492,8 +495,7 @@ pub(crate) fn annotate(
     Ok(())
 }
 
-// The command budget reserves room for the rows, so a result that cannot take them is a defect, not a quiet drop.
-// A capture refusal replaces the result with plain text; the rows then follow that text so neither is lost.
+// A result that cannot hold the refusal rows is a defect; plain-text results keep the rows after the text.
 fn annotated(output: &str, refusals: Vec<NetworkRefusal>) -> Result<String, ToolError> {
     let Ok(mut result) = serde_json::from_str::<CommandResult>(output) else {
         let rows = serde_json::to_string(&refusals).map_err(|_| ToolError::Operation)?;

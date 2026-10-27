@@ -3728,7 +3728,7 @@ mod tests {
         };
         assert_eq!(digest(true, &offline), enforcement_digest(&[]).unwrap());
         assert_ne!(digest(true, &offline), digest(true, &proxy));
-        assert_eq!(digest(false, &offline), digest(false, &proxy));
+        assert_ne!(digest(false, &offline), digest(false, &proxy));
         assert_ne!(
             profile::profile_digest(profile::Routing::Offline).unwrap(),
             profile::profile_digest(profile::Routing::Proxy).unwrap()
@@ -3742,6 +3742,8 @@ mod tests {
             args: Vec::new(),
             cwd: ".".into(),
         });
+        command.policy_digest = [1; 32];
+        command.enforcement_digest = [2; 32];
         command.limits.network = crate::NetworkGrant::Proxy;
         assert!(command.valid());
         for call in [
@@ -3752,8 +3754,8 @@ mod tests {
                 cwd: ".".into(),
             },
         ] {
-            let mut other = intent(call);
-            other.limits.network = crate::NetworkGrant::Proxy;
+            let mut other = command.clone();
+            other.call = call;
             assert_eq!(
                 other.valid(),
                 matches!(other.call, ToolCall::Command { .. })
