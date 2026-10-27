@@ -13,6 +13,8 @@ mod tests;
 const MOUNT_DIRECTORY: &str = "namespace";
 const PROBE_NAME: &str = "user.arany_probe";
 const PROBE_VALUE: &[u8] = b"arany";
+const MAX_SUPERVISOR_ARGUMENTS: usize = 4096;
+const MAX_PIN_BYTES: usize = 4096;
 pub(super) const TMPFS_INODES: u64 = (crate::tools::types::COMMAND_SCAN_ENTRIES
     + crate::tools::config::MAX_WORKSPACE_PATHS * overlay::SETUP_INODES
     + 2) as u64;
@@ -208,7 +210,7 @@ struct HelperInput {
 
 pub(in crate::tools::guard) fn verify_helper() -> Result<Option<overlay::Attestation>, ToolError> {
     let encoded = std::env::args_os().nth(2).ok_or(ToolError::Configuration)?;
-    if encoded.len() > MAX_PATH_BYTES {
+    if encoded.len() > MAX_PIN_BYTES {
         return Err(ToolError::Limit);
     }
     let helper: HelperInput =
@@ -245,7 +247,7 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
     let mut bytes = 0usize;
     for argument in std::env::args_os().skip(3) {
         bytes = bytes.checked_add(argument.len()).ok_or(ToolError::Limit)?;
-        if bytes > super::super::TASK_BYTES_CAP || arguments.len() >= MOUNTINFO_ENTRIES_CAP {
+        if bytes > super::super::TASK_BYTES_CAP || arguments.len() >= MAX_SUPERVISOR_ARGUMENTS {
             return Err(ToolError::Limit);
         }
         arguments.push(argument);
@@ -317,9 +319,41 @@ fn mount_view(
 fn bind_helper(target: &Path) -> Result<(), ToolError> {
     rustix::mount::mount_bind("/proc/self/exe", target)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
-    rustix::mount::mount_remount(target, MountFlags::BIND | MountFlags::RDONLY, "")
+    let flags = helper_mount_flags(target)? | MountFlags::RDONLY;
+    // Bind remounts replace per-mount flags, including restrictions locked by user namespaces.
+    rustix::mount::mount_remount(target, MountFlags::BIND | flags, "")
         .map_err(|_| ToolError::ProtectionUnavailable)?;
-    verify_mount_entries(&read_mountinfo()?, &[target.to_owned()])
+    if helper_mount_flags(target)? != flags {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn helper_mount_flags(target: &Path) -> Result<MountFlags, ToolError> {
+    let mounts = read_mountinfo()?;
+    verify_mount_entries(&mounts, &[target.to_owned()])?;
+    let entry = mounts
+        .iter()
+        .find(|entry| entry.path == target)
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    entry
+        .options
+        .split(|byte| *byte == b',')
+        .try_fold(MountFlags::empty(), |flags, option| {
+            Ok(flags
+                | match option {
+                    b"rw" => MountFlags::empty(),
+                    b"ro" => MountFlags::RDONLY,
+                    b"nosuid" => MountFlags::NOSUID,
+                    b"nodev" => MountFlags::NODEV,
+                    b"noexec" => MountFlags::NOEXEC,
+                    b"noatime" => MountFlags::NOATIME,
+                    b"nodiratime" => MountFlags::NODIRATIME,
+                    b"relatime" => MountFlags::RELATIME,
+                    b"nosymfollow" => MountFlags::NOSYMFOLLOW,
+                    _ => return Err(ToolError::ProtectionUnavailable),
+                })
+        })
 }
 
 fn enter() -> Result<(), ToolError> {
@@ -441,7 +475,10 @@ fn wait_bwrap(
         .spawn()
         .map_err(|_| ToolError::ProtectionUnavailable)?;
     let result = (|| {
-        let pid = Pid::from_raw(child.id() as i32).ok_or(ToolError::ProtectionUnavailable)?;
+        let pid = i32::try_from(child.id())
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or(ToolError::ProtectionUnavailable)?;
         let pidfd =
             pidfd_open(pid, PidfdFlags::empty()).map_err(|_| ToolError::ProtectionUnavailable)?;
         if let Some(view) = view {

@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn supervisor_caps_require_every_set_empty_and_no_new_privileges() {
@@ -22,12 +23,14 @@ fn supervisor_pin_rejects_same_path_content_and_identity_replacement() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("arany");
     std::fs::write(&path, b"original executable").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let pin = Pin::read(&path).unwrap();
     assert!(pin.verify(&path).is_ok());
     std::fs::write(&path, b"modified executable").unwrap();
     assert!(matches!(pin.verify(&path), Err(ToolError::ChangedInput)));
     let replacement = root.path().join("replacement");
     std::fs::write(&replacement, b"original executable").unwrap();
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::rename(replacement, &path).unwrap();
     assert!(matches!(pin.verify(&path), Err(ToolError::ChangedInput)));
     let large = std::fs::File::create(&path).unwrap();
@@ -45,7 +48,6 @@ fn supervisor_pin_rejects_same_path_content_and_identity_replacement() {
 #[cfg_attr(not(arany_ci), ignore = "native Linux systemd executable replacement")]
 fn supervisor_launch_never_executes_a_path_replacement() {
     use crate::test_process::BoundedOutput;
-    use std::os::unix::fs::PermissionsExt;
 
     let _gate = crate::test_process::NATIVE_GATE
         .lock()

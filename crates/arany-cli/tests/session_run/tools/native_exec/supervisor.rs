@@ -10,7 +10,25 @@ fn entry_case(mode: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
+    let executable = std::env::current_exe().unwrap();
+    let mut command = if mode == "mount-flags" {
+        let mut command = Command::new("/usr/bin/unshare");
+        command
+            .args([
+                "--user",
+                "--map-current-user",
+                "--mount",
+                "--propagation",
+                "private",
+                "--keep-caps",
+                "--",
+            ])
+            .arg(executable);
+        command
+    } else {
+        Command::new(executable)
+    };
+    let output = command
         .args(["--exact", HELPER, "--ignored", "--nocapture"])
         .env_clear()
         .env("ARANY_TEST_SUPERVISOR_MODE", mode)
@@ -42,6 +60,7 @@ fn supervisor_probes_tmpfs_clears_caps_and_reaps_bwrap() {
     entry_case("probe-denied");
     entry_case("success");
     entry_case("replacement");
+    entry_case("mount-flags");
 }
 
 #[test]
@@ -76,8 +95,10 @@ fn supervisor_entry_helper() {
         executable.clone()
     };
     let mut command = entry_command(&path, &launch, &helper);
-    if mode == "replacement" {
+    if matches!(mode.as_str(), "replacement" | "mount-flags") {
         command.args(["/arany", "--version"]);
+    }
+    if mode == "replacement" {
         let replacement = root.join("replacement");
         std::fs::write(
             &replacement,
@@ -86,7 +107,7 @@ fn supervisor_entry_helper() {
         .unwrap();
         std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(replacement, &executable).unwrap();
-    } else {
+    } else if mode != "mount-flags" {
         command.args(["/usr/bin/sh", "-c",
             "set -eu; count=0; while IFS= read -r line; do case \"$line\" in CapInh:*|CapPrm:*|CapEff:*|CapBnd:*|CapAmb:*) set -- $line; test \"$2\" = 0000000000000000; count=$((count + 1));; NoNewPrivs:*) set -- $line; test \"$2\" = 1;; esac; done < /proc/self/status; test \"$count\" = 5; printf 'capabilities cleared\\n'"]);
     }
@@ -96,13 +117,13 @@ fn supervisor_entry_helper() {
         .current_dir("/")
         .bounded_output_for(Duration::from_secs(20), 16 * 1024)
         .unwrap();
-    if matches!(mode.as_str(), "success" | "replacement") {
+    if matches!(mode.as_str(), "success" | "replacement" | "mount-flags") {
         assert!(
             output.status.success(),
             "post-clear bwrap: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let expected = if mode == "replacement" {
+        let expected = if matches!(mode.as_str(), "replacement" | "mount-flags") {
             format!("arany {}\n", env!("CARGO_PKG_VERSION"))
         } else {
             "capabilities cleared\n".into()
@@ -133,8 +154,13 @@ fn supervisor_entry_helper() {
     }
     std::fs::remove_dir(namespace).unwrap();
     std::fs::remove_file(helper).unwrap();
-    if mode == "replacement" {
+    if matches!(mode.as_str(), "replacement" | "mount-flags") {
         std::fs::remove_file(executable).unwrap();
+    }
+    if mode == "mount-flags" {
+        let directory = root.join("restricted");
+        rustix::mount::unmount(&directory, rustix::mount::UnmountFlags::empty()).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }
 
@@ -144,7 +170,9 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
     let helper = root.join("supervisor-executable");
     std::fs::File::create_new(&helper).unwrap();
     let installed = Path::new(env!("CARGO_BIN_EXE_arany"));
-    let executable = if mode == "replacement" {
+    let executable = if mode == "mount-flags" {
+        restricted_executable(root, installed)
+    } else if mode == "replacement" {
         let path = root.join("arany");
         std::fs::copy(installed, &path).unwrap();
         path
@@ -173,6 +201,28 @@ fn entry_launch(root: &Path, mode: &str) -> (PathBuf, std::fs::File, Value) {
         launch["overlay"] = json!({"path":workspace,"device":metadata.dev(),"inode":metadata.ino(),"digest":vec![0; 32]});
     }
     (executable, file, launch)
+}
+
+fn restricted_executable(root: &Path, installed: &Path) -> PathBuf {
+    use rustix::mount::MountFlags;
+    let directory = root.join("restricted");
+    std::fs::create_dir(&directory).unwrap();
+    let options = std::ffi::CString::new(format!(
+        "size={},nr_inodes=2,mode=0700",
+        std::fs::metadata(installed).unwrap().len()
+    ))
+    .unwrap();
+    rustix::mount::mount(
+        "tmpfs",
+        &directory,
+        "tmpfs",
+        MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOATIME | MountFlags::NODIRATIME,
+        options.as_c_str(),
+    )
+    .unwrap();
+    let executable = directory.join("arany");
+    std::fs::copy(installed, &executable).unwrap();
+    executable
 }
 
 fn deny_entry(mode: &str) {
