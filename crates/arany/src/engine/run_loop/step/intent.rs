@@ -834,6 +834,9 @@ fn command_limits(
         intent.limits.build_jobs = resource_settings
             .build_jobs
             .ok_or(EngineError::InvalidRequest)?;
+        intent.limits.build_cpu_cores = resource_settings
+            .build_cpu_cores
+            .ok_or(EngineError::InvalidRequest)?;
         runtime.bind_build_jobs(intent)?;
         intent.limits.project_bytes = resource_settings.build_project_bytes;
     }

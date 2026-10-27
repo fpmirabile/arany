@@ -1,6 +1,7 @@
 use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_terminal_width};
 mod blocks;
 mod inline;
+mod links;
 mod tables;
 use blocks::BlockLine;
 use ratatui::style::Modifier;

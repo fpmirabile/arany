@@ -244,6 +244,7 @@ impl GoalRequest {
             budget: Some(budget),
             resource_settings: crate::tools::ToolResourceSettings {
                 build_jobs: None,
+                build_cpu_cores: None,
                 ..Default::default()
             },
             finish_after_run: true,
