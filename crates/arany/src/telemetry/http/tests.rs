@@ -12,6 +12,7 @@ use std::{
 const RESPONSE_CAP: usize = 4 * 1024 * 1024;
 const PEER_WAIT: Duration = Duration::from_secs(10);
 const REQUEST_CAP: usize = 4096;
+const TIMER_TICK: Duration = Duration::from_millis(1);
 
 fn collector() -> TcpListener {
     let listener = TcpListener::bind("127.0.0.1:0").expect("local Collector");
@@ -58,11 +59,14 @@ fn request(listener: &TcpListener) -> Request<Bytes> {
     .expect("empty request")
 }
 
-async fn supervised<T>(future: impl Future<Output = T>) -> T {
+async fn supervised<T>(stage: &str, future: impl Future<Output = T>) -> T {
     let deadline = Instant::now() + PEER_WAIT;
     tokio::pin!(future);
     loop {
-        assert!(Instant::now() < deadline, "Collector supervision expired");
+        assert!(
+            Instant::now() < deadline,
+            "Collector supervision expired at {stage}"
+        );
         tokio::select! {
             biased;
             result = &mut future => return result,
@@ -101,7 +105,8 @@ fn streaming_response_cap_is_independent_of_the_deadline() {
         client.runtime.block_on(async {
             tokio::time::pause();
             let started = tokio::time::Instant::now();
-            let result = supervised(send_bounded(&client.client, request)).await;
+            let response = send_bounded(&client.client, request);
+            let result = supervised("streamed response", response).await;
             assert_eq!(tokio::time::Instant::now(), started, "no timeout advanced");
             if length > RESPONSE_CAP {
                 assert!(
@@ -152,20 +157,27 @@ fn incomplete_response_deadline_releases_the_read_before_the_next_export() {
         tokio::time::pause();
         let response = send_bounded(&client.client, first_request);
         tokio::pin!(response);
-        supervised(async {
+        supervised("partial response", async {
             tokio::select! {
                 result = &mut response => panic!("incomplete response completed early: {result:?}"),
                 _ = gate(&partial_seen) => {}
             }
         })
         .await;
-        tokio::time::advance(EXPORT_TIMEOUT).await;
+        // Tokio rounds timer deadlines up to the next millisecond.
+        tokio::time::advance(EXPORT_TIMEOUT + TIMER_TICK).await;
+        let error = supervised("incomplete response deadline", response)
+            .await
+            .expect_err("incomplete body refused");
         assert!(
-            supervised(response).await.is_err(),
-            "incomplete body refused"
+            error.is::<tokio::time::error::Elapsed>()
+                || error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(reqwest::Error::is_timeout),
+            "incomplete body must reach a typed timeout"
         );
-        supervised(gate(&disposal_seen)).await;
-        let next = supervised(send_bounded(&client.client, second_request))
+        supervised("peer disposal", gate(&disposal_seen)).await;
+        let next = supervised("next export", send_bounded(&client.client, second_request))
             .await
             .expect("next export succeeds");
         assert_eq!(next.status(), 200);
