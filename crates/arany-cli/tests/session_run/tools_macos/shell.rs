@@ -1,5 +1,7 @@
 use super::*;
 
+const REFUSAL_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde_json::Value) {
     for option in ["-lc", "-i"] {
         trace_case(root, "refusal");
@@ -32,7 +34,7 @@ pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde
         )
         .unwrap();
         let outcome = tokio::time::timeout(
-            Duration::from_secs(30),
+            REFUSAL_TIMEOUT,
             run_with(
                 &engine,
                 &provider,
