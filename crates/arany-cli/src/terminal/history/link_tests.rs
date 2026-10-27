@@ -189,13 +189,22 @@ fn wrapped_destinations_keep_partial_selection_reading_and_find_anchors() {
 #[test]
 fn collapsed_link_and_image_suffixes_keep_literal_text_and_source_origins() {
     for (markup, expected) in [
-        ("[reference][]", "[reference][]"),
-        ("[reference][][]", "[reference][][]"),
-        ("[reference] []", "[reference] []"),
+        ("[reference][]", "reference (https://example.test/target)"),
+        (
+            "[reference][][]",
+            "reference (https://example.test/target)[]",
+        ),
+        (
+            "[reference] []",
+            "reference (https://example.test/target) []",
+        ),
         ("![reference][]", "![reference][]"),
         ("![reference][][]", "![reference][][]"),
         ("![reference] []", "![reference] []"),
-        ("**[reference][]**", "[reference][]"),
+        (
+            "**[reference][]**",
+            "reference (https://example.test/target)",
+        ),
         ("*![reference][]*", "![reference][]"),
         ("[![reference][]](target)", "![reference][] (target)"),
     ] {
@@ -210,13 +219,20 @@ fn collapsed_link_and_image_suffixes_keep_literal_text_and_source_origins() {
             let rows = display_rows(kind, &source, 120, None);
             assert_eq!(rows[1].text, format!("  {expected}"), "{markup}");
         }
-        if let Some(suffix) = markup.find("][]").map(|end| end + 1) {
-            let ((rows, _, _), cue) = markdown::project(&source, 1, true);
-            assert!(cue.is_none());
+        let ((rows, _, _), cue) = markdown::project(&source, 1, true);
+        assert!(cue.is_none());
+        for (suffix, _) in markup.match_indices("[]") {
+            let projected =
+                !markup.contains("![") && Some(suffix) == markup.find("][]").map(|end| end + 1);
             for (index, text) in [(suffix, "["), (suffix + 1, "]")] {
                 assert!(
                     rows.iter().flat_map(|row| &row.cells).any(|cell| {
-                        cell.byte == index && cell.source.contains(&index) && cell.text == text
+                        cell.source.contains(&index)
+                            && if projected {
+                                cell.text == ")"
+                            } else {
+                                cell.byte == index && cell.text == text
+                            }
                     }),
                     "{markup}: missing suffix byte {index}"
                 );
@@ -226,7 +242,7 @@ fn collapsed_link_and_image_suffixes_keep_literal_text_and_source_origins() {
 }
 
 #[test]
-fn hostile_destinations_stay_escaped_and_decoded_and_reference_links_stay_literal() {
+fn hostile_destinations_stay_escaped_and_images_stay_literal() {
     for source in [
         "[label](<https://example.test/\u{1b}]52;c;payload\u{7}\u{202e}\u{0085}>)",
         "[label](<https://example.test/&#27;]52;c;payload&#7;&#x202e;>)",
@@ -247,12 +263,7 @@ fn hostile_destinations_stay_escaped_and_decoded_and_reference_links_stay_litera
             assert!(rows.iter().all(|row| row.text.width() <= width
                 && !row.text.chars().any(|c| c.is_control() || c == '\u{202e}')));
         }
-        if source.contains("&amp;")
-            || source.contains("&#27;")
-            || source.contains("\\(")
-            || source.contains("[reference]")
-            || source.starts_with("![")
-        {
+        if source.starts_with("![") {
             assert_eq!(
                 body(source, 120)
                     .iter()

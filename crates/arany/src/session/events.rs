@@ -3,7 +3,9 @@ mod records;
 mod shared_editors;
 pub(crate) use shared_editors::{
     live_editor_payload, pre_shared_editor_payload, retired_worker_payload,
+    run_started_v23_payload, run_started_v24_payload, run_started_v24_to_v25,
 };
+use shared_editors::{parse_run_started, string_run_provider_text};
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -170,16 +172,16 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolProposed", 4),
+    ("ToolProposed", 5),
     ("ToolPreflightRefused", 1),
-    ("HookStarted", 15),
-    ("HookFinished", 21),
-    ("ToolFinished", 32),
-    ("RunStarted", 25),
+    ("HookStarted", 16),
+    ("HookFinished", 22),
+    ("ToolFinished", 33),
+    ("RunStarted", 26),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 26),
+    ("ToolStarted", 27),
     ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
@@ -1847,7 +1849,7 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
     }
     match kind {
         "RunStarted" => {
-            let data = parse_string_run_provider(payload)?;
+            let (data, allowance) = parse_run_started(payload, run_started_v23_to_v24)?;
             data.config
                 .tool_policy
                 .as_ref()
@@ -1856,7 +1858,7 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
                         && policy.host_prefixes.is_empty()
                         && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
                 })
-                .then(|| string_run_provider_text(&data))
+                .then(|| string_run_provider_text(&data, allowance))
                 .flatten()
         }
         "ToolFinished" => expiring_again::<ToolFinishedPayload>(kind, payload, |data| {
@@ -2360,28 +2362,6 @@ pub(crate) fn run_started_v23_to_v24(mut value: serde_json::Value) -> Option<ser
     let record = crate::provider::ProviderRecord::parse(provider.as_str()?)?;
     *provider = serde_json::to_value(record).ok()?;
     Some(value)
-}
-
-fn parse_string_run_provider(payload: &str) -> Option<RunStartedPayload> {
-    let limit = crate::store::MAX_EVENT_BYTES;
-    let value =
-        crate::validate::parse_json_bounded(payload.as_bytes(), limit, limit, limit).ok()?;
-    let value = run_started_v23_to_v24(value)?;
-    parse(&value.to_string()).ok()
-}
-
-fn string_run_provider_text(data: &RunStartedPayload) -> Option<String> {
-    let text = serialize(data).ok()?;
-    let tagged = format!("\"provider\":{}", serialize(&data.config.provider).ok()?);
-    let original = format!(
-        "\"provider\":{}",
-        serialize(&data.config.provider.profile()).ok()?
-    );
-    (text.matches(&tagged).count() == 1).then(|| text.replacen(&tagged, &original, 1))
-}
-
-pub(crate) fn run_started_v23_payload(payload: &str) -> Option<String> {
-    string_run_provider_text(&parse_string_run_provider(payload)?)
 }
 
 pub(crate) fn pre_roster_setup_payload(kind: &str, payload: &str) -> Option<String> {

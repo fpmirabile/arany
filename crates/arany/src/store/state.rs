@@ -26,8 +26,6 @@ mod lock;
 pub(crate) mod spill;
 #[cfg(test)]
 pub(crate) use build_cache::capture_archive;
-#[cfg(target_os = "linux")]
-pub(crate) use build_cache::restore_archive_with_limit;
 pub(crate) use build_cache::{
     AGGREGATE_BYTES, BuildCacheIdentity, BuildCacheLease,
     DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES, MAX_ARCHIVE_BYTES,

@@ -14,7 +14,7 @@ impl BuildCacheLease {
     pub(crate) fn prepare_directory(&mut self) -> Result<Dir, StoreError> {
         let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
         directory_available(&self.dir, &self.token)?;
-        if self.shared || self.candidate_limit == 0 {
+        if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
         let lower_bytes = own_tree_bytes(&self.dir, &self.token)?.max(
@@ -194,25 +194,6 @@ pub(super) fn committed_bytes(
     } else {
         Ok(archive_bytes)
     }
-}
-
-pub(super) fn prepare_worker_archive(
-    state: &StateRoot,
-    dir: &Dir,
-    identity: &BuildCacheIdentity,
-    limit: u64,
-) -> Result<(), StoreError> {
-    let token = identity.token();
-    if !file_exists(dir, &tree_name(&token))? || file_exists(dir, &archive_name(&token))? {
-        return Ok(());
-    }
-    let mut lease = state.begin_build_cache_with_limits(identity.clone(), limit, limit)?;
-    let lower = lease.dir.open_dir_nofollow(tree_name(&token))?;
-    let mut candidate = lease.candidate_writer()?;
-    capture_archive_with_limit(&lower, identity, &[], &mut candidate, limit)?;
-    candidate.sync_all()?;
-    candidate.rewind()?;
-    lease.publish(&mut candidate, &[])
 }
 
 fn apply(lower: &Dir, upper: &Dir, changes: &[CacheChange]) -> Result<(), StoreError> {
