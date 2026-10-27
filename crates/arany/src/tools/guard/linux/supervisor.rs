@@ -105,6 +105,19 @@ struct ProjectProbe {
 }
 
 impl Launch {
+    pub(super) async fn prepare(
+        guard: &Path,
+        seed: &Path,
+        intent: &EffectIntent,
+    ) -> Result<(Self, std::fs::File), ToolError> {
+        let guard = guard.to_owned();
+        let seed = seed.to_owned();
+        let intent = intent.clone();
+        tokio::task::spawn_blocking(move || Self::new(&guard, &seed, &intent))
+            .await
+            .map_err(|_| ToolError::Operation)?
+    }
+
     pub(super) fn new(
         guard: &Path,
         seed: &Path,

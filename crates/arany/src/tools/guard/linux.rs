@@ -635,6 +635,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
 }
 
 struct UnitFilesystem<'a> {
+    launch: (supervisor::Launch, std::fs::File),
     preparation: bool,
     seed_path: &'a Path,
     seed_dir: &'a cap_std::fs::Dir,
@@ -650,6 +651,7 @@ fn unit_command(
     filesystem: UnitFilesystem<'_>,
 ) -> Result<(Command, std::fs::File), ToolError> {
     let UnitFilesystem {
+        launch: (launch, executable),
         preparation,
         seed_path,
         seed_dir,
@@ -668,8 +670,6 @@ fn unit_command(
     } else {
         "--property=CPUQuota=25%"
     };
-    let (launch, executable) =
-        supervisor::Launch::new(&runtime.guard_executable, seed_path, intent)?;
     let executable_path = supervisor::executable_path(&executable);
     let mut command = manager_command("/usr/bin/systemd-run");
     command.args([
@@ -1056,6 +1056,7 @@ pub(super) async fn execute_inner(
         limits: Some(intent.limits.clone()),
     };
     let filesystem = UnitFilesystem {
+        launch: supervisor::Launch::prepare(&runtime.guard_executable, &seed_path, intent).await?,
         preparation: false,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
@@ -1458,7 +1459,7 @@ fn parse_mountinfo(bytes: &[u8]) -> Result<Vec<MountInfoEntry>, ToolError> {
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let source = decode_mount_field(fields[separator + 2])?;
+        let source = fields[separator + 2].to_vec();
         let root = decode_mount_root(fields[3])?;
         let path = decode_mount_path(fields[4])?;
         entries.push(MountInfoEntry {
@@ -1683,6 +1684,7 @@ async fn prepare_inputs(
         intent.limits.cache_bytes > 0,
     )?;
     let filesystem = UnitFilesystem {
+        launch: supervisor::Launch::prepare(&runtime.guard_executable, seed_path, intent).await?,
         preparation: true,
         seed_path,
         seed_dir,
@@ -2188,6 +2190,8 @@ mod tests {
             "arany-discovery-profile",
             "/usr/bin:/bin",
             UnitFilesystem {
+                launch: supervisor::Launch::new(&runtime.guard_executable, fixture.path(), &intent)
+                    .unwrap(),
                 preparation: false,
                 seed_path: fixture.path(),
                 seed_dir: &seed,
@@ -2512,6 +2516,11 @@ mod tests {
         ] {
             assert!(parse_mountinfo(invalid.as_bytes()).is_err());
         }
+
+        let escaped_source = b"1 0 8:1 / / rw - ext4 host\\043volume rw\n2 1 8:1 /cache/a\\040b /opt/toolchains/a\\040b ro - ext4 host\\043volume ro\n";
+        let entries = parse_mountinfo(escaped_source).unwrap();
+        assert_eq!(entries[1].source, b"host\\043volume");
+        assert!(verify_mount_entries(&entries, std::slice::from_ref(&target)).is_ok());
 
         let invalid_escape = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache/a\\141b /opt/toolchains/a\\141b ro - ext4 /dev/root ro\n";
         assert!(parse_mountinfo(invalid_escape).is_err());
