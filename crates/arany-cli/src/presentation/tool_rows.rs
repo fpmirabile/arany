@@ -9,34 +9,22 @@ mod summary;
 const SUMMARY_TEXT_WIDTH: usize = 160;
 
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
-    use arany::{ToolCall, ToolDisposition};
+    use arany::ToolDisposition;
+    use summary::ResultKind;
     let operation = summary::operation(&tool.intent.call);
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
         Some(observation) => match observation.disposition {
             ToolDisposition::Limit => format!("limit: {}", limit_summary(observation)),
-            ToolDisposition::Succeeded => match tool.intent.call {
-                ToolCall::Write { .. }
-                | ToolCall::Edit { .. }
-                | ToolCall::MultiEdit { .. }
-                | ToolCall::Delete { .. }
-                | ToolCall::Move { .. }
-                | ToolCall::Mkdir { .. }
-                | ToolCall::ApplyChangeset { .. } => "applied".into(),
-                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
-                    command_result_summary(observation)
-                        .unwrap_or_else(|| read_result_summary(std::slice::from_ref(tool)))
+            ToolDisposition::Succeeded => match summary::result_kind(&tool.intent.call) {
+                ResultKind::Applied => "applied".into(),
+                ResultKind::Command => command_result_summary(observation)
+                    .unwrap_or_else(|| read_result_summary(std::slice::from_ref(tool))),
+                ResultKind::GitCommit | ResultKind::GitSwitch | ResultKind::GitWrite => {
+                    git_write_summary(observation)
                 }
-                ToolCall::GitCommit { .. }
-                | ToolCall::GitBranch { name: Some(_), .. }
-                | ToolCall::GitSwitch { .. } => git_write_summary(observation),
-                ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
-                    safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
-                }
-                ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
-                    safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
-                }
-                _ => read_result_summary(std::slice::from_ref(tool)),
+                ResultKind::Host => safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH),
+                ResultKind::Read => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
                 let state = match disposition {
@@ -62,24 +50,26 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 } else if observation.output.is_empty() {
                     state.into()
                 } else {
-                    match (disposition, &tool.intent.call) {
-                        (
-                            ToolDisposition::Failed,
-                            ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. },
-                        ) => format!(
-                            "{state}: {}",
-                            command_result_summary(observation).unwrap_or_else(|| safe_truncate(
-                                &observation.output,
-                                SUMMARY_TEXT_WIDTH
-                            ))
-                        ),
+                    match disposition {
+                        ToolDisposition::Failed
+                            if matches!(
+                                summary::result_kind(&tool.intent.call),
+                                ResultKind::Command
+                            ) =>
+                        {
+                            format!(
+                                "{state}: {}",
+                                command_result_summary(observation).unwrap_or_else(|| {
+                                    safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
+                                })
+                            )
+                        }
                         // An uncertain Git write may lead with locks the owner must remove by hand.
-                        (
-                            ToolDisposition::Uncertain,
-                            ToolCall::GitCommit { .. }
-                            | ToolCall::GitBranch { .. }
-                            | ToolCall::GitSwitch { .. },
-                        ) => format!("{state}: {}", wrapped_rows(&observation.output)),
+                        ToolDisposition::Uncertain
+                            if summary::uncertain_git_write(&tool.intent.call) =>
+                        {
+                            format!("{state}: {}", wrapped_rows(&observation.output))
+                        }
                         _ => format!(
                             "{state}: {}",
                             safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
@@ -183,8 +173,8 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
             "timed out after {}{}",
             format_duration(u64::from(observation.intent.effective_timeout_ms())),
             if matches!(
-                observation.intent.call,
-                arany::ToolCall::Command { .. } | arany::ToolCall::CommandUnguarded { .. }
+                summary::result_kind(&observation.intent.call),
+                summary::ResultKind::Command
             ) {
                 "; /settings raises it"
             } else {
@@ -209,14 +199,14 @@ fn git_write_summary(observation: &arany::ToolObservation) -> String {
     let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap_or_default();
     let text = |key: &str| safe_truncate(result[key].as_str().unwrap_or("?"), SUMMARY_TEXT_WIDTH);
     let short = |key: &str| text(key).chars().take(12).collect::<String>();
-    match &observation.intent.call {
-        arany::ToolCall::GitCommit { .. } => {
+    match summary::result_kind(&observation.intent.call) {
+        summary::ResultKind::GitCommit => {
             format!("committed {} on {}", short("commit"), text("branch"))
         }
-        arany::ToolCall::GitSwitch { .. } if result["switched"] == false => {
+        summary::ResultKind::GitSwitch if result["switched"] == false => {
             format!("already on {}", text("branch"))
         }
-        arany::ToolCall::GitSwitch { .. } => {
+        summary::ResultKind::GitSwitch => {
             let files = result["files"].as_u64().unwrap_or_default();
             format!(
                 "switched to {} · {files} {}",
@@ -540,20 +530,7 @@ fn read_result_summary(tools: &[arany::ToolView]) -> String {
 }
 
 fn read_operation(tool: &arany::ToolView) -> bool {
-    use arany::ToolCall;
-    matches!(
-        tool.intent.call,
-        ToolCall::List { .. }
-            | ToolCall::Read { .. }
-            | ToolCall::Search { .. }
-            | ToolCall::Glob { .. }
-            | ToolCall::GitStatus { .. }
-            | ToolCall::GitDiff { .. }
-            | ToolCall::GitLog { .. }
-            | ToolCall::GitBranch { name: None, .. }
-            | ToolCall::Skill { .. }
-            | ToolCall::McpList { .. }
-    )
+    summary::read_group(&tool.intent.call).is_some()
 }
 
 fn collapsible_read(tool: &arany::ToolView) -> bool {
@@ -581,45 +558,37 @@ fn group_label(tools: &[arany::ToolView]) -> String {
     );
     let kinds: [Kind; 6] = [
         (
-            |c| matches!(c, ToolCall::Search { .. } | ToolCall::Glob { .. }),
+            |c| summary::read_group(c) == Some(summary::ReadGroup::Pattern),
             "searched for",
             "pattern",
             "patterns",
         ),
         (
-            |c| matches!(c, ToolCall::Read { .. }),
+            |c| summary::read_group(c) == Some(summary::ReadGroup::File),
             "read",
             "file",
             "files",
         ),
         (
-            |c| matches!(c, ToolCall::List { .. }),
+            |c| summary::read_group(c) == Some(summary::ReadGroup::Directory),
             "listed",
             "directory",
             "directories",
         ),
         (
-            |c| {
-                matches!(
-                    c,
-                    ToolCall::GitStatus { .. }
-                        | ToolCall::GitDiff { .. }
-                        | ToolCall::GitLog { .. }
-                        | ToolCall::GitBranch { name: None, .. }
-                )
-            },
+            |c| summary::read_group(c) == Some(summary::ReadGroup::Git),
             "inspected",
             "Git query",
             "Git queries",
         ),
         (
-            |c| matches!(c, ToolCall::Skill { .. }),
+            |c| summary::read_group(c) == Some(summary::ReadGroup::Skill),
             "loaded",
             "Skill",
             "Skills",
         ),
         (
-            |c| matches!(c, ToolCall::McpList { .. }),
+            |c| summary::read_group(c) == Some(summary::ReadGroup::Mcp),
             "listed",
             "MCP server",
             "MCP servers",

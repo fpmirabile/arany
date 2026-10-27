@@ -1,5 +1,5 @@
 use arany::{
-    CacheUpdate, EffectIntent, Event, GoalId, GoalView, RunId, RunStatus, RunStop, RunView,
+    CacheUpdate, EffectIntent, Event, Family, GoalId, GoalView, RunId, RunStatus, RunStop, RunView,
     SessionView, ToolCall, ToolDisposition, ToolObservation,
 };
 use arany_cli::protocol::{methods::*, rpc::Notification};
@@ -291,6 +291,15 @@ fn tool_item_with_denial_output(
         None if history => ItemStatus::Uncertain,
         None => ItemStatus::InProgress,
     };
+    if let Some(changes) = file_changes(&intent.call) {
+        return Item::FileChange {
+            id,
+            changes,
+            status,
+            disposition,
+            output,
+        };
+    }
     match &intent.call {
         ToolCall::Command { program, args, cwd } => Item::CommandExecution {
             id,
@@ -307,92 +316,6 @@ fn tool_item_with_denial_output(
                     arany::Attestation::InProcess { .. } => Some(Attestation::InProcess),
                     arany::Attestation::Host(_) | arany::Attestation::Unguarded(_) => None,
                 }),
-        },
-        ToolCall::Write {
-            path,
-            expected_digest,
-            ..
-        } => Item::FileChange {
-            id,
-            changes: vec![FileChange {
-                path: path.clone(),
-                kind: if expected_digest.is_some() {
-                    FileChangeKind::Update
-                } else {
-                    FileChangeKind::Add
-                },
-            }],
-            status,
-            disposition,
-            output,
-        },
-        ToolCall::Delete { path, .. } => Item::FileChange {
-            id,
-            changes: vec![FileChange {
-                path: path.clone(),
-                kind: FileChangeKind::Delete,
-            }],
-            status,
-            disposition,
-            output,
-        },
-        ToolCall::Move {
-            source,
-            destination,
-            ..
-        } => Item::FileChange {
-            id,
-            changes: vec![
-                FileChange {
-                    path: source.clone(),
-                    kind: FileChangeKind::Delete,
-                },
-                FileChange {
-                    path: destination.clone(),
-                    kind: FileChangeKind::Add,
-                },
-            ],
-            status,
-            disposition,
-            output,
-        },
-        ToolCall::Edit { path, .. }
-        | ToolCall::MultiEdit {
-            file_path: path, ..
-        }
-        | ToolCall::Mkdir { path } => Item::FileChange {
-            id,
-            changes: vec![FileChange {
-                path: path.clone(),
-                kind: if matches!(intent.call, ToolCall::Mkdir { .. }) {
-                    FileChangeKind::Mkdir
-                } else {
-                    FileChangeKind::Update
-                },
-            }],
-            status,
-            disposition,
-            output,
-        },
-        ToolCall::ApplyChangeset {
-            source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
-        } => Item::FileChange {
-            id,
-            changes: changeset
-                .files
-                .iter()
-                .map(|change| FileChange {
-                    path: change.path.clone(),
-                    kind: match (&change.before, &change.after) {
-                        (None, _) => FileChangeKind::Add,
-                        (_, None) => FileChangeKind::Delete,
-                        _ => FileChangeKind::Update,
-                    },
-                })
-                .collect(),
-            status,
-            disposition,
-            output,
         },
         ToolCall::McpList { server } => Item::McpToolCall {
             id,
@@ -425,6 +348,54 @@ fn tool_item_with_denial_output(
             output,
         },
     }
+}
+
+fn file_changes(call: &ToolCall) -> Option<Vec<FileChange>> {
+    let facts = call.display_facts();
+    let kinds = match (facts.family, call) {
+        (
+            Family::File,
+            ToolCall::Write {
+                expected_digest, ..
+            },
+        ) => vec![if expected_digest.is_some() {
+            FileChangeKind::Update
+        } else {
+            FileChangeKind::Add
+        }],
+        (Family::File, ToolCall::Delete { .. }) => vec![FileChangeKind::Delete],
+        (Family::File, ToolCall::Move { .. }) => vec![FileChangeKind::Delete, FileChangeKind::Add],
+        (Family::File, ToolCall::Edit { .. } | ToolCall::MultiEdit { .. }) => {
+            vec![FileChangeKind::Update]
+        }
+        (Family::File, ToolCall::Mkdir { .. }) => vec![FileChangeKind::Mkdir],
+        (
+            Family::File,
+            ToolCall::ApplyChangeset {
+                source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            },
+        ) => changeset
+            .files
+            .iter()
+            .map(|change| match (&change.before, &change.after) {
+                (None, _) => FileChangeKind::Add,
+                (_, None) => FileChangeKind::Delete,
+                _ => FileChangeKind::Update,
+            })
+            .collect(),
+        _ => return None,
+    };
+    Some(
+        facts
+            .paths
+            .into_iter()
+            .zip(kinds)
+            .map(|(path, kind)| FileChange {
+                path: path.to_owned(),
+                kind,
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

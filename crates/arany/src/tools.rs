@@ -5,6 +5,8 @@ mod cancel;
 pub(crate) mod catalog;
 pub(crate) mod config;
 pub(crate) mod definitions;
+mod display;
+pub use display::DisplayFacts;
 mod discovery;
 mod dispatch;
 pub use discovery::{
@@ -38,6 +40,62 @@ mod workspace;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tools/fs/tests.rs"]
+mod fs_tests;
+
+#[cfg(test)]
+#[path = "tools/fs/read_tests.rs"]
+mod read_tests;
+
+#[cfg(test)]
+#[path = "tools/fs/command/selection_tests.rs"]
+mod command_selection_tests;
+
+#[cfg(test)]
+#[path = "tools/search/tests.rs"]
+mod search_tests;
+
+#[cfg(test)]
+#[path = "tools/glob/runtime_tests.rs"]
+mod glob_tests;
+
+#[cfg(test)]
+#[path = "tools/discovery/runtime_tests.rs"]
+mod discovery_tests;
+
+#[cfg(test)]
+#[path = "tools/permissions/runtime_tests.rs"]
+mod permission_tests;
+
+#[cfg(test)]
+#[path = "tools/skills/runtime_tests.rs"]
+mod skill_tests;
+
+#[cfg(test)]
+#[path = "tools/catalog/runtime_tests.rs"]
+mod catalog_tests;
+
+#[cfg(test)]
+#[path = "tools/types/tests.rs"]
+mod type_tests;
+
+#[cfg(test)]
+#[path = "tools/config/tests.rs"]
+mod config_tests;
+
+#[cfg(test)]
+#[path = "tools/git/admission_tests.rs"]
+mod git_tests;
+
+#[cfg(test)]
+#[path = "tools/process/admission_tests.rs"]
+mod process_tests;
+
+#[cfg(test)]
+#[path = "tools/guard/receipt_tests.rs"]
+mod cache_receipt_tests;
 
 use crate::session::{AgentRunId, RunId, WorkspaceIdentity};
 use crate::store::StateRoot;

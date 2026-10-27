@@ -118,3 +118,6 @@ impl Event {
 fn valid_setup_identity(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| id.get_version() == Some(uuid::Version::SortRand))
 }
+
+#[cfg(test)]
+mod tests;

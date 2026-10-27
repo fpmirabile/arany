@@ -32,6 +32,7 @@ pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
 pub(crate) const COMMAND_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const COMMAND_COMPARE_BYTES_PER_UPPER_BYTE: u64 = 2;
 pub(crate) const COMMAND_SNAPSHOT_FILES: usize = 16_384;
 pub(crate) const COMMAND_SCAN_ENTRIES: usize = 131_072;
 pub(crate) const COMMAND_SNAPSHOT_DEPTH: usize = 32;

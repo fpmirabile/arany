@@ -86,10 +86,11 @@ fn inspect_agents(
         let mut bytes = Vec::new();
         let mut stages: Vec<&[u8]> = vec![b"Input:", b"Agent choice: n next"];
         if session.is_some() {
-            stages.push(b"Changed paths (untrusted");
+            stages.push(b"Agent choice: n next");
         }
         stages.push(b"Notice: Agent inspection closed");
         let mut next = 0;
+        let mut consumed = 0;
         loop {
             let mut chunk = [0; 4096];
             let count = output.read(&mut chunk).expect("PTY output bytes");
@@ -100,10 +101,11 @@ fn inspect_agents(
             bytes.extend_from_slice(&chunk[..count]);
             crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             if next < stages.len()
-                && bytes
+                && let Some(offset) = bytes[consumed..]
                     .windows(stages[next].len())
-                    .any(|part| part == stages[next])
+                    .position(|part| part == stages[next])
             {
+                consumed += offset + stages[next].len();
                 sender.send(next).expect("stage receiver");
                 next += 1;
             }
@@ -114,7 +116,7 @@ fn inspect_agents(
         assert_eq!(
             receiver
                 .recv_timeout(Duration::from_secs(10))
-                .expect("PTY stage"),
+                .unwrap_or_else(|error| panic!("PTY stage {expected}: {error}")),
             expected
         );
     };

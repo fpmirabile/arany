@@ -13,6 +13,14 @@ use std::time::Duration;
 
 const TEAM_SIZE: u8 = 3;
 
+pub(crate) const RETIRED_WORKER_KINDS: &[&str] = &[
+    "WorkerDataChunk",
+    "WorkerDataSealed",
+    "WorkerHandoverRecorded",
+    "WorkerIntegrationRecorded",
+    "WorkerHandoverDiscarded",
+];
+
 pub struct TeamObservation {
     pub directory: tempfile::TempDir,
     pub session: SessionId,
@@ -621,6 +629,7 @@ async fn run_live(
                 .released
                 .is_some()
         );
+        assert_ne!(view.goals[0].status, GoalStatus::Completed);
     }
     assert_live_editor_evidence(case, session, &events, &view);
     bounds::assert_stopped(case, &events, &view, &provider);
@@ -705,6 +714,11 @@ async fn run_live(
                 .all(|(phase, _)| *phase != AgentPhase::ChildWork)
         );
     }
+    assert!(
+        !events
+            .iter()
+            .any(|e| RETIRED_WORKER_KINDS.contains(&e.event.kind()))
+    );
     assert_action_bounds(&events, false, false);
     TeamObservation {
         directory,

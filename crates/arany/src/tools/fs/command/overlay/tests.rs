@@ -116,13 +116,19 @@ fn capture_validates_ignored_and_publishable_metadata_before_selection() {
         let source = open_directory(lower.path()).unwrap();
         let baseline = baseline(&source);
         std::fs::create_dir(upper.path().join("output")).unwrap();
-        rustix::fs::setxattr(
+        match rustix::fs::setxattr(
             upper.path().join("output"),
             name,
             value,
             rustix::fs::XattrFlags::CREATE,
-        )
-        .unwrap();
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::OPNOTSUPP) => {
+                eprintln!("overlay xattr cases skipped: user xattrs are unsupported");
+                break;
+            }
+            Err(error) => panic!("xattr fixture failed: {error}"),
+        }
         let result = baseline.capture(
             &source,
             &open_directory(upper.path()).unwrap(),
@@ -313,13 +319,19 @@ fn comparison_preserves_content_exec_drift_and_metadata_checks() {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap()
             }
             "drift" => std::fs::write(lower.path().join("existing"), b"host").unwrap(),
-            "metadata" => rustix::fs::setxattr(
+            "metadata" => match rustix::fs::setxattr(
                 &path,
                 "user.overlay.whiteout",
                 b"",
                 rustix::fs::XattrFlags::CREATE,
-            )
-            .unwrap(),
+            ) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::OPNOTSUPP) => {
+                    eprintln!("overlay metadata case skipped: user xattrs are unsupported");
+                    continue;
+                }
+                Err(error) => panic!("xattr fixture failed: {error}"),
+            },
             _ => {}
         }
         let result = baseline.capture(
