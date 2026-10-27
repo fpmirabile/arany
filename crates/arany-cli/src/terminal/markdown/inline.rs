@@ -30,6 +30,7 @@ impl Flow {
         source: &str,
         event: &Event<'_>,
         range: Range<usize>,
+        definition: Option<Range<usize>>,
     ) -> Result<(), ()> {
         if self
             .literal
@@ -47,7 +48,7 @@ impl Flow {
             event,
             Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link)
         ) {
-            return self.link_event(source, event, range);
+            return self.link_event(source, event, range, definition);
         }
         match event {
             Event::Start(Tag::Emphasis | Tag::Strong) => {
@@ -88,6 +89,7 @@ impl Flow {
                     content: range,
                     outer,
                     atomic,
+                    entities: false,
                 };
                 self.append(source, text, origin, self.style())?;
             }
@@ -135,18 +137,25 @@ impl Flow {
         source: &str,
         event: &Event<'_>,
         range: Range<usize>,
+        definition: Option<Range<usize>>,
     ) -> Result<(), ()> {
         match event {
             Event::Start(Tag::Link {
-                link_type: LinkType::Inline,
+                link_type:
+                    link_type @ (LinkType::Inline
+                    | LinkType::Reference
+                    | LinkType::Collapsed
+                    | LinkType::Shortcut),
                 dest_url,
                 ..
             }) => {
+                let range = super::links::literal_range(source, range, *link_type);
                 self.link = Some(super::links::Link {
                     range,
                     start: self.cells.len(),
                     breaks: self.breaks.len(),
                     destination: dest_url.to_string(),
+                    definition,
                 });
             }
             Event::Start(Tag::Link {
@@ -185,32 +194,77 @@ impl Flow {
                     .last()
                     .map_or(0, |(_, range)| range.end),
             );
-        let Some(destination) = link.destination_range(source, label_end) else {
-            self.bytes -= self
-                .cells
-                .drain(link.start..)
-                .map(|cell| cell.text.len())
-                .sum::<usize>();
-            self.breaks.truncate(link.breaks);
-            return self.literal_source(source, link.range, self.style());
-        };
+        let destination = link.destination_range(source, label_end).ok_or(())?;
         let style = self.style() | Modifier::UNDERLINED;
-        let separator = label_end..destination.start;
-        self.append(
-            source,
-            " (",
-            Origin::plain(separator.clone(), separator),
-            style,
-        )?;
+        for (offset, cell) in self.cells[link.start..].iter_mut().enumerate() {
+            cell.coordinate = Coordinate {
+                site: link.range.start,
+                fragment: Fragment::Label,
+                offset,
+            };
+        }
+        let separator = if link.definition.is_some() {
+            link.range.clone()
+        } else {
+            label_end..destination.start
+        };
+        self.link_fragment(source, (" (", separator, Fragment::Separator), &link)?;
+        let first = self.cells.len();
         self.append(
             source,
             &link.destination,
-            Origin::plain(destination.clone(), destination.clone()),
+            Origin {
+                content: destination.clone(),
+                outer: destination.clone(),
+                atomic: false,
+                entities: true,
+            },
             style,
         )?;
-        let closing = destination.end..link.range.end;
-        self.append(source, ")", Origin::plain(closing.clone(), closing), style)?;
+        for (offset, cell) in self.cells[first..].iter_mut().enumerate() {
+            cell.coordinate = Coordinate {
+                site: link.range.start,
+                fragment: Fragment::Destination,
+                offset,
+            };
+            cell.envelope = link.definition.as_ref().map(|_| link.range.clone());
+            cell.definition = link.definition.clone();
+        }
+        let closing = if link.definition.is_some() {
+            link.range.clone()
+        } else {
+            destination.end..link.range.end
+        };
+        self.link_fragment(source, (")", closing, Fragment::Marker), &link)?;
         self.enclose(link.start, link.range);
+        Ok(())
+    }
+    fn link_fragment(
+        &mut self,
+        source: &str,
+        (text, range, fragment): (&str, Range<usize>, Fragment),
+        link: &super::links::Link,
+    ) -> Result<(), ()> {
+        let first = self.cells.len();
+        self.append(
+            source,
+            text,
+            Origin {
+                content: range.clone(),
+                outer: range,
+                atomic: link.definition.is_some(),
+                entities: false,
+            },
+            self.style() | Modifier::UNDERLINED,
+        )?;
+        for (offset, cell) in self.cells[first..].iter_mut().enumerate() {
+            cell.coordinate = Coordinate {
+                site: link.range.start,
+                fragment,
+                offset,
+            };
+            cell.definition = link.definition.clone();
+        }
         Ok(())
     }
     fn enclose(&mut self, start: usize, mut range: Range<usize>) {
@@ -252,6 +306,7 @@ impl Flow {
             content,
             outer,
             atomic,
+            entities,
         }: Origin,
         style: Modifier,
     ) -> Result<(), ()> {
@@ -261,15 +316,32 @@ impl Flow {
         }
         let first = self.cells.len();
         let mut cursor = content.start;
+        let mut atomic_offset = 0;
+        let mut previous = None;
+        let mut decoded = super::links::Origins::new(source, content.clone());
         for grapheme in text.graphemes(true) {
             let origin = if atomic {
                 content.clone()
+            } else if entities {
+                decoded.next(grapheme)?
             } else {
                 origin(source, grapheme, cursor, content.end)
             };
             cursor = origin.end;
+            if previous == Some(origin.start) {
+                atomic_offset += 1;
+            } else {
+                atomic_offset = 0;
+            }
+            previous = Some(origin.start);
             self.cells.push(Cell {
                 byte: origin.start,
+                coordinate: Coordinate {
+                    offset: atomic_offset,
+                    ..Coordinate::source(origin.start)
+                },
+                envelope: None,
+                definition: None,
                 source: origin,
                 text: escape_terminal(grapheme),
                 style,
@@ -284,6 +356,7 @@ struct Origin {
     content: Range<usize>,
     outer: Range<usize>,
     atomic: bool,
+    entities: bool,
 }
 impl Origin {
     fn plain(content: Range<usize>, outer: Range<usize>) -> Self {
@@ -291,6 +364,7 @@ impl Origin {
             content,
             outer,
             atomic: false,
+            entities: false,
         }
     }
 }
@@ -307,10 +381,10 @@ impl Lines {
                 (!line.is_empty() || anchor.is_some()).then(|| (line, anchor.unwrap_or(0)))
             })
     }
-    pub(super) fn line_at(&self, byte: usize) -> Option<&[Cell]> {
+    pub(super) fn line_at(&self, coordinate: Coordinate) -> Option<&[Cell]> {
         self.lines()
             .map(|(line, _)| line)
-            .find(|line| line.iter().any(|cell| cell.byte == byte))
+            .find(|line| line.iter().any(|cell| cell.coordinate == coordinate))
     }
 }
 // A decoded grapheme maps to the next source bytes that show it; one with no counterpart (a joined line break) takes the bytes it replaces.

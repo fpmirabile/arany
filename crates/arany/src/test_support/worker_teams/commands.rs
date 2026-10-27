@@ -36,6 +36,19 @@ pub(super) fn configure(state: &Path, case: &str) {
     })).unwrap());
 }
 
+pub(super) fn fail_cache_publication(_state: &Path, identity: &crate::store::BuildCacheIdentity) {
+    #[cfg(target_os = "linux")]
+    {
+        let state = StateRoot::open_existing(_state).unwrap();
+        let mut lease = state.begin_build_cache(identity.clone()).unwrap();
+        // Initialize the directory so the sync fault reaches publication, not preparation.
+        drop(lease.prepare_directory().unwrap());
+        FaultPlan::fail_record_sync(identity.token().into(), "");
+    }
+    #[cfg(not(target_os = "linux"))]
+    FaultPlan::fail_commit_marker(identity);
+}
+
 impl LiveProvider {
     pub(super) fn command_outcome(
         &self,
