@@ -129,6 +129,8 @@ pub(super) use macos::RESERVATION_OVERHEAD;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Task {
+    #[serde(deserialize_with = "Option::deserialize")]
+    command_deadline: Option<[u8; 8]>,
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
@@ -367,6 +369,18 @@ fn publish_archive(cache: BuildCacheSession) -> CacheUpdate {
 }
 
 impl Task {
+    fn runtime_started(&self) -> Result<Option<std::time::Instant>, ToolError> {
+        match self.command_deadline {
+            Some(frame) => selection_phase::decode_deadline(frame)?
+                .checked_sub(Duration::from_millis(u64::from(
+                    self.intent.limits.runtime_ms,
+                )))
+                .map(Some)
+                .ok_or(ToolError::Limit),
+            None => Ok(runtime_start_at_go()),
+        }
+    }
+
     fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
         #[cfg(target_os = "macos")]
         if !self.intent.call.is_process() && self.system_programs.is_some() {
@@ -816,6 +830,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
+                command_deadline: selection_phase::primary_command(intent).then_some([u8::MAX; 8]),
                 config: runtime.config.clone(),
                 intent: intent.clone(),
                 cache: None,
@@ -834,7 +849,11 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     #[cfg(target_os = "macos")]
     {
         Task::new(runtime, intent, None)
-            .and_then(|task| encode_task(&task))
+            .and_then(|mut task| {
+                task.command_deadline =
+                    selection_phase::primary_command(intent).then_some([u8::MAX; 8]);
+                encode_task(&task)
+            })
             .is_ok()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1731,7 +1750,7 @@ impl GuardContext<'_> {
     }
 }
 
-// Only macOS has a supervisor deadline counted from GO; elsewhere the full runtime starts at spawn.
+// Non-primary payloads retain their platform-specific runtime start.
 fn runtime_start_at_go() -> Option<std::time::Instant> {
     cfg!(target_os = "macos").then(std::time::Instant::now)
 }
@@ -1743,7 +1762,9 @@ fn runtime_after(
 ) -> Duration {
     let runtime = Duration::from_millis(u64::from(runtime_ms));
     started.map_or(runtime, |started| {
-        (started + runtime).saturating_duration_since(now)
+        (started + runtime)
+            .saturating_duration_since(now)
+            .min(runtime)
     })
 }
 
@@ -1756,6 +1777,9 @@ impl GuardContext<'_> {
 
 fn validate_task(task: &Task) -> Result<(), ToolError> {
     task.config.validate()?;
+    if task.command_deadline.is_some() && !selection_phase::primary_command(&task.intent) {
+        return Err(ToolError::Configuration);
+    }
     if let Some(cache) = &task.cache {
         cache.validate(&task.intent, &task.config)?;
     }
@@ -1931,7 +1955,7 @@ pub(super) fn helper_main() -> ExitCode {
         stdin
             .read_exact(&mut go)
             .map_err(|_| ToolError::Operation)?;
-        let runtime_started = runtime_start_at_go();
+        let runtime_started = task.runtime_started()?;
         // Admitted preparation and GO have their own deadlines.
         if go != *b"GO\n" {
             return Err(ToolError::Configuration);
@@ -2546,6 +2570,7 @@ mod tests {
         };
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
+            command_deadline: None,
             config,
             intent: intent(call),
             cache: None,
@@ -2610,6 +2635,7 @@ mod tests {
             .collect();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
+            command_deadline: None,
             config,
             intent: intent(call.clone()),
             cache: None,
@@ -2640,6 +2666,7 @@ mod tests {
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
+            command_deadline: None,
             config,
             intent: intent(ToolCall::Write {
                 path: "\"".repeat(512),
@@ -2787,10 +2814,21 @@ mod tests {
             Duration::ZERO
         );
         assert_eq!(runtime_after(None, 5_000, go + runtime + setup), runtime);
+        let selected = Duration::from_secs(6);
+        let command_runtime_ms = super::super::types::DEFAULT_COMMAND_TIMEOUT_MS;
+        let command_runtime = Duration::from_millis(u64::from(command_runtime_ms));
+        assert_eq!(
+            runtime_after(Some(go), command_runtime_ms, go + selected),
+            command_runtime - selected,
+        );
+        assert_eq!(
+            runtime_after(Some(go), command_runtime_ms, go + command_runtime),
+            Duration::ZERO,
+        );
         assert_eq!(
             runtime_start_at_go().is_some(),
             cfg!(target_os = "macos"),
-            "Linux keeps the full runtime from spawn"
+            "Non-primary Linux payloads keep the full runtime from spawn"
         );
         let supervisor_go = tokio::time::Instant::now();
         assert!(
@@ -3196,7 +3234,7 @@ mod tests {
                 .unwrap();
         assert_eq!(status.code(), Some(1));
         let output = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": status.code(),
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": status.code(),
             "stdout": String::from_utf8(stdout).unwrap(),
             "stderr": String::from_utf8(stderr).unwrap(),
             "enforcement_cause": "filesystem_denied",
@@ -3261,7 +3299,7 @@ mod tests {
                 &super::super::fs::open_directory(workspace.path()).unwrap(),
                 &super::super::fs::open_directory(resources.path()).unwrap(),
                 &config(Vec::new()),
-                std::time::Instant::now() + super::super::selection::PHASE_TIME,
+                std::time::Instant::now() + super::super::selection::TEST_RUNTIME,
             )
             .unwrap();
             let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
@@ -3288,7 +3326,7 @@ mod tests {
                 workspace.path(),
                 &snapshot,
                 &selection,
-                std::time::Instant::now() + super::super::selection::PHASE_TIME,
+                std::time::Instant::now() + super::super::selection::TEST_RUNTIME,
             );
             let (disposition, output, cause, limit_cause) = super::super::dispatch::outcome(
                 &observation.intent,
@@ -3636,7 +3674,7 @@ mod tests {
             limit_cause: None,
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
+            output: r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
                 .into(),
             attestation: Some(Attestation::Guard(guard)),
             approval_cause: None,
@@ -4191,6 +4229,7 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
+                command_deadline: None,
                 definition: None,
                 handover: None,
                 config: config.clone(),

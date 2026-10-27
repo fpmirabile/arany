@@ -1597,14 +1597,7 @@ impl ToolRuntime {
         }
         match call.facts().site {
             Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
-            Site::Guard => {
-                guard::RESERVATION_OVERHEAD
-                    + if matches!(call, ToolCall::Command { .. }) {
-                        selection::PHASE_TIME
-                    } else {
-                        Duration::ZERO
-                    }
-            }
+            Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
 
@@ -2172,6 +2165,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         observation.output = "File operation cancelled; nothing in the Workspace changed".into();
         return observation;
     }
+    if matches!(error, ToolError::Timeout(_)) {
+        return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+    }
     if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
         return unattested_limit(
             intent,
@@ -2252,14 +2248,21 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         stage: failure_stage(&error),
         check: failure_check(&error),
     });
+    let limit_cause = if resource_limit {
+        Some(LimitCause::Resource)
+    } else if matches!(error, ToolError::ProjectSelection(SelectionCause::TimedOut)) {
+        Some(LimitCause::Timeout)
+    } else {
+        None
+    };
     ToolObservation {
         spill: None,
         enforcement_cause,
-        limit_cause: resource_limit.then_some(LimitCause::Resource),
+        limit_cause,
         guard_stage,
         output,
         intent,
-        disposition: if resource_limit {
+        disposition: if limit_cause.is_some() {
             ToolDisposition::Limit
         } else {
             ToolDisposition::Failed

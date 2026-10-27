@@ -3,11 +3,18 @@ use super::*;
 const RETIRED_EVENTS: &str = include_str!("retired-worker-events.json");
 
 fn current_source(kind: &str) -> (i64, &'static str) {
+    let version = match kind {
+        "ToolProposed" => 2,
+        "ToolStarted" => 24,
+        "ToolFinished" => 30,
+        "HookStarted" => 13,
+        "HookFinished" => 19,
+        _ => payload_version(kind).unwrap() - 1,
+    };
     EVENT_FIXTURES
         .iter()
         .find_map(|(name, from, source, _)| {
-            (*name == kind && *from + 1 == payload_version(kind).unwrap())
-                .then_some((*from, *source))
+            (*name == kind && *from == version).then_some((*from, *source))
         })
         .unwrap()
 }
@@ -227,7 +234,7 @@ fn enclosing_payloads_refuse_removed_calls_attestations_and_supervisor_subjects(
         assert!(
             Event::decode(
                 kind,
-                from + 1,
+                payload_version(kind).unwrap(),
                 &value.to_string(),
                 Some(scope.0),
                 Some(scope.1)
@@ -267,7 +274,7 @@ fn live_editor_history_migrates_and_reopens_without_changing_effects_or_receipts
                 "GoalPlanContractRecorded",
             ]
             .contains(&kind)
-                && payload_version(kind) == Some(from + 1)
+                && from == current_source(kind).0
             {
                 changed += connection
                     .execute(
@@ -347,7 +354,7 @@ fn enclosing_payloads_refuse_the_removed_private_target_and_cache_outcome() {
             assert!(
                 Event::decode(
                     kind,
-                    from + 1,
+                    payload_version(kind).unwrap(),
                     &value.to_string(),
                     Some(scope.0),
                     Some(scope.1)

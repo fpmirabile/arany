@@ -102,9 +102,11 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
             &super::fs::open_directory(&target).unwrap(),
             &super::fs::open_directory(&resources).unwrap(),
             &config,
-            std::time::Instant::now() + super::selection::PHASE_TIME,
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
         )
         .unwrap();
+        assert!(selection.summary.elapsed_ms.is_some(), "{case}");
+        assert!(selection.summary.valid(), "{case}");
         assert_eq!(selection.summary.oversized_inputs, 1, "{case}");
         assert_eq!(selection.summary.pruned_directories, 1, "{case}");
         for absent in [
@@ -165,7 +167,7 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
             &target,
             &before,
             &selection,
-            std::time::Instant::now() + super::selection::PHASE_TIME,
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
         );
         if case == "selected" {
             let (changes, summary) = captured.unwrap();
@@ -229,7 +231,7 @@ fn command_selection_rejects_unexcluded_unsafe_inputs() {
                     &super::fs::open_directory(&target).unwrap(),
                     &super::fs::open_directory(&resources).unwrap(),
                     &config,
-                    std::time::Instant::now() + super::selection::PHASE_TIME,
+                    std::time::Instant::now() + super::selection::TEST_RUNTIME,
                 ),
                 Err(super::ToolError::Path)
             ),
@@ -289,7 +291,7 @@ fn command_selection_rejects_unsafe_or_unbounded_controls_before_copy() {
             &super::fs::open_directory(&target).unwrap(),
             &super::fs::open_directory(&resources).unwrap(),
             &config,
-            std::time::Instant::now() + super::selection::PHASE_TIME,
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
         );
         assert!(
             match case {
@@ -342,7 +344,7 @@ fn command_controls_cannot_exceed_the_grant_or_path_depth() {
             &super::fs::open_directory(&target).unwrap(),
             &super::fs::open_directory(&resources).unwrap(),
             &config,
-            std::time::Instant::now() + super::selection::PHASE_TIME,
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
         );
         if case == "grant" {
             assert!(matches!(result, Err(super::ToolError::FilesystemDenied)));
@@ -375,7 +377,7 @@ fn command_selection_rejects_an_overlong_relative_path() {
             &super::fs::open_directory(&target).unwrap(),
             &super::fs::open_directory(&resources).unwrap(),
             &config,
-            std::time::Instant::now() + super::selection::PHASE_TIME,
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
         ),
         Err(super::ToolError::Limit)
     ));
@@ -409,7 +411,7 @@ fn command_selection_negations_cannot_disclose_protected_names() {
         &super::fs::open_directory(&target).unwrap(),
         &super::fs::open_directory(&resources).unwrap(),
         &serde_json::from_value(config).unwrap(),
-        std::time::Instant::now() + super::selection::PHASE_TIME,
+        std::time::Instant::now() + super::selection::TEST_RUNTIME,
     )
     .unwrap();
     for protected in [".env", ".env.local", ".git", ".ssh", "nested/.aws"] {
