@@ -32,7 +32,7 @@ fn cache_capture_recreates_subtrees_preserves_host_exclusions_and_rejects_unsafe
             &lower,
             &upper,
             &exclusions,
-            Instant::now() + crate::tools::selection::PHASE_TIME,
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
             DEFAULT_COMMAND_PROJECT_BYTES,
         )
     };
@@ -56,7 +56,7 @@ fn cache_capture_recreates_subtrees_preserves_host_exclusions_and_rejects_unsafe
             &lower,
             &upper,
             &exclusions,
-            Instant::now() + crate::tools::selection::PHASE_TIME,
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
             1
         ),
         Err(ToolError::Limit)

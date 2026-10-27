@@ -247,7 +247,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 const MACOS_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
 
-const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
+const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
@@ -1016,6 +1016,7 @@ impl Task {
         cache: Option<super::BuildCacheTransfer>,
     ) -> Result<Self, ToolError> {
         Ok(Self {
+            command_deadline: None,
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache,
@@ -1227,13 +1228,14 @@ async fn execute_worker(
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     gate: GoGate,
-    root: &Path,
+    (root, command_deadline): (&Path, Option<[u8; 8]>),
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let git_stage = gate.git_stage;
     #[cfg(any(test, feature = "test-support"))]
     let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
+    task.command_deadline = command_deadline;
     task.git_stage = git_stage;
     #[cfg(any(test, feature = "test-support"))]
     {
@@ -1383,7 +1385,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(MACOS_SELECTION_CONTRACT),
-            "c9a73a9d3c9b713e75e126b87e2a86783fd4b2bbdabcdbb83aaf4ae779ec1d6b"
+            "a66a758e6b033ed1c57f64c9fcdb86ceab80ed061eb05a1937744c68ca8b5c52"
         );
         super::super::tests::assert_enforcement_prose(
             MACOS_SELECTION_CONTRACT,
@@ -1617,6 +1619,7 @@ mod tests {
             "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
+            command_deadline: None,
             definition: None,
             handover: None,
             intent: EffectIntent {
@@ -2096,6 +2099,7 @@ mod tests {
         .unwrap();
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
+            command_deadline: None,
             definition: None,
             handover: None,
             intent: EffectIntent {
