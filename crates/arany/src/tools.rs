@@ -5,6 +5,8 @@ mod cancel;
 pub(crate) mod catalog;
 pub(crate) mod config;
 pub(crate) mod definitions;
+mod display;
+pub use display::DisplayFacts;
 mod discovery;
 mod dispatch;
 pub use discovery::{
