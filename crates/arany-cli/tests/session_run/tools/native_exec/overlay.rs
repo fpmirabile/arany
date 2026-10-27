@@ -22,19 +22,21 @@ enum OverlayCase {
     HostCreate,
 }
 
-const OVERLAY_CASES: [OverlayCase; 12] = [
+const OVERLAY_CASES: [OverlayCase; 9] = [
     OverlayCase::Reads,
     OverlayCase::Writes,
     OverlayCase::SpillMerge,
     OverlayCase::IgnoredClean,
     OverlayCase::ModeZero,
     OverlayCase::NoSpace,
-    OverlayCase::Deletion,
-    OverlayCase::DeleteDrift,
-    OverlayCase::CopyUps,
     OverlayCase::Recreation,
     OverlayCase::HostEdit,
     OverlayCase::HostCreate,
+];
+const PUBLICATION_OVERLAY_CASES: [OverlayCase; 3] = [
+    OverlayCase::Deletion,
+    OverlayCase::DeleteDrift,
+    OverlayCase::CopyUps,
 ];
 const NARROW_OVERLAY_CASES: [OverlayCase; 4] = [
     OverlayCase::Narrow,
@@ -155,6 +157,15 @@ impl std::fmt::Display for OverlayCase {
 )]
 fn whole_root_overlay_publication_and_refusals_reopen_without_execution() {
     overlay_journey(&OVERLAY_CASES);
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux overlay deletion and copy-up publication and closed replay"
+)]
+fn overlay_deletion_and_copyups_reopen_without_execution() {
+    overlay_journey(&PUBLICATION_OVERLAY_CASES);
 }
 
 #[test]
@@ -393,6 +404,12 @@ async fn overlay_case(case: OverlayCase) {
         }
     };
     let (outcome, ()) = tokio::join!(running, mutate);
+    if let Err(error) = &outcome {
+        let reason = arany_cli::protocol::rpc::Reason::from(error);
+        crate::process::annotate_native_fixture(&format!(
+            "fixture=command_overlay; case={case}; stage=engine; reason={reason:?}"
+        ));
+    }
     check_overlay_case(fixture, &provider, outcome.unwrap(), case).await;
 }
 
