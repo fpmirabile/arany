@@ -430,8 +430,6 @@ pub enum WorkerDisposition {
     NoChange,
     Failed,
     Cancelled,
-    Lost,
-    PrivateUncertain,
 }
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -446,8 +444,6 @@ pub enum WorkerCause {
     Budget,
     SnapshotDrift,
     CriterionUnverified,
-    PrivateUncertain,
-    Lost,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -912,7 +908,6 @@ impl WorkerOutcome {
                     | WorkerCause::SnapshotDrift
                     | WorkerCause::CriterionUnverified
             ) | (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
-                | (WorkerDisposition::Lost, WorkerCause::Lost)
         )
     }
 }

@@ -66,10 +66,10 @@ pub(crate) use events::{
 };
 pub(crate) use events::{
     add_command_selection, expiring_intent_text, expiring_payload, goal_started_v7_payload,
-    goal_started_v7_to_v8, intent_without_expiry, pre_command_selection_payload,
-    pre_file_removal_payload, pre_gh_pr_list_payload, pre_gh_pr_view_payload,
-    pre_git_write_payload, pre_glob_payload, pre_host_git_payload, pre_host_payload,
-    pre_multiedit_payload, pre_role_routing_payload, pre_roster_setup_payload,
+    goal_started_v7_to_v8, intent_without_expiry, live_editor_payload,
+    pre_command_selection_payload, pre_file_removal_payload, pre_gh_pr_list_payload,
+    pre_gh_pr_view_payload, pre_git_write_payload, pre_glob_payload, pre_host_git_payload,
+    pre_host_payload, pre_multiedit_payload, pre_role_routing_payload, pre_roster_setup_payload,
     pre_shared_editor_payload, provider_call_v18_payload, provider_call_v18_to_v19,
     provider_call_v19_payload, provider_call_v19_to_v20, provider_call_v22_payload,
     rebind_intent_pins, replace_intent_pin, rewind_started_v1_payload, rewind_started_v1_to_v2,
