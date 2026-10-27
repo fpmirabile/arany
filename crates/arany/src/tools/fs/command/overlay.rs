@@ -54,7 +54,7 @@ impl Baseline {
         }
         let calls = selector.calls();
         for directory in &self.complete {
-            if ignored(directory, true, &mut selector)? {
+            if ignored(&joined(prefix, directory), true, selector)? {
                 continue;
             }
             let path = if directory.is_empty() {
