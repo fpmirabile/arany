@@ -14,10 +14,20 @@ const MARKDOWN_CASES: &[(&str, &str, bool, &str)] = &[
         "Result",
     ),
     (r"  ## \*Result", r"\*Result", true, "Result"),
-    ("```Result\n  中 e\u{301} 👩‍💻\n```", "Result", true, "Result"),
-    ("~~~Result&#27;\nbody\n~~~", "Result&#27;", true, "Result"),
-    ("~~~Result\nbody\n~~~", "Result", true, "Result"),
-    ("  ~~~~Result\nbody\n  ~~~~", "Result", true, "Result"),
+    (
+        "```Result\n  中 e\u{301} 👩‍💻\n```",
+        "Result",
+        true,
+        "```Result",
+    ),
+    (
+        "~~~Result&#27;\nbody\n~~~",
+        r"Result\u{001b}",
+        true,
+        "~~~Result",
+    ),
+    ("~~~Result\nbody\n~~~", "Result", true, "~~~Result"),
+    ("  ~~~~Result\nbody\n  ~~~~", "Result", true, "  ~~~~Result"),
     ("~~~\nResult\n~~~", "Result", false, "Result"),
     ("~~~\n~Result~\n~~~", "~Result~", false, "~Result~"),
     ("    Result\n      value", "Result", false, "Result"),
@@ -232,7 +242,7 @@ fn code_whitespace_info_strings_and_narrow_geometry() {
         ("```\n\tResult\n```", vec!["    Result"]),
         (
             "~~~&#27;]52;c;unsafe&#7;\nResult\n~~~",
-            vec!["&#27;]52;c;unsafe&#7;", "Result"],
+            vec![r"\u{001b}]52;c;unsafe\u{0007}", "Result"],
         ),
         (
             "~~~rust\u{1b}\nResult\n~~~",
@@ -518,7 +528,7 @@ fn streaming_snapshots_replace_partial_markdown_and_keep_source_on_resize() {
     for source in [
         "# Result\n\n*unfinished emphasis*",
         "# Result\n\n[label](https://example.test)",
-        "# Result\n\n```rust\n  中 e\u{301} value\n```",
+        "# Result\n\n```rust&amp;lang\n  中 e\u{301} value\n```",
         "# Result\n\n| Name | Value |\n| --- | --- |\n| **first** | second |",
     ] {
         for width in [16, 40, 50, 80, 120] {
@@ -631,7 +641,8 @@ fn replace_prefixes(
 #[test]
 fn incomplete_checkpoints_format_with_exact_classic_costs_and_withdraw_on_rejection() {
     use arany::ProviderCallDisposition;
-    let source = "# Result\n\n```rust\n  retained body";
+    let source =
+        "# Result\n\n[retained](https://example.test/body)\n\n```rust&amp;lang\n  retained body";
     let view = checkpoint_view(source);
     for width in [16, 40, 50, 80, 120] {
         let mut history = History::default();

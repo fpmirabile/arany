@@ -914,7 +914,7 @@ fn action_deadlines(
                     u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
                 )
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-                + crate::tools::guard::transfer::transfer_overhead(intent)
+                + crate::tools::guard::transfer::transfer_time(intent)
                 + Duration::from_secs(10)
         },
         |window| window.completion_deadline,
@@ -1013,9 +1013,6 @@ pub(super) async fn run_unit(
     }
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    if let Some(private) = &runtime.worker {
-        private.contained.store(false, Ordering::Release);
-    }
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
     let go_cancellation = cancellation.clone();
@@ -1106,7 +1103,9 @@ pub(super) async fn run_unit(
                             })??;
                 } else if bytes == b"WORKER_READY\n" && !image_sent {
                     image_sent = true;
-                    let input = crate::tools::guard::transfer::bulk_input(runtime)
+                    let input = runtime
+                        .handover
+                        .as_deref()
                         .ok_or(ToolError::Configuration)?;
                     tokio::time::timeout_at(
                         go_deadline,
@@ -1218,7 +1217,7 @@ pub(super) async fn run_unit(
                     }
                 }
                 let capture_result = async {
-                    if let Some(session) = cache.as_ref().filter(|_| runtime.worker.is_none()) {
+                    if let Some(session) = cache.as_ref() {
                         let observation =
                             super::super::read_observation_line(&mut stream, intent).await?;
                         let update_deadline = super::super::cache_transfer_deadline(
@@ -1270,20 +1269,6 @@ pub(super) async fn run_unit(
                             .map(|observation| {
                                 (observation, super::super::CacheCandidate::Received)
                             })
-                    } else if runtime.worker.is_some() {
-                        if crate::tools::discovery::possible(&intent.call) {
-                            super::super::wait_discovery_completion(&mut stream, intent).await?;
-                        }
-                        super::super::read_worker_observation(
-                            &mut stream,
-                            runtime,
-                            intent,
-                            Duration::from_millis(u64::from(intent.limits.runtime_ms))
-                                + crate::tools::guard::transfer::transfer_time(intent)
-                                + TEARDOWN_WAIT,
-                        )
-                        .await
-                        .map(|observation| (observation, super::super::CacheCandidate::Received))
                     } else if crate::tools::discovery::possible(&intent.call) {
                         super::super::read_discovery_report(&mut stream, intent)
                             .await
@@ -1352,9 +1337,6 @@ pub(super) async fn run_unit(
         .map_err(|_| ToolError::Operation)?;
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
-    if let Some(private) = &runtime.worker {
-        private.contained.store(true, Ordering::Release);
-    }
     if result.is_ok() {
         link.release_publisher(&mut unit)?;
     }
@@ -1438,7 +1420,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let worker_input = if task.worker.is_some() || task.handover.is_some() {
+        let worker_input = if task.handover.is_some() {
             stream
                 .write_all(b"WORKER_READY\n")
                 .map_err(|_| ToolError::Operation)?;
@@ -1446,11 +1428,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 &mut stream,
                 crate::session::worker::WORKER_DATA_BYTES,
             )?;
-            if let Some(transfer) = &task.worker {
-                transfer.decode(&bytes)?;
-            } else {
-                crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
-            }
+            crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
             Some(bytes)
         } else {
             None
@@ -1487,15 +1465,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if runtime.worker.is_some() && !intent.call.is_process() {
-                    Some(
-                        super::storage::prepare_worker_storage(
-                            path.parent().ok_or(ToolError::Path)?,
-                            &intent.limits,
-                        )
-                        .await?,
-                    )
-                } else if intent.call.is_git() && git_stage != Some(GitStage::Publish) {
+                storage = if intent.call.is_git() && git_stage != Some(GitStage::Publish) {
                     let root = path.parent().ok_or(ToolError::Path)?;
                     let volumes = super::storage::prepare_git_storage(root).await?;
                     git_storage_fault(root, &volumes, &intent)?;
@@ -1693,14 +1663,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                      windows,
                      ..
                  }| {
-                    observation.cache_update =
-                        if runtime.worker.is_some() && intent.call.is_process() {
-                            crate::tools::CacheUpdate::Discarded
-                        } else if cache.is_some() {
-                            crate::tools::CacheUpdate::NotAttempted
-                        } else {
-                            crate::tools::CacheUpdate::NotApplicable
-                        };
+                    observation.cache_update = if cache.is_some() {
+                        crate::tools::CacheUpdate::NotAttempted
+                    } else {
+                        crate::tools::CacheUpdate::NotApplicable
+                    };
                     if cleanup.is_ok()
                         && let Some((before, selection)) = &command_before
                         && let Ok(command) =
@@ -1760,33 +1727,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                             }
                         }
                     }
-                    if cleanup.is_ok()
-                        && intent.call.is_process()
-                        && let Some(action) = &runtime.worker
-                    {
-                        let before = action.transfer.decode(&action.input)?;
-                        let (image, capture) = if observation.disposition
-                            == ToolDisposition::Succeeded
-                        {
-                            crate::tools::guard::transfer::command_capture(
-                                &before,
-                                &crate::tools::fs::open_directory(
-                                    &path.parent().ok_or(ToolError::Path)?.join("workspace/tree"),
-                                )?,
-                                &action.transfer.grant,
-                            )
-                        } else {
-                            (before, crate::session::worker::PrivateCapture::None {})
-                        };
-                        let mut command: crate::session::worker::WorkerCommandResult =
-                            serde_json::from_str(&observation.output)
-                                .map_err(|_| ToolError::Operation)?;
-                        command.private_capture = capture;
-                        observation.output =
-                            serde_json::to_string(&command).map_err(|_| ToolError::Operation)?;
-                        *action.output.lock().map_err(|_| ToolError::Operation)? =
-                            Some(image.encode()?);
-                    }
                     Ok(observation)
                 },
             );
@@ -1795,9 +1735,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             }
             let mut response_sent = false;
             let mut cache_transfer_failed = false;
-            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result)
-                && runtime.worker.is_none()
-            {
+            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result) {
                 let transfer = async {
                     let bytes = crate::tools::spill::encode_report(observation)?;
                     output
@@ -1960,17 +1898,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 && let Some(frame) = &git_frame
             {
                 super::git_write::send_plan(&mut output, frame, relayed_receiver).await?;
-            }
-            if result.is_ok()
-                && let Some(action) = &runtime.worker
-            {
-                let bytes = action
-                    .output
-                    .lock()
-                    .map_err(|_| ToolError::Operation)?
-                    .take()
-                    .ok_or(ToolError::Operation)?;
-                crate::tools::guard::transfer::send_frame(&mut output, &bytes).await?;
             }
             // The reader owns the relay acknowledgement, so it outlives the frame send.
             if let Some(reader) = reader {
@@ -2603,7 +2530,6 @@ done
             guard_available: true,
             git_writes_available: false,
             host_authentication: Default::default(),
-            worker: None,
             handover: None,
             definitions: Default::default(),
             permissions: None,
@@ -4146,7 +4072,6 @@ int main(int argc, char **argv) {
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
                     definition: None,
-                    worker: None,
                     handover: None,
                     config: runtime.config.clone(),
                     cache: None,

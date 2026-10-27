@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft` — O1/O2 open; R1/R2 are recurrence checks scoped to VR3/VR4; VR1 and VR5 are implementable now; implementation has not started.
+- Status: `Draft` — O1/O2 open; R1/R2 are recurrence checks scoped to VR3/VR4; VR1 and VR5 are implementable now; VR2 is closed with evidence only.
 - Owner: Arany owner; the team lead owns CI evidence collection and slice delivery.
 - Last updated: `2026-10-27`
 - Research baseline: `20b5dd02580959e89caeed02225d820db2a9c51f`.
@@ -20,7 +20,7 @@ lossy observer.
 
 This is reliability work on existing paths, not a new Guard, reporting command,
 credential backend or macOS feature. The related Linux overlay implementation
-remains with its [own plan](../command-workspace-overlay/README.md). Measure the
+is owned by the [Tools contract](../../docs/specs/tools.md#linux-enforcement-and-compatibility). Measure the
 implementation actually present at the selected revision, including its overlay
 and cache profile; do not restore a retired copy path for comparison.
 
@@ -255,7 +255,7 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   no-op executable on the selected host using ordinary executable pinning; record
   its canonical identity as a prerequisite and refuse absence. Update the corpus
   notes' owner procedure to require the selected revision's native namespace
-  bootstrap and host authorization ([D7′](../command-workspace-overlay/README.md#research));
+  bootstrap and host authorization ([Ubuntu namespace prerequisite](../../docs/specs/tools.md#ubuntu-namespace-entry-diagnosis));
   stock-policy refusal is failed evidence, never a host/fake-Guard fallback.
   Read/Edit alone did not exercise that prerequisite. Use explicit argv,
   no interpreter, no network, no MCP and no approval wait, with a matching admitted
@@ -284,6 +284,32 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
 
 ### VR2 — Check current runtime topology stability before repair
 
+- **Result (2026-10-27): closed with evidence only.** N=5 sequential Focused CI
+  `macos-debug` runs on `ci/focused-vr` at
+  `e6d33c30b954c4e819cb220945d35b5f52fdf7fb` all succeeded, without a busy-detach
+  recurrence. Every run used attempt 1; independent GitHub REST API checks
+  confirmed the head, attempt and successful run/job conclusions for all five:
+
+  | Run | macOS debug job |
+  | --- | --- |
+  | [40514236943](https://github.com/fpmirabile/arany/actions/runs/40514236943/attempts/1) | [122223858175](https://github.com/fpmirabile/arany/actions/runs/40514236943/job/122223858175) |
+  | [40518417560](https://github.com/fpmirabile/arany/actions/runs/40518417560/attempts/1) | [122238267510](https://github.com/fpmirabile/arany/actions/runs/40518417560/job/122238267510) |
+  | [40525006176](https://github.com/fpmirabile/arany/actions/runs/40525006176/attempts/1) | [122262069645](https://github.com/fpmirabile/arany/actions/runs/40525006176/job/122262069645) |
+  | [40531463742](https://github.com/fpmirabile/arany/actions/runs/40531463742/attempts/1) | [122285118529](https://github.com/fpmirabile/arany/actions/runs/40531463742/job/122285118529) |
+  | [40535203285](https://github.com/fpmirabile/arany/actions/runs/40535203285/attempts/1) | [122298475267](https://github.com/fpmirabile/arany/actions/runs/40535203285/job/122298475267) |
+
+  The lead's retained result lines show
+  `tools::guarded_runtime_profile_checks_mount_topology_before_dispatch`
+  completing with `ok` in every job; each Session suite finished with
+  `63 passed; 0 failed; 14 ignored`. The history result above remains
+  attributed to Fable: no busy-detach
+  recurrence after the shared detach helper `572b46b3` (18 Oct) in about 360
+  retained macOS job logs. The independent subset contains 110 debug logs,
+  including seven at known descendants of that helper, with no busy-detach
+  failure. The 18 Oct `tools_macos.rs:1115` call-count assertions are a separate
+  topology family and are not closed by this result. Only the busy-detach
+  `NEXT_STEPS.md` row is removed; no source change or cause claim accompanies
+  this closure.
 - Inventory: the existing runtime-topology `NEXT_STEPS.md` row and retained native
   evidence first; `crates/arany-cli/tests/session_run/tools_macos.rs` and
   `crates/arany/src/test_support/process.rs` only for a reproduced current defect.
@@ -351,6 +377,7 @@ VR5 includes deletion of this plan and its index row in its changed-line estimat
   running. Retain every attempt and current intent-correlated stage/check capture.
   No recurrence closes VR4 as evidence plus row removal (≤150 changed lines),
   without source changes or a claim that the historical cause is known.
+- **R2 result:** N=5 sequential Focused CI `macos-release` runs at `e6d33c30b954c4e819cb220945d35b5f52fdf7fb` all succeeded with nonzero test counts and no execution- or storage-cleanup-unconfirmed failure: [40514236959](https://github.com/fpmirabile/arany/actions/runs/40514236959), [40519063160](https://github.com/fpmirabile/arany/actions/runs/40519063160), [40534470573](https://github.com/fpmirabile/arany/actions/runs/40534470573), [40538385142](https://github.com/fpmirabile/arany/actions/runs/40538385142), [40544264386](https://github.com/fpmirabile/arany/actions/runs/40544264386). The family is closed without a cause claim.
 - On recurrence, bind mode/rule/operation, intent identity, GO state and first
   closed stage/check before teardown overwrites a snapshot. Reuse the bounded
   release recorder/debug stages; distinguish execution unconfirmed

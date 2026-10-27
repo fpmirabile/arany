@@ -65,36 +65,16 @@ fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
 
 #[test]
 fn live_replay_refuses_private_targets_and_old_release_fields() {
-    let mut f = fixture();
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::ToolRequested,
-        None,
-    );
-    let intent = f.intent(
-        f.child,
-        ToolCall::Read {
-            path: "src/a".into(),
-            offset: None,
-            limit: None,
-        },
-        EffectTarget::WorkerView {
-            assignment_id: f.child,
-            base_digest: [1; 32],
-            revision: 0,
-            cache_generation: None,
-        },
-    );
-    rejected(
-        &f,
-        Event::ToolStarted {
-            run_id: f.run,
-            agent_run_id: f.child,
-            intent: intent.into(),
-            active_ceiling_ms: 0,
-            verdict: None,
-        },
+    let f = fixture();
+    assert!(
+        serde_json::from_value::<EffectTarget>(serde_json::json!({
+            "kind": "worker_view",
+            "assignment_id": f.child,
+            "base_digest": vec![1_u8; 32],
+            "revision": 0,
+            "cache_generation": null,
+        }))
+        .is_err()
     );
     let data = serde_json::json!({
         "assignment_id": f.child,

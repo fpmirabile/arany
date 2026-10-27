@@ -528,6 +528,7 @@ async fn dead_publisher(
     let provider = Arc::new(ScriptedProvider::new(Vec::new()));
     let mut resumed = input(workspace);
     resumed.session_id = Some(recorded.view.id);
+    resumed.title = None;
     resumed.objective.clear();
     resumed.goal = arany::GoalRequest::resume(recorded.view.goals.last().unwrap().id, false);
     let result = run_with(
