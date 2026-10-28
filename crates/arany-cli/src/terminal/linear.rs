@@ -1929,20 +1929,25 @@ mod usage_tests {
         let mut identity =
             arany::ProviderIdentity::new("openai", "model-00", arany::Provenance::native());
         identity.effort = Some(arany::Effort::High);
-        view.usage.api_limits.push(arany::ApiUsage {
-            session_id: view.id,
-            run_id,
-            actor: None,
-            role: arany::ProviderRole::Primary,
-            identity,
-            dialect: arany::ApiLimitDialect::OpenAi,
-            rows: arany::test_support::routing::api_sample(1000)
-                .api
-                .unwrap()
-                .rows,
-            latest_unavailable: None,
-            latest_omitted: None,
-        });
+        for role in [
+            arany::ProviderRole::Primary,
+            arany::ProviderRole::Compaction,
+        ] {
+            view.usage.api_limits.push(arany::ApiUsage {
+                session_id: view.id,
+                run_id,
+                actor: None,
+                role,
+                identity: identity.clone(),
+                dialect: arany::ApiLimitDialect::OpenAi,
+                rows: arany::test_support::routing::api_sample(1000)
+                    .api
+                    .unwrap()
+                    .rows,
+                latest_unavailable: None,
+                latest_omitted: None,
+            });
+        }
         let pages = crate::presentation::usage::usage_pages(&view, false, None);
         assert!(pages.len() > 2);
         for page in &pages {
@@ -1964,6 +1969,12 @@ mod usage_tests {
         }
         assert_eq!(text, expected);
         assert!(text.contains("Requests\nLimit: 100\nRemaining: 0\nLast reported: 1970-01-01T00:16:40Z · headers\nObservation age unknown\nReset: 1970-01-01T00:17:40Z\n"));
+        assert_eq!(
+            text.matches("\nAPI rate limits · Run 1 · route ").count(),
+            2
+        );
+        assert!(text.contains("Role: primary\nReported header dialect: OpenAI\n"));
+        assert!(text.contains("Role: compaction\nReported header dialect: OpenAI\n"));
         assert!(text.contains("Output: 8 known; some calls unreported"));
         assert!(text.contains("Cache read (included in input): 0 known; some calls unreported"));
         assert!(text.contains("Cache write (included in input): unknown (not reported)"));
