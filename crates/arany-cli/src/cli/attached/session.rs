@@ -145,16 +145,20 @@ impl AttachedSession {
         {
             self.ui.notice = Some(Feedback::History(text.into()));
         }
-        if let Some(notice) = crate::accounts::chatgpt::take_migration_notice() {
+        let migration_notice = crate::accounts::chatgpt::take_migration_notice();
+        if let Some(notice) = migration_notice {
             append_notice(&mut self.ui.notice, notice);
         }
-        self.terminal
-            .draw_notice(
-                &self.view,
-                &self.composer,
-                self.ui.notice.as_ref().map(Feedback::notice),
-            )
-            .map_err(|error| error.to_string())?;
+        if let Err(error) = self.terminal.draw_notice(
+            &self.view,
+            &self.composer,
+            self.ui.notice.as_ref().map(Feedback::notice),
+        ) {
+            if migration_notice.is_some() {
+                crate::accounts::chatgpt::record_migration_notice();
+            }
+            return Err(error.to_string());
+        }
         let archive_drawn =
             archive_notice_drawn(self.ui.notice.as_ref(), self.ui.archive_notice.as_deref());
         self.ui.notice = self

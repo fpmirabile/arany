@@ -1599,6 +1599,8 @@ fn sign_out_target_at_with(
                 if !local_cleared {
                     return Err(AuthorizationError::SignOutStorageUncertain);
                 }
+                index.accounts[position].signout_pending = false;
+                index.write(state)?;
                 forget_removed_account(state, &mut index, target.account_id)?;
                 return Ok(SignOutOutcome {
                     remote_confirmed: false,

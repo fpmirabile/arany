@@ -33,7 +33,7 @@ pub(crate) use consent::{RiskAcknowledgment, RiskPrompt};
 static MIGRATION_NOTICE_PENDING: AtomicBool = AtomicBool::new(false);
 const MIGRATION_NOTICE: &str = "Saved ChatGPT accounts were upgraded; earlier sign-ins are disconnected. Reconnect through /setup to use the Codex OAuth client.";
 
-fn record_migration_notice() {
+pub(crate) fn record_migration_notice() {
     MIGRATION_NOTICE_PENDING.store(true, Ordering::Release);
 }
 
