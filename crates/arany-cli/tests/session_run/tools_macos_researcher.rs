@@ -333,7 +333,13 @@ done
             assert_eq!(primary["commands"][0]["name"], "shell");
             assert_eq!(
                 primary["git"]["operations"],
-                json!(["git_status", "git_diff", "git_log", "git_commit", "git_branch"])
+                json!([
+                    "git_status",
+                    "git_diff",
+                    "git_log",
+                    "git_commit",
+                    "git_branch"
+                ])
             );
             let catalog: Value =
                 serde_json::from_str(requests[1].input.tools.as_ref().unwrap().catalog()).unwrap();
