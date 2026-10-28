@@ -85,7 +85,10 @@ fn command_resource_engine(state_path: &Path) -> Engine {
     use std::os::unix::fs::PermissionsExt;
     let engine = facts_engine(StateRoot::admit(state_path).unwrap(), state_path);
     let executable = std::fs::canonicalize("/bin/sh").unwrap();
-    let digest = format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
+    let digest: String = Sha256::digest(std::fs::read(&executable).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
         "commands":[{"name":"sh","executable":executable,"sha256":digest,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
     let config_path = state_path.join("tools.json");
