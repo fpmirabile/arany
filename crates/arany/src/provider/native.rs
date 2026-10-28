@@ -59,14 +59,6 @@ pub(super) async fn post_json_observed(
     key: &str,
     observe: impl FnOnce(&reqwest::header::HeaderMap) -> Result<(), ProviderError>,
 ) -> Result<Vec<u8>, ProviderError> {
-    post_json_observed(request, key, |_| Ok(())).await
-}
-
-pub(super) async fn post_json_observed(
-    request: reqwest::RequestBuilder,
-    key: &str,
-    observe: impl FnOnce(&reqwest::header::HeaderMap) -> Result<(), ProviderError>,
-) -> Result<Vec<u8>, ProviderError> {
     let mut response = request.send().await.map_err(|error| send_failure(&error))?;
     observe(response.headers())?;
     if !response.status().is_success() {
