@@ -167,7 +167,6 @@ pub(super) fn preflight_idle_run(
                 Some(id) => match chatgpt::selected_reauthorization_target(id) {
                     Ok(_) => chatgpt::AuthorizationError::BackendRouteNotAdmitted.to_string(),
                     Err(error) => error.to_string(),
-                    _ => "Choose a model with /model before submitting".into(),
                 },
                 None => "Choose a model with /model before submitting".into(),
             },
