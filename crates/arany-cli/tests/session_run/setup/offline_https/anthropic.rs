@@ -283,10 +283,15 @@ pub(super) fn stage() {
     assert_eq!(compact_api.rows[0].remaining, Some(0));
     assert_eq!(compact_api.rows[1].limit, Some(2000));
     assert_eq!(direct.usage.api_limits.len(), 2);
-    assert!(direct.usage.api_limits.iter().all(|group| {
-        group.identity.saved_api_account_id() == Some(id)
-            && group.dialect == arany::ApiLimitDialect::Anthropic
-    }));
+    for group in &direct.usage.api_limits {
+        assert_eq!(
+            group.identity.provenance,
+            arany::Provenance::Native {
+                saved_api_account_id: Some(id),
+            }
+        );
+        assert_eq!(group.dialect, arany::ApiLimitDialect::Anthropic);
+    }
     assert_eq!(
         compact.wire_provenance,
         Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified)
