@@ -1556,6 +1556,13 @@ mod committed_selection_failure_tests {
         assert!(!detail.contains("runtime mount topology"));
         assert!(tool_summary(tool).contains("Guard stage: project selection timed out"));
     }
+}
+
+#[cfg(test)]
+mod rewrite_summary_tests {
+    use super::tool_summary;
+    use crate::presentation::tool_fixture;
+    use arany::ToolCall;
 
     #[test]
     fn tool_summary_lists_each_rewrite_fact_in_order() {

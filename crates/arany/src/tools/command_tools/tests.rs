@@ -41,7 +41,7 @@ fn selection_is_private_disabled_until_probed_and_drift_requires_a_new_pin() {
     let (state, workspace, executable, grant) = fixture(temp.path());
     assert_eq!(
         command_tool_candidates(&state, &workspace).unwrap(),
-        [executable.clone()]
+        std::slice::from_ref(&executable)
     );
     let tool = CommandTool::pin(&state, &workspace, &executable, vec!["hook".into()]).unwrap();
     CommandTools::edit(&state, |record| record.select(tool.clone())).unwrap();
