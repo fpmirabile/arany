@@ -7,6 +7,8 @@
 | <a id="max_api_limit_rows"></a>[`MAX_API_LIMIT_ROWS`](#max_api_limit_rows) | 7 | rows | `crates/arany/src/provider/limits.rs` |
 | <a id="login_shell_capture_timeout_ms"></a>[`LOGIN_SHELL_CAPTURE_TIMEOUT_MS`](#login_shell_capture_timeout_ms) | 10000 | milliseconds | `crates/arany/src/tools/unguarded/environment.rs` |
 | <a id="login_shell_capture_output_bytes"></a>[`LOGIN_SHELL_CAPTURE_OUTPUT_BYTES`](#login_shell_capture_output_bytes) | 65536 | bytes | `crates/arany/src/tools/unguarded/environment.rs` |
+| <a id="max_command_tools"></a>[`MAX_COMMAND_TOOLS`](#max_command_tools) | 8 | tools | `crates/arany/src/tools/command_tools.rs` |
+| <a id="max_command_tool_candidates"></a>[`MAX_COMMAND_TOOL_CANDIDATES`](#max_command_tool_candidates) | 256 | directory entries | `crates/arany/src/tools/command_tools.rs` |
 | <a id="max_editor_change_report_bytes"></a>[`MAX_EDITOR_CHANGE_REPORT_BYTES`](#max_editor_change_report_bytes) | 2048 | bytes | `crates/arany/src/session/worker.rs` |
 | <a id="max_context_content_bytes"></a>[`MAX_CONTEXT_CONTENT_BYTES`](#max_context_content_bytes) | 385024 | bytes | `crates/arany/src/session.rs` |
 | <a id="max_window_content_bytes"></a>[`MAX_WINDOW_CONTENT_BYTES`](#max_window_content_bytes) | 1048576 | bytes | `crates/arany/src/session.rs` |

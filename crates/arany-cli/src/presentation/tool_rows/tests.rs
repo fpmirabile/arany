@@ -1160,6 +1160,7 @@ mod enforcement_tests {
     fn tool_summary_preserves_the_guards_protected_path_diagnostic() {
         let intent = arany::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -1249,6 +1250,7 @@ mod unguarded_tests {
     fn intent(args: &[&str], cwd: &str) -> EffectIntent {
         EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -1553,5 +1555,50 @@ mod committed_selection_failure_tests {
         assert!(detail.contains("Resend your message; the Guard executable is not involved."));
         assert!(!detail.contains("runtime mount topology"));
         assert!(tool_summary(tool).contains("Guard stage: project selection timed out"));
+    }
+}
+
+#[cfg(test)]
+mod rewrite_summary_tests {
+    use super::tool_summary;
+    use crate::presentation::tool_fixture;
+    use arany::ToolCall;
+
+    #[test]
+    fn tool_summary_lists_each_rewrite_fact_in_order() {
+        let call = || ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "ls".into()],
+            cwd: String::new(),
+        };
+        let fact = |stage| arany::CommandRewrite {
+            hook_intent_id: None,
+            original_sha256: [1; 32],
+            tool_sha256: "a".repeat(64),
+            stage,
+        };
+        for (stage, label) in [
+            (arany::RewriteStage::Rewritten, "rewritten"),
+            (arany::RewriteStage::Unchanged, "no rewrite"),
+            (arany::RewriteStage::PinRefused, "needs re-pin"),
+            (arany::RewriteStage::InputLimit, "input limit"),
+            (arany::RewriteStage::NonZeroExit, "non-zero exit"),
+            (arany::RewriteStage::InvalidOutput, "malformed output"),
+            (arany::RewriteStage::NotCompleted, "not completed"),
+            (arany::RewriteStage::Limit, "limit reached"),
+            (arany::RewriteStage::Uncertain, "unknown outcome"),
+        ] {
+            let mut tool = tool_fixture(call(), "");
+            tool.intent.rewrite.push(fact(stage));
+            assert!(tool_summary(&tool).contains(&format!(" · rewrite: {label}")));
+        }
+        let mut tool = tool_fixture(call(), "");
+        tool.intent
+            .rewrite
+            .push(fact(arany::RewriteStage::Rewritten));
+        tool.intent
+            .rewrite
+            .push(fact(arany::RewriteStage::PinRefused));
+        assert!(tool_summary(&tool).contains(" · rewrite: rewritten · rewrite: needs re-pin"));
     }
 }

@@ -214,6 +214,86 @@ fn one_offered_delegate_call_decodes_as_a_typed_outcome() {
 }
 
 #[test]
+fn workspace_tools_are_offered_decoded_and_replayed_like_native_routes() {
+    let mut request = crate::provider::test_support::primary_request(MODEL);
+    let conversation = render::conversation(&request).unwrap();
+    let offered = conversation.tools.clone().unwrap();
+    let body = run_body(&request, &conversation, None).unwrap();
+    let names: Vec<_> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    for spec in &offered {
+        assert!(names.contains(&spec.name.as_str()), "{}", spec.name);
+    }
+    assert!(names.contains(&"arany_read"));
+    assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["parallel_tool_calls"], false);
+
+    let arguments = json!({"path":"src/lib.rs","offset":null,"limit":null}).to_string();
+    let mut reply = delegate_reply();
+    reply["choices"][0]["message"]["tool_calls"][0] = json!({
+        "id":"call_read","type":"function","function":{"name":"arany_read","arguments":arguments}
+    });
+    let response = decode_run(
+        reply.to_string().as_bytes(),
+        &request,
+        KEY,
+        &offered,
+        &conversation.outcome,
+    )
+    .unwrap();
+    assert!(matches!(
+        &response.outcome,
+        ProviderOutcome::Tools(requests) if requests.len() == 1
+            && requests[0].id.as_str() == "call_read"
+            && matches!(&requests[0].call, crate::tools::ToolCall::Read { path, .. } if path == "src/lib.rs")
+    ));
+    assert!(
+        decode_run(
+            reply.to_string().as_bytes(),
+            &request,
+            KEY,
+            &[],
+            &conversation.outcome
+        )
+        .is_err(),
+        "an unoffered Workspace Tool must not decode"
+    );
+
+    let mut replay = conversation;
+    replay.messages.push(Message {
+        role: Role::Assistant,
+        blocks: vec![Block::AssistantTurn(response.turn)],
+    });
+    replay.messages.push(Message {
+        role: Role::User,
+        blocks: vec![Block::ToolResult {
+            id: ToolUseId::new("call_read").unwrap(),
+            output: json!({"text":"fn main() {}"}),
+            is_error: false,
+        }],
+    });
+    let replay_body = run_body(&request, &replay, None).unwrap();
+    let messages = replay_body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[messages.len() - 1],
+        json!({"role":"tool","tool_call_id":"call_read","content":"{\"text\":\"fn main() {}\"}"})
+    );
+
+    request.input.tools = Some(crate::provider::test_support::tool_context(json!({
+        "write": true, "commands": [], "skills": [], "mcp_servers": [], "git": "unavailable",
+        "tool_calls_remaining": 0,
+    })));
+    let exhausted = render::conversation(&request).unwrap();
+    let body = run_body(&request, &exhausted, None).unwrap();
+    assert!(!body["tools"].as_array().unwrap().is_empty());
+    assert_eq!(body["tool_choice"], "none");
+}
+
+#[test]
 fn call_shapes_reject_multiple_mixed_and_unoffered_calls() {
     let request = delegate_request();
     let conversation = render::conversation(&request).unwrap();

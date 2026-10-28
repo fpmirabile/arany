@@ -9,8 +9,12 @@ use crate::tools::permissions::{
     PermissionConfig, feedback_lines, narrows, peer_name, post_tool_use_input, pre_tool_use_input,
 };
 use crate::tools::types::model_observation;
-use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
+use crate::tools::{
+    CommandTool, EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime,
+};
 use std::ops::ControlFlow;
+
+mod command_tools;
 
 const MIN_HOOK_RUNTIME_MS: u32 = 1_000;
 const FEEDBACK_RESERVE_BYTES: usize = 2 * MAX_HOOK_FEEDBACK_BYTES + 256;
@@ -38,6 +42,8 @@ pub(in crate::engine::run_loop) struct PostFold {
 
 #[derive(Debug, Eq, PartialEq)]
 struct HookRun {
+    intent_id: uuid::Uuid,
+    disposition: ToolDisposition,
     result: HookResult,
     stops: bool,
     cancelled: bool,
@@ -87,7 +93,9 @@ impl HookStart {
         match self {
             Self::Exhausted => Admission::Exhausted,
             Self::Ran(run) => match event {
-                HookEvent::PreToolUse | HookEvent::PostToolUse => Admission::Reserved(run),
+                HookEvent::CommandRewrite | HookEvent::PreToolUse | HookEvent::PostToolUse => {
+                    Admission::Reserved(run)
+                }
                 HookEvent::Stop | HookEvent::SubagentStop | HookEvent::PreCompact => {
                     if parent.is_cancelled() {
                         Admission::Reserved(run)
@@ -127,6 +135,8 @@ enum HookClock {
 type HookPlanRefusal = (&'static str, Option<(u8, u8)>);
 
 struct HookPlan {
+    command_subject: Option<uuid::Uuid>,
+    command_tool: Option<Box<CommandTool>>,
     group: u8,
     handler: u8,
     call: ToolCall,
@@ -140,6 +150,8 @@ fn hook_plan(
     hook: &CommandHook,
 ) -> Option<HookPlan> {
     Some(HookPlan {
+        command_subject: None,
+        command_tool: None,
         group,
         handler,
         call: hook_call(runtime, hook)?,
@@ -979,6 +991,8 @@ impl RunLoop<'_> {
                 handler,
                 subject_digest: digest,
                 intent: intent.clone(),
+                command_subject: None,
+                command_tool: None,
                 input_digest: crate::validate::digest(input.as_bytes()),
                 active_ceiling_ms,
             },
@@ -1157,7 +1171,10 @@ impl RunLoop<'_> {
                     boundary_ceiling
                 } else if matches!(
                     event,
-                    HookEvent::Stop | HookEvent::SubagentStop | HookEvent::PreCompact
+                    HookEvent::CommandRewrite
+                        | HookEvent::Stop
+                        | HookEvent::SubagentStop
+                        | HookEvent::PreCompact
                 ) {
                     Some(self.lifecycle_ceiling(if deadline.is_some() {
                         0
@@ -1172,6 +1189,8 @@ impl RunLoop<'_> {
                 handler: plan.handler,
                 subject_digest: digests.0,
                 intent: hook_intent.clone(),
+                command_subject: plan.command_subject,
+                command_tool: plan.command_tool.clone(),
                 input_digest: digests.1,
             },
         })
@@ -1211,6 +1230,8 @@ impl RunLoop<'_> {
         observation: ToolObservation,
         exhausted: bool,
     ) -> Result<HookStart, EngineError> {
+        let intent_id = observation.intent.id;
+        let disposition = observation.disposition;
         let stops = observation.stops_run();
         let cancelled = observation.disposition == ToolDisposition::Cancelled;
         let result = HookResult::for_event(occurrence.event, &observation);
@@ -1231,6 +1252,8 @@ impl RunLoop<'_> {
         })
         .await?;
         Ok(HookStart::Ran(HookRun {
+            intent_id,
+            disposition,
             result,
             stops,
             cancelled,

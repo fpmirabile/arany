@@ -99,6 +99,7 @@ impl StepEnd {
 #[must_use]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SizingRefusal {
+    Uncertain,
     DelegationDeadline,
     ActiveTime,
     Cancelled,
@@ -136,6 +137,7 @@ impl From<SizingRefusal> for StopCause {
     fn from(refusal: SizingRefusal) -> Self {
         match refusal {
             SizingRefusal::DelegationDeadline => Self::DelegationDeadline,
+            SizingRefusal::Uncertain => Self::Uncertain,
             SizingRefusal::ActiveTime => Self::ActiveTime,
             SizingRefusal::Cancelled => Self::Cancelled,
             SizingRefusal::ContextFull => Self::ContextFull,
@@ -422,6 +424,8 @@ mod tests {
                 handler: 0,
                 subject_digest: tool.intent.digest(),
                 intent: tool.intent.clone(),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [0; 32],
                 active_ceiling_ms: None,
             },
@@ -554,6 +558,7 @@ mod tests {
         }
 
         for (refusal, expected) in [
+            (SizingRefusal::Uncertain, StopCause::Uncertain),
             (SizingRefusal::ActiveTime, StopCause::ActiveTime),
             (SizingRefusal::Cancelled, StopCause::Cancelled),
             (SizingRefusal::ContextFull, StopCause::ContextFull),

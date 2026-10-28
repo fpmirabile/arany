@@ -372,6 +372,7 @@ mod tests {
             runs: Vec::new(),
             compactions: Vec::new(),
             goals: Vec::new(),
+            command_tool_probe: None,
             pending_provider_setup_edit: None,
             provider_setup_uncertain: false,
             environment_capture: None,
@@ -531,6 +532,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id,
@@ -766,6 +768,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),

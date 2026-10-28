@@ -4,6 +4,9 @@ use crate::tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostPrefixRule {
@@ -97,6 +100,9 @@ impl HostPrefixRule {
         let ToolCall::CommandUnguarded { program, args, .. } = &intent.call else {
             return false;
         };
+        if !intent.rewrite.is_empty() {
+            return false;
+        }
         let Some(pin) = &intent.host_command else {
             return false;
         };

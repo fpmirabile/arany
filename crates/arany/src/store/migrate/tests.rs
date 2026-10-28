@@ -6,6 +6,8 @@ use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+#[path = "command_tools_tests.rs"]
+mod command_tools;
 #[path = "retired_worker_tests.rs"]
 mod retired_worker;
 #[path = "selection_timing_tests.rs"]
@@ -20,7 +22,55 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 107] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 113] = [
+    (
+        "RunStarted",
+        26,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
+    ),
+    (
+        "ToolProposed",
+        5,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        27,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        34,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        16,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        23,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "ToolFinished",
+        32,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookFinished",
+        21,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
     (
         "AgentFinished",
         11,
@@ -486,33 +536,21 @@ const EVENT_FIXTURES: [EventFixture<'static>; 107] = [
         include_str!("runstarted-v24.json"),
         include_str!("runstarted-v24.json"),
     ),
-    (
-        "ToolFinished",
-        32,
-        SELECTION_TOOLFINISHED,
-        SELECTION_TOOLFINISHED,
-    ),
-    (
-        "HookFinished",
-        21,
-        SELECTION_HOOKFINISHED,
-        SELECTION_HOOKFINISHED,
-    ),
 ];
 
 #[test]
 fn web_operations_never_appear_in_source_version_rows() {
-    for (kind, input) in [
-        ("ToolProposed", include_str!("toolproposed-v1.json")),
-        ("ToolStarted", include_str!("toolstarted-v23.json")),
-        ("ToolFinished", SELECTION_TOOLFINISHED),
+    for (kind, from, input) in [
+        ("ToolProposed", 4, include_str!("toolproposed-v1.json")),
+        ("ToolStarted", 26, include_str!("toolstarted-v23.json")),
+        ("ToolFinished", 33, SELECTION_TOOLFINISHED),
         (
             "HookStarted",
+            15,
             include_str!("hookstarted-without-expiry.json"),
         ),
-        ("HookFinished", SELECTION_HOOKFINISHED),
+        ("HookFinished", 22, SELECTION_HOOKFINISHED),
     ] {
-        let from = crate::test_support::payload_version(kind) - 1;
         let value: Value = serde_json::from_str(input).unwrap();
         let pointer = ["/intent/call", "/observation/intent/call"]
             .into_iter()

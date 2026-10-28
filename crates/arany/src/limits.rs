@@ -24,6 +24,7 @@ use crate::{
         MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, MAX_QUERY_BYTES,
         MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS,
         WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS, WRITE_FRAME_BYTES,
+        command_tools::{MAX_COMMAND_TOOL_CANDIDATES, MAX_COMMAND_TOOLS},
         permissions::MAX_CONFIG_BYTES,
         toolchains::{
             MAX_DISCOVERY_PATH_ENTRIES, MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS,
@@ -77,6 +78,18 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: crate::tools::unguarded::environment::LOGIN_SHELL_CAPTURE_OUTPUT_BYTES as u64,
             unit: "bytes",
             owner: "crates/arany/src/tools/unguarded/environment.rs",
+        },
+        Limit {
+            name: "MAX_COMMAND_TOOLS",
+            value: MAX_COMMAND_TOOLS as u64,
+            unit: "tools",
+            owner: "crates/arany/src/tools/command_tools.rs",
+        },
+        Limit {
+            name: "MAX_COMMAND_TOOL_CANDIDATES",
+            value: MAX_COMMAND_TOOL_CANDIDATES as u64,
+            unit: "directory entries",
+            owner: "crates/arany/src/tools/command_tools.rs",
         },
         Limit {
             name: "MAX_EDITOR_CHANGE_REPORT_BYTES",

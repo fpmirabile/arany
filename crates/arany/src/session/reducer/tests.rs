@@ -781,7 +781,8 @@ fn roster_resume_and_unused_candidates_cannot_widen_pinned_routing() {
         });
         snapshot.child_profiles.push("spare".into());
         snapshot.selection_digest = snapshot.digest().unwrap();
-        assert!(invalid.validate().is_err());
+        // A single-route custom profile shares its own account, so Tools stay admitted.
+        assert_eq!(invalid.validate().is_err(), !custom);
         invalid.tool_policy = None;
         invalid.supervisor = None;
         assert!(invalid.validate().is_ok());

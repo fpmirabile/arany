@@ -1171,6 +1171,7 @@ impl Task {
             hook_stdin: self.hook_stdin.map(Into::into),
             checkpoint_gate: None,
             cache_state: None,
+            command_tools: Default::default(),
             command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::empty()),
             spill_access: None,
             config: self.config,
@@ -1855,6 +1856,7 @@ mod tests {
             handover: None,
             intent: EffectIntent {
                 host: None,
+                rewrite: Vec::new(),
                 host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),
@@ -2337,6 +2339,7 @@ mod tests {
             handover: None,
             intent: EffectIntent {
                 host: None,
+                rewrite: Vec::new(),
                 host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),

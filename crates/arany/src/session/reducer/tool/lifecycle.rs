@@ -281,6 +281,9 @@ pub(super) fn proposed(
         }
     }
     let child = names_child(current, run_id, agent_run_id);
+    if child && !intent.rewrite.is_empty() {
+        return Err(ReplayError::InvalidTransition);
+    }
     if super::search_allowance_spent(current, &intent.call) {
         return Err(ReplayError::InvalidTransition);
     }
@@ -321,7 +324,8 @@ fn start_primary_tool(
     let run = active_run(current, run_id)?;
     let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
     let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
-    let valid_origin = valid_origin(run, primary, config, intent);
+    let valid_origin =
+        valid_origin(run, primary, config, intent) && super::rewrite::valid(run, intent);
     if config
         .tool_policy
         .as_ref()

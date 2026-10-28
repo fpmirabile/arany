@@ -74,16 +74,17 @@ pub(crate) use events::{
 pub(crate) use events::{
     add_command_selection, add_selection_timing, expiring_intent_text, expiring_payload,
     goal_started_v7_payload, goal_started_v7_to_v8, intent_without_expiry, live_editor_payload,
-    pre_command_selection_payload, pre_file_removal_payload, pre_gh_pr_list_payload,
-    pre_gh_pr_view_payload, pre_git_write_payload, pre_glob_payload, pre_host_git_payload,
-    pre_host_payload, pre_multiedit_payload, pre_proxy_payload, pre_role_routing_payload,
-    pre_roster_setup_payload, pre_selection_timing_payload, pre_shared_editor_payload,
-    pre_web_payload, provider_call_v18_payload, provider_call_v18_to_v19,
-    provider_call_v19_payload, provider_call_v19_to_v20, provider_call_v22_payload,
-    rebind_intent_pins, replace_intent_pin, retired_worker_payload, rewind_started_v1_payload,
-    rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload, run_started_v18_to_v19,
-    run_started_v19_payload, run_started_v19_to_v20, run_started_v23_payload,
-    run_started_v23_to_v24, run_started_v24_payload, run_started_v24_to_v25,
+    pre_command_selection_payload, pre_command_tools_payload, pre_file_removal_payload,
+    pre_gh_pr_list_payload, pre_gh_pr_view_payload, pre_git_write_payload, pre_glob_payload,
+    pre_host_git_payload, pre_host_payload, pre_multiedit_payload, pre_proxy_payload,
+    pre_role_routing_payload, pre_roster_setup_payload, pre_selection_timing_payload,
+    pre_shared_editor_payload, pre_web_payload, provider_call_v18_payload,
+    provider_call_v18_to_v19, provider_call_v19_payload, provider_call_v19_to_v20,
+    provider_call_v22_payload, rebind_intent_pins, replace_intent_pin, retired_worker_payload,
+    rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
+    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
+    run_started_v23_payload, run_started_v23_to_v24, run_started_v24_payload,
+    run_started_v24_to_v25,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]
