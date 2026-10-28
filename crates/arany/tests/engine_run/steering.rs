@@ -133,11 +133,7 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,
@@ -470,11 +466,7 @@ async fn child_note_is_retained_when_no_boundary_remains() {
             }
         }));
         let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
-        let mut input = request(&workspace, "Check facts");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Check facts");
         let result = run_with(
             &engine,
             &provider,
@@ -770,11 +762,7 @@ async fn pause_at_the_delegate_boundary_spawns_no_child() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,
@@ -824,11 +812,7 @@ async fn pause_before_synthesis_starts_no_synthesis_call() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,
@@ -938,11 +922,7 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,

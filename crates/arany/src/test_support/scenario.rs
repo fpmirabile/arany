@@ -480,6 +480,16 @@ pub fn request(workspace: &Path, objective: &str) -> RunRequest {
     }
 }
 
+pub fn team_request(workspace: &Path, objective: &str) -> RunRequest {
+    RunRequest {
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Auto {
+            max_active_children: 1,
+        },
+        ..request(workspace, objective)
+    }
+}
+
 /// Context bytes the Engine reserves for an unplanned Goal's metadata: pinned budget, maximum facts, plan allowance and framing.
 pub fn unplanned_goal_metadata_bytes() -> u32 {
     let facts = crate::GoalContextFacts {

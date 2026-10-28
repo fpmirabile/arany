@@ -231,11 +231,7 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
             arany::test_support::goals::finish_with("child report"),
             arany::test_support::goals::finish_with("answer"),
         ]));
-        let mut input = request(&workspace, "Inspect notes");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Inspect notes");
         let result = run_with(
             &engine,
             &provider,

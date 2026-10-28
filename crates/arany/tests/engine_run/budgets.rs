@@ -1798,11 +1798,7 @@ async fn child_tool_sizing_does_not_exhaust_unspent_goal_time() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     input.goal.budget = Some(arany::GoalBudget {
         max_active_ms: Some(GOAL_ACTIVE_MS),
         ..arany::GoalBudget::default()
@@ -1852,11 +1848,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     // The primary call spends 8 tokens; the child's call spends the last 8 and exhausts the budget.
     input.goal.budget = Some(arany::GoalBudget {
         max_tokens: Some(16),
@@ -1906,11 +1898,7 @@ async fn near_deadline_child_tool_journals_limit_without_dispatch() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     input.goal.budget = Some(arany::GoalBudget {
         max_active_ms: Some(15_000),
         ..arany::GoalBudget::default()
