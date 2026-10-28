@@ -72,8 +72,7 @@ impl Provider for CustomProvider {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
-        if request.input.tools.is_some()
-            || !request.input.images.is_empty()
+        if !request.input.images.is_empty()
             || request.model != self.identity.model
             || !(1..=super::CUSTOM_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens)
         {
@@ -91,8 +90,7 @@ impl Provider for CustomProvider {
         preview: crate::provider::ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
-        if request.input.tools.is_some()
-            || !request.input.images.is_empty()
+        if !request.input.images.is_empty()
             || request.model != self.identity.model
             || !(1..=super::CUSTOM_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens)
         {
