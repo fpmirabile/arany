@@ -34,13 +34,9 @@ impl CommandFixture {
             .record(arany::RecordKind::Permissions)
             .replace(br#"{"permissions":{"defaultMode":"default","allow":["Bash"]}}"#)
             .unwrap();
-        let tool = arany::CommandTool::pin(
-            &state,
-            &workspace,
-            executable.to_str().unwrap(),
-            Vec::new(),
-        )
-        .unwrap();
+        let tool =
+            arany::CommandTool::pin(&state, &workspace, executable.to_str().unwrap(), Vec::new())
+                .unwrap();
         arany::CommandTools::edit(&state, |record| record.select(tool.clone())).unwrap();
         Self {
             state,
@@ -51,7 +47,10 @@ impl CommandFixture {
     }
 
     async fn probe_and_enable(&self, engine: &Engine) -> arany::SessionId {
-        let session = engine.create_session(self.workspace.clone(), None).await.unwrap();
+        let session = engine
+            .create_session(self.workspace.clone(), None)
+            .await
+            .unwrap();
         let probe = engine
             .probe_command_tool(session, &self.workspace, &self.tool, RunCancellation::new())
             .await
@@ -89,7 +88,11 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
         )
         .unwrap();
         let session = fixture.probe_and_enable(&engine).await;
-        let expected_text = if failure.is_some() { "original" } else { "rewritten" };
+        let expected_text = if failure.is_some() {
+            "original"
+        } else {
+            "rewritten"
+        };
         let rewritten = command(host, &format!("printf {expected_text}"));
         let outcome = run_rewrite(&engine, &fixture, session, &rewritten).await;
         assert_eq!(outcome.run.status, RunStatus::Succeeded);
@@ -104,10 +107,21 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
             executed.intent.rewrite[0].stage,
             failure.unwrap_or(arany::RewriteStage::Rewritten)
         );
-        assert!(executed.observation.as_ref().unwrap().output.contains(expected_text));
+        assert!(
+            executed
+                .observation
+                .as_ref()
+                .unwrap()
+                .output
+                .contains(expected_text)
+        );
         assert_eq!(
             executed.permission_verdict.as_ref().unwrap().source,
-            if host { PermissionSource::Human } else { PermissionSource::Rule }
+            if host {
+                PermissionSource::Human
+            } else {
+                PermissionSource::Rule
+            }
         );
         engine.close().await.unwrap();
         assert_rewrite_replay(fixture, session).await;
@@ -174,13 +188,20 @@ async fn run_rewrite(
 
 async fn assert_rewrite_replay(fixture: CommandFixture, session: arany::SessionId) {
     std::fs::write(&fixture.executable, "#!/bin/sh\nexit 99\n").unwrap();
-    fixture.state.record(arany::RecordKind::CommandTools).remove().unwrap();
+    fixture
+        .state
+        .record(arany::RecordKind::CommandTools)
+        .remove()
+        .unwrap();
     let store = Store::open(fixture.state).unwrap();
     let events = store.load_session(session).await.unwrap();
     let view = store.load_view(session).await.unwrap().unwrap();
     store.close().await.unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Succeeded);
-    assert_eq!(SessionView::replay(session, &events).unwrap().unwrap(), view);
+    assert_eq!(
+        SessionView::replay(session, &events).unwrap().unwrap(),
+        view
+    );
     let rewrite = events
         .iter()
         .position(|event| {
@@ -194,9 +215,11 @@ async fn assert_rewrite_replay(fixture: CommandFixture, session: arany::SessionI
         .position(|event| matches!(event.event, Event::ToolStarted { .. }))
         .unwrap();
     assert!(rewrite < dispatch);
-    assert!(events
-        .iter()
-        .any(|event| matches!(event.event, Event::CommandToolProbeFinished { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, Event::CommandToolProbeFinished { .. }))
+    );
 }
 
 fn command(host: bool, script: &str) -> arany::ToolCall {
@@ -225,5 +248,7 @@ fn hook_source(failure: Option<arany::RewriteStage>) -> String {
         None => rewrite,
         Some(_) => unreachable!("only confirmed failures are configured"),
     };
-    format!("#!/bin/sh\nIFS= read -r input || :\ncase \"$input\" in *'cargo test'*) {rewrite}; exit 0 ;; esac\n{payload}\n")
+    format!(
+        "#!/bin/sh\nIFS= read -r input || :\ncase \"$input\" in *'cargo test'*) {rewrite}; exit 0 ;; esac\n{payload}\n"
+    )
 }

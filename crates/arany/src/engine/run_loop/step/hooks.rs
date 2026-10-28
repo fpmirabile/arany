@@ -1186,9 +1186,8 @@ impl RunLoop<'_> {
                 subject_digest: digests.0,
                 intent: hook_intent.clone(),
                 command_subject: plan.command_subject,
-                command_tool: (*event == HookEvent::CommandRewrite).then(|| {
-                    runtime.command_tools().entries()[usize::from(plan.group)].clone()
-                }),
+                command_tool: (*event == HookEvent::CommandRewrite)
+                    .then(|| runtime.command_tools().entries()[usize::from(plan.group)].clone()),
                 input_digest: digests.1,
             },
         })

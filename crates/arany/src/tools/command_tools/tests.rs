@@ -92,7 +92,10 @@ fn discovery_refuses_overflow_and_selection_confines_links_to_granted_roots() {
     assert!(CommandTool::pin(&state, &workspace, escape.to_str().unwrap(), Vec::new()).is_err());
     let mut expected = vec![executable.clone(), alias.to_str().unwrap().to_owned()];
     expected.sort();
-    assert_eq!(command_tool_candidates(&state, &workspace).unwrap(), expected);
+    assert_eq!(
+        command_tool_candidates(&state, &workspace).unwrap(),
+        expected
+    );
     for index in 0..MAX_COMMAND_TOOL_CANDIDATES {
         std::fs::write(grant.path.join(format!("entry-{index}")), b"").unwrap();
     }
@@ -107,7 +110,9 @@ fn discovery_refuses_overflow_and_selection_confines_links_to_granted_roots() {
     value["workspaces"][0]["runtime_grants"][0]["path"] = serde_json::json!(workspace);
     value["workspaces"][0]["runtime_grants"][0]["device"] = serde_json::json!(metadata.dev());
     value["workspaces"][0]["runtime_grants"][0]["inode"] = serde_json::json!(metadata.ino());
-    record.replace(&serde_json::to_vec(&value).unwrap()).unwrap();
+    record
+        .replace(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
     assert!(matches!(
         command_tool_candidates(&state, &workspace),
         Err(ToolError::Path)
@@ -153,7 +158,12 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
         ToolCall::CommandUnguarded { program, cwd, prefix_rule: None, .. }
             if program == "sh" && cwd == "src"
     ));
-    assert!(script(&ToolCall::List { path: String::new() }).is_none());
+    assert!(
+        script(&ToolCall::List {
+            path: String::new()
+        })
+        .is_none()
+    );
 }
 
 #[test]
@@ -183,9 +193,14 @@ fn a_relative_program_link_can_reach_the_granted_prefix_and_pins_its_target() {
     let mut value: serde_json::Value =
         serde_json::from_slice(&record.read().unwrap().unwrap()).unwrap();
     value["workspaces"][0]["runtime_grants"] = serde_json::json!([grant]);
-    record.replace(&serde_json::to_vec(&value).unwrap()).unwrap();
+    record
+        .replace(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
     let candidates = command_tool_candidates(&state, &workspace).unwrap();
-    assert_eq!(candidates, [bin.join("filter").to_str().unwrap().to_owned()]);
+    assert_eq!(
+        candidates,
+        [bin.join("filter").to_str().unwrap().to_owned()]
+    );
     let tool = CommandTool::pin(&state, &workspace, &candidates[0], Vec::new()).unwrap();
     assert_eq!(tool.executable, executable.to_str().unwrap());
     assert!(tool.pin_status(&state, &workspace));

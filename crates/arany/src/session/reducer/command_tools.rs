@@ -11,9 +11,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .command_tool_probe
                 .as_ref()
                 .is_some_and(|probe| probe.outcome.is_none())
-                || current.runs.last().is_some_and(|run| {
-                    matches!(run.status, RunStatus::Active | RunStatus::Pending)
-                })
+                || current
+                    .runs
+                    .last()
+                    .is_some_and(|run| matches!(run.status, RunStatus::Active | RunStatus::Pending))
                 || current.workspace_identity != Some(identity)
             {
                 return Err(ReplayError::InvalidTransition);

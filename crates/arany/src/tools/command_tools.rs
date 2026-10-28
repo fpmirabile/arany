@@ -276,8 +276,8 @@ fn selected_permissions(
     state: &StateRoot,
     workspace: &Path,
 ) -> Result<super::WorkspacePermissions, ToolError> {
-    let permissions =
-        super::WorkspacePermissions::load(workspace, state).map_err(|_| ToolError::Configuration)?;
+    let permissions = super::WorkspacePermissions::load(workspace, state)
+        .map_err(|_| ToolError::Configuration)?;
     if !permissions.is_trusted() {
         return Err(ToolError::Configuration);
     }
@@ -334,7 +334,11 @@ fn pin_in(
     }
     let bytes = super::fs::read_regular(file, super::config::MAX_EXECUTABLE_BYTES as usize)?;
     grant.verify_host()?;
-    let path = root.join(resolved).to_str().ok_or(ToolError::Path)?.to_owned();
+    let path = root
+        .join(resolved)
+        .to_str()
+        .ok_or(ToolError::Path)?
+        .to_owned();
     Ok((path, metadata.dev(), metadata.ino(), hex_digest(&bytes)))
 }
 
@@ -391,8 +395,7 @@ pub(crate) fn result(observation: &super::ToolObservation) -> super::permissions
     if !matches!(
         observation.disposition,
         super::ToolDisposition::Succeeded | super::ToolDisposition::Failed
-    )
-        || observation.attestation.is_none()
+    ) || observation.attestation.is_none()
     {
         return HookResult::Ignored {
             why: HookIgnoreReason::NotCompleted,
@@ -433,9 +436,9 @@ pub(crate) fn script(call: &ToolCall) -> Option<String> {
             .chain(args)
             .map(|word| {
                 if !word.is_empty()
-                    && word.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || b"_./:@,%+-".contains(&byte)
-                    })
+                    && word
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_./:@,%+-".contains(&byte))
                 {
                     word.clone()
                 } else {
@@ -470,9 +473,7 @@ pub(crate) fn rewritten(call: &ToolCall, command: String) -> ToolCall {
             cwd: cwd.clone(),
         },
         ToolCall::CommandUnguarded {
-            cwd,
-            justification,
-            ..
+            cwd, justification, ..
         } => ToolCall::CommandUnguarded {
             program: "sh".into(),
             args,

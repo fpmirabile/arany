@@ -1376,10 +1376,14 @@ impl Event {
                 }
             }
             "CommandToolProbeStarted" if run_id.is_none() && agent_run_id.is_none() => {
-                Self::CommandToolProbeStarted { probe: parse(payload)? }
+                Self::CommandToolProbeStarted {
+                    probe: parse(payload)?,
+                }
             }
             "CommandToolProbeFinished" if run_id.is_none() && agent_run_id.is_none() => {
-                Self::CommandToolProbeFinished { outcome: parse(payload)? }
+                Self::CommandToolProbeFinished {
+                    outcome: parse(payload)?,
+                }
             }
             "ProviderSetupEditStarted" if run_id.is_none() && agent_run_id.is_none() => {
                 let data: ProviderSetupEditStartedPayload = parse(payload)?;

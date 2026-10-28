@@ -41,14 +41,24 @@ const EVENT_FIXTURES: [EventFixture<'static>; 104] = [
         include_str!("toolstarted-v23.json"),
         include_str!("toolstarted-v23.json"),
     ),
-    ("ToolFinished", 34, SELECTION_TOOLFINISHED, SELECTION_TOOLFINISHED),
+    (
+        "ToolFinished",
+        34,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
     (
         "HookStarted",
         16,
         include_str!("hookstarted-without-expiry.json"),
         include_str!("hookstarted-without-expiry.json"),
     ),
-    ("HookFinished", 23, SELECTION_HOOKFINISHED, SELECTION_HOOKFINISHED),
+    (
+        "HookFinished",
+        23,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
     (
         "ToolFinished",
         32,

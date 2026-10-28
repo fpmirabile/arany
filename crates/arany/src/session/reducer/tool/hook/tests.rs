@@ -1868,7 +1868,14 @@ fn unknown_command_rewrite_stops_the_primary_and_never_reuses_the_hook() {
     let mut observation = observation_for(hook.intent.clone(), b"");
     let payload = start.payload().unwrap();
     assert_eq!(
-        Event::decode(start.kind(), start.version(), &payload, Some(run), Some(agent)).unwrap(),
+        Event::decode(
+            start.kind(),
+            start.version(),
+            &payload,
+            Some(run),
+            Some(agent)
+        )
+        .unwrap(),
         start
     );
     apply(&mut view, start.clone()).unwrap();

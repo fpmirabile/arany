@@ -27,7 +27,10 @@ impl Engine {
         }) {
             return Err(EngineError::SessionBusy);
         }
-        if let Some(probe) = view.command_tool_probe.filter(|probe| probe.outcome.is_none()) {
+        if let Some(probe) = view
+            .command_tool_probe
+            .filter(|probe| probe.outcome.is_none())
+        {
             return self.recover_command_probe(session_id, probe).await;
         }
         let (runtime, intent) = self.command_probe_runtime(workspace, tool)?;
@@ -47,7 +50,8 @@ impl Engine {
             .await?;
         lock.keep();
         let observation = runtime.execute(intent, cancellation).await;
-        self.finish_command_probe(session_id, probe, observation).await
+        self.finish_command_probe(session_id, probe, observation)
+            .await
     }
 
     fn command_probe_runtime(
@@ -102,7 +106,8 @@ impl Engine {
             guard_stage: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         };
-        self.finish_command_probe(session_id, probe, observation).await
+        self.finish_command_probe(session_id, probe, observation)
+            .await
     }
 
     async fn finish_command_probe(

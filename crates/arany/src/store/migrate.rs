@@ -180,9 +180,17 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         variant_step!("RunStarted", 26, crate::session::pre_command_tools_payload),
         variant_step!("ToolProposed", 5, crate::session::pre_command_tools_payload),
         variant_step!("ToolStarted", 27, crate::session::pre_command_tools_payload),
-        variant_step!("ToolFinished", 34, crate::session::pre_command_tools_payload),
+        variant_step!(
+            "ToolFinished",
+            34,
+            crate::session::pre_command_tools_payload
+        ),
         variant_step!("HookStarted", 16, crate::session::pre_command_tools_payload),
-        variant_step!("HookFinished", 23, crate::session::pre_command_tools_payload),
+        variant_step!(
+            "HookFinished",
+            23,
+            crate::session::pre_command_tools_payload
+        ),
         web_step!("RunStarted", 25),
         web_step!("AgentSpawned", 17),
         web_step!("ToolProposed", 4),

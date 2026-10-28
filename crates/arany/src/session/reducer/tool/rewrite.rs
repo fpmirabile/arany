@@ -7,7 +7,9 @@ pub(super) fn started(
     hook: &crate::tools::permissions::HookInvocation,
     sequence: u64,
 ) -> Result<(), ReplayError> {
-    let ceiling = hook.active_ceiling_ms.ok_or(ReplayError::InvalidTransition)?;
+    let ceiling = hook
+        .active_ceiling_ms
+        .ok_or(ReplayError::InvalidTransition)?;
     let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
     if goal
         .effective_budget()
@@ -34,9 +36,10 @@ pub(super) fn started(
         || hook.intent.workspace_inode != config.workspace_inode
         || hook.active_ceiling_ms.is_none_or(|ceiling| ceiling == 0)
         || hook.group as usize >= crate::tools::command_tools::MAX_COMMAND_TOOLS
-        || hook.command_tool.as_ref().is_none_or(|tool| {
-            !tool.enabled || !tool.valid() || hook.intent.call != tool.call()
-        })
+        || hook
+            .command_tool
+            .as_ref()
+            .is_none_or(|tool| !tool.enabled || !tool.valid() || hook.intent.call != tool.call())
         || hook.handler != 0
         || run
             .lifecycle_hooks
@@ -93,7 +96,10 @@ pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
             return false;
         }
         let Some(id) = fact.hook_intent_id else {
-            if !matches!(fact.stage, RewriteStage::PinRefused | RewriteStage::InputLimit) {
+            if !matches!(
+                fact.stage,
+                RewriteStage::PinRefused | RewriteStage::InputLimit
+            ) {
                 return false;
             }
             continue;
@@ -132,7 +138,9 @@ pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
         let Some(outcome) = &hook.outcome else {
             return false;
         };
-        let (stage, command) = outcome.result.command_rewrite(outcome.observation.disposition);
+        let (stage, command) = outcome
+            .result
+            .command_rewrite(outcome.observation.disposition);
         if let Some(command) = command {
             let call = crate::tools::command_tools::rewritten(&intent.call, command.to_owned());
             expected = Some(crate::validate::digest(

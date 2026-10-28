@@ -2596,6 +2596,7 @@ done
             checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
+            command_tools: Default::default(),
             command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
                 "/usr/bin:/bin",
             )),

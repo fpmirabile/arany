@@ -1097,9 +1097,7 @@ impl From<&Event> for TraceEventKind {
             Event::CommandToolProbeStarted { .. }
             | Event::CommandToolProbeFinished { .. }
             | Event::ProviderSetupEditStarted { .. }
-            | Event::ProviderSetupEditFinished { .. } => {
-                Self::Unmarked
-            }
+            | Event::ProviderSetupEditFinished { .. } => Self::Unmarked,
         }
     }
 }

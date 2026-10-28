@@ -127,7 +127,9 @@ async fn edit_entry(
             tool.args.clone(),
         )
         .and_then(|replacement| {
-            CommandTools::edit(editor.state, |record| record.replace(index, tool, replacement))
+            CommandTools::edit(editor.state, |record| {
+                record.replace(index, tool, replacement)
+            })
         }),
         Some(3) => CommandTools::edit(editor.state, |record| {
             if record.entries().get(index) != Some(tool) {
@@ -194,7 +196,10 @@ async fn select(
             terminal,
             "Fixed arguments",
             "Arguments are passed literally, in order",
-            &[(1, "Add an argument".into()), (2, "Finish selection".into())],
+            &[
+                (1, "Add an argument".into()),
+                (2, "Finish selection".into()),
+            ],
         )
         .await?
         {
@@ -326,7 +331,9 @@ async fn confirm_probe(
     probed: &CommandTool,
     preview: &str,
 ) -> Result<String, SetupError> {
-    let stage = probed.last_probe.expect("a completed probe records its stage");
+    let stage = probed
+        .last_probe
+        .expect("a completed probe records its stage");
     let mut updated = probed.clone();
     if matches!(stage, RewriteStage::Rewritten | RewriteStage::Unchanged) {
         let warning = format!(
@@ -351,14 +358,18 @@ async fn confirm_probe(
     } else {
         "Disabled"
     };
-    match CommandTools::edit(editor.state, |record| record.replace(index, probed, updated)) {
+    match CommandTools::edit(editor.state, |record| {
+        record.replace(index, probed, updated)
+    }) {
         Ok(_) => Ok(format!(
             "Probe {}: {}. {status}",
             stage.label(),
             crate::presentation::escape_terminal(preview)
         )),
         Err(arany::ToolError::Uncertain) => Err(record_error(arany::ToolError::Uncertain)),
-        Err(error) => Ok(format!("Probe save failed: {error}; reopen /permissions to verify")),
+        Err(error) => Ok(format!(
+            "Probe save failed: {error}; reopen /permissions to verify"
+        )),
     }
 }
 
