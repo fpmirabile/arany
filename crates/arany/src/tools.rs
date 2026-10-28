@@ -23,7 +23,12 @@ mod guard;
 pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
+mod network;
+pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
+pub(crate) use network::{
+    MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, NETWORK_IDLE_MS,
+};
 mod output;
 pub(crate) mod spill;
 pub use spill::OutputSpill;
@@ -359,7 +364,6 @@ pub(crate) struct ToolRuntime {
     config: Config,
     git_writes_available: bool,
     host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
-    worker: Option<std::sync::Arc<guard::transfer::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -466,6 +470,25 @@ fn admission_resources(
         fs::reject_overlap(Path::new(path), state.path())?;
         fs::reject_overlap(Path::new(path), account)?;
     }
+    Ok(())
+}
+
+// The pinned configuration digest covers the effective domain set, so every admission and re-admission merges the same way.
+fn merge_network(
+    config: &mut Config,
+    permissions: Option<&PermissionSnapshot>,
+) -> Result<(), ToolError> {
+    let Some(network) = config.network.take() else {
+        return Ok(());
+    };
+    let (allow, restrict) = permissions.map_or_else(Default::default, |snapshot| {
+        snapshot.config.network_domains()
+    });
+    let network = network.merged(&allow, &restrict);
+    if !network.valid() {
+        return Err(ToolError::Configuration);
+    }
+    config.network = Some(network);
     Ok(())
 }
 
@@ -957,6 +980,7 @@ impl ToolRuntime {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
                 config.bind_environment(&environment);
+                merge_network(&mut config, Some(&snapshot))?;
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -972,6 +996,7 @@ impl ToolRuntime {
         };
         config.discover_skills(workspace)?;
         config.bind_environment(&environment);
+        merge_network(&mut config, Some(&snapshot))?;
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1025,7 +1050,6 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
-        config.bind_environment(&command_environment);
         let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
@@ -1047,8 +1071,10 @@ impl ToolRuntime {
                 Ok(snapshot)
             })
             .transpose()?;
+        merge_network(&mut config, permissions.as_ref())?;
         let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
+        config.bind_environment(&command_environment);
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
@@ -1118,7 +1144,6 @@ impl ToolRuntime {
             config,
             git_writes_available: guard::git_writes_available(),
             host_authentication,
-            worker: None,
             handover: None,
             permissions,
             result_filter: None,
@@ -1310,7 +1335,7 @@ impl ToolRuntime {
     }
 
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
-        let catalog = serde_json::json!({
+        let mut catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write && self.guard_available,
@@ -1338,6 +1363,18 @@ impl ToolRuntime {
                 serde_json::json!("unavailable")
             },
         });
+        if let Some(network) = self
+            .config
+            .network
+            .as_ref()
+            .filter(|_| self.guard_available)
+        {
+            catalog["network"] = serde_json::json!({
+                "allow": network.allow,
+                "deny": network.deny,
+                "contract": catalog::NETWORK_CONTRACT,
+            });
+        }
         let context = ToolContext::new(catalog);
         if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
@@ -1390,7 +1427,6 @@ impl ToolRuntime {
                 concurrency: 4,
                 max_turns: 17,
                 max_tools: 16,
-                data_bytes: WORKER_DATA_BYTES as u32,
             })
             .filter(WorkerPolicy::valid)
     }
@@ -1566,25 +1602,6 @@ impl ToolRuntime {
         .unwrap_or(false)
     }
 
-    pub(crate) fn worker_reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call)
-            || call.facts().family == catalog::Family::File && call.facts().mutates
-        {
-            guard::RESERVATION_OVERHEAD
-        } else {
-            self.reservation_overhead(call)
-        }
-    }
-
-    pub(crate) fn intent_reservation_overhead(&self, intent: &EffectIntent) -> Duration {
-        match intent.target {
-            crate::worker::EffectTarget::WorkerView { .. } => {
-                self.worker_reservation_overhead(&intent.call)
-            }
-            crate::worker::EffectTarget::Workspace => self.reservation_overhead(&intent.call),
-        }
-    }
-
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         if discovery::possible(call) {
             let exact = self
@@ -1597,14 +1614,7 @@ impl ToolRuntime {
         }
         match call.facts().site {
             Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
-            Site::Guard => {
-                guard::RESERVATION_OVERHEAD
-                    + if self.worker.is_none() && matches!(call, ToolCall::Command { .. }) {
-                        selection::PHASE_TIME
-                    } else {
-                        Duration::ZERO
-                    }
-            }
+            Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
 
@@ -1634,24 +1644,6 @@ impl ToolRuntime {
             && !self.guard_available
         {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
-        }
-        if matches!(
-            intent.target,
-            crate::worker::EffectTarget::WorkerView { .. }
-        ) && matches!(intent.call, ToolCall::Command { .. })
-        {
-            return ToolObservation {
-                spill: None,
-                enforcement_cause: None,
-                limit_cause: None,
-                intent,
-                disposition: ToolDisposition::Denied,
-                output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
-                attestation: None,
-                approval_cause: None,
-                guard_stage: None,
-                cache_update: CacheUpdate::NotApplicable,
-            };
         }
         if matches!(
             intent.call,
@@ -2093,8 +2085,6 @@ struct InProcessReads {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-pub(crate) const PRIVATE_IMAGE_REQUIRED: &str =
-    "Worker commands require an admitted private image; no operation was dispatched";
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {
@@ -2195,6 +2185,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         observation.output = "File operation cancelled; nothing in the Workspace changed".into();
         return observation;
     }
+    if matches!(error, ToolError::Timeout(_)) {
+        return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+    }
     if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
         return unattested_limit(
             intent,
@@ -2275,14 +2268,21 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         stage: failure_stage(&error),
         check: failure_check(&error),
     });
+    let limit_cause = if resource_limit {
+        Some(LimitCause::Resource)
+    } else if matches!(error, ToolError::ProjectSelection(SelectionCause::TimedOut)) {
+        Some(LimitCause::Timeout)
+    } else {
+        None
+    };
     ToolObservation {
         spill: None,
         enforcement_cause,
-        limit_cause: resource_limit.then_some(LimitCause::Resource),
+        limit_cause,
         guard_stage,
         output,
         intent,
-        disposition: if resource_limit {
+        disposition: if limit_cause.is_some() {
             ToolDisposition::Limit
         } else {
             ToolDisposition::Failed

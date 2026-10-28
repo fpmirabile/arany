@@ -839,9 +839,8 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
         .remember_profiles(true, ApprovalMode::Request, &tokens)
         .unwrap();
     let state = root.join("cargo-state");
-    let jobs = u32::try_from(std::thread::available_parallelism().unwrap().get())
-        .unwrap()
-        .min(2);
+    let cores = u32::try_from(std::thread::available_parallelism().unwrap().get()).unwrap();
+    let jobs = cores.min(2);
     for (case, script, success) in [
         (
             "unmarked",
@@ -993,6 +992,7 @@ printf cache-changed
                 ToolResourceClass::Build
             );
             assert_eq!(approval.intent.limits.build_jobs, jobs);
+            assert_eq!(approval.intent.limits.build_cpu_cores, cores);
             let report_gate = (case == "cancelled-report")
                 .then(|| crate::fault::FaultPlan::gate_guard_cache_report(approval.intent.id));
             if case == "cancelled" {
@@ -1016,11 +1016,13 @@ printf cache-changed
                 None
             }
         };
+        let started = std::time::Instant::now();
         let (outcome, report_release) = tokio::time::timeout(Duration::from_secs(100), async {
             tokio::join!(run, approve)
         })
         .await
         .expect("bounded Cargo journey");
+        let elapsed = started.elapsed();
         drop(report_release);
         engine.close().await.unwrap();
         let session_id = provider.requests.lock().unwrap()[0].session_id;
@@ -1045,6 +1047,11 @@ printf cache-changed
         assert_eq!(run.tools.len(), 1);
         assert_eq!(replay.goals[0].resource_settings.build_jobs, Some(jobs));
         assert_eq!(observation.intent.limits.build_jobs, jobs);
+        assert_eq!(
+            replay.goals[0].resource_settings.build_cpu_cores,
+            Some(cores)
+        );
+        assert_eq!(observation.intent.limits.build_cpu_cores, cores);
         assert!(
             !observation
                 .output
@@ -1066,7 +1073,10 @@ printf cache-changed
                 assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
             }
         } else {
-            let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+            let result: serde_json::Value = serde_json::from_str(&observation.output)
+                .unwrap_or_else(|error| {
+                    panic!("{case}: {error}; Cargo output: {}", observation.output)
+                });
             assert_eq!(result["exit_code"] == 0, success, "{case}: {result}");
             if !success {
                 let fragments: &[&str] = match case {
@@ -1127,6 +1137,10 @@ printf cache-changed
                     "{case}: {result}"
                 );
                 assert!(stdout.contains("local_test_ipc ... ignored, requires local test IPC"));
+                println!(
+                    "offline Cargo {case}: {} ms; 1 passed; 0 failed; 1 ignored; CPU cores {cores}; jobs {jobs}",
+                    elapsed.as_millis()
+                );
             }
             if case == "warm" {
                 assert!(

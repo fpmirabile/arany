@@ -1525,7 +1525,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     assert!(!HookResult::Passed.valid_for(&observation));
     assert!(!allow.valid_for(&observation));
     let result = |exit: i32, stdout: &str| {
-        serde_json::to_string(&json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": exit, "stdout": stdout, "stderr": "no", "stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":2,"lines":1},"changeset": {"files": []}}))
+        serde_json::to_string(&json!({"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": exit, "stdout": stdout, "stderr": "no", "stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":2,"lines":1},"changeset": {"files": []}}))
             .unwrap()
     };
     observation.disposition = crate::tools::ToolDisposition::Failed;
@@ -2716,4 +2716,44 @@ fn typed_host_pr_list_allow_applies_in_every_mode() {
         let ordinary_allow = config(json!({"allow": ["gh_pr_view"]}));
         assert_eq!(ordinary_allow.evaluate(&view).0, Decision::Ask);
     }
+}
+
+#[test]
+fn network_domain_rules_extend_a_grant_and_never_match_calls() {
+    let rules = config(json!({
+        "allow": ["Network(domain:*.pypi.org)", "Network(domain:example.com)", "Bash(git diff *)"],
+        "ask": ["Network(domain:ask.example.com)"],
+        "deny": ["Network(domain:bad.pypi.org)"],
+    }));
+    let (allow, restrict) = rules.network_domains();
+    assert_eq!(allow, ["*.pypi.org", "example.com"]);
+    assert_eq!(restrict, ["bad.pypi.org", "ask.example.com"]);
+    assert_eq!(
+        rules.decision(&command("curl", &["https://example.com"])),
+        Decision::Ask
+    );
+    for rule in [
+        "Network",
+        "Network(*)",
+        "Network(example.com)",
+        "Network(host:example.com)",
+        "Network(domain:)",
+        "Network(domain:*.com)",
+        "Network(domain:Example.com)",
+        "Network(domain:10.0.0.1)",
+    ] {
+        let parsed = PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions": {"allow": [rule]}})).unwrap(),
+        );
+        assert!(parsed.is_err(), "{rule}");
+    }
+    let too_many: Vec<String> = (0..=crate::tools::network::MAX_NETWORK_PATTERNS)
+        .map(|index| format!("Network(domain:h{index}.example.com)"))
+        .collect();
+    assert!(
+        PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions": {"allow": too_many}})).unwrap()
+        )
+        .is_err()
+    );
 }

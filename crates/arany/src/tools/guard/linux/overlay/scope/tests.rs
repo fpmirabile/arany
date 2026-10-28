@@ -121,7 +121,12 @@ fn grants_reject_file_directory_and_ancestor_replacement_without_widening_mounts
                 cwd: ".".into(),
             },
         );
-        let grant = Grant::new(&runtime, &intent).unwrap();
+        let grant = Grant::new(
+            &runtime,
+            &intent,
+            tokio::time::Instant::now() + crate::tools::selection::TEST_RUNTIME,
+        )
+        .unwrap();
         assert!(grant.verify().is_ok());
         let mut command = Command::new("/usr/bin/bwrap");
         grant.arguments(&mut command, Path::new("/private"));
@@ -171,7 +176,7 @@ fn inventory_budget_and_protected_alias_refusals_span_grants() {
     for _ in 0..entries - 1 {
         budget.entry(path).unwrap();
     }
-    let deadline = std::time::Instant::now() + crate::tools::selection::PHASE_TIME;
+    let deadline = std::time::Instant::now() + crate::tools::selection::TEST_RUNTIME;
     let mut selector = crate::tools::selection::Selector::new(0, deadline);
     for name in ["first", "second"] {
         let path = directory.path().join(name);
@@ -242,10 +247,19 @@ fn exact_file_grants_refuse_protected_hard_links_before_and_after_admission() {
             cwd: ".".into(),
         },
     );
-    let grant = Grant::new(&runtime, &intent).unwrap();
+    let grant = Grant::new(
+        &runtime,
+        &intent,
+        tokio::time::Instant::now() + crate::tools::selection::TEST_RUNTIME,
+    )
+    .unwrap();
     std::fs::hard_link(root.path().join("Cargo.toml"), root.path().join(".env")).unwrap();
     assert!(matches!(
-        Grant::new(&runtime, &intent),
+        Grant::new(
+            &runtime,
+            &intent,
+            tokio::time::Instant::now() + crate::tools::selection::TEST_RUNTIME
+        ),
         Err(ToolError::Path)
     ));
     assert!(matches!(grant.verify(), Err(ToolError::Path)));
@@ -334,6 +348,7 @@ fn whole_root_views_refuse_a_parent_mount_that_only_narrow_views_expect() {
             cache: None,
             root: root.clone(),
             grant: Grant {
+                command_deadline: [0; 8],
                 path: "/project".into(),
                 device: 0,
                 inode: 0,
@@ -341,6 +356,7 @@ fn whole_root_views_refuse_a_parent_mount_that_only_narrow_views_expect() {
                 roots: roots.clone(),
             },
             bytes: 0,
+            selection_ms: 0,
             directories: Vec::new(),
             attestation: Attestation {
                 cache_bytes: None,

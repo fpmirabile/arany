@@ -3,13 +3,82 @@ use super::ToolError;
 use super::{Cancellation, read_line_capped};
 #[cfg(any(test, target_os = "macos"))]
 use crate::tools::SelectionCause;
-use crate::tools::selection::PHASE_TIME;
+#[cfg(test)]
+use crate::tools::selection::TEST_RUNTIME;
 use crate::tools::{EffectIntent, ToolCall, ToolLimits, ToolResourceClass};
 use std::time::{Duration, Instant};
 
 pub(super) fn primary_command(intent: &EffectIntent) -> bool {
     matches!(intent.call, ToolCall::Command { .. })
         && intent.target == crate::session::worker::EffectTarget::Workspace
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn begin_action(
+    runtime: &crate::tools::ToolRuntime,
+    intent: &EffectIntent,
+    admitted_at: tokio::time::Instant,
+) -> Result<Option<crate::tools::ActiveToolWindow>, ToolError> {
+    let window = runtime.begin_active_action(admitted_at).await?;
+    Ok(command_window(intent, window))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn preparation_deadline(
+    preparation: tokio::time::Instant,
+    command: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    preparation
+        .min(command.unwrap_or_else(|| tokio::time::Instant::now() + super::RESERVATION_OVERHEAD))
+}
+
+pub(super) fn command_window(
+    intent: &EffectIntent,
+    window: Option<crate::tools::ActiveToolWindow>,
+) -> Option<crate::tools::ActiveToolWindow> {
+    window.map(|mut window| {
+        if primary_command(intent) {
+            let runtime = Duration::from_millis(u64::from(intent.limits.runtime_ms));
+            window.preparation_deadline += runtime;
+            window.go_deadline += runtime;
+        }
+        window
+    })
+}
+
+pub(super) fn command_deadline(intent: &EffectIntent) -> Option<tokio::time::Instant> {
+    primary_command(intent).then(|| {
+        tokio::time::Instant::now() + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+    })
+}
+
+pub(super) fn remaining_ms(
+    intent: &EffectIntent,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<u32, ToolError> {
+    let remaining = deadline.map_or(intent.limits.runtime_ms, |deadline| {
+        deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_millis()
+            .min(u128::from(intent.limits.runtime_ms)) as u32
+    });
+    if remaining == 0 {
+        Err(ToolError::Timeout(String::new()))
+    } else {
+        Ok(remaining)
+    }
+}
+
+pub(super) async fn before_dispatch(
+    runtime: &crate::tools::ToolRuntime,
+    intent: &EffectIntent,
+    window: Option<crate::tools::ActiveToolWindow>,
+    deadline: Option<tokio::time::Instant>,
+    cancellation: &crate::tools::Cancellation,
+) -> Result<(), ToolError> {
+    runtime
+        .before_dispatch(window, remaining_ms(intent, deadline)?, cancellation)
+        .await
 }
 
 pub(super) fn selection_limits(limits: &ToolLimits) -> ToolLimits {
@@ -31,7 +100,7 @@ pub(super) fn capture_deadlines(
         .checked_sub(CAPTURE_REPORT_TIME)
         .filter(|deadline| *deadline > now)
         .ok_or_else(|| ToolError::Timeout(String::new()))?
-        .min(now + PHASE_TIME);
+        .min(now + Duration::from_millis(u64::from(crate::tools::types::MAX_COMMAND_TIMEOUT_MS)));
     Ok((capture, capture + CAPTURE_REPORT_TIME))
 }
 
@@ -58,10 +127,7 @@ fn monotonic_nanos() -> Result<u64, ToolError> {
 
 pub(super) fn encode_deadline(deadline: tokio::time::Instant) -> Result<[u8; 8], ToolError> {
     let clock = monotonic_nanos()?;
-    let remaining = deadline
-        .into_std()
-        .saturating_duration_since(Instant::now())
-        .min(PHASE_TIME);
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let nanos = u64::try_from(remaining.as_nanos()).map_err(|_| ToolError::Limit)?;
     Ok(clock
         .checked_add(nanos)
@@ -73,10 +139,24 @@ pub(in crate::tools) fn decode_deadline(frame: [u8; 8]) -> Result<Instant, ToolE
     let now = Instant::now();
     let remaining =
         Duration::from_nanos(u64::from_le_bytes(frame).saturating_sub(monotonic_nanos()?));
-    if remaining > PHASE_TIME {
+    if remaining > Duration::from_millis(u64::from(crate::tools::types::MAX_COMMAND_TIMEOUT_MS)) {
         return Err(ToolError::Limit);
     }
     Ok(now + remaining)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn decode_command_deadline(
+    frame: [u8; 8],
+    limits: &ToolLimits,
+) -> Result<Instant, ToolError> {
+    let deadline = decode_deadline(frame)?;
+    if deadline.saturating_duration_since(Instant::now())
+        > Duration::from_millis(u64::from(limits.runtime_ms))
+    {
+        return Err(ToolError::Configuration);
+    }
+    Ok(deadline)
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -182,15 +262,60 @@ pub(in crate::tools::guard) mod tests {
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test(start_paused = true)]
+    async fn selection_consumes_the_command_budget_before_go() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = crate::tools::tests::in_process_runtime(
+            root.path(),
+            crate::tools::tests::config_value(),
+        );
+        let intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Command {
+                program: "shell".into(),
+                args: vec![],
+                cwd: String::new(),
+            },
+        );
+        let duration = Duration::from_millis(u64::from(intent.limits.runtime_ms));
+        let now = tokio::time::Instant::now();
+        let preparation = crate::tools::guard::RESERVATION_OVERHEAD;
+        let original = crate::tools::ActiveToolWindow {
+            preparation_deadline: now + preparation,
+            go_deadline: now + preparation,
+            payload_deadline: now + preparation + duration,
+            completion_deadline: now + preparation + duration + CAPTURE_REPORT_TIME,
+        };
+        let window = command_window(&intent, Some(original)).unwrap();
+        assert_eq!(window.preparation_deadline, original.payload_deadline);
+        assert_eq!(window.go_deadline, original.payload_deadline);
+        assert_eq!(window.completion_deadline, original.completion_deadline);
+        let deadline = command_deadline(&intent).unwrap();
+        let selected = Duration::from_secs(6);
+        tokio::time::advance(selected).await;
+        let remaining = remaining_ms(&intent, Some(deadline)).unwrap();
+        assert_eq!(
+            Duration::from_millis(u64::from(remaining)),
+            duration - selected
+        );
+        runtime
+            .before_dispatch(Some(window), remaining, &Cancellation::new())
+            .await
+            .unwrap();
+        tokio::time::advance(duration - selected).await;
+        assert!(matches!(
+            remaining_ms(&intent, Some(deadline)),
+            Err(ToolError::Timeout(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn capture_reserves_bounded_report_time_inside_the_action() {
         for remaining in [Duration::from_secs(30), Duration::from_secs(3)] {
             let now = tokio::time::Instant::now();
             let completion = now + remaining;
             let (capture, report) = capture_deadlines(completion).unwrap();
-            assert_eq!(
-                capture,
-                (completion - CAPTURE_REPORT_TIME).min(now + PHASE_TIME)
-            );
+            assert_eq!(capture, completion - CAPTURE_REPORT_TIME);
             assert_eq!(report - capture, CAPTURE_REPORT_TIME);
             assert!(report <= completion);
             tokio::time::advance(capture - now).await;
@@ -214,11 +339,30 @@ pub(in crate::tools::guard) mod tests {
         }
     }
 
-    #[test]
-    fn transported_deadline_never_restarts_the_action_budget() {
-        let action = tokio::time::Instant::now() + Duration::from_millis(25);
-        let decoded = decode_deadline(encode_deadline(action).unwrap()).unwrap();
-        assert!(decoded <= action.into_std());
+    #[tokio::test(start_paused = true)]
+    async fn transported_deadline_never_restarts_the_action_budget() {
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        for runtime in [
+            Duration::from_millis(25),
+            TEST_RUNTIME,
+            Duration::from_millis(u64::from(crate::tools::types::MAX_COMMAND_TIMEOUT_MS)),
+        ] {
+            let action = tokio::time::Instant::now() + runtime;
+            tokio::time::advance(runtime / 2).await;
+            let remaining = runtime - runtime / 2;
+            let host_now = Instant::now();
+            let decoded = decode_deadline(encode_deadline(action).unwrap()).unwrap();
+            assert!(decoded <= Instant::now() + remaining);
+            if runtime >= TEST_RUNTIME {
+                assert!(decoded > host_now + Duration::from_secs(5));
+            }
+        }
+        let expired =
+            decode_deadline(encode_deadline(tokio::time::Instant::now()).unwrap()).unwrap();
+        assert!(matches!(
+            Selector::new(0, expired).add("", b"ignored"),
+            Err(ToolError::Timeout(_))
+        ));
         let expired = decode_deadline([0; 8]).unwrap();
         assert!(matches!(
             Selector::new(0, expired).add("", b"ignored"),
@@ -228,6 +372,20 @@ pub(in crate::tools::guard) mod tests {
             decode_deadline(u64::MAX.to_le_bytes()),
             Err(ToolError::Limit)
         ));
+        let limits = ToolLimits {
+            runtime_ms: 1_000,
+            ..ToolLimits::default()
+        };
+        let runtime = Duration::from_millis(u64::from(limits.runtime_ms));
+        for remaining in [Duration::ZERO, runtime / 2, runtime, runtime * 2] {
+            let frame = encode_deadline(tokio::time::Instant::now() + remaining).unwrap();
+            let decoded = decode_command_deadline(frame, &limits);
+            if remaining <= runtime {
+                assert!(decoded.is_ok(), "{remaining:?}: {decoded:?}");
+            } else {
+                assert!(matches!(decoded, Err(ToolError::Configuration)));
+            }
+        }
     }
 
     pub(in crate::tools::guard) async fn protocol_outcomes() {
@@ -260,7 +418,7 @@ pub(in crate::tools::guard) mod tests {
             if expected == "rejected" {
                 assert_eq!(bytes, b"SELECT_REJECTED\n");
             }
-            let result = receive(&mut bytes, tokio::time::Instant::now() + PHASE_TIME).await;
+            let result = receive(&mut bytes, tokio::time::Instant::now() + TEST_RUNTIME).await;
             assert!(match expected {
                 "done" => result.is_ok(),
                 "limit" => matches!(result, Err(ToolError::Limit)),
@@ -286,7 +444,7 @@ pub(in crate::tools::guard) mod tests {
         }
         for bytes in [b"SELECT_UNKNOWN\n".as_slice(), b"DONE\n"] {
             assert!(matches!(
-                receive(&mut &bytes[..], tokio::time::Instant::now() + PHASE_TIME).await,
+                receive(&mut &bytes[..], tokio::time::Instant::now() + TEST_RUNTIME).await,
                 Err(ToolError::Path)
             ));
         }
@@ -294,7 +452,7 @@ pub(in crate::tools::guard) mod tests {
         assert!(matches!(
             receive(
                 &mut oversized.as_slice(),
-                tokio::time::Instant::now() + PHASE_TIME
+                tokio::time::Instant::now() + TEST_RUNTIME
             )
             .await,
             Err(ToolError::Limit)
@@ -316,7 +474,7 @@ pub(in crate::tools::guard) mod tests {
         ));
         drop(peer);
         assert!(matches!(
-            receive(&mut stream, tokio::time::Instant::now() + PHASE_TIME).await,
+            receive(&mut stream, tokio::time::Instant::now() + TEST_RUNTIME).await,
             Err(ToolError::Operation)
         ));
     }
@@ -329,7 +487,7 @@ pub(in crate::tools::guard) mod tests {
             let (started, ready) = tokio::sync::oneshot::channel();
             let (stop, stopped) = std::sync::mpsc::sync_channel(1);
             let worker = tokio::task::spawn_blocking(move || {
-                let deadline = Instant::now() + PHASE_TIME;
+                let deadline = Instant::now() + TEST_RUNTIME;
                 let mut selector = Selector::new(0, deadline);
                 if phase == "match" {
                     match selector.add("", b"**/**/**/**/*a*a*a*a*a*a*a*a") {
@@ -363,10 +521,10 @@ pub(in crate::tools::guard) mod tests {
             let operation = async {
                 cancel.cancel();
                 stop.send(()).unwrap();
-                receive(&mut stream, tokio::time::Instant::now() + PHASE_TIME).await
+                receive(&mut stream, tokio::time::Instant::now() + TEST_RUNTIME).await
             };
             let result = wait(
-                tokio::time::Instant::now() + PHASE_TIME,
+                tokio::time::Instant::now() + TEST_RUNTIME,
                 &mut cancellation,
                 operation,
             )

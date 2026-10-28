@@ -443,7 +443,6 @@ fn fixture_with_grant(
             concurrency: 4,
             max_turns: 17,
             max_tools: 16,
-            data_bytes: WORKER_DATA_BYTES as u32,
         }),
         agent_definitions: Some(crate::tools::DefinitionRegistryPin {
             digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
@@ -781,7 +780,7 @@ pub(crate) fn session_host_protocol_fixture() -> Fixture {
                 &intent,
                 ToolDisposition::Succeeded,
                 Some(Attestation::for_site(&intent)),
-                r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#,
+                r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#,
             );
             f.call(
                 f.primary,

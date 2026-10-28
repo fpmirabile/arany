@@ -48,6 +48,8 @@ pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use custom::resolve_admitted;
 pub use custom::{
     CustomCheckStatus, CustomProfile, CustomProfileCheck, CustomProfileDraft, CustomProfileError,
     CustomProtocol, CustomProvider, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,

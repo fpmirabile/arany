@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const MAX_NAMES: usize = 32;
 const MAX_PATH_ENTRIES: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -76,11 +76,17 @@ pub(crate) const COMMAND_ENVIRONMENT: RecordFormat = RecordFormat {
     kind: RecordKind::CommandEnvironment,
     field: "version",
     floor: 1,
-    current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: upgrade_v1,
-    }],
+    current: VERSION as u64,
+    steps: &[
+        RecordStep {
+            from: 1,
+            transform: upgrade_v1,
+        },
+        RecordStep {
+            from: 2,
+            transform: upgrade_v2,
+        },
+    ],
     accepts: |bytes| CommandEnvironment::parse(bytes).is_ok(),
 };
 
@@ -286,12 +292,12 @@ impl CommandEnvironment {
             .collect()
     }
 
+    // Capture time is informational; keeping it out of the identity keeps the pinned digest stable across state roots.
     fn canonical(&self) -> Vec<u8> {
         serde_json::to_vec(&(
             self.version,
             self.source,
             &self.shell,
-            self.captured_at,
             &self.path,
             &self.names,
             &self.excluded,
@@ -487,18 +493,52 @@ fn upgrade_v1(mut value: serde_json::Value) -> Option<serde_json::Value> {
     let canonical = serde_json::to_vec(&(
         1_u8,
         Source::Process,
+        fields.get("path")?,
+        fields.get("names")?,
+        fields.get("excluded")?,
+    ))
+    .ok()?;
+    let timestamped = serde_json::to_vec(&(
+        1_u8,
+        Source::Process,
         fields.get("captured_at")?.as_u64()?,
         fields.get("path")?,
         fields.get("names")?,
         fields.get("excluded")?,
     ))
     .ok()?;
-    if fields.get("sha256")?.as_str()? != hex_digest(&canonical) {
+    let sha256 = fields.get("sha256")?.as_str()?;
+    if sha256 != hex_digest(&canonical) && sha256 != hex_digest(&timestamped) {
         return None;
     }
-    value["version"] = VERSION.into();
+    value["version"] = 2.into();
     value["shell"] = serde_json::Value::Null;
+    let record: CommandEnvironment = serde_json::from_value(value).ok()?;
+    let sha256 = hex_digest(&timestamped_canonical(&record));
+    let mut value = serde_json::to_value(record).ok()?;
+    value["sha256"] = sha256.into();
+    Some(value)
+}
+
+fn timestamped_canonical(record: &CommandEnvironment) -> Vec<u8> {
+    serde_json::to_vec(&(
+        record.version,
+        record.source,
+        &record.shell,
+        record.captured_at,
+        &record.path,
+        &record.names,
+        &record.excluded,
+    ))
+    .expect("typed record is serializable")
+}
+
+fn upgrade_v2(value: serde_json::Value) -> Option<serde_json::Value> {
     let mut record: CommandEnvironment = serde_json::from_value(value).ok()?;
+    if record.version != 2 || record.sha256 != hex_digest(&timestamped_canonical(&record)) {
+        return None;
+    }
+    record.version = VERSION;
     record.seal();
     let bytes = serde_json::to_vec(&record).ok()?;
     CommandEnvironment::parse(&bytes).ok()?;
@@ -554,11 +594,16 @@ mod tests {
     fn capture_replacement_refuses_editor_drift_and_preserves_prior_bytes() {
         let (_temp, state) = state();
         let before = CommandEnvironment::load(&state).unwrap();
+        let mut metadata = before.clone();
+        metadata.captured_at += 1;
+        metadata.seal();
+        assert_eq!(metadata.digest(), before.digest());
+        assert!(CommandEnvironment::parse(&serde_json::to_vec(&metadata).unwrap()).is_ok());
         let captured = before
             .capture_output(shell(), b"PATH=/bin\0LANG=C\0")
             .unwrap();
         CommandEnvironment::edit(&state, |record| {
-            record.captured_at += 1;
+            record.path = vec!["/edited-programs".into()];
             record.seal();
             Ok(())
         })
@@ -664,7 +709,7 @@ mod tests {
         let good = serde_json::to_value(&record).unwrap();
         assert!(CommandEnvironment::parse(good.to_string().as_bytes()).is_ok());
         let mutations: [(&str, serde_json::Value); 5] = [
-            ("version", 3.into()),
+            ("version", 4.into()),
             ("path", serde_json::json!(["relative"])),
             ("path", serde_json::json!(["/a:b"])),
             (

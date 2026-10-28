@@ -824,7 +824,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 &mut transcript,
                 &mut answered,
                 from,
-                b"Choose what to manage",
+                b"Network domains",
             );
             let from = transcript.len();
             input
@@ -896,7 +896,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                     from,
-                    b"Choose what to manage",
+                    b"Network domains",
                 );
                 let from = transcript.len();
                 input
@@ -959,7 +959,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                     from,
-                    b"Choose what to manage",
+                    b"Network domains",
                 );
                 let from = transcript.len();
                 input
@@ -1168,7 +1168,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "Choose what to manage",
+        "Network domains",
     );
     input.write_all(b"\r").unwrap();
     wait(
@@ -1755,7 +1755,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
     super::isolation::remember_workspace_trust(&account, &workspace, &workspace);
     let state = temp.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":2,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"9cfab19c2eb7a19a3fad3ed741187ed439a24f3c2d0e76d04efe5c19298d4467"}"#).unwrap();
+    root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"1ae964a6a4911a76405b9484671bd5f5c24650a712f4c6c829698c8ad9128c2b"}"#).unwrap();
     let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
     let mut command = super::isolation::isolated_script(temp.path());
     command
@@ -1820,7 +1820,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     assert!(!file.exists());
     input.write_all(b"\x1b[B\x1b[B\r").unwrap();
@@ -1855,7 +1855,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "environment area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
     until(
@@ -1923,7 +1923,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "capture area",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
     until(
@@ -1967,8 +1967,35 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut input,
         &mut transcript,
         &mut answered,
+        "environment cancellation area",
+        &shows("Network domains"),
+    );
+    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "command environment page",
+        &shows("Select a name from the Arany process"),
+    );
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "command environment cancellation",
+        &shows("Command environment unchanged"),
+    );
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
         "typed area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     input.write_all(b"\x1b[B\r").unwrap();
     until(
@@ -2117,7 +2144,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "host area menu",
-        &shows("Choose what to manage"),
+        &shows("Network domains"),
     );
     input.write_all(b"\x1b[B\x1b[B\r").unwrap();
     until(

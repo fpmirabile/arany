@@ -8,30 +8,10 @@ use crate::validate::{MAX_PATH_BYTES, valid_digest, valid_relative};
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectTarget {
     Workspace,
-    WorkerView {
-        assignment_id: AgentRunId,
-        base_digest: [u8; 32],
-        revision: u32,
-        #[serde(deserialize_with = "Option::deserialize")]
-        cache_generation: Option<[u8; 32]>,
-    },
 }
 impl EffectTarget {
     pub(crate) fn valid(&self) -> bool {
-        match self {
-            Self::Workspace => true,
-            Self::WorkerView {
-                assignment_id,
-                base_digest,
-                revision,
-                cache_generation,
-            } => {
-                assignment_id.valid()
-                    && *base_digest != [0; 32]
-                    && *revision <= 16
-                    && *cache_generation != Some([0; 32])
-            }
-        }
+        true
     }
 }
 

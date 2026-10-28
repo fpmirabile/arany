@@ -21,9 +21,10 @@ use std::str::FromStr;
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_BUSY: &str = "Build cache is in use; retry after its command finishes";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
+mod build_cpu;
 mod build_jobs;
 
-const UI_PREFERENCES_VERSION: u8 = 7;
+const UI_PREFERENCES_VERSION: u8 = 8;
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
     ("KB", 1024),
@@ -53,6 +54,10 @@ pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
         RecordStep {
             from: 6,
             transform: build_jobs::with_default,
+        },
+        RecordStep {
+            from: 7,
+            transform: build_cpu::with_default,
         },
     ],
     accepts: |bytes| decode_settings(bytes).is_ok(),
@@ -128,6 +133,7 @@ impl Default for Preferences {
             goal_budget: arany::GoalBudget::default(),
             resources: arany::ToolResourceSettings {
                 build_jobs: None,
+                build_cpu_cores: None,
                 ..Default::default()
             },
             copy_on_select: PointerSettings::default().copy_on_select,
@@ -386,6 +392,7 @@ const SETTINGS: &[Setting] = &[
         guidance: Some(AttachedTerminal::newline_shortcut_guidance),
     },
     build_jobs::SETTING,
+    build_cpu::SETTING,
 ];
 
 fn show_limit(value: Option<u64>, format: impl FnOnce(u64) -> String) -> String {
@@ -1978,6 +1985,15 @@ mod tests {
             ),
             None => "Build jobs: automatic; Build unavailable (automatic or 1..cores)".into(),
         };
+        let build_cpu = match cores {
+            Some(cores) => format!(
+                "Build CPU cores: automatic; {cores} effective (1..{cores}) (automatic or 1..cores; Linux quota)"
+            ),
+            None => {
+                "Build CPU cores: automatic; Build unavailable (automatic or 1..cores; Linux quota)"
+                    .into()
+            }
+        };
         assert_eq!(
             linear_setting_rows(preferences),
             [
@@ -1995,6 +2011,7 @@ mod tests {
                 "Copy on select: on (on|off)",
                 "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)",
                 build_jobs.as_str(),
+                build_cpu.as_str(),
             ]
         );
         for (raw, expected) in [
@@ -2078,6 +2095,7 @@ mod tests {
                 build_memory_bytes: 1025,
                 build_processes: 17,
                 build_jobs: None,
+                build_cpu_cores: None,
                 build_project_bytes: 513 * 1024 * 1024,
                 build_cache_bytes: 1025 * 1024 * 1024,
             },
@@ -2341,7 +2359,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":7,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
+            br#"{"version":8,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_cpu_cores":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
         );
         // A complete version-3 record upgrades in place, keeping its choices and adding newer defaults.
         let finite = Preferences {
@@ -2370,6 +2388,10 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .remove("build_jobs");
+            legacy["preferences"]["resources"]
+                .as_object_mut()
+                .unwrap()
+                .remove("build_cpu_cores");
             legacy["preferences"]["mouse"] = mouse.into();
             root.record(RecordKind::UiPreferences)
                 .replace(&serde_json::to_vec(&legacy).unwrap())
@@ -2393,6 +2415,10 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .remove("build_jobs");
+            legacy["preferences"]["resources"]
+                .as_object_mut()
+                .unwrap()
+                .remove("build_cpu_cores");
             legacy["preferences"]["mouse"] = mouse;
             let legacy = serde_json::to_vec(&legacy).unwrap();
             root.record(RecordKind::UiPreferences)

@@ -19,6 +19,8 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+pub(super) mod bridge;
+mod cpu;
 pub(super) mod overlay;
 pub(super) mod supervisor;
 
@@ -45,7 +47,8 @@ const BWRAP_TEST_LAUNCH: &[&str] = &[
 ];
 
 pub(super) fn check_available() -> Result<(), ToolError> {
-    profile::programs()?;
+    profile::programs(profile::Routing::Proxy)?;
+    profile::programs(profile::Routing::Offline)?;
     use std::os::unix::fs::MetadataExt;
     for path in [
         "/usr/bin/bwrap",
@@ -62,23 +65,23 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     Ok(())
 }
 
-const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling";
+const LINUX_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling";
 
-const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
+const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v24:primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear-worker-only-archive;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v26:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    bytes.extend_from_slice(cpu::contract().as_bytes());
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&overlay::cache::HANDOFF_BYTES.to_le_bytes());
     bytes.extend_from_slice(&supervisor::MAX_PIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
-    bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
-    bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
+    bytes.extend_from_slice(LINUX_REWIND_CONTRACT);
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
     bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
-    bytes.extend_from_slice(&profile::profile_digest()?);
+    bytes.extend_from_slice(&profile::profile_digest(profile::Routing::Offline)?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_SERIALIZED_BYTES as u64).to_le_bytes());
@@ -110,6 +113,7 @@ pub(super) async fn stop_command_descendants(
                 Err(_) => return Err(ToolError::ProtectionUnavailable),
             }
         }
+        bridge::reap();
         let mut count = 0usize;
         let mut live = false;
         for (index, entry) in std::fs::read_dir("/proc")
@@ -144,7 +148,7 @@ pub(super) async fn stop_command_descendants(
     }
 }
 
-pub(super) fn harden() -> Result<(), ToolError> {
+pub(super) fn harden(routing: profile::Routing) -> Result<(), ToolError> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
     use rustix::process::{Resource, Rlimit, setrlimit};
@@ -156,7 +160,7 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    profile::install()?;
+    profile::install(routing)?;
     setrlimit(
         Resource::Core,
         Rlimit {
@@ -248,6 +252,16 @@ struct Unit {
 }
 
 impl Unit {
+    fn new(id: uuid::Uuid, limits: &ToolLimits) -> Self {
+        Self {
+            name: format!("arany-tool-{id}.service"),
+            invocation: None,
+            group: None,
+            kill: None,
+            limits: Some(limits.clone()),
+        }
+    }
+
     async fn properties(&self) -> Result<serde_json::Value, ToolError> {
         let mut command = manager_command("/usr/bin/systemctl");
         command.args(["--user", "--no-ask-password", "show", &self.name,
@@ -286,11 +300,7 @@ impl Unit {
             .ok_or(ToolError::ProtectionUnavailable)?;
         let memory = limits.memory_bytes.to_string();
         let processes = limits.max_processes.to_string();
-        let cpu = if limits.resource_class == ToolResourceClass::Build {
-            "100000 100000"
-        } else {
-            "25000 100000"
-        };
+        let cpu = cpu::maximum(limits);
         let values = self.properties().await?;
         let group = values["ControlGroup"]
             .as_str()
@@ -326,7 +336,7 @@ impl Unit {
             ("memory.swap.max", "0".into()),
             ("memory.oom.group", "1".into()),
             ("pids.max", processes.clone()),
-            ("cpu.max", cpu.into()),
+            ("cpu.max", cpu),
         ] {
             let mut file = dir
                 .open(name)
@@ -640,11 +650,13 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
 }
 
 struct UnitFilesystem<'a> {
+    command_deadline: Option<tokio::time::Instant>,
     launch: (supervisor::Launch, std::fs::File),
     seed_path: &'a Path,
     seed_dir: &'a cap_std::fs::Dir,
     runtime_directories: Vec<PathBuf>,
     mounts: Vec<(PathBuf, PathBuf)>,
+    proxy_socket: Option<&'a Path>,
 }
 
 fn unit_command(
@@ -655,22 +667,25 @@ fn unit_command(
     filesystem: UnitFilesystem<'_>,
 ) -> Result<(Command, std::fs::File), ToolError> {
     let UnitFilesystem {
+        command_deadline,
         launch: (mut launch, executable),
         seed_path,
         seed_dir,
         runtime_directories,
         mounts,
+        proxy_socket,
     } = filesystem;
     let phase_limits = &intent.limits;
     let memory_max = format!("--property=MemoryMax={}", phase_limits.memory_bytes);
     let tasks_max = format!("--property=TasksMax={}", phase_limits.max_processes);
-    let cpu_quota = if phase_limits.resource_class == ToolResourceClass::Build {
-        "--property=CPUQuota=100%"
-    } else {
-        "--property=CPUQuota=25%"
-    };
+    let cpu_quota = cpu::quota_property(phase_limits);
+    let cpu_period = cpu::period_property();
     if overlay::selected(intent, &runtime.config) {
-        launch.overlay = Some(overlay::Grant::new(runtime, intent)?);
+        launch.overlay = Some(overlay::Grant::new(
+            runtime,
+            intent,
+            command_deadline.ok_or(ToolError::Configuration)?,
+        )?);
     }
     let cache_view = launch.cache.as_ref().map(overlay::cache::Grant::merged);
     let executable_path = supervisor::executable_path(&executable);
@@ -699,14 +714,14 @@ fn unit_command(
         "--property=MemorySwapMax=0",
         "--property=OOMPolicy=kill",
         &tasks_max,
-        cpu_quota,
-        "--property=CPUQuotaPeriodSec=100ms",
+        &cpu_quota,
+        &cpu_period,
     ]);
     let service_runtime_ms = 10_000_u64
         .saturating_add(u64::from(intent.limits.cache_transfer_ms).saturating_mul(2))
         .saturating_add(u64::from(intent.limits.runtime_ms))
         .saturating_add(
-            u64::try_from(super::transfer::transfer_overhead(intent).as_millis())
+            u64::try_from(super::transfer::transfer_time(intent).as_millis())
                 .expect("bounded worker transfer time"),
         );
     command.arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms));
@@ -719,8 +734,7 @@ fn unit_command(
     let workspace_mount = if let Some(overlay) = &launch.overlay {
         Some(overlay.workspace_mount(seed_path))
     } else {
-        (native && runtime.worker.is_none())
-            .then(|| (runtime.workspace.clone(), intent.call.mutates()))
+        native.then(|| (runtime.workspace.clone(), intent.call.mutates()))
     };
     profile_arguments(
         &mut command,
@@ -742,6 +756,12 @@ fn unit_command(
     for (source, target) in mounts {
         command.args(["--ro-bind"]).arg(source).arg(target);
     }
+    if let Some(socket) = proxy_socket {
+        command
+            .args(["--ro-bind"])
+            .arg(socket)
+            .arg(crate::tools::network::PROXY_SOCKET_TARGET);
+    }
     command
         .args(["--chdir", "/", "/arany", "--internal-tool-guard"])
         .arg(launch.helper_pin()?);
@@ -756,11 +776,7 @@ async fn settle_launch(
     stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
     deadline: tokio::time::Instant,
     result: Result<(ToolObservation, super::CacheCandidate), ToolError>,
-    (cache, private, discovery): (
-        &mut Option<super::BuildCacheSession>,
-        Option<&super::transfer::Action>,
-        bool,
-    ),
+    (cache, discovery): (&mut Option<super::BuildCacheSession>, bool),
 ) -> Result<ToolObservation, ToolError> {
     let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
     if !matches!(cleanup, Ok(Ok(()))) {
@@ -785,15 +801,6 @@ async fn settle_launch(
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
             .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
-    }
-    if matches!(cleanup, Ok(Ok(())))
-        && matches!(reaped, Ok(Ok(_)))
-        && drained.is_some()
-        && let Some(private) = private
-    {
-        private
-            .contained
-            .store(true, std::sync::atomic::Ordering::Release);
     }
     if matches!(cleanup, Ok(Ok(()))) && matches!(reaped, Ok(Ok(_))) && drained.is_some() {
         super::cache_directory::finished(cache.as_ref())?;
@@ -843,13 +850,14 @@ fn action_deadlines(
     tokio::time::Instant,
 ) {
     let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-    let selection_time = if primary_command(intent) {
-        crate::tools::selection::PHASE_TIME
-    } else {
-        Duration::ZERO
-    };
     let preparation_deadline = active_window.map_or(
-        capacity_started + RESERVATION_OVERHEAD + selection_time,
+        capacity_started
+            + RESERVATION_OVERHEAD
+            + if primary_command(intent) {
+                Duration::from_millis(u64::from(intent.limits.runtime_ms))
+            } else {
+                Duration::ZERO
+            },
         |window| window.preparation_deadline,
     );
     let bulk = super::transfer::transfer_time(intent);
@@ -866,9 +874,8 @@ fn action_deadlines(
         || {
             capacity_started
                 + Duration::from_secs(15)
-                + selection_time
                 + cache_transfer.saturating_mul(2)
-                + super::transfer::transfer_overhead(intent)
+                + super::transfer::transfer_time(intent)
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
         },
         |window| window.completion_deadline,
@@ -907,9 +914,7 @@ fn guard_config<'a>(
     runtime: &'a ToolRuntime,
     intent: &EffectIntent,
 ) -> std::borrow::Cow<'a, super::Config> {
-    if runtime.worker.is_some() && !intent.call.is_process()
-        || matches!(intent.call, ToolCall::ParseAgentDefinition { .. })
-    {
+    if matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) {
         std::borrow::Cow::Owned(super::parser_config(&runtime.config))
     } else {
         std::borrow::Cow::Borrowed(&runtime.config)
@@ -925,7 +930,7 @@ fn prepare_seed(
     let (path, directory) = permit.prepare_seed(
         &workspace,
         &guard_config(runtime, intent),
-        intent.call.is_process() && !primary_command(intent) && runtime.worker.is_none(),
+        intent.call.is_process() && !primary_command(intent),
     )?;
     Ok((path, directory))
 }
@@ -938,7 +943,10 @@ async fn worker_input<W: tokio::io::AsyncWrite + Unpin, R: tokio::io::AsyncBufRe
     go_deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, ToolError> {
     if ready_bytes == b"WORKER_READY\n" {
-        let input = super::transfer::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+        let input = runtime
+            .handover
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
         tokio::time::timeout_at(go_deadline, super::transfer::send_frame(stdin, input))
             .await
             .map_err(|_| ToolError::Limit)??;
@@ -954,15 +962,7 @@ async fn read_effect_observation<R: tokio::io::AsyncBufRead + Unpin>(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    if runtime.worker.is_some() {
-        super::read_worker_observation(
-            reader,
-            runtime,
-            intent,
-            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
-        )
-        .await
-    } else if runtime.handover.is_some() {
+    if runtime.handover.is_some() {
         tokio::time::timeout(
             Duration::from_millis(u64::from(intent.limits.runtime_ms)),
             read_observation(reader, intent),
@@ -979,10 +979,13 @@ fn task_bytes(
     intent: &EffectIntent,
     cache: Option<super::BuildCacheTransfer>,
     parent_namespaces: profile::Namespaces,
+    command_deadline: Option<tokio::time::Instant>,
 ) -> Result<Vec<u8>, ToolError> {
     encode_task(&Task {
+        command_deadline: command_deadline
+            .map(super::selection_phase::encode_deadline)
+            .transpose()?,
         definition: runtime.definitions.payload(&intent.call)?,
-        worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
         handover: runtime
             .handover
             .as_ref()
@@ -994,14 +997,6 @@ fn task_bytes(
         hidden: runtime.hidden_paths(&intent.call),
         parent_namespaces,
     })
-}
-
-fn mark_contained(runtime: &ToolRuntime, contained: bool) {
-    if let Some(private) = &runtime.worker {
-        private
-            .contained
-            .store(contained, std::sync::atomic::Ordering::Release);
-    }
 }
 
 pub(super) async fn execute_inner(
@@ -1016,7 +1011,8 @@ pub(super) async fn execute_inner(
         permit = super::admit_operation(runtime, intent) => permit?,
     };
     let capacity_started = tokio::time::Instant::now();
-    let active_window = runtime.begin_active_action(capacity_started).await?;
+    let active_window =
+        super::selection_phase::begin_action(runtime, intent, capacity_started).await?;
     let (preparation_deadline, go_deadline, deadline) =
         action_deadlines(active_window, intent, capacity_started);
     crate::tools::fs::validate_workspace(runtime)?;
@@ -1031,35 +1027,31 @@ pub(super) async fn execute_inner(
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let (mut cache, launch) =
         overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
+    let command_deadline = super::selection_phase::command_deadline(intent);
     let preparation_deadline =
-        preparation_deadline.min(tokio::time::Instant::now() + RESERVATION_OVERHEAD);
-    let mut unit = Unit {
-        name: format!("arany-tool-{}.service", permit.id),
-        invocation: None,
-        group: None,
-        kill: None,
-        limits: Some(intent.limits.clone()),
-    };
+        super::selection_phase::preparation_deadline(preparation_deadline, command_deadline);
+    let mut unit = Unit::new(permit.id, &intent.limits);
+    let proxy = proxy_for(runtime, intent, permit.id)?;
     let filesystem = UnitFilesystem {
+        command_deadline,
         launch,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
         runtime_directories,
         mounts,
+        proxy_socket: proxy.as_ref().map(crate::tools::network::Proxy::socket),
     };
     let (mut command, _executable) =
         unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
     let parent_namespaces = profile::Namespaces::read()?;
     super::cache_directory::started(cache.as_ref(), permit.id)?;
     permit.launching()?;
-    mark_contained(runtime, false);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
             super::cache_directory::finished(cache.as_ref())?;
             permit.terminated()?;
             permit.cleanup().await?;
-            mark_contained(runtime, true);
             return Err(ToolError::ProtectionUnavailable);
         }
     };
@@ -1075,14 +1067,19 @@ pub(super) async fn execute_inner(
             cache.as_ref(),
             &seed_dir,
             (&mut stdin, &mut stdout),
-            (preparation_deadline, go_deadline),
+            (preparation_deadline, go_deadline, command_deadline),
             parent_namespaces.clone(),
         )
         .await?;
         admit_ready(&mut unit, &ready_bytes, intent, &parent_namespaces).await?;
-        runtime
-            .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
-            .await?;
+        super::selection_phase::before_dispatch(
+            runtime,
+            intent,
+            active_window,
+            command_deadline,
+            &go_cancellation,
+        )
+        .await?;
         *dispatched = true;
         stdin
             .write_all(b"GO\n")
@@ -1139,20 +1136,51 @@ pub(super) async fn execute_inner(
         () = cancellation.cancelled() => Err(ToolError::Operation),
         result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
     };
-    Box::pin(settle_launch(
+    let settled = Box::pin(settle_launch(
         &mut unit,
         &permit,
         &mut child,
         &mut stderr_task,
         deadline,
         result,
-        (
-            &mut cache,
-            runtime.worker.as_deref(),
-            super::super::discovery::possible(&intent.call),
-        ),
+        (&mut cache, super::super::discovery::possible(&intent.call)),
     ))
-    .await
+    .await;
+    finish_proxy(proxy, settled).await
+}
+
+async fn finish_proxy(
+    proxy: Option<crate::tools::network::Proxy>,
+    settled: Result<ToolObservation, ToolError>,
+) -> Result<ToolObservation, ToolError> {
+    let Some(proxy) = proxy else {
+        return settled;
+    };
+    let refusals = proxy.finish().await;
+    settled.and_then(|mut observation| {
+        crate::tools::network::annotate(&mut observation, refusals)?;
+        Ok(observation)
+    })
+}
+
+fn proxy_for(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    id: uuid::Uuid,
+) -> Result<Option<crate::tools::network::Proxy>, ToolError> {
+    if intent.limits.network != crate::tools::types::NetworkGrant::Proxy {
+        return Ok(None);
+    }
+    let grant = runtime
+        .config
+        .network
+        .clone()
+        .ok_or(ToolError::Configuration)?;
+    let socket = PathBuf::from(format!(
+        "/run/user/{}/arany-egress-{id}.sock",
+        rustix::process::geteuid().as_raw()
+    ));
+    crate::tools::network::Proxy::start(grant, socket).map(Some)
 }
 
 const PREPARATION_ROOT: &str = "/prepared";
@@ -1177,7 +1205,10 @@ const PROFILE_MOUNT_TARGETS: [&str; 14] = [
 fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
     if PROFILE_MOUNT_TARGETS
         .iter()
-        .chain(std::iter::once(&PREPARATION_ROOT))
+        .chain([
+            &PREPARATION_ROOT,
+            &crate::tools::network::PROXY_SOCKET_TARGET,
+        ])
         .map(Path::new)
         .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))
     {
@@ -1598,15 +1629,11 @@ impl Unit {
             .group
             .as_ref()
             .ok_or(ToolError::ProtectionUnavailable)?;
-        let cpu = if limits.resource_class == ToolResourceClass::Build {
-            "100000 100000"
-        } else {
-            "25000 100000"
-        };
+        let cpu = cpu::maximum(&limits);
         for (name, value) in [
             ("memory.max", limits.memory_bytes.to_string()),
             ("pids.max", limits.max_processes.to_string()),
-            ("cpu.max", cpu.into()),
+            ("cpu.max", cpu),
         ] {
             let mut options = cap_std::fs::OpenOptions::new();
             options.write(true);
@@ -1670,7 +1697,7 @@ async fn receive_result(
     cache: Option<&super::BuildCacheSession>,
     report_deadline: Option<tokio::time::Instant>,
 ) -> Result<(ToolObservation, super::CacheCandidate), ToolError> {
-    if let Some(session) = cache.filter(|_| runtime.worker.is_none()) {
+    if let Some(session) = cache {
         let read = super::read_observation_line(stdout, intent);
         let observation = if let Some(report_deadline) = report_deadline {
             tokio::time::timeout_at(report_deadline, read)
@@ -1719,11 +1746,21 @@ async fn prepare_ready(
         &mut (impl tokio::io::AsyncWrite + Unpin),
         &mut (impl tokio::io::AsyncBufRead + Unpin),
     ),
-    (preparation_deadline, go_deadline): (tokio::time::Instant, tokio::time::Instant),
+    (preparation_deadline, go_deadline, command_deadline): (
+        tokio::time::Instant,
+        tokio::time::Instant,
+        Option<tokio::time::Instant>,
+    ),
     parent_namespaces: profile::Namespaces,
 ) -> Result<Vec<u8>, ToolError> {
     let cache_transfer = cache.map(|session| session.transfer.clone());
-    let task = task_bytes(runtime, intent, cache_transfer, parent_namespaces)?;
+    let task = task_bytes(
+        runtime,
+        intent,
+        cache_transfer,
+        parent_namespaces,
+        command_deadline,
+    )?;
     let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {
         stdin
             .write_all(&task)
@@ -1745,22 +1782,6 @@ async fn prepare_ready(
             return Err(ToolError::ProtectionUnavailable);
         }
         drop(upper);
-        ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(stdout, 2048))
-            .await
-            .map_err(|_| ToolError::Limit)??;
-    }
-    if ready_bytes == b"CACHE_READY\n" {
-        if runtime.worker.is_none() {
-            return Err(ToolError::Configuration);
-        }
-        let session = cache.ok_or(ToolError::Operation)?;
-        let transfer_deadline = super::cache_transfer_deadline(intent, Some(go_deadline));
-        tokio::time::timeout_at(
-            transfer_deadline,
-            super::send_cache_archive(stdin, &session.lease),
-        )
-        .await
-        .map_err(|_| ToolError::Limit)??;
         ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(stdout, 2048))
             .await
             .map_err(|_| ToolError::Limit)??;
@@ -1788,16 +1809,16 @@ mod tests {
         use crate::validate::hex_digest;
 
         assert_eq!(
-            hex_digest(LINUX_WORKER_CONTRACT),
-            "d98dda7eac0d3078c424ff02e1a77a277220b0119898d9b21e044585a6832e27"
+            hex_digest(LINUX_REWIND_CONTRACT),
+            "3ac1446048748f68a0d448cd728bcc31ed106856d1588d1c890b034729e5a293"
         );
         assert_eq!(
             hex_digest(LINUX_SELECTION_CONTRACT),
-            "35f1aa2d4c41ec3e4703f055ab4a9921d8aa39d6daffd3c9d670ec73582e74d5"
+            "ac6ba2cdae3e03d83caaf69c0b224079af11bfc05ef3e5ce6da5577ae0edb03a"
         );
         super::super::tests::assert_enforcement_prose(
             LINUX_SELECTION_CONTRACT,
-            LINUX_WORKER_CONTRACT,
+            LINUX_REWIND_CONTRACT,
         );
     }
 
@@ -1994,13 +2015,12 @@ mod tests {
             ),
         ];
         for (call, workspace_mode) in calls {
-            for (root, private) in [(".", false), ("src", false), (".", true), ("src", true)] {
-                let arguments = native_launch_arguments(call.clone(), root, private);
+            for root in [".", "src"] {
+                let arguments = native_launch_arguments(call.clone(), root);
                 assert_native_workspace_mounts(
                     &arguments,
                     workspace_mode,
                     root,
-                    private,
                     call["operation"] == "command",
                 );
             }
@@ -2011,7 +2031,6 @@ mod tests {
         arguments: &[String],
         workspace_mode: Option<&str>,
         root: &str,
-        private: bool,
         command: bool,
     ) {
         let bootstrap = arguments
@@ -2019,7 +2038,7 @@ mod tests {
             .position(|argument| argument == "--supervisor")
             .unwrap();
         let launch: serde_json::Value = serde_json::from_str(&arguments[bootstrap + 1]).unwrap();
-        let overlay = command && !private;
+        let overlay = command;
         assert_eq!(launch["probe"].is_object(), overlay);
         assert_eq!(launch["overlay"].is_object(), overlay);
         assert!(!arguments.iter().any(|argument| argument == "/prepared"));
@@ -2031,7 +2050,7 @@ mod tests {
         let workspace_mode = if overlay {
             Some(if root == "." { "--bind" } else { "--ro-bind" })
         } else {
-            workspace_mode.filter(|_| !private)
+            workspace_mode
         };
         if let Some(mode) = workspace_mode {
             assert_eq!(mounts.len(), 1, "{arguments:?}");
@@ -2058,7 +2077,7 @@ mod tests {
         }
     }
 
-    fn native_launch_arguments(call: serde_json::Value, root: &str, private: bool) -> Vec<String> {
+    fn native_launch_arguments(call: serde_json::Value, root: &str) -> Vec<String> {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = tempfile::tempdir().unwrap();
@@ -2076,42 +2095,25 @@ mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        let mut intent = runtime.intent(
+        let intent = runtime.intent(
             crate::session::RunId::new(),
             crate::session::AgentRunId::new(),
             serde_json::from_value(call).unwrap(),
         );
-        if private {
-            intent.target = crate::worker::EffectTarget::WorkerView {
-                assignment_id: intent.agent_run_id,
-                base_digest: [1; 32],
-                revision: 0,
-                cache_generation: None,
-            };
-            runtime.worker = Some(std::sync::Arc::new(crate::tools::guard::transfer::Action {
-                transfer: serde_json::from_value(serde_json::json!({
-                    "target":intent.target,"bytes":1,"sha256":vec![1_u8; 32],
-                    "grant":{"read_paths":["."],"write_paths":["."],"tools":["list"],
-                        "skills":[],"mcp_servers":[],"commands":[],"permission_mode":null}
-                }))
-                .unwrap(),
-                input: vec![1].into(),
-                output: std::sync::Mutex::new(None),
-                contained: std::sync::atomic::AtomicBool::new(true),
-            }));
-        }
         unit_command(
             &runtime,
             &intent,
             "arany-discovery-profile",
             "/usr/bin:/bin",
             UnitFilesystem {
+                command_deadline: super::super::selection_phase::command_deadline(&intent),
                 launch: supervisor::Launch::new(&runtime.guard_executable, fixture.path(), &intent)
                     .unwrap(),
                 seed_path: fixture.path(),
                 seed_dir: &seed,
                 runtime_directories: Vec::new(),
                 mounts: Vec::new(),
+                proxy_socket: None,
             },
         )
         .unwrap()
@@ -2257,7 +2259,7 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        harden().expect("production Guard hardening");
+        harden(profile::Routing::Offline).expect("production Guard hardening");
         let own = thread_status(Path::new("/proc/thread-self/status"))
             .unwrap()
             .expect("the caller's own status");

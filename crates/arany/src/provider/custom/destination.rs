@@ -25,44 +25,25 @@ impl PinnedDestination {
         let port = url
             .port_or_known_default()
             .ok_or(CustomProfileError::InvalidConfiguration)?;
-        let numeric = host.trim_matches(['[', ']']).parse::<IpAddr>().ok();
-        let addresses = if let Some(address) = numeric {
-            vec![SocketAddr::new(address, port)]
-        } else {
-            let resolved =
-                tokio::time::timeout(DNS_DEADLINE, tokio::net::lookup_host((host, port)))
-                    .await
-                    .map_err(|_| CustomProfileError::Unavailable)?
-                    .map_err(|_| CustomProfileError::Unavailable)?;
-            resolved.take(MAX_ADDRESSES + 1).collect()
-        };
-        Self::admit(profile.endpoint(), host, numeric.is_some(), addresses)
+        let addresses = resolve_admitted(host, port).await?;
+        Ok(Self {
+            host: host.to_owned(),
+            endpoint: profile.endpoint().to_owned(),
+            addresses,
+        })
     }
 
+    #[cfg(test)]
     fn admit(
         endpoint: &str,
         host: &str,
         numeric: bool,
-        mut addresses: Vec<SocketAddr>,
+        addresses: Vec<SocketAddr>,
     ) -> Result<Self, CustomProfileError> {
-        if addresses.is_empty() || addresses.len() > MAX_ADDRESSES {
-            return Err(CustomProfileError::InvalidConfiguration);
-        }
-        if addresses.iter().any(|address| {
-            if numeric {
-                !address.ip().is_loopback()
-            } else {
-                !permitted_public_address(address.ip())
-            }
-        }) {
-            return Err(CustomProfileError::InvalidConfiguration);
-        }
-        addresses.sort_unstable();
-        addresses.dedup();
         Ok(Self {
             host: host.to_owned(),
             endpoint: endpoint.to_owned(),
-            addresses,
+            addresses: admit_addresses(numeric, addresses)?,
         })
     }
 
@@ -80,6 +61,44 @@ impl PinnedDestination {
             .build()
             .map_err(|_| CustomProfileError::Unavailable)
     }
+}
+
+pub(crate) async fn resolve_admitted(
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>, CustomProfileError> {
+    let numeric = host.trim_matches(['[', ']']).parse::<IpAddr>().ok();
+    let addresses = if let Some(address) = numeric {
+        vec![SocketAddr::new(address, port)]
+    } else {
+        let resolved = tokio::time::timeout(DNS_DEADLINE, tokio::net::lookup_host((host, port)))
+            .await
+            .map_err(|_| CustomProfileError::Unavailable)?
+            .map_err(|_| CustomProfileError::Unavailable)?;
+        resolved.take(MAX_ADDRESSES + 1).collect()
+    };
+    admit_addresses(numeric.is_some(), addresses)
+}
+
+fn admit_addresses(
+    numeric: bool,
+    mut addresses: Vec<SocketAddr>,
+) -> Result<Vec<SocketAddr>, CustomProfileError> {
+    if addresses.is_empty() || addresses.len() > MAX_ADDRESSES {
+        return Err(CustomProfileError::InvalidConfiguration);
+    }
+    if addresses.iter().any(|address| {
+        if numeric {
+            !address.ip().is_loopback()
+        } else {
+            !permitted_public_address(address.ip())
+        }
+    }) {
+        return Err(CustomProfileError::InvalidConfiguration);
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
 }
 
 fn permitted_public_address(address: IpAddr) -> bool {

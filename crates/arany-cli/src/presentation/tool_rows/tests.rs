@@ -107,7 +107,6 @@ mod peer_row_tests {
             for (cache, marker) in [
                 (CacheUpdate::NotApplicable, ""),
                 (CacheUpdate::NotAttempted, ""),
-                (CacheUpdate::Discarded, ""),
                 (CacheUpdate::Published, ""),
                 (CacheUpdate::Rejected, " · cache not saved (limit)"),
                 (CacheUpdate::Failed, " · cache update failed"),
@@ -757,7 +756,7 @@ mod peer_row_tests {
     #[test]
     fn command_rows_use_typed_line_totals_and_mark_truncation() {
         let output = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
             "stderr": "", "stdout_total": {"bytes":123408,"lines":12340},
             "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
@@ -780,7 +779,7 @@ mod peer_row_tests {
         );
         let mut tool = tool;
         tool.observation.as_mut().unwrap().output = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "x lines omitted; 45 bytes, 1 lines total]…\n",
             "stderr": "", "stdout_total": {"bytes":45,"lines":1},
             "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
@@ -800,7 +799,7 @@ mod peer_row_tests {
             "Command(sh )\nResult: exit 0 · 1 line · selection counts unavailable"
         );
         result["selection"] = serde_json::json!({
-            "ignored_entries":7,"pruned_directories":2,"oversized_inputs":1,"discarded_outputs":3
+            "elapsed_ms":null,"ignored_entries":7,"pruned_directories":2,"oversized_inputs":1,"discarded_outputs":3
         });
         tool.observation.as_mut().unwrap().output = result.to_string();
         assert_eq!(
@@ -822,7 +821,7 @@ mod peer_row_tests {
             ),
         ] {
             result["selection"] = serde_json::json!({
-                "ignored_entries":count,"pruned_directories":count,"oversized_inputs":count,"discarded_outputs":count
+                "elapsed_ms":null,"ignored_entries":count,"pruned_directories":count,"oversized_inputs":count,"discarded_outputs":count
             });
             tool.observation.as_mut().unwrap().output = result.to_string();
             assert_eq!(
@@ -871,7 +870,7 @@ mod peer_row_tests {
     #[test]
     fn command_rows_show_only_nonzero_counters() {
         let mut result = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":3,"oversized_inputs":0,"discarded_outputs":2},
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":3,"oversized_inputs":0,"discarded_outputs":2},
             "exit_code":0,"stdout":"x\n","stderr":"",
             "stdout_total":{"bytes":2,"lines":1},"stderr_total":{"bytes":0,"lines":0}
         });
@@ -889,7 +888,7 @@ mod peer_row_tests {
             ([4, 1, 0, 0], "4 ignored entries (1 pruned root)"),
         ] {
             result["selection"] = serde_json::json!({
-                "ignored_entries":selection[0],"pruned_directories":selection[1],
+                "elapsed_ms":null,"ignored_entries":selection[0],"pruned_directories":selection[1],
                 "oversized_inputs":selection[2],"discarded_outputs":selection[3]
             });
             tool.observation.as_mut().unwrap().output = result.to_string();

@@ -383,7 +383,6 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         guard_available: true,
         git_writes_available,
         host_authentication: Default::default(),
-        worker: None,
         handover: None,
         definitions: Default::default(),
         permissions: None,
@@ -438,6 +437,20 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         }),
         super::guard::git_writes_available()
     );
+    assert_eq!(
+        config.allows(&ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![".".into()],
+            staged: false,
+        }),
+        super::guard::git_writes_available()
+    );
+    assert_eq!(
+        config.allows(&ToolCall::GitSwitch {
+            branch: "topic".into()
+        }),
+        super::guard::git_writes_available()
+    );
     for git_writes in [false, true] {
         let operations = if git_writes {
             vec![
@@ -488,7 +501,6 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         guard_available: true,
         git_writes_available: true,
         host_authentication: Default::default(),
-        worker: None,
         handover: None,
         definitions: Default::default(),
         permissions: None,

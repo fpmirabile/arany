@@ -488,6 +488,7 @@ impl WorkspacePermissions {
             git_identity: super::git::user_identity(),
             locale: Default::default(),
             environment_sha256: None,
+            network: None,
         };
         config.validate()?;
         Ok(config)

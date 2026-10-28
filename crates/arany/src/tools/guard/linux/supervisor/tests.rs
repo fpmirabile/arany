@@ -73,11 +73,13 @@ fn supervisor_launch_never_executes_a_path_replacement() {
         &format!("arany-pin-test-{}.service", uuid::Uuid::now_v7()),
         "/usr/bin:/bin",
         UnitFilesystem {
+            command_deadline: None,
             launch: Launch::new(&runtime.guard_executable, root.path(), &intent).unwrap(),
             seed_path: root.path(),
             seed_dir: &seed,
             runtime_directories: Vec::new(),
             mounts: Vec::new(),
+            proxy_socket: None,
         },
     )
     .unwrap();

@@ -14,7 +14,7 @@ impl BuildCacheLease {
     pub(crate) fn prepare_directory(&mut self) -> Result<Dir, StoreError> {
         let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
         directory_available(&self.dir, &self.token)?;
-        if self.shared || self.candidate_limit == 0 {
+        if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
         let lower_bytes = own_tree_bytes(&self.dir, &self.token)?.max(
@@ -24,23 +24,7 @@ impl BuildCacheLease {
                 .transpose()?
                 .unwrap_or_default(),
         );
-        let reserved = self
-            .archive_limit
-            .checked_add(self.candidate_limit)
-            .and_then(|headroom| headroom.checked_add(lower_bytes))
-            .ok_or(StoreError::StorageFull)?;
-        let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
-        let previous = validate_reservation(&reservation, &self.token)?;
-        if inventory(&self.dir)?
-            .saturating_sub(previous)
-            .checked_add(reserved)
-            .ok_or(StoreError::StorageFull)?
-            > AGGREGATE_BYTES
-        {
-            return Err(StoreError::StorageFull);
-        }
-        set_reservation(&self.dir, &self.token, reserved)?;
-        sync_directory(&self.dir)?;
+        self.reserve_directory(lower_bytes)?;
         let name = tree_name(&self.token);
         let stamp = stamp_name(&self.token);
         let migrate = file_exists(&self.dir, &stamp)?;
@@ -74,11 +58,33 @@ impl BuildCacheLease {
                 self.archive_limit,
             )?;
         }
-        measure(&tree, self.archive_limit)?;
+        let lower_bytes = measure(&tree, self.archive_limit)?;
         sync_tree(&tree, &self.token)?;
         self.archive = None;
+        remove_if_present(&self.dir, &archive_name(&self.token))?;
+        self.reserve_directory(lower_bytes)?;
         self.finish_directory()?;
         Ok(tree)
+    }
+
+    fn reserve_directory(&self, lower_bytes: u64) -> Result<(), StoreError> {
+        let reserved = self
+            .archive_limit
+            .checked_add(self.candidate_limit)
+            .and_then(|headroom| headroom.checked_add(lower_bytes))
+            .ok_or(StoreError::StorageFull)?;
+        let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
+        let previous = validate_reservation(&reservation, &self.token)?;
+        if inventory(&self.dir)?
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(reserved))
+            .ok_or(StoreError::StorageFull)?
+            > AGGREGATE_BYTES
+        {
+            return Err(StoreError::StorageFull);
+        }
+        set_reservation(&self.dir, &self.token, reserved)?;
+        sync_directory(&self.dir)
     }
 
     pub(crate) fn publish_directory(
@@ -188,25 +194,6 @@ pub(super) fn committed_bytes(
     } else {
         Ok(archive_bytes)
     }
-}
-
-pub(super) fn prepare_worker_archive(
-    state: &StateRoot,
-    dir: &Dir,
-    identity: &BuildCacheIdentity,
-    limit: u64,
-) -> Result<(), StoreError> {
-    let token = identity.token();
-    if !file_exists(dir, &tree_name(&token))? || file_exists(dir, &archive_name(&token))? {
-        return Ok(());
-    }
-    let mut lease = state.begin_build_cache_with_limits(identity.clone(), limit, limit)?;
-    let lower = lease.dir.open_dir_nofollow(tree_name(&token))?;
-    let mut candidate = lease.candidate_writer()?;
-    capture_archive_with_limit(&lower, identity, &[], &mut candidate, limit)?;
-    candidate.sync_all()?;
-    candidate.rewind()?;
-    lease.publish(&mut candidate, &[])
 }
 
 fn apply(lower: &Dir, upper: &Dir, changes: &[CacheChange]) -> Result<(), StoreError> {

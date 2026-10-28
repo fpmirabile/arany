@@ -11,7 +11,7 @@ const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserI
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.
-const FIXTURES: [Fixture<'static>; 22] = [
+const FIXTURES: [Fixture<'static>; 24] = [
     (
         RecordKind::ToolsConfig,
         1,
@@ -34,11 +34,17 @@ const FIXTURES: [Fixture<'static>; 22] = [
         RecordKind::CommandEnvironment,
         1,
         COMMAND_ENVIRONMENT_V1,
-        COMMAND_ENVIRONMENT,
+        COMMAND_ENVIRONMENT_V2,
     ),
     (
         RecordKind::CommandEnvironment,
         2,
+        COMMAND_ENVIRONMENT_V2,
+        COMMAND_ENVIRONMENT,
+    ),
+    (
+        RecordKind::CommandEnvironment,
+        3,
         COMMAND_ENVIRONMENT,
         COMMAND_ENVIRONMENT,
     ),
@@ -48,7 +54,8 @@ const FIXTURES: [Fixture<'static>; 22] = [
     (RecordKind::UiPreferences, 4, UI_V4, UI_V5),
     (RecordKind::UiPreferences, 5, UI_V5, UI_V6),
     (RecordKind::UiPreferences, 6, UI_V6, UI_V7),
-    (RecordKind::UiPreferences, 7, UI_V7, UI_V7),
+    (RecordKind::UiPreferences, 7, UI_V7, UI_V8),
+    (RecordKind::UiPreferences, 8, UI_V8, UI_V8),
     (
         RecordKind::ModelPreferences,
         1,
@@ -80,8 +87,10 @@ const FIXTURES: [Fixture<'static>; 22] = [
     (RecordKind::ProviderRouting, 1, ROUTING, ROUTING_V2),
     (RecordKind::ProviderRouting, 2, ROUTING_V2, ROUTING_V2),
 ];
+const COMMAND_ENVIRONMENT_V1_STABLE: &str = r#"{"version":1,"source":"process","captured_at":0,"path":[],"names":[],"excluded":[],"sha256":"5fb8d18f216b305631b7e04584e2db972974baaa85b6448a9120c4e899730833"}"#;
 const COMMAND_ENVIRONMENT_V1: &str = r#"{"version":1,"source":"process","captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"93ffd086ef94ffa935cc4ad55f5ef67a0dda50913d60bbe61c424572733c8b99"}"#;
-const COMMAND_ENVIRONMENT: &str = r#"{"version":2,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"b543544f6d20cffccddb8cb997234ccb594dbeafb96c632be1bb0fe4b01207a2"}"#;
+const COMMAND_ENVIRONMENT_V2: &str = r#"{"version":2,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"b543544f6d20cffccddb8cb997234ccb594dbeafb96c632be1bb0fe4b01207a2"}"#;
+const COMMAND_ENVIRONMENT: &str = r#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"f9aa85256800d2c10b3d044c2e5005c385f5ef42a543e0182c0a1e2366c4b6b4"}"#;
 const PROFILES: &str = r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const PROFILES_V2: &str = r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const UI_V3: &str = r#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
@@ -90,6 +99,7 @@ const UI_V4: &str = r#"{"version":4,"preferences":{"completion":"tabs","view":"f
 const UI_V5: &str = r#"{"version":5,"preferences":{"completion":"tabs","view":"fullscreen","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"off","copy_on_select":false,"newline":"shift_enter"}}"#;
 const UI_V6: &str = r#"{"version":6,"preferences":{"completion":"tabs","view":"fullscreen","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":false,"newline":"shift_enter"}}"#;
 const UI_V7: &str = r#"{"version":7,"preferences":{"completion":"tabs","view":"fullscreen","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":false,"newline":"shift_enter"}}"#;
+const UI_V8: &str = r#"{"version":8,"preferences":{"completion":"tabs","view":"fullscreen","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_cpu_cores":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":false,"newline":"shift_enter"}}"#;
 const ACCOUNT: &str = r#"{"schema":1,"storage":"private_file","account":{"schema":2,"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","provider":"openai","model":"gpt-5.4","effort":"low","api_key":"synthetic-test-key","anthropic_workspace_id":null}}"#;
 const ACCOUNT_V2: &str = r#"{"schema":2,"storage":"private_file","account":{"schema":3,"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","api_key":"synthetic-test-key","anthropic_workspace_id":null}}"#;
 const CHATGPT_ACCOUNT_V1: &str = r#"{"schema":1,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":1,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}}],"model_checks":[{"account_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","fingerprint":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"checked_at_sec":1700000000,"expires_at_sec":1700086400,"context_window_tokens":272000}]}"#;
@@ -214,14 +224,34 @@ fn uncovered(
 }
 
 #[test]
+fn timestamp_independent_version_one_records_migrate() {
+    let formats = formats();
+    let format = formats
+        .iter()
+        .find(|format| format.kind == RecordKind::CommandEnvironment)
+        .unwrap();
+    let upgraded = format
+        .upgrade(COMMAND_ENVIRONMENT_V1_STABLE.as_bytes())
+        .unwrap();
+    let record: Value = serde_json::from_slice(&upgraded).unwrap();
+    assert_eq!(record["version"], format.current);
+    assert_eq!(record["path"], serde_json::json!([]));
+    assert_eq!(record["names"], serde_json::json!([]));
+    assert!(format.accepts_current(&upgraded));
+}
+
+#[test]
 fn every_record_version_from_its_floor_has_a_step_and_fixture() {
     assert_eq!(
         uncovered(&formats(), &FIXTURES, &NESTED_SCHEMAS),
         Vec::<String>::new()
     );
 
+    let current = UI_PREFERENCES.current;
+    let floor = UI_PREFERENCES.floor;
+    let next = current + 1;
     let bumped = RecordFormat {
-        current: UI_PREFERENCES.current + 1,
+        current: next,
         ..UI_PREFERENCES
     };
     let changed: Vec<&RecordFormat> = formats()
@@ -238,10 +268,10 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
     assert_eq!(
         uncovered(&changed, &FIXTURES, &NESTED_SCHEMAS),
         [
-            "ProviderRouting declares 0 record formats",
-            "UiPreferences 8 has no accepted identity fixture",
-            "UiPreferences 7 -> 8 has no step and fixture",
-            "UiPreferences 3 -> 8 does not decode",
+            "ProviderRouting declares 0 record formats".to_owned(),
+            format!("UiPreferences {next} has no accepted identity fixture"),
+            format!("UiPreferences {current} -> {next} has no step and fixture"),
+            format!("UiPreferences {floor} -> {next} does not decode"),
         ]
     );
     // A decoder that changes shape without a version bump refuses its own identity fixture.
@@ -255,8 +285,8 @@ fn every_record_version_from_its_floor_has_a_step_and_fixture() {
             .filter(|problem| problem.starts_with("UiPreferences"))
             .collect::<Vec<_>>(),
         [
-            "UiPreferences 7 has no accepted identity fixture",
-            "UiPreferences 3 -> 7 does not decode",
+            format!("UiPreferences {current} has no accepted identity fixture"),
+            format!("UiPreferences {floor} -> {current} does not decode"),
         ]
     );
 }
