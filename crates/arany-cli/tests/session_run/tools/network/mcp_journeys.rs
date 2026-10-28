@@ -446,7 +446,7 @@ fn echo_call(description: &str) -> ToolCall {
     ignore = "native Linux remote MCP through the egress proxy with a saved OAuth token"
 )]
 async fn remote_mcp_lists_tools_with_the_saved_token() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::Normal);
@@ -474,7 +474,7 @@ async fn remote_mcp_lists_tools_with_the_saved_token() {
     ignore = "native Linux remote MCP: a missing token refuses before any request"
 )]
 async fn remote_mcp_without_a_saved_token_refuses_before_any_request() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::Normal);
@@ -490,7 +490,7 @@ async fn remote_mcp_without_a_saved_token_refuses_before_any_request() {
     ignore = "native Linux remote MCP: an expired token renews through the saved refresh token"
 )]
 async fn remote_mcp_renews_an_expired_token_before_the_call() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::Normal);
@@ -513,7 +513,7 @@ async fn remote_mcp_renews_an_expired_token_before_the_call() {
     ignore = "native Linux remote MCP: an unconfirmed refresh blocks every later use of the refresh token"
 )]
 async fn remote_mcp_never_resubmits_a_refresh_token_after_an_unconfirmed_reply() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     for mode in [
@@ -552,7 +552,7 @@ async fn remote_mcp_never_resubmits_a_refresh_token_after_an_unconfirmed_reply()
     ignore = "native Linux remote MCP: cancelling during a renewal is uncertain and never refreshes twice"
 )]
 async fn remote_mcp_cancelled_during_a_renewal_is_uncertain_and_blocks_reuse() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::HoldTokenReply);
@@ -580,7 +580,7 @@ async fn remote_mcp_cancelled_during_a_renewal_is_uncertain_and_blocks_reuse() {
     ignore = "native Linux remote MCP: a real deadline expiry or a dead launcher during a renewal is uncertain and blocks reuse"
 )]
 async fn remote_mcp_stopped_during_a_renewal_is_uncertain_and_blocks_reuse() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     for launcher_dies in [false, true] {
@@ -622,7 +622,7 @@ async fn remote_mcp_stopped_during_a_renewal_is_uncertain_and_blocks_reuse() {
     ignore = "native Linux remote MCP: a researcher proposing the remote server is refused before any request"
 )]
 async fn remote_mcp_is_refused_to_researchers_without_touching_credentials() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::Normal);
@@ -705,7 +705,7 @@ async fn remote_mcp_is_refused_to_researchers_without_touching_credentials() {
     ignore = "native Linux remote MCP: a refused ping reply during a pending call stays uncertain"
 )]
 async fn remote_mcp_call_with_a_refused_ping_reply_is_uncertain() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::RejectPingReply);
@@ -721,7 +721,7 @@ async fn remote_mcp_call_with_a_refused_ping_reply_is_uncertain() {
     ignore = "native Linux remote MCP: the client answers a server ping while the result is pending"
 )]
 async fn remote_mcp_answers_a_ping_before_the_server_finishes_its_stream() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::PingBeforeResult);
@@ -737,7 +737,7 @@ async fn remote_mcp_answers_a_ping_before_the_server_finishes_its_stream() {
     ignore = "native Linux remote MCP: a call whose reply is lost is uncertain and stops the Run"
 )]
 async fn remote_mcp_call_with_a_lost_reply_is_uncertain() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::DisconnectAfterCall);
@@ -767,7 +767,7 @@ async fn remote_mcp_call_with_a_lost_reply_is_uncertain() {
     ignore = "native Linux remote MCP: a reflected bearer token never reaches Events, spills or the model"
 )]
 async fn remote_mcp_rejects_a_reflected_bearer_token() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let server = mcp_fixture(Mode::ReflectToken);
@@ -788,7 +788,7 @@ async fn remote_mcp_rejects_a_reflected_bearer_token() {
     ignore = "native Linux remote MCP: an invalid reply to a dispatched call stays uncertain"
 )]
 async fn remote_mcp_call_with_an_invalid_reply_is_uncertain() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     for mode in [
@@ -822,10 +822,6 @@ fn arany_mcp(action: &str, state: &Path, workspace: &Path) -> std::process::Comm
         .args(["mcp", action, "remote", "--state-dir"])
         .arg(state)
         .current_dir(workspace)
-        .env(
-            "ARANY_TEST_ACCOUNT_ROOT",
-            StateRoot::account_path().unwrap(),
-        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -944,9 +940,15 @@ fn cli_login(state: &Path, workspace: &Path) -> (CliRun, String) {
     ignore = "isolated loopback authorization server: the shipped login and logout commands"
 )]
 async fn remote_mcp_login_and_logout_commands_run_the_full_oauth_flow() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
+    // The shipped CLI resolves this same account root from the private fixture passwd home.
+    let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
+    assert_eq!(
+        StateRoot::account_path().unwrap(),
+        Path::new(&root).join("account-home/.local/state/arany")
+    );
     for revoke_fails in [false, true] {
         let server = mcp_fixture(if revoke_fails {
             Mode::RevokeFails
