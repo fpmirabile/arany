@@ -1444,8 +1444,12 @@ mod tests {
         std::fs::copy(&system_shell, &shell).unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let program = shell_program(&shell);
-        // macOS launch constraints kill a copied platform shell, so commands run the system one.
-        let runnable = shell_program(&system_shell);
+        // macOS launch constraints kill a copied shell, so macOS runs the system one.
+        let runnable = shell_program(if cfg!(target_os = "macos") {
+            &system_shell
+        } else {
+            &shell
+        });
         let identity = super::super::workspace_identity(&workspace).unwrap();
         Fixture {
             launcher: std::env::current_exe().unwrap(),
