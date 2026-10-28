@@ -829,7 +829,7 @@ impl RunLoop<'_> {
             != Decision::Deny;
         let goal_allows = intent.call.is_internal()
             || match grant {
-                Grant::Primary { .. } => self.plan_allows(&intent.call)?,
+                Grant::Primary { .. } => self.plan_allows(intent.scoped_call())?,
                 Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
             };
         let hooks = match config {

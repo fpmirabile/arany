@@ -1310,6 +1310,7 @@ mod tests {
     fn read_intent() -> EffectIntent {
         EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,

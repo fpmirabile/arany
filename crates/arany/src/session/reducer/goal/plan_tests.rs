@@ -100,6 +100,7 @@ fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
 fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
     let intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,

@@ -281,7 +281,7 @@ pub(super) fn proposed(
         }
     }
     let child = names_child(current, run_id, agent_run_id);
-    if child && !intent.rewrite.is_empty() {
+    if child && (!intent.rewrite.is_empty() || intent.wrap.is_some()) {
         return Err(ReplayError::InvalidTransition);
     }
     if super::search_allowance_spent(current, &intent.call) {
@@ -312,7 +312,7 @@ fn start_primary_tool(
     intent: &EffectIntent,
 ) -> Result<(), ReplayError> {
     let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
-    super::validate_primary_tool_scope(current, run_id, &intent.call)
+    super::validate_primary_tool_scope(current, run_id, intent.scoped_call())
         .map_err(|_| ReplayError::InvalidTransition)?;
     if goal
         .effective_budget()

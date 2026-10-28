@@ -799,6 +799,8 @@ pub(crate) fn test_host_pin() -> HostCommandPin {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectIntent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<Box<super::command_tools::CommandWrap>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewrite: Vec<super::command_tools::CommandRewrite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -826,6 +828,10 @@ pub struct HostIntent {
 }
 
 impl EffectIntent {
+    pub(crate) fn scoped_call(&self) -> &ToolCall {
+        self.wrap.as_ref().map_or(&self.call, |wrap| &wrap.original)
+    }
+
     pub fn effective_timeout_ms(&self) -> u32 {
         let cap = match self.call {
             ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => GIT_TIMEOUT_MS,
@@ -842,7 +848,15 @@ impl EffectIntent {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.rewrite.len() <= super::command_tools::MAX_COMMAND_TOOLS
+        self.wrap.as_ref().is_none_or(|wrap| {
+            wrap.valid(&self.call)
+                && (wrap.stage != super::command_tools::WrapStage::Direct
+                    || self.host_command.as_ref().is_some_and(|pin| {
+                        pin.executable == wrap.tool.executable
+                            || pin.sha256 == wrap.tool.sha256
+                            || (pin.device, pin.inode) == (wrap.tool.device, wrap.tool.inode)
+                    }))
+        }) && self.rewrite.len() <= super::command_tools::MAX_COMMAND_TOOLS
             && self.rewrite.iter().all(|fact| {
                 crate::validate::valid_digest(&fact.tool_sha256)
                     && fact.original_sha256 != [0; 32]
@@ -2129,6 +2143,7 @@ mod model_call_tests {
         ] {
             let intent = EffectIntent {
                 host: None,
+                wrap: None,
                 rewrite: Vec::new(),
                 host_command: None,
                 target: EffectTarget::Workspace,
@@ -2172,6 +2187,7 @@ mod unguarded_vocabulary_tests {
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: call.is_unguarded().then(test_host_pin),
             target: crate::session::worker::EffectTarget::Workspace,

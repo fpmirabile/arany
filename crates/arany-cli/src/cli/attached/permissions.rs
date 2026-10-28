@@ -1341,6 +1341,7 @@ mod tests {
         arany::ToolView {
             intent: arany::EffectIntent {
                 host: None,
+                wrap: None,
                 rewrite: Vec::new(),
                 host_command: Some(pin),
                 target: arany::worker::EffectTarget::Workspace,

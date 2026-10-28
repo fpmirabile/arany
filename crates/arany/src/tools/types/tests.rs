@@ -140,6 +140,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     }
     let intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -460,6 +461,7 @@ fn guard_stage_is_valid_only_on_unattested_guard_failures() {
     let observation = |call: ToolCall, disposition| {
         let intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,

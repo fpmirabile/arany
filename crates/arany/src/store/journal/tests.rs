@@ -722,6 +722,7 @@ fn largest_tool_started_payload() -> String {
     };
     let intent = crate::tools::EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,

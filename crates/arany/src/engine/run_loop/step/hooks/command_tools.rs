@@ -25,7 +25,10 @@ impl RunLoop<'_> {
             return Ok(Ok(intent));
         }
         let tools = runtime.command_tools().entries();
-        let count = tools.iter().filter(|tool| tool.enabled).count();
+        let count = tools
+            .iter()
+            .filter(|tool| tool.enabled && tool.role == command_tools::CommandToolRole::Rewrite)
+            .count();
         if count == 0 {
             return Ok(Ok(intent));
         }
@@ -36,7 +39,9 @@ impl RunLoop<'_> {
                 count,
             )
             .await?;
-        for (index, tool) in tools.iter().enumerate().filter(|(_, tool)| tool.enabled) {
+        for (index, tool) in tools.iter().enumerate().filter(|(_, tool)| {
+            tool.enabled && tool.role == command_tools::CommandToolRole::Rewrite
+        }) {
             if self.controls.cancellation.is_cancelled() {
                 return Ok(Err(SizingRefusal::Cancelled));
             }

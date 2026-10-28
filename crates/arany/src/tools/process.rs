@@ -47,7 +47,10 @@ pub(super) enum Truncation {
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
-        ToolCall::Command { program, args, cwd } => valid_command(program, args, cwd),
+        ToolCall::Command { program, args, cwd } => {
+            (valid_name(program) || super::config::valid_absolute(program))
+                && valid_command("command", args, cwd)
+        }
         ToolCall::CommandUnguarded {
             program,
             args,
@@ -102,11 +105,28 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let ToolCall::Command { program, args, cwd } = &site.intent.call else {
         return Err(ToolError::Configuration);
     };
-    let definition = site
-        .config
-        .commands
-        .iter()
-        .find(|value| &value.name == program)
+    if let Some(wrap) = &site.intent.wrap {
+        wrap.verify(&site.config.runtime_grants, &site.intent.call)?;
+    }
+    let prefix = site
+        .intent
+        .wrap
+        .as_ref()
+        .filter(|wrap| {
+            matches!(
+                wrap.stage,
+                super::command_tools::WrapStage::Wrapped | super::command_tools::WrapStage::Probe
+            )
+        })
+        .map(|wrap| wrap.program());
+    let definition = prefix
+        .as_ref()
+        .or_else(|| {
+            site.config
+                .commands
+                .iter()
+                .find(|value| &value.name == program)
+        })
         .ok_or(ToolError::Configuration)?;
     #[cfg(target_os = "macos")]
     let args = args
@@ -121,8 +141,13 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         .collect::<Vec<_>>();
     #[cfg(target_os = "macos")]
     let args = &args;
+    let source = if prefix.is_some() {
+        super::guard::PayloadProgram::Prefix(definition)
+    } else {
+        super::guard::PayloadProgram::Configured(definition)
+    };
     let mut command = payload(
-        definition,
+        source,
         args,
         cwd,
         site.root,

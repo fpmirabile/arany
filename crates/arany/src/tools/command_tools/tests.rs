@@ -2,7 +2,7 @@ use super::*;
 use crate::tools::toolchains::{GrantRoot, RuntimeKind, RuntimeManager};
 use std::os::unix::fs::PermissionsExt;
 
-fn fixture(root: &Path) -> (StateRoot, std::path::PathBuf, String, RuntimeGrant) {
+pub(super) fn fixture(root: &Path) -> (StateRoot, std::path::PathBuf, String, RuntimeGrant) {
     let workspace = root.join("workspace");
     let directory = root.join("programs");
     std::fs::create_dir(&workspace).unwrap();

@@ -15,6 +15,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let run_id = RunId::new();
     let command_intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -72,6 +73,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     tools.extend((0..15).map(|index| {
         let intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
@@ -586,6 +588,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     late_run.tools.push(late_rejected_command);
     let uncertain_intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -693,6 +696,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     byte_run.tools.truncate(13);
     let failed_intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -796,6 +800,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         for failure_index in 0..denied_count {
             let intent = EffectIntent {
                 host: None,
+                wrap: None,
                 rewrite: Vec::new(),
                 host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,
@@ -973,6 +978,7 @@ fn read_evidence_names_the_site_that_attested_it() {
 fn read_intent(call: &ToolCall) -> EffectIntent {
     EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,

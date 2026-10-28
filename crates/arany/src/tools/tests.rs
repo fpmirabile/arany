@@ -29,6 +29,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 
     let intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -58,6 +59,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
     let intent = |call| EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,

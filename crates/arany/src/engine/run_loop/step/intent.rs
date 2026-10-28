@@ -428,6 +428,10 @@ impl RunLoop<'_> {
                 Ok(intent) => intent,
                 Err(refusal) => return Ok(Err(refusal)),
             };
+            intent = runtime.prepare_prefix(intent).await?;
+            if intent.wrap.is_some() && !intent.call.valid() {
+                return Ok(Err(SizingRefusal::ContextFull));
+            }
         }
         let integration = (matches!(intent.call, ToolCall::Command { .. })
             && matches!(intent.target, crate::worker::EffectTarget::Workspace))

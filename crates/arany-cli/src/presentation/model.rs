@@ -532,6 +532,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
@@ -768,6 +769,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,

@@ -1,9 +1,12 @@
+mod import;
+
 use super::*;
 use arany::{
-    CommandTool, CommandToolProbe, CommandTools, Engine, RewriteStage, RunCancellation, SessionId,
-    command_tool_candidates,
+    CommandTool, CommandToolProbe, CommandToolRole, CommandTools, Engine, RewriteStage,
+    RunCancellation, SessionId, command_tool_candidates,
 };
 
+const IMPORT: u8 = 249;
 const PAGE_SIZE: usize = 32;
 const NEXT: u8 = 250;
 const PREVIOUS: u8 = 251;
@@ -31,7 +34,7 @@ pub(in crate::cli::attached) async fn manage_command_tools(
     view: &mut arany::SessionView,
 ) -> Result<String, SetupError> {
     let mut notice =
-        "Select, probe and confirm a Rewrite hook. Changes apply from the next Run.".to_owned();
+        "Select, probe and confirm a command tool. Changes apply from the next Run.".to_owned();
     loop {
         let state = match StateRoot::open_existing(&admission.state_dir) {
             Ok(state) => state,
@@ -54,6 +57,9 @@ pub(in crate::cli::attached) async fn manage_command_tools(
                 };
                 notice = saved(CommandTools::edit(&state, |record| record.select(tool)))?;
             }
+            Some(IMPORT) => {
+                notice = import::select_import(terminal, &editor).await?;
+            }
             Some(value) if value >= ENTRY_BASE => {
                 let index = usize::from(value - ENTRY_BASE);
                 let Some(tool) = record.entries().get(index) else {
@@ -73,6 +79,7 @@ async fn choose_tools(
     notice: &str,
 ) -> Result<Option<u8>, SetupError> {
     let mut rows = vec![(ADD, "Select executable and role".to_owned())];
+    rows.push((IMPORT, "Import from Claude Code settings".into()));
     rows.extend(record.entries().iter().enumerate().map(|(index, tool)| {
         let pinned = tool.pin_status(editor.state, &editor.admission.workspace);
         let pin = if pinned { "pinned" } else { "needs re-pin" };
@@ -86,8 +93,9 @@ async fn choose_tools(
         (
             ENTRY_BASE + u8::try_from(index).expect("command tools are capped"),
             format!(
-                "{} · Rewrite hook · {pin} · last probe {} · {status}",
+                "{} · {} · {pin} · last probe {} · {status}",
                 executable_name(&tool.selected_path),
+                tool.role.label(),
                 tool.last_probe.map_or("not probed", RewriteStage::label)
             ),
         )
@@ -126,7 +134,8 @@ async fn edit_entry(
             &tool.selected_path,
             tool.args.clone(),
         )
-        .and_then(|replacement| {
+        .and_then(|mut replacement| {
+            replacement.role = tool.role;
             CommandTools::edit(editor.state, |record| {
                 record.replace(index, tool, replacement)
             })
@@ -183,19 +192,22 @@ async fn select(
     let Some(index) = candidate(terminal, &candidates).await? else {
         return Ok(None);
     };
-    if super::pick(
+    let role = match super::pick(
         terminal,
         "Command tool role",
         "Choose a role",
-        &[(1, "Rewrite hook".into())],
+        &[(1, "Rewrite hook".into()), (2, "Prefix wrapper".into())],
     )
     .await?
-    .is_none()
     {
-        return Ok(None);
-    }
+        Some(1) => CommandToolRole::Rewrite,
+        Some(2) => CommandToolRole::Prefix,
+        _ => return Ok(None),
+    };
     let mut args = Vec::new();
-    while args.len() < CommandTool::ARGUMENT_COUNT_LIMIT {
+    let argument_limit =
+        CommandTool::ARGUMENT_COUNT_LIMIT - usize::from(role == CommandToolRole::Prefix);
+    while args.len() < argument_limit {
         match super::pick(
             terminal,
             "Fixed arguments",
@@ -229,7 +241,10 @@ async fn select(
         &candidates[index],
         args,
     ) {
-        Ok(tool) => Ok(Some(tool)),
+        Ok(mut tool) => {
+            tool.role = role;
+            Ok(Some(tool))
+        }
         Err(error) => {
             super::super::setup::review_warning(
                 terminal,
@@ -353,9 +368,10 @@ async fn confirm_probe(
     let mut updated = probed.clone();
     if matches!(stage, RewriteStage::Rewritten | RewriteStage::Unchanged) {
         let warning = format!(
-            "Selected: {}\nExecutable: {}\nRole: Rewrite hook\nFixed arguments: {}\nSample: {}\nPreview: {}",
+            "Selected: {}\nExecutable: {}\nRole: {}\nFixed arguments: {}\nSample: {}\nPreview: {}",
             crate::presentation::escape_terminal(&probed.selected_path),
             crate::presentation::escape_terminal(&probed.executable),
+            probed.role.label(),
             crate::presentation::escape_terminal(
                 &serde_json::to_string(&probed.args).expect("typed arguments serialize")
             ),
@@ -366,7 +382,7 @@ async fn confirm_probe(
             terminal,
             "Command tool probe",
             &warning,
-            "Accept enables this Rewrite hook for the next Run",
+            "Accept enables this command tool for the next Run",
         )
         .await?;
     }
