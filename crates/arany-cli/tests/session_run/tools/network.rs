@@ -645,7 +645,7 @@ async fn read_reopened_web_spill(state: &Path, workspace: &Path, outcome: &arany
     ignore = "native Linux web_fetch through the egress proxy: HTML reduction and the download bound"
 )]
 async fn web_fetch_reads_a_listed_page_and_bounds_a_large_one() {
-    if !crate::isolation::enter_account_isolated_test() {
+    if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
     let (page, spilled) = fetch_page(

@@ -1,6 +1,6 @@
 {
   "primary": {
-    "command_contract": "Explicit argv only. Private selected-project cwd without .git; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded requests a primary host command with justification and explicit human approval; no prior failure is required.",
+    "command_contract": "Explicit argv only. Private selected-project cwd without .git; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. Environment cleared; PATH is selected toolchain bin directories followed by /usr/bin:/bin. The pinned shell accepts only -c SCRIPT; Arany does not automatically source profiles. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. For user-installed tools outside the Guard, command_unguarded requests a primary host command with justification and explicit human approval; no prior failure is required.",
     "commands": [
       {
         "inputs": [],

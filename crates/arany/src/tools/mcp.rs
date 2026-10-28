@@ -1,11 +1,10 @@
 use super::ToolError;
 use super::catalog::string;
-use super::config::Config;
+use super::config::{Config, Server};
 use super::guard::{
     TEARDOWN_WAIT, drain_stderr, payload, read_capped, read_line_capped, reap_owned_child,
 };
 use super::skills::parse_json;
-use super::config::Server;
 use super::types::{ToolCall, parse_mcp_arguments};
 use crate::validate::{hex_digest, valid_digest, valid_name};
 use serde_json::{Value, json};
@@ -284,6 +283,7 @@ pub(super) async fn execute(
         cache_enabled,
         &super::types::ToolLimits::default(),
     )?;
+    command.envs(&config.locale);
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;
     let writer = child.stdin.take().ok_or(ToolError::Operation)?;

@@ -177,7 +177,8 @@ impl HostPrefixRule {
         {
             return Err(ToolError::ChangedInput);
         }
-        self.pin.verify(workspace)?;
+        self.pin
+            .verify(workspace, &crate::tools::CommandEnvironment::load(state)?)?;
         let config = match crate::tools::config::Config::load(state) {
             Ok(config) => config,
             Err(ToolError::MissingConfiguration) => {

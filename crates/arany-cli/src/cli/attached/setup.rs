@@ -10,7 +10,7 @@ mod routing;
 
 use chatgpt_flow::{chatgpt_setup, remove_chatgpt_saved_access, selected_chatgpt_defaults};
 pub(super) use error::SetupError;
-pub(super) use prompts::{await_operation, choose_focused, review_warning};
+pub(super) use prompts::{await_operation, choose_focused, read_setup_value, review_warning};
 use prompts::{await_setup_ack, choose};
 
 use crate::accounts::chatgpt;

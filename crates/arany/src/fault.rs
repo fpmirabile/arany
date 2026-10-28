@@ -8,10 +8,10 @@ use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
 
-#[cfg(any(test, feature = "test-support"))]
-pub use injection::{FaultPlan, GitStorageFault};
 #[cfg(test)]
 pub(crate) use injection::PRIVATE_RECORD_GATE_DEADLINE;
+#[cfg(any(test, feature = "test-support"))]
+pub use injection::{FaultPlan, GitStorageFault};
 
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub(crate) mod git_write;
@@ -821,7 +821,12 @@ mod injection {
         ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
             let (entered, wait_entered) = std::sync::mpsc::channel();
             let (release, wait_release) = std::sync::mpsc::channel();
-            plan().push(Fault::PrivateRecordAdmission(state, record, entered, wait_release));
+            plan().push(Fault::PrivateRecordAdmission(
+                state,
+                record,
+                entered,
+                wait_release,
+            ));
             (wait_entered, release)
         }
 

@@ -14,8 +14,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "tools_macos/network.rs"]
+mod network;
 #[path = "tools_macos/repository.rs"]
 mod repository;
+#[path = "tools_macos/shell.rs"]
+mod shell;
 
 const MCP_SCRIPT: &str = r#"set -eu
 while IFS= read -r request; do
@@ -363,6 +367,15 @@ fn guarded_command_changesets_survive_closed_replay() {
 #[test]
 #[cfg_attr(
     not(arany_ci),
+    ignore = "native macOS egress proxy: loopback tunnel, unlisted refusal and no other route"
+)]
+fn guarded_command_egress_reaches_only_the_loopback_proxy() {
+    native_journey("tools::network::native_network_proxy_helper");
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
     ignore = "native macOS selected-runtime Guard command and mounted-image refusal"
 )]
 fn guarded_runtime_profile_checks_mount_topology_before_dispatch() {
@@ -470,6 +483,7 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
+    super::tools_git::latency::forward(&output.stdout);
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if line.starts_with("offline Cargo ")
             || (registry.is_some() && line.starts_with("repository "))
@@ -1005,6 +1019,7 @@ async fn native_file_journey_helper() {
         .expect("recorded Guard discovery intent");
     guard_refuses_before_go(root, &workspace, &discovery.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
+    shell::refuse_options(root, &workspace, &config).await;
 }
 
 #[tokio::test]
@@ -2654,6 +2669,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
+        ("missing_command_deadline", "admission"),
         ("workspace_write", "admission"),
         ("unknown_task_field", "admission"),
         ("invalid_go", "admission"),
@@ -2684,8 +2700,21 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
-        let mut task_value = json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
-            "intent":intent,"definition":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
+        let mut task_value = json!({
+            "command_deadline": null,
+            "config": serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
+            "intent": intent,
+            "definition": null,
+            "handover": null,
+            "workspace": workspace,
+            "guard_executable": env!("CARGO_BIN_EXE_arany")
+        });
+        if case == "missing_command_deadline" {
+            task_value
+                .as_object_mut()
+                .unwrap()
+                .remove("command_deadline");
+        }
         if case == "unknown_task_field" {
             task_value["unexpected"] = json!(false);
         }

@@ -146,6 +146,20 @@ pub(in crate::tools) fn decode_deadline(frame: [u8; 8]) -> Result<Instant, ToolE
 }
 
 #[cfg(any(test, target_os = "macos"))]
+pub(super) fn decode_command_deadline(
+    frame: [u8; 8],
+    limits: &ToolLimits,
+) -> Result<Instant, ToolError> {
+    let deadline = decode_deadline(frame)?;
+    if deadline.saturating_duration_since(Instant::now())
+        > Duration::from_millis(u64::from(limits.runtime_ms))
+    {
+        return Err(ToolError::Configuration);
+    }
+    Ok(deadline)
+}
+
+#[cfg(any(test, target_os = "macos"))]
 pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
     match result {
         Ok(_) => b"SELECT_DONE\n",
@@ -169,6 +183,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::HostPrefixConflict { .. }
             | ToolError::InactiveHostArchiveUnconfirmed
             | ToolError::InactiveHostArchiveConflict
+            | ToolError::CommandEnvironmentUnconfirmed
             | ToolError::AccountBusy
             | ToolError::ProtectionUnavailable
             | ToolError::QueueFull
@@ -357,6 +372,20 @@ pub(in crate::tools::guard) mod tests {
             decode_deadline(u64::MAX.to_le_bytes()),
             Err(ToolError::Limit)
         ));
+        let limits = ToolLimits {
+            runtime_ms: 1_000,
+            ..ToolLimits::default()
+        };
+        let runtime = Duration::from_millis(u64::from(limits.runtime_ms));
+        for remaining in [Duration::ZERO, runtime / 2, runtime, runtime * 2] {
+            let frame = encode_deadline(tokio::time::Instant::now() + remaining).unwrap();
+            let decoded = decode_command_deadline(frame, &limits);
+            if remaining <= runtime {
+                assert!(decoded.is_ok(), "{remaining:?}: {decoded:?}");
+            } else {
+                assert!(matches!(decoded, Err(ToolError::Configuration)));
+            }
+        }
     }
 
     pub(in crate::tools::guard) async fn protocol_outcomes() {
