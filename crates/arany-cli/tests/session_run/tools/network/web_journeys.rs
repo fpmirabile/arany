@@ -236,6 +236,9 @@ fn web_policy_search_privacy_and_https() {
                 .any(|window| window == SEARCH_KEY.as_bytes())
         );
     }
+    if !output.status.success() {
+        crate::process::relay_native_panic_location(&output.stderr, "native_account_test");
+    }
     assert!(output.status.success(), "web journey helper failed");
     crate::process::assert_single_test_completed(&output.stdout, "web journey helper");
 }
@@ -245,6 +248,7 @@ fn web_policy_search_privacy_and_https() {
 async fn web_journey_helper() {
     let root = std::env::var_os("ARANY_WEB_JOURNEY_ROOT").expect("owned web fixture root");
     assert!(std::env::var_os("ARANY_ACCOUNT_ISOLATED_TEST").is_some());
+    assert!(crate::isolation::enter_native_account_isolated_test());
     let root = Path::new(&root);
     researcher_journeys(root).await;
     search_journeys(root).await;
@@ -424,7 +428,8 @@ async fn fetch_policy_journeys(root: &Path) {
     }
     let server = page_upstream("text/plain", b"must never be fetched".to_vec());
     let mut case = WebCase::fetch(format!("http://127.0.0.1:{}/page", server.port));
-    case.permissions = json!({"permissions":{"allow":["WebFetch"],"deny":["WebFetch(domain:127.0.0.1)"]}});
+    case.permissions =
+        json!({"permissions":{"allow":["WebFetch"],"deny":["WebFetch(domain:127.0.0.1)"]}});
     let outcome = web_case(&root.join("network-deny"), case).await;
     assert_eq!(first_result(&outcome).disposition, Denied);
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);

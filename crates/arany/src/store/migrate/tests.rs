@@ -457,7 +457,10 @@ fn web_operations_never_appear_in_source_version_rows() {
         ("ToolProposed", include_str!("toolproposed-v1.json")),
         ("ToolStarted", include_str!("toolstarted-v23.json")),
         ("ToolFinished", SELECTION_TOOLFINISHED),
-        ("HookStarted", include_str!("hookstarted-without-expiry.json")),
+        (
+            "HookStarted",
+            include_str!("hookstarted-without-expiry.json"),
+        ),
         ("HookFinished", SELECTION_HOOKFINISHED),
     ] {
         let from = crate::test_support::payload_version(kind) - 1;
