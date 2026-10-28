@@ -168,9 +168,17 @@ async fn prefix_journey(host: bool, ending: Ending, compose: bool) {
     })
     .await
     .unwrap();
-    assert_prefix_outcome(&outcome.unwrap(), ending, compose);
+    if matches!(ending, Ending::Unknown) {
+        assert!(matches!(
+            outcome,
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+        ));
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    } else {
+        assert_prefix_outcome(&outcome.unwrap().run, ending, compose);
+    }
     engine.close().await.unwrap();
-    assert_prefix_replay(fixture, session).await;
+    assert_prefix_replay(fixture, session, ending, compose).await;
 }
 
 async fn approve_prefix(
@@ -216,12 +224,11 @@ fn prefix_provider(
     ]))
 }
 
-fn assert_prefix_outcome(outcome: &arany::RunOutcome, ending: Ending, compose: bool) {
+fn assert_prefix_outcome(run: &arany::RunView, ending: Ending, compose: bool) {
     if matches!(ending, Ending::Success) {
-        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(run.status, RunStatus::Finished);
     }
-    let wrapped = outcome
-        .run
+    let wrapped = run
         .tools
         .iter()
         .filter(|tool| tool.intent.wrap.is_some())
@@ -231,7 +238,7 @@ fn assert_prefix_outcome(outcome: &arany::RunOutcome, ending: Ending, compose: b
     match ending {
         Ending::Unknown => {
             assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
-            assert!(observation.stops_run());
+            assert_eq!(run.status, RunStatus::Interrupted);
         }
         Ending::Drift => {
             assert!(observation.attestation.is_none());
@@ -258,7 +265,12 @@ fn assert_prefix_outcome(outcome: &arany::RunOutcome, ending: Ending, compose: b
     }
 }
 
-async fn assert_prefix_replay(fixture: CommandFixture, session: arany::SessionId) {
+async fn assert_prefix_replay(
+    fixture: CommandFixture,
+    session: arany::SessionId,
+    ending: Ending,
+    compose: bool,
+) {
     std::fs::write(&fixture.executable, b"must never execute during replay").unwrap();
     fixture
         .state
@@ -269,6 +281,18 @@ async fn assert_prefix_replay(fixture: CommandFixture, session: arany::SessionId
     let events = store.load_session(session).await.unwrap();
     let view = store.load_view(session).await.unwrap().unwrap();
     store.close().await.unwrap();
+    assert_prefix_outcome(&view.runs[0], ending, compose);
+    if matches!(ending, Ending::Unknown) {
+        assert_eq!(
+            view.run_stop(&view.runs[0]),
+            Some(arany::RunStop::Uncertain)
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event.event, Event::RunFinished { .. }))
+        );
+    }
     assert_eq!(
         SessionView::replay(session, &events).unwrap().unwrap(),
         view
