@@ -785,7 +785,10 @@ mod tests {
     #[test]
     fn native_fixture_relay_admits_only_listed_fixtures() {
         let panic_annotation = b"::error title=Arany native fixture::fixture=isolated_child_panic; case=native_account_test; scenario=web; engine_error=x; cause=y\n";
-        assert!(super::relay_native_fixture_annotation(panic_annotation, b""));
+        assert!(super::relay_native_fixture_annotation(
+            panic_annotation,
+            b""
+        ));
         let unknown = b"::error title=Arany native fixture::fixture=unlisted; case=x\n";
         assert!(!super::relay_native_fixture_annotation(b"", unknown));
     }

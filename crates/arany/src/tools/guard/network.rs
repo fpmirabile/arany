@@ -6,8 +6,7 @@ pub(super) fn validate(task: &Task) -> Result<(), ToolError> {
     if proxied
         && (!(task.intent.call.is_web() || task.config.network.is_some())
             || task.intent.call.is_web()
-                && (!task.config.admits_web(&task.intent.call)
-                    || cfg!(not(target_os = "linux"))))
+                && (!task.config.admits_web(&task.intent.call) || cfg!(not(target_os = "linux"))))
     {
         return Err(ToolError::Configuration);
     }
