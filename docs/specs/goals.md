@@ -71,7 +71,7 @@ Goal receipts derive changes from observations, including child effects; the bou
 
 `GoalStarted` pins an `autonomous` flag. After each Run that ends without finishing the Goal, an autonomous Goal's Engine admits the next Run with no user input. Its input is the pinned objective; earlier results and reports are ordinary Session history. Each iteration follows the normal Run admission, budget, linkage and effect rules. A resume with no new text (`GoalRequest::resume`, empty `RunRequest.objective`) runs the pinned objective, and resuming an autonomous Goal continues the loop; non-empty resume text is used as given. Plain prompts and non-autonomous Goals keep the single-Run rule.
 
-A Run that Finishes without the plan's success criterion is a Run boundary while another Run is admissible within the pinned budget; otherwise it fails the Run and the Goal with its report. Stop conditions:
+A Run that Finishes without the plan's success criterion is a Run boundary while another Run is admissible within the pinned Run, Provider call and known-token budgets; otherwise it fails the Run and the Goal with its report. Active-time exhaustion is handled at settlement, below. Stop conditions:
 
 - A Finished Run that satisfies the criterion, or whose Goal has no plan contract, completes the Goal.
 - A Finished Run with an unsatisfied criterion whose Runs, Provider calls or known tokens admit no further Run fails the Run and the Goal with its report. The Engine decides these dimensions when the answer is recorded, so no next Run is admitted. Active time is decided at settlement, below.
