@@ -324,10 +324,7 @@ impl WorkspacePermissions {
 
     /// Discovery failure keeps the saved profiles listed and is reported with the chooser.
     pub fn prepare_profile_selection(self, state_dir: &Path) -> Self {
-        let discovered = StateRoot::admit(state_dir)
-            .map_err(|_| ToolError::Configuration)
-            .and_then(|state| discover_home_candidates(&state));
-        self.with_candidates(discovered)
+        self.with_candidates(discover_home_candidates(state_dir))
     }
 
     fn with_candidates(mut self, discovered: Result<Vec<Candidate>, ToolError>) -> Self {
@@ -572,14 +569,14 @@ fn saved_profile_label(grant: &RuntimeGrant, detected: bool) -> String {
     }
 }
 
-fn discover_home_candidates(state: &StateRoot) -> Result<Vec<Candidate>, ToolError> {
+fn discover_home_candidates(state_dir: &Path) -> Result<Vec<Candidate>, ToolError> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(Vec::new());
     };
     if !home.is_absolute() {
         return Ok(Vec::new());
     }
-    let environment = super::CommandEnvironment::load(state)?;
+    let environment = super::CommandEnvironment::for_discovery(state_dir)?;
     let path = environment.path_string();
     let mut candidates = discover(&home)?;
     candidates.extend(discover_user_environment(

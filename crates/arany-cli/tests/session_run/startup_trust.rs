@@ -1674,11 +1674,27 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
 
     let transcript = probe(true, None);
     assert!(!record_path.exists(), "Ctrl+C must save no choice");
+    assert!(!state.exists(), "cancelled consent must create no State");
     for row in ["3. ", "4. ", "5. "] {
         assert!(transcript.contains(row), "{transcript}");
     }
     assert!(transcript.contains("runs whatever the directory currently holds"));
 
+    let path = std::env::split_paths(search.strip_prefix("PATH=").unwrap())
+        .map(|entry| entry.to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let canonical = serde_json::to_vec(&serde_json::json!([1, "process", path, [], []])).unwrap();
+    StateRoot::admit(&state)
+        .unwrap()
+        .record(arany::RecordKind::CommandEnvironment)
+        .replace(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1, "source": "process", "captured_at": 0, "path": path,
+                "names": [], "excluded": [], "sha256": hash(&canonical)
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     probe(
         true,
         Some(if homebrew {
