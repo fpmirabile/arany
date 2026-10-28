@@ -126,6 +126,7 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
         goals: vec![goal_view(goal_id, budget)],
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
+        environment_capture: None,
     };
     GoalLedger::new(view, Some(goal_id))
 }

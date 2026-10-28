@@ -28,6 +28,7 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         match self {
+            Self::HostEnvironmentCapture { record } => record.validate(),
             Self::SupervisorVerdictRecorded { .. }
             | Self::WorkspaceRewindStarted { .. }
             | Self::WorkspaceRewindFinished { .. }

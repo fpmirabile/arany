@@ -1036,6 +1036,7 @@ pub struct SessionView {
     pub goals: Vec<GoalView>,
     pub pending_provider_setup_edit: Option<uuid::Uuid>,
     pub provider_setup_uncertain: bool,
+    pub environment_capture: Option<super::EnvironmentCaptureView>,
 }
 
 impl SessionView {
@@ -1136,6 +1137,7 @@ impl SessionView {
                         goals: Vec::new(),
                         pending_provider_setup_edit: None,
                         provider_setup_uncertain: false,
+                        environment_capture: None,
                     });
                     view.as_mut()
                         .expect("created Session")
@@ -1179,6 +1181,7 @@ impl SessionView {
                         goals: Vec::new(),
                         pending_provider_setup_edit: None,
                         provider_setup_uncertain: false,
+                        environment_capture: None,
                     });
                     view.as_mut()
                         .expect("created Session")
@@ -1308,6 +1311,7 @@ impl SessionView {
         tool::before_lifecycle_event(current, &envelope.event)?;
         worker::before_event(current, &envelope.event)?;
         match &envelope.event {
+            Event::HostEnvironmentCapture { record } => super::environment::apply(current, record)?,
             Event::SupervisorVerdictRecorded { .. } => return Err(ReplayError::InvalidTransition),
             Event::WorkspaceRewindStarted { record } => rewind::start(current, record, prior)?,
             Event::WorkspaceRewindFinished { record } => rewind::finish(current, record, prior)?,

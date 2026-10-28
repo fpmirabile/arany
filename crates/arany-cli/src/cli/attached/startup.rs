@@ -90,6 +90,15 @@ pub(super) async fn start(
         return Ok(ControlFlow::Break(()));
     };
     startup.archived_history = archived;
+    if let Ok(state) = StateRoot::open_existing(&startup.admission.state_dir)
+        && let Ok(environment) = arany::CommandEnvironment::load(&state)
+        && environment.process_path_differs()
+    {
+        append_notice(
+            &mut startup.setup_notice,
+            "Process PATH differs from the pinned command environment; use /permissions → Command environment to capture explicitly",
+        );
+    }
     if !native_protection_supported() {
         append_notice(&mut startup.setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
@@ -555,6 +564,11 @@ impl Startup {
             return Ok(ControlFlow::Break(()));
         }
         let engine = self.open_engine()?;
+        if let Some(capture) = &view.environment_capture
+            && capture.outcome() == arany::EnvironmentCaptureStage::Uncertain
+        {
+            append_notice(&mut self.setup_notice, capture.outcome().summary());
+        }
         let skills_supported = self.prepare_composer(&view, reuse_saved_selection).await;
         let setup_notice = self.take_setup_notice();
         let saved_session_id = (view.created_sequence != 0).then_some(session_id);

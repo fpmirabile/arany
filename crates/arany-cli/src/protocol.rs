@@ -49,6 +49,7 @@ macro_rules! event_kinds {
 
 // The exhaustive match keeps this binary-only catalog in step with Event variants.
 event_kinds!(
+    HostEnvironmentCapture,
     SessionStarted,
     SessionDefaultChanged,
     SessionForked,
