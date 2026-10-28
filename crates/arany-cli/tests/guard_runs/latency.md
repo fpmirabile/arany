@@ -9,12 +9,12 @@ new runtime deadline, CLI reporting feature or native support claim.
 ## Measurement
 
 `tool_receipt_to_commit_us` is a monotonic interval from the Engine receiving a
-complete typed primary Provider response to the Store acknowledging the step's
-final `ToolFinished` append. It includes validation, permission journaling,
-execution and result fitting; Command includes Guard preparation, selection, GO,
-execution, capture and cleanup. Provider inference, transport, startup, final
-answer, hooks, rendering and `show` are outside it. The four-Read row runs its
-reads concurrently. The recorder exists only under `test-support`.
+complete typed primary Provider response to the Store's durable acknowledgement
+of the step's final `ToolFinished` append. It includes validation, permission
+journaling, execution and result fitting; Command includes Guard preparation,
+selection, GO, execution, capture and cleanup. Provider inference, transport,
+startup, final answer, hooks, rendering and `show` are outside it. The four-Read
+row runs its reads concurrently. The recorder exists only under `test-support`.
 
 Each sample uses fresh private State, Workspace and runtime, then audits the
 committed result, strict replay of the reopened journal and a fresh `arany show`.
