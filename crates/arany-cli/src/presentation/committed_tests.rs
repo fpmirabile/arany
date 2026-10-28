@@ -436,6 +436,8 @@ async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
                 program: "sh".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
             "Later action stopped",
         );

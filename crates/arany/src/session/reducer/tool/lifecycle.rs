@@ -142,37 +142,29 @@ pub(super) fn finished(
             return Err(ReplayError::InvalidTransition);
         }
     }
+    let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
+    validate_timeout_limit(current, *run_id, goal, observation)?;
     let child = names_child(current, *run_id, *agent_run_id);
     if child {
         current.finish_child_tool(event, prior)?;
     } else {
-        validate_primary_finished(current, *run_id, observation)?;
+        let out_of_plan_integration = matches!(
+            &observation.intent.call,
+            crate::tools::ToolCall::ApplyChangeset { .. }
+        ) && goal
+            .plan_contract
+            .as_ref()
+            .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
+        if out_of_plan_integration
+            && (observation.disposition != crate::tools::ToolDisposition::Denied
+                || observation.attestation.is_some()
+                || observation.cache_update != crate::tools::CacheUpdate::NotApplicable)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
         apply_primary_finished(current, event, prior)?;
     }
     super::super::goal::observe_tool(current, *run_id, observation)
-}
-
-fn validate_primary_finished(
-    current: &SessionView,
-    run_id: RunId,
-    observation: &crate::tools::ToolObservation,
-) -> Result<(), ReplayError> {
-    let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
-    let out_of_plan_integration = matches!(
-        &observation.intent.call,
-        crate::tools::ToolCall::ApplyChangeset { .. }
-    ) && goal
-        .plan_contract
-        .as_ref()
-        .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
-    if out_of_plan_integration
-        && (observation.disposition != crate::tools::ToolDisposition::Denied
-            || observation.attestation.is_some()
-            || observation.cache_update != crate::tools::CacheUpdate::NotApplicable)
-    {
-        return Err(ReplayError::InvalidTransition);
-    }
-    validate_timeout_limit(current, run_id, goal, observation)
 }
 
 fn validate_timeout_limit(
@@ -188,12 +180,12 @@ fn validate_timeout_limit(
                 .iter()
                 .find(|run| run.id == run_id)
                 .ok_or(ReplayError::InvalidTransition)?;
-            let contract_timeout = goal
-                .plan_contract
-                .as_ref()
-                .and_then(|contract| contract.command_timeout_ms);
-            let requested =
-                contract_timeout.unwrap_or(goal.resource_settings.default_command_timeout_ms);
+            let (_, requested) = crate::session::events::requested_command_resources(
+                &observation.intent.call,
+                goal.plan_contract.as_ref(),
+                goal.resource_settings,
+            )
+            .map_err(|_| ReplayError::InvalidTransition)?;
             (requested > goal.resource_settings.max_command_timeout_ms)
                 .then_some((requested, goal.resource_settings.max_command_timeout_ms))
                 .map(|limit| {
@@ -201,6 +193,7 @@ fn validate_timeout_limit(
                         limit,
                         run.tools
                             .iter()
+                            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
                             .find(|tool| tool.intent == observation.intent)
                             .is_some_and(|tool| tool.review_call_index.is_none()),
                     )
@@ -208,6 +201,14 @@ fn validate_timeout_limit(
         }
         _ => None,
     };
+    if matches!(
+        observation.intent.call,
+        crate::tools::ToolCall::Command { .. }
+    ) && observation.limit_cause == Some(crate::tools::LimitCause::RequestedTime)
+        && timeout_limit.is_none()
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     if let Some(((requested, maximum), no_review)) = timeout_limit
         && (!no_review
             || observation.intent.limits.runtime_ms != requested
@@ -271,6 +272,18 @@ pub(super) fn proposed(
     intent: &EffectIntent,
     active_ceiling_ms: u64,
 ) -> Result<(), ReplayError> {
+    if matches!(intent.call, crate::tools::ToolCall::Command { .. }) {
+        let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
+        let (class, timeout) = crate::session::events::requested_command_resources(
+            &intent.call,
+            goal.plan_contract.as_ref(),
+            goal.resource_settings,
+        )
+        .map_err(|_| ReplayError::InvalidTransition)?;
+        if intent.limits.resource_class != class || intent.limits.runtime_ms > timeout {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
     if intent.limits.resource_class == crate::tools::ToolResourceClass::Build {
         let goal = active_run_goal(current, run_id).ok_or(ReplayError::InvalidTransition)?;
         if !matches!(intent.call, crate::tools::ToolCall::Command { .. })
@@ -495,5 +508,7 @@ pub(super) fn started(
     Ok(())
 }
 
+#[cfg(test)]
+mod command_resources_tests;
 #[cfg(test)]
 mod tests;

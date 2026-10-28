@@ -7,6 +7,39 @@ use crate::tools::types::*;
 use serde_json::{Value, json};
 
 #[test]
+fn command_resource_arguments_reject_unknown_classes_and_invalid_timeouts() {
+    let base = json!({"operation":"command","program":"sh","args":["-c","exit 0"],"cwd":""});
+    for (field, value) in [
+        ("resource_class", json!("unlimited")),
+        ("timeout_ms", json!(1.5)),
+        ("timeout_ms", json!("1000")),
+        ("timeout_ms", json!(-1)),
+        ("timeout_ms", json!(MIN_COMMAND_TIMEOUT_MS - 1)),
+        ("timeout_ms", json!(MAX_COMMAND_TIMEOUT_MS + 1)),
+    ] {
+        let mut call = base.clone();
+        call[field] = value;
+        assert!(!serde_json::from_value::<ToolCall>(call).is_ok_and(|call| call.valid()));
+    }
+    let command = super::catalog::call_schemas()
+        .into_iter()
+        .find(|schema| schema["properties"]["operation"]["enum"] == json!(["command"]))
+        .unwrap();
+    assert_eq!(
+        command["properties"]["resource_class"]["enum"],
+        json!(["default", "build", null])
+    );
+    assert!(
+        command["properties"]["timeout_ms"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(&format!(
+                "{MIN_COMMAND_TIMEOUT_MS} through {MAX_COMMAND_TIMEOUT_MS}"
+            ))
+    );
+}
+
+#[test]
 fn tool_call_display_and_site_facts_cover_every_variant() {
     use crate::session::worker::ChangesetSource;
     use crate::tools::types::CommandChangeset;
@@ -62,6 +95,8 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
             program: "cargo".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         ToolCall::CommandUnguarded {
             program: "cargo".into(),

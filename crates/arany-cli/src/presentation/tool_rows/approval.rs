@@ -198,7 +198,14 @@ fn file(call: &ToolCall) -> Vec<String> {
 }
 
 fn process(call: &ToolCall) -> Vec<String> {
-    let ToolCall::Command { program, args, cwd } = call else {
+    let ToolCall::Command {
+        program,
+        args,
+        cwd,
+        resource_class,
+        timeout_ms,
+    } = call
+    else {
         return fallback(call);
     };
     let mut lines = vec![format!(
@@ -210,6 +217,19 @@ fn process(call: &ToolCall) -> Vec<String> {
             escape_terminal(cwd)
         }
     )];
+    if let Some(class) = resource_class {
+        let label = match class {
+            arany::ToolResourceClass::Default => "Default",
+            arany::ToolResourceClass::Build => "Build",
+        };
+        lines.push(format!("Resources: {label}"));
+    }
+    if let Some(timeout) = timeout_ms {
+        lines.push(format!(
+            "Timeout: {}",
+            super::format_duration(u64::from(*timeout))
+        ));
+    }
     lines.push("Offline isolated copy · changes are validated before publication".into());
     lines.extend(args.iter().enumerate().map(|(index, argument)| {
         format!(

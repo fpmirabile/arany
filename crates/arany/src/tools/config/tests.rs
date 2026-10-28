@@ -107,6 +107,8 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         program: "unconfigured".into(),
         args: Vec::new(),
         cwd: "".into()
+        resource_class: None,
+        timeout_ms: None,
     }));
     assert!(!config.allows(&ToolCall::Skill {
         name: "unconfigured".into(),

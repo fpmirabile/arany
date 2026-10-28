@@ -238,11 +238,15 @@ fn configured_call(hook: &CommandHook) -> ToolCall {
             program: "sh".into(),
             args: vec!["-c".into(), hook.command().into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
         Some(args) => ToolCall::Command {
             program: hook.command().into(),
             args: args.to_vec(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     }
 }

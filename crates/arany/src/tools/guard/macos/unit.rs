@@ -2070,6 +2070,8 @@ mod tests {
                 program: "shell".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: ToolLimits {
                 cache_transfer_ms: 1_000,
@@ -2726,6 +2728,8 @@ done
             program: "node".into(),
             args: Vec::new(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let mut stage = super::super::super::BootstrapStage::Workspace;
         assert!(matches!(
@@ -4159,6 +4163,8 @@ int main(int argc, char **argv) {
                             program: "shell".into(),
                             args: Vec::new(),
                             cwd: ".".into(),
+                            resource_class: None,
+                            timeout_ms: None,
                         },
                         limits: limits.clone(),
                         use_count: 1,

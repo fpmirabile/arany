@@ -3255,6 +3255,8 @@ mod tests {
                 program: "node".into(),
                 args: Vec::new(),
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             };
             let grants = std::slice::from_ref(&grant);
             let mut stage = super::super::BootstrapStage::Workspace;

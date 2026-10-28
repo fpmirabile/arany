@@ -88,6 +88,8 @@ impl RunLoop<'_> {
     ) -> Result<Option<EffectIntent>, EngineError> {
         let command = matches!(call, ToolCall::Command { .. });
         let timeout_limit = self.ledger().command_timeout_limit(&call)?;
+        let (resource_class, requested_runtime_ms, resource_settings) =
+            self.ledger().requested_command_resources(&call)?;
         let mut intent = if call.is_unguarded() {
             let runtime = runtime.clone();
             let run = self.run_id;
@@ -97,8 +99,6 @@ impl RunLoop<'_> {
         } else {
             runtime.intent(self.run_id, actor, call)
         };
-        let (resource_class, requested_runtime_ms, resource_settings) =
-            self.ledger().requested_command_resources()?;
         if command {
             command_limits(
                 runtime,
@@ -144,7 +144,7 @@ impl RunLoop<'_> {
                     requested_runtime_ms.min(u32::try_from(per_action).unwrap_or(u32::MAX))
                 })
         };
-        if runtime_ms < 1_000 {
+        if runtime_ms < crate::tools::types::MIN_COMMAND_TIMEOUT_MS {
             return Ok(None);
         }
         intent.limits.runtime_ms = runtime_ms;
@@ -154,6 +154,26 @@ impl RunLoop<'_> {
             0
         };
         Ok(Some(intent))
+    }
+
+    async fn editor_command_intent(
+        &self,
+        runtime: &ToolRuntime,
+        actor: crate::session::AgentRunId,
+        call: ToolCall,
+        deadline: Instant,
+    ) -> Result<Option<EffectIntent>, EngineError> {
+        let timeout_limit = self.ledger().command_timeout_limit(&call)?;
+        Ok(self
+            .workspace_intent(runtime, actor, call)
+            .await?
+            .and_then(|intent| {
+                if timeout_limit.is_some() {
+                    Some(intent)
+                } else {
+                    self.limit_child_intent(runtime, intent, deadline)
+                }
+            }))
     }
 
     pub(in crate::engine::run_loop) fn researcher_intent(
@@ -192,7 +212,7 @@ impl RunLoop<'_> {
             .limits
             .runtime_ms
             .min(u32::try_from(duration_ms(available) / (2 * transfers)).unwrap_or(u32::MAX));
-        if runtime_ms < 1_000 {
+        if runtime_ms < crate::tools::types::MIN_COMMAND_TIMEOUT_MS {
             return None;
         }
         intent.limits.runtime_ms = runtime_ms;
@@ -407,9 +427,8 @@ impl RunLoop<'_> {
                 );
                 let deadline = grant.deadline().unwrap_or(*deadline);
                 let intent = if child.kind.is_editor() && matches!(call, ToolCall::Command { .. }) {
-                    self.workspace_intent(runtime, child.agent_run_id, call)
+                    self.editor_command_intent(runtime, child.agent_run_id, call, deadline)
                         .await?
-                        .and_then(|intent| self.limit_child_intent(runtime, intent, deadline))
                 } else {
                     self.researcher_intent(runtime, child, call, deadline)?
                 };

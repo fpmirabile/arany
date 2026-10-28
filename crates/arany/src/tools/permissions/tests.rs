@@ -49,6 +49,8 @@ fn command(program: &str, args: &[&str]) -> ToolCall {
         program: program.into(),
         args: args.iter().map(|arg| (*arg).into()).collect(),
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     }
 }
 
@@ -339,6 +341,8 @@ fn opaque_argv_never_auto_allows_and_conservatively_matches_restrictions() {
         program: "git".into(),
         args,
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     assert_eq!(
         config(json!({"allow":["Bash(*)"]})).decision(&large),

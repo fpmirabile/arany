@@ -58,6 +58,8 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
             program: "noop".into(),
             args: Vec::new(),
             cwd: "src".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         Operation::Other | Operation::InvalidProposal => panic!("unsupported latency operation"),
     }

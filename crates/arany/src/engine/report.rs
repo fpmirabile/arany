@@ -625,15 +625,19 @@ fn push_unresolved_tool_facts(
                 crate::tools::ToolDisposition::Limit => {
                     let timeout_limit = match call {
                         crate::tools::ToolCall::Command { .. } => {
-                            let requested = goal
-                                .plan_contract
-                                .as_ref()
-                                .and_then(|contract| contract.command_timeout_ms)
-                                .unwrap_or(goal.resource_settings.default_command_timeout_ms);
-                            (requested > goal.resource_settings.max_command_timeout_ms).then_some((
-                                requested,
-                                goal.resource_settings.max_command_timeout_ms,
-                            ))
+                            crate::session::events::requested_command_resources(
+                                call,
+                                goal.plan_contract.as_ref(),
+                                goal.resource_settings,
+                            )
+                            .ok()
+                            .and_then(|(_, requested)| {
+                                (requested > goal.resource_settings.max_command_timeout_ms)
+                                    .then_some((
+                                        requested,
+                                        goal.resource_settings.max_command_timeout_ms,
+                                    ))
+                            })
                         }
                         _ => None,
                     };

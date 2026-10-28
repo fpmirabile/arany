@@ -28,6 +28,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             program: "cargo".into(),
             args: vec!["check".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         limits: ToolLimits::default(),
         use_count: 1,
@@ -594,6 +596,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             program: "cargo".into(),
             args: vec!["test".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         limits: ToolLimits::default(),
         use_count: 1,
@@ -882,6 +886,9 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
 
     let mut timeout_intent = run.tools[0].intent.clone();
     timeout_intent.id = Uuid::now_v7();
+    if let crate::tools::ToolCall::Command { timeout_ms, .. } = &mut timeout_intent.call {
+        *timeout_ms = Some(2_000);
+    }
     timeout_intent.limits.runtime_ms = 2_000;
     timeout_intent.limits.cache_bytes = 0;
     timeout_intent.limits.cache_candidate_bytes = 0;
@@ -916,20 +923,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let mut timeout_goal = goal.clone();
     timeout_goal.resource_settings.default_command_timeout_ms = 1_000;
     timeout_goal.resource_settings.max_command_timeout_ms = 1_000;
-    timeout_goal.plan_contract = Some(crate::session::GoalPlanContract {
-        mission: "Run the configured command within pinned limits".into(),
-        paths: Vec::new(),
-        commands: vec!["cargo".into()],
-        resource_class: crate::tools::ToolResourceClass::Default,
-        command_timeout_ms: Some(2_000),
-        skills: Vec::new(),
-        mcp_tools: Vec::new(),
-        success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
-            path: "src/main.rs".into(),
-            content: "expected".into(),
-        },
-        budget: GoalBudget::default(),
-    });
+    timeout_goal.plan_contract = None;
     let mut timeout_view = view.clone();
     timeout_view.runs = vec![timeout_run.clone()];
     timeout_view.goals = vec![timeout_goal.clone()];

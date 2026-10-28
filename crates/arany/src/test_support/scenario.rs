@@ -1006,6 +1006,8 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
         program: "sh".into(),
         args: vec!["-c".into(), user_programs_script(&home)],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let state = root.join("state");
     let (outcome, provider) = run_user_program_command(workspace, guard, &state, &call).await;
@@ -1171,8 +1173,10 @@ printf cache-changed
                 "argument with ' quote".into(),
             ],
             cwd: String::new(),
+            resource_class: (case == "guarded").then_some(ToolResourceClass::Build),
+            timeout_ms: (case == "guarded").then_some(crate::tools::types::MAX_COMMAND_TIMEOUT_MS),
         };
-        let provider = Arc::new(ScriptedProvider::new(vec![
+        let mut steps = vec![
             plan_outcome(GoalPlanContract {
                 mission: "Run offline registry-backed tests under selected Rust".into(),
                 paths: Vec::new(),
@@ -1190,7 +1194,11 @@ printf cache-changed
             ProviderOutcome::Answer(Answer {
                 text: "Observed the guarded Cargo result.".into(),
             }),
-        ]));
+        ];
+        if case == "guarded" {
+            steps.remove(0);
+        }
+        let provider = Arc::new(ScriptedProvider::new(steps));
         let engine = Engine::open(
             StateRoot::admit(&state).unwrap(),
             EngineConfig {
@@ -1223,6 +1231,12 @@ printf cache-changed
                 approval.intent.limits.resource_class,
                 ToolResourceClass::Build
             );
+            if case == "guarded" {
+                assert_eq!(
+                    approval.intent.limits.runtime_ms,
+                    crate::tools::types::MAX_COMMAND_TIMEOUT_MS
+                );
+            }
             assert_eq!(approval.intent.limits.build_jobs, jobs);
             assert_eq!(approval.intent.limits.build_cpu_cores, cores);
             let report_gate = (case == "cancelled-report")
@@ -1263,6 +1277,7 @@ printf cache-changed
         store.close().await.unwrap();
         let replay = SessionView::replay(session_id, &events).unwrap().unwrap();
         assert_eq!(replay.runs.len(), 1);
+        assert_eq!(replay.goals[0].plan_contract.is_none(), case == "guarded");
         let run = &replay.runs[0];
         if case == "cancelled-report" {
             assert!(matches!(

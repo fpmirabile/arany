@@ -301,7 +301,9 @@ fn tool_item_with_denial_output(
         };
     }
     match &intent.call {
-        ToolCall::Command { program, args, cwd } => Item::CommandExecution {
+        ToolCall::Command {
+            program, args, cwd, ..
+        } => Item::CommandExecution {
             id,
             command: program.clone(),
             args: args.clone(),

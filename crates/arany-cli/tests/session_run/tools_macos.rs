@@ -726,6 +726,8 @@ async fn native_file_journey_helper() {
             program: "shell".into(),
             args: vec!["-c".into(), "set -eu; if /bin/cat /etc/passwd >/dev/null 2>&1; then exit 90; fi; if /bin/cat /usr/bin/sudo >/dev/null 2>&1; then exit 91; fi; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf 'command create\\n' > src/command-output.txt; printf 'command modify\\n' > src/generated/note.txt; /usr/bin/find src/deleted.txt -type f -delete; printf native-command-success".into()],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         ToolCall::McpList {
             server: "synthetic".into(),
@@ -969,6 +971,8 @@ async fn native_file_journey_helper() {
                 program: "shell".into(),
                 args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/command-output.txt)\" = 'command create'; test \"$(/bin/cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }],
             linked_file: None,
         });
@@ -1297,6 +1301,8 @@ async fn native_offline_rust_build_helper() {
             ),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut requested = arany::test_support::scenario::request(
         &workspace,
@@ -1606,6 +1612,8 @@ async fn native_runtime_mount_journey_helper() {
                 .into(),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let refused_requests = Arc::new(Mutex::new(Vec::new()));
     let refused_state = root.join("state-mounted");
@@ -1738,6 +1746,8 @@ async fn native_runtime_mount_journey_helper() {
             "if test -z \"${CARGO_HOME-}\"; then printf 'cache-seed:cargo-home-missing\\n' >&2; exit 90; fi; if ! mkdir -p \"$CARGO_HOME/registry/cache\" 2>/dev/null; then printf 'cache-seed:mkdir-failed\\n' >&2; exit 91; fi; set -eu; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; if ! { :; } 2>/dev/null > \"$cache\"; then printf 'cache-seed:create-failed\\n' >&2; exit 92; fi; i=0; while test \"$i\" -lt 40; do if ! { printf '%1048576s' ''; } 2>/dev/null >> \"$cache\"; then printf 'cache-seed:write-failed\\n' >&2; exit 93; fi; i=$((i + 1)); done".into(),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let seed_requests = Arc::new(Mutex::new(Vec::new()));
     let seed_engine_provider = Arc::new(RuntimeJourney {
@@ -1872,6 +1882,8 @@ async fn native_runtime_mount_journey_helper() {
             ),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let cache_read = ToolCall::Command {
         program: "sh".into(),
@@ -1882,6 +1894,8 @@ async fn native_runtime_mount_journey_helper() {
             ),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let cache_overflow = ToolCall::Command {
         program: "sh".into(),
@@ -1890,6 +1904,8 @@ async fn native_runtime_mount_journey_helper() {
             "set -eu; mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let accepted_calls = vec![cache_write, cache_read, cache_overflow];
     let provider = Arc::new(RuntimeJourney {
@@ -2169,6 +2185,8 @@ async fn native_runtime_mount_journey_helper() {
             "set -eu; test \"$(/usr/bin/wc -c < \"$CARGO_HOME/registry/cache/private-bulk.crate\")\" -eq 41943040; test \"$(cat \"$CARGO_TARGET_DIR/persistent-marker\")\" = ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY; test ! -e \"$CARGO_TARGET_DIR/overflow-marker\"; printf 'cache-prior-retained\\n'; node".into(),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let verify_requests = Arc::new(Mutex::new(Vec::new()));
     let verify_engine_provider = Arc::new(RuntimeJourney {
@@ -2333,6 +2351,8 @@ int main(void) {
                 program: "receipt-loss".into(),
                 args: Vec::new(),
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         } else {
             let script = if case == "overflow" {
@@ -2344,6 +2364,8 @@ int main(void) {
                 program: "shell".into(),
                 args: vec!["-c".into(), script.into()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         };
         let provider = Arc::new(Journey {

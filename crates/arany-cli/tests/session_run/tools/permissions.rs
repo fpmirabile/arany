@@ -118,6 +118,8 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                     format!("printf published > {command_path}; printf approval-command-passed"),
                 ],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         } else {
             ToolCall::Write {

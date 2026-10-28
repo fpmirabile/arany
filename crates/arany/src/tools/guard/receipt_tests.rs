@@ -99,6 +99,8 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             program: "cargo".into(),
             args: vec!["check".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let mut observation = make_observation(call, requested);
         super::guard::publish_cache_candidate(

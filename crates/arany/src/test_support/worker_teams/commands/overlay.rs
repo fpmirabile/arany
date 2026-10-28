@@ -7,6 +7,8 @@ pub(super) fn call(case: &str) -> Option<ToolCall> {
         program: "build".into(),
         args: vec!["-c".into(), "set -eu; test ! -e sibling; test \"$(cat notes/ignored)\" = retained; while read -r signal < notes/released && test \"$signal\" = hold; do :; done; printf 'edited 0' > notes/0; printf discarded > notes/ignored".into()],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     })
 }
 

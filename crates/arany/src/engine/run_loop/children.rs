@@ -1912,6 +1912,7 @@ impl RunLoop<'_> {
                     &wave.children[index],
                     requests,
                     self.ledger().plan_contract()?.as_ref(),
+                    self.ledger().resource_settings()?,
                 ),
                 CallResult::Response(ProviderResponse {
                     outcome:
@@ -2964,6 +2965,7 @@ impl RunLoop<'_> {
         child: &ChildWork,
         requests: &[ToolRequest],
         contract: Option<&crate::session::GoalPlanContract>,
+        settings: crate::tools::ToolResourceSettings,
     ) -> bool {
         !requests.is_empty()
             && requests.len() <= usize::from(crate::session::MAX_STEP_TOOL_CALLS)
@@ -2980,6 +2982,12 @@ impl RunLoop<'_> {
             && child.turns_remaining > 0
             && requests.iter().all(|request| {
                 request.call.valid()
+                    && crate::session::events::requested_command_resources(
+                        &request.call,
+                        contract,
+                        settings,
+                    )
+                    .is_ok()
                     && self.model_may_propose(&request.call)
                     && (if child.kind.is_editor() {
                         self.proposed_editor(child.agent_run_id)

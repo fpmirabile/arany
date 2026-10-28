@@ -9,6 +9,25 @@ mod peer_row_tests {
     use arany::{ToolCall, ToolDisposition};
 
     #[test]
+    fn command_approval_shows_requested_resources_and_timeout() {
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "cargo test --workspace".into()],
+            cwd: String::new(),
+            resource_class: Some(arany::ToolResourceClass::Build),
+            timeout_ms: Some(600_000),
+        };
+        let lines = approval_call_lines(&call);
+        assert!(lines.iter().any(|line| line == "Resources: Build"));
+        assert!(lines.iter().any(|line| line == "Timeout: 10 min"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("cargo test --workspace"))
+        );
+    }
+
+    #[test]
     fn publication_summaries_follow_the_file_family() {
         use arany::worker::ChangesetSource;
 
@@ -76,6 +95,8 @@ mod peer_row_tests {
                 program: "sh".into(),
                 args: vec![],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             "untrusted timeout text\u{1b}[2J",
         );
@@ -700,6 +721,8 @@ mod peer_row_tests {
                     program: "sh".into(),
                     args: vec![],
                     cwd: String::new(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
                 "Command(sh )",
                 60_000,
@@ -766,6 +789,8 @@ mod peer_row_tests {
                 program: "sh".into(),
                 args: vec![],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             &output,
         );
@@ -879,6 +904,8 @@ mod peer_row_tests {
                 program: "sh".into(),
                 args: vec![],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             &result.to_string(),
         );
@@ -915,6 +942,8 @@ mod peer_row_tests {
                     program: "sh".into(),
                     args: args.into_iter().map(String::from).collect(),
                     cwd: String::new(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
                 "",
             );
@@ -928,6 +957,8 @@ mod peer_row_tests {
                 program: "sh".into(),
                 args: vec!["-c".into(), format!("{}\nls", "\u{1b}".repeat(500))],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             "",
         );

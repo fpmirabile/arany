@@ -75,6 +75,8 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         program: "shell".into(),
         args: Vec::new(),
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let intent = arany::EffectIntent {
         host: None,
@@ -928,6 +930,8 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         program: "shell".into(),
         args: Vec::new(),
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let command_digest = Sha256::digest(serde_json::to_vec(&command_intent).unwrap()).into();
     let mut integration_intent = command_intent.clone();
@@ -1697,15 +1701,21 @@ pub(super) async fn native_command_changeset_corpus(
                     ),
                 ],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         } else if native_setid {
             ToolCall::Command {
                 program: program.into(),
                 args: vec!["-c".into(), "set -eu; chmod 4755 src/m-modified".into()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         } else if case == "partial" {
-            ToolCall::Command { program: program.into(), args: vec!["-c".into(), "set -eu; chmod u+w src/z; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()], cwd: "".into() }
+            ToolCall::Command { program: program.into(), args: vec!["-c".into(), "set -eu; chmod u+w src/z; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()], cwd: "".into()     resource_class: None,
+     timeout_ms: None,
+ }
         } else if case == "large-changeset" {
             ToolCall::Command {
                 program: program.into(),
@@ -1714,12 +1724,16 @@ pub(super) async fn native_command_changeset_corpus(
                     "set -eu; printf '%16384s' x > src/large; printf payload-complete".into(),
                 ],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         } else if cfg!(target_os = "macos") && matches!(case, "symlink" | "hardlink") {
             ToolCall::Command {
                 program: "native-links".into(),
                 args: vec![case.into()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         } else {
             ToolCall::Command {
@@ -1731,6 +1745,8 @@ pub(super) async fn native_command_changeset_corpus(
                     ),
                 ],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1740,6 +1756,8 @@ pub(super) async fn native_command_changeset_corpus(
                 program: program.into(),
                 args: vec!["-c".into(), "set -eu; test -x src/a-created; printf '\\000\\377' | cmp - src/a-created; test \"$(cat src/m-modified)\" = modified; test ! -e src/z-deleted; printf fresh-binary-snapshot".into()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             });
         }
         let provider = Arc::new(CommandJourney {

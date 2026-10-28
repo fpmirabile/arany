@@ -17,6 +17,8 @@ fn cancellable_hook() -> (Value, HookCancellation) {
         program: "sh".into(),
         args: vec!["-c".into(), script.clone()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     });
     (
         shell_hook(&script),
@@ -644,6 +646,8 @@ async fn hook_on_a_command_keeps_changeset_integration_valid() {
         program: "sh".into(),
         args: vec!["-c".into(), "printf done > notes/new.txt".into()],
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let (result, _, _) = fixture
         .run(
@@ -1308,6 +1312,8 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
         program: "sh".into(),
         args: vec!["-c".into(), "printf done > notes/new.txt".into()],
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let (result, requests, _) = fixture
         .run(

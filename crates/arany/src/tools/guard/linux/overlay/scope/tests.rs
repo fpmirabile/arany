@@ -119,6 +119,8 @@ fn grants_reject_file_directory_and_ancestor_replacement_without_widening_mounts
                 program: "shell".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let grant = Grant::new(
@@ -245,6 +247,8 @@ fn exact_file_grants_refuse_protected_hard_links_before_and_after_admission() {
             program: "shell".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     let grant = Grant::new(

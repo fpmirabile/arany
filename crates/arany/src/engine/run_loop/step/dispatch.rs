@@ -859,6 +859,8 @@ mod tests {
             program: "check".into(),
             args: Vec::new(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         for (calls, intent, overhead, expected) in [
             (1, read_intent(), Duration::ZERO, Serial),

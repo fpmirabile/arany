@@ -275,6 +275,8 @@ pub(in crate::tools::guard) mod tests {
                 program: "shell".into(),
                 args: vec![],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let duration = Duration::from_millis(u64::from(intent.limits.runtime_ms));

@@ -7,6 +7,94 @@ use super::*;
 use arany::test_support::goals::*;
 
 #[tokio::test]
+async fn command_resources_refuse_invalid_requests_and_plan_widening_before_dispatch() {
+    use arany::{ProposalRefusalCause as Cause, ToolResourceClass as Class};
+    let invalid = Cause::InvalidArguments;
+    let scope = Cause::PlanScopeExcludesCall;
+    let default_plan = Some((Class::Default, None));
+    let build_plan = Some((Class::Build, Some(5_000)));
+    for (plan, timeout, class, jobs, cores, cause) in [
+        (None, 999, Class::Default, Some(1), Some(1), invalid),
+        (None, 600_001, Class::Default, Some(1), Some(1), invalid),
+        (None, 1_000, Class::Build, Some(u32::MAX), Some(1), invalid),
+        (None, 1_000, Class::Build, Some(1), Some(u32::MAX), invalid),
+        (default_plan, 1_000, Class::Build, Some(1), Some(1), scope),
+        (
+            default_plan,
+            120_001,
+            Class::Default,
+            Some(1),
+            Some(1),
+            scope,
+        ),
+        (build_plan, 5_001, Class::Default, Some(1), Some(1), scope),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let engine = command_resource_engine(&state_path);
+        let call = arany::ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            resource_class: Some(class),
+            timeout_ms: Some(timeout),
+        };
+        let mut steps = Vec::new();
+        if let Some((resource_class, command_timeout_ms)) = plan {
+            let mut plan = facts_plan(facts_digest("v1"));
+            plan.commands = vec!["sh".into()];
+            plan.resource_class = resource_class;
+            plan.command_timeout_ms = command_timeout_ms;
+            steps.push(arany::test_support::scenario::plan_outcome(plan));
+        }
+        steps.extend([
+            crate::tool_outcome(call),
+            crate::tool_outcome(facts_read()),
+            finish_with("done"),
+        ]);
+        let provider = Arc::new(ScriptedProvider::new(steps));
+        let mut input = request(&workspace, "Read after a refused command");
+        input.include_paths.clear();
+        input.goal.resource_settings.build_jobs = jobs;
+        input.goal.resource_settings.build_cpu_cores = cores;
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        assert_eq!(view.runs[0].status, RunStatus::Finished);
+        assert_eq!(view.runs[0].tools.len(), 1);
+        assert_eq!(view.runs[0].tools[0].intent.call, facts_read());
+        assert!(events.iter().any(|event| matches!(&event.event,
+            Event::ProviderCallRecorded { record, .. }
+                if record.refusal.as_ref().is_some_and(|refusal| refusal.cause == cause)
+        )));
+    }
+}
+
+fn command_resource_engine(state_path: &Path) -> Engine {
+    use std::os::unix::fs::PermissionsExt;
+    let engine = facts_engine(StateRoot::admit(state_path).unwrap(), state_path);
+    let executable = std::fs::canonicalize("/bin/sh").unwrap();
+    let digest = format!("{:x}", Sha256::digest(std::fs::read(&executable).unwrap()));
+    let config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+        "commands":[{"name":"sh","executable":executable,"sha256":digest,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+    let config_path = state_path.join("tools.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    engine
+}
+
+#[tokio::test]
 async fn single_run_goal_with_an_unmet_plan_criterion_is_not_a_budget_close() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

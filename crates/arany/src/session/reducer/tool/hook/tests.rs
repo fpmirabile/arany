@@ -120,6 +120,8 @@ fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
                         program: "sh".into(),
                         args: vec!["-c".into(), "exit 2".into()],
                         cwd: String::new(),
+                        resource_class: None,
+                        timeout_ms: None,
                     },
                 ),
                 input_digest: [9; 32],
@@ -203,6 +205,8 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let started = |subject: [u8; 32], hook_intent: &EffectIntent| Event::HookStarted {
@@ -583,6 +587,8 @@ fn post_tool_use_hooks_need_a_committed_observation_and_feed_back_only_their_res
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let started = |event, subject: [u8; 32]| Event::HookStarted {
@@ -745,6 +751,8 @@ fn post_tool_hook(intent: &EffectIntent) -> crate::tools::permissions::HookInvoc
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 0".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         ),
         input_digest: [9; 32],
@@ -1151,6 +1159,8 @@ fn primary_host_approval_preserves_ignored_hook_outcomes() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         apply(
@@ -1341,6 +1351,8 @@ fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let subject = if event == HookEvent::PreCompact {
@@ -1580,6 +1592,8 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 2".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     apply(
@@ -1666,6 +1680,8 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 2".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     let last_call = view.runs[0].agents[0].provider_calls.len() - 1;
@@ -1750,6 +1766,8 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 2".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     apply(
