@@ -8,7 +8,7 @@ Folder consent and native Tool capability are independent. Without an implemente
 
 Supported operating systems provide equivalent file operations, commands, Skills and local MCP with the same permission, isolation, cancellation and durable-result contract. Typed Git reads follow their [per-platform availability](#typed-git-reads); resource guarantees differ by native profile as defined below. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) records the native, platform, live and human checks still required before claiming support.
 
-Native adapters use [automatic Tool selection and plain text answers](./provider.md#structured-outcomes-and-tool-encoding), translating one semantic proposal at a time. Exact custom profiles reject `--tools` because their data-free conformance covers only read-only turns.
+Native adapters use [automatic Tool selection and plain text answers](./provider.md#structured-outcomes-and-tool-encoding), translating one semantic proposal at a time. Exact custom profiles receive the same Tools after their [conformance check](./provider.md#custom-destinations-and-routing). Compatibility with a real selected model requires live evidence.
 
 The generated function and outcome schemas offer file reads and search plus only catalog-enabled mutations, commands, Skills, MCP operations, typed Git reads and, with `write`, [typed Git writes](#typed-git-writes). Command, Skill and MCP-server identifiers are constrained to configured names. An unparsable or oversized catalog offers only read-only file operations and the primary's optional plan function. Catalog text guides generation but supplies no authority; the pinned router and Guard admit every proposal independently.
 
