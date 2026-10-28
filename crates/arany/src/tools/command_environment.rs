@@ -198,9 +198,13 @@ impl CommandEnvironment {
     }
 
     fn write(&self, state: &StateRoot) -> Result<(), CommandEnvironmentError> {
+        let bytes = serde_json::to_vec(self).expect("typed record is serializable");
+        if bytes.len() > RecordKind::CommandEnvironment.limit() {
+            return Err(CommandEnvironmentError::TooLarge("record"));
+        }
         state
             .record(RecordKind::CommandEnvironment)
-            .replace(&serde_json::to_vec(self).expect("typed record is serializable"))
+            .replace(&bytes)
             .map_err(|error| match error {
                 crate::store::StoreError::ReplaceUnconfirmed => {
                     CommandEnvironmentError::Unconfirmed
@@ -450,6 +454,9 @@ impl CommandEnvironment {
                 .ok_or(CommandEnvironmentError::Invalid)?;
             let name = std::str::from_utf8(&entry[..split])
                 .map_err(|_| CommandEnvironmentError::Invalid)?;
+            if name.starts_with("BASH_FUNC_") && name.ends_with("%%") {
+                continue;
+            }
             if !valid_name(name) {
                 return Err(CommandEnvironmentError::Invalid);
             }
@@ -586,7 +593,7 @@ mod tests {
         let record = CommandEnvironment::for_path("/bin")
             .with_name("LANG", "C")
             .with_name("BUILD_MODE", "debug");
-        let captured = record.capture_output(shell(), b"PATH=/usr/bin:/bin\0LANG=en_US.UTF-8\0HOME=/private\0BUILD_MODE=release\0API_TOKEN=CAPTURE_SECRET_CANARY\0client_secret=CAPTURE_SECRET_CANARY\0UNSELECTED=hidden\0").unwrap();
+        let captured = record.capture_output(shell(), b"PATH=/usr/bin:/bin\0BASH_FUNC_which%%=() { :; }\0LANG=en_US.UTF-8\0HOME=/private\0BUILD_MODE=release\0API_TOKEN=CAPTURE_SECRET_CANARY\0client_secret=CAPTURE_SECRET_CANARY\0UNSELECTED=hidden\0").unwrap();
         assert_eq!(captured.source(), "login-shell");
         assert_eq!(captured.shell(), Some(&shell()));
         assert_eq!(

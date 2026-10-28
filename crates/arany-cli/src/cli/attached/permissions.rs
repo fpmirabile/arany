@@ -334,10 +334,9 @@ pub(super) async fn manage_command_environment(
         let outcome = match action {
             EnvironmentAction::Capture => {
                 let summary = session.capture(terminal).await?;
-                let summary = if saved || last_failure.is_some() {
-                    format!("{summary}. {}", leave_notice(saved, last_failure))
-                } else {
-                    summary
+                let summary = match last_failure {
+                    Some(failure) => format!("{summary}. Earlier edit failed: {failure}"),
+                    None => summary,
                 };
                 return Ok(EnvironmentOutcome::Confirmed(summary));
             }
