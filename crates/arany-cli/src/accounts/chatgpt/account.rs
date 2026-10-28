@@ -1590,7 +1590,10 @@ fn sign_out_target_at_with(
             let position = index.account_position(id)?;
             let entry = &index.accounts[position];
             let slot = entry.keyring_slot.clone();
+            let storage = entry.storage;
             if entry.disconnected {
+                let token = stored_token(entry, storage, actions.read_keyring);
+                let remote_confirmed = revoke_stored_token(token, storage, actions.revoke);
                 index.accounts[position].token = None;
                 index.write(state)?;
                 let local_cleared = slot
@@ -1600,14 +1603,15 @@ fn sign_out_target_at_with(
                     return Err(AuthorizationError::SignOutStorageUncertain);
                 }
                 index.accounts[position].signout_pending = false;
-                index.write(state)?;
+                index
+                    .write(state)
+                    .map_err(|_| AuthorizationError::SignOutStorageUncertain)?;
                 forget_removed_account(state, &mut index, target.account_id)?;
                 return Ok(SignOutOutcome {
-                    remote_confirmed: false,
+                    remote_confirmed,
                     local_cleared,
                 });
             }
-            let storage = entry.storage;
             if !entry.signout_pending {
                 index.accounts[position].renewal_pending = false;
                 index.accounts[position].signout_pending = true;
@@ -1615,18 +1619,8 @@ fn sign_out_target_at_with(
                 index.write(state)?;
             }
             let entry = &index.accounts[position];
-            let token = match storage {
-                AccountStorage::Keyring => (actions.read_keyring)(entry).ok(),
-                AccountStorage::PrivateFile => entry.token.clone(),
-            };
-            let remote_confirmed =
-                token
-                    .filter(|token| token.valid_for(storage))
-                    .is_some_and(|token| {
-                        actions
-                            .revoke
-                            .is_some_and(|revoke| revoke(&token.credentials).is_ok())
-                    });
+            let token = stored_token(entry, storage, actions.read_keyring);
+            let remote_confirmed = revoke_stored_token(token, storage, actions.revoke);
             index.accounts[position].token = None;
             index.accounts[position].signout_pending = false;
             index.accounts[position].disconnected = true;
@@ -1646,6 +1640,27 @@ fn sign_out_target_at_with(
             })
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn stored_token(
+    entry: &AccountEntry,
+    storage: AccountStorage,
+    read_keyring: impl FnOnce(&AccountEntry) -> Result<TokenRecord, AuthorizationError>,
+) -> Option<TokenRecord> {
+    match storage {
+        AccountStorage::Keyring => read_keyring(entry).ok(),
+        AccountStorage::PrivateFile => entry.token.clone(),
+    }
+}
+
+fn revoke_stored_token(
+    token: Option<TokenRecord>,
+    storage: AccountStorage,
+    revoke: Option<impl FnOnce(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+) -> bool {
+    token
+        .filter(|token| token.valid_for(storage))
+        .is_some_and(|token| revoke.is_some_and(|revoke| revoke(&token.credentials).is_ok()))
 }
 
 fn forget_removed_account(

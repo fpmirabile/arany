@@ -495,9 +495,6 @@ impl Startup {
     }
 
     fn take_setup_notice(&mut self) -> Option<String> {
-        if let Some(notice) = chatgpt::take_migration_notice() {
-            append_notice(&mut self.setup_notice, notice);
-        }
         if self.setup_notice.is_some() {
             self.setup_notice.take()
         } else if self.admission.setup_requested
