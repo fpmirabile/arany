@@ -2,7 +2,6 @@ use super::*;
 use crate::test_process::assert_single_test_completed;
 use base64::Engine as _;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-use sha2::Digest as _;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -13,7 +12,7 @@ const REMOVED_CLIENT: &str = "oaiapp_removed_account";
 
 // Local: this module also compiles in the binary unit tests, which lack `crate::setup`.
 fn legacy_chatgpt_slot(client_id: &str) -> String {
-    let digest = sha2::Sha256::digest(client_id.as_bytes());
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(client_id.as_bytes());
     format!(
         "chatgpt-{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
@@ -95,14 +94,7 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     let deleted: Vec<_> = deleted.lines().collect();
     assert_eq!(deleted.len(), 2);
     assert_eq!(deleted[0], deleted[1]);
-    assert_eq!(
-        deleted[0],
-        format!(
-            "chatgpt-{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(Sha256::digest(REMOVED_CLIENT.as_bytes()))
-        )
-    );
+    assert_eq!(deleted[0], legacy_chatgpt_slot(REMOVED_CLIENT));
 }
 
 fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
