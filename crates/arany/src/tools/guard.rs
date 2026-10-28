@@ -1032,8 +1032,8 @@ pub(super) async fn execute(
     #[cfg(target_os = "linux")]
     let result = result
         .map_err(|error| linux::supervisor::namespace_failure(error, &runtime.guard_executable));
-    let result = if super::discovery::possible(&intent.call) {
-        discovery_result(intent, dispatched, stop.is_cancelled(), result)
+    let result = if known_read_stop(&intent.call) {
+        read_stop_result(intent, dispatched, stop.is_cancelled(), result)
     } else {
         dispatch_result(intent, dispatched, result)
     };
@@ -1047,15 +1047,25 @@ pub(super) async fn execute(
     ))
 }
 
-fn discovery_result(
+// Discovery and web calls publish nothing, so confirmed teardown after a stop is a known outcome.
+fn known_read_stop(call: &ToolCall) -> bool {
+    super::discovery::possible(call) || call.is_web()
+}
+
+fn read_stop_result(
     intent: &EffectIntent,
     dispatched: bool,
     cancelled: bool,
     result: Result<ToolObservation, ToolError>,
 ) -> Result<ToolObservation, ToolError> {
+    let discovery = super::discovery::possible(&intent.call);
     let cause = match &result {
-        Err(ToolError::Timeout(_)) if dispatched => Some(crate::tools::LimitCause::Timeout),
-        Err(ToolError::Limit) if dispatched => Some(crate::tools::LimitCause::Resource),
+        Err(ToolError::Timeout(_)) if dispatched && discovery => {
+            Some(crate::tools::LimitCause::Timeout)
+        }
+        Err(ToolError::Limit) if dispatched && discovery => {
+            Some(crate::tools::LimitCause::Resource)
+        }
         Err(ToolError::Operation) if cancelled => None,
         Err(ToolError::GuardBootstrap(BootstrapFailure {
             check: Some(GuardCheck::Cancelled),
@@ -1073,8 +1083,10 @@ fn discovery_result(
         },
         output: if cause.is_some() {
             "Discovery stopped at its resource or time limit"
-        } else {
+        } else if discovery {
             "Discovery cancelled"
+        } else {
+            "Web request cancelled"
         }
         .into(),
         attestation: dispatched.then(|| {
@@ -2362,6 +2374,25 @@ mod tests {
                 discovery_work(&intent, std::future::pending()).await;
             assert!(matches!(result, Err(ToolError::Timeout(_))));
             assert_eq!(tokio::time::Instant::now() - start, duration);
+        }
+    }
+
+    #[test]
+    fn cancelled_web_teardown_is_cancelled_and_other_dispatched_errors_stay_unknown() {
+        let intent = intent(ToolCall::WebFetch {
+            url: "https://example.com/".into(),
+        });
+        assert!(known_read_stop(&intent.call));
+        let observation = read_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Cancelled);
+        assert_eq!(observation.output, "Web request cancelled");
+        assert!(matches!(observation.attestation, Some(Attestation::Guard(_))));
+        for (cancelled, error) in [
+            (false, ToolError::Operation),
+            (true, ToolError::Limit),
+            (true, ToolError::Timeout(String::new())),
+        ] {
+            assert!(read_stop_result(&intent, true, cancelled, Err(error)).is_err());
         }
     }
 

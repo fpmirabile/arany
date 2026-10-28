@@ -784,7 +784,7 @@ async fn settle_launch(
     stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
     deadline: tokio::time::Instant,
     result: Result<(ToolObservation, super::CacheCandidate), ToolError>,
-    (cache, discovery): (&mut Option<super::BuildCacheSession>, bool),
+    (cache, typed_error): (&mut Option<super::BuildCacheSession>, bool),
 ) -> Result<ToolObservation, ToolError> {
     let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
     if !matches!(cleanup, Ok(Ok(()))) {
@@ -827,7 +827,7 @@ async fn settle_launch(
     let Some(stderr) = drained else {
         return Err(ToolError::GuardRejected(GuardStage::OutputEof));
     };
-    if result.is_err() && !discovery {
+    if result.is_err() && !typed_error {
         let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
         let stage = if diagnostic.contains("bwrap:") || diagnostic.contains("unshare:") {
             GuardStage::NamespaceBootstrap
@@ -1152,7 +1152,11 @@ pub(super) async fn execute_inner(
         &mut stderr_task,
         deadline,
         result,
-        (&mut cache, super::super::discovery::possible(&intent.call)),
+        (
+            &mut cache,
+            super::super::discovery::possible(&intent.call)
+                || (intent.call.is_web() && cancellation.is_cancelled()),
+        ),
     ))
     .await;
     finish_proxy(proxy, settled).await
