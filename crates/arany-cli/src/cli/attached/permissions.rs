@@ -11,6 +11,8 @@ use arany::{
     WorkspacePermissions, native_protection_supported,
 };
 use std::path::Path;
+mod capture;
+pub(super) use capture::EnvironmentSession;
 
 pub(super) enum PermissionChoice {
     Selected(WorkspacePermissions),
@@ -77,6 +79,7 @@ pub(super) async fn admit(
 const BACK: u8 = 0;
 const ADD: u8 = 1;
 const ENTRY_BASE: u8 = 2;
+const CAPTURE: u8 = u8::MAX;
 const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
 const HOST_NOTE: &str = "host; human approval required";
@@ -283,6 +286,7 @@ pub(super) enum EnvironmentOutcome {
 }
 
 enum EnvironmentAction {
+    Capture,
     Select(String),
     Reveal(String),
     Remove(String),
@@ -296,13 +300,13 @@ enum EnvironmentStep {
 
 pub(super) async fn manage_command_environment(
     terminal: &mut AttachedTerminal,
-    state_dir: &Path,
+    mut session: EnvironmentSession<'_>,
 ) -> Result<EnvironmentOutcome, SetupError> {
     let mut notice = None::<String>;
     let mut saved = false;
     let mut last_failure = None::<String>;
     loop {
-        let Ok(state) = StateRoot::open_existing(state_dir) else {
+        let Ok(state) = StateRoot::open_existing(&session.admission.state_dir) else {
             return Ok(EnvironmentOutcome::Confirmed(
                 "Error: state directory unavailable or unsafe; command environment unchanged"
                     .into(),
@@ -334,6 +338,14 @@ pub(super) async fn manage_command_environment(
             }
         };
         let outcome = match action {
+            EnvironmentAction::Capture => {
+                let summary = session.capture(terminal).await?;
+                let summary = match last_failure {
+                    Some(failure) => format!("{summary}. Earlier edit failed: {failure}"),
+                    None => summary,
+                };
+                return Ok(EnvironmentOutcome::Confirmed(summary));
+            }
             EnvironmentAction::Select(name) => {
                 CommandEnvironment::edit(&state, |record| record.select(&name)).map(|_| "Selected.")
             }
@@ -515,13 +527,33 @@ async fn choose_environment(
         (ENTRY_BASE + index, format!("{name} · value hidden"))
     }));
     rows.push((BACK, "Back".to_owned()));
+    rows.insert(
+        1,
+        (
+            CAPTURE,
+            if environment.shell().is_some() {
+                "Re-capture from login shell"
+            } else {
+                "Capture from login shell"
+            }
+            .to_owned(),
+        ),
+    );
     let labels = rows
         .iter()
         .map(|(value, label)| (*value, label.as_str()))
         .collect::<Vec<_>>();
     let instruction = format!(
-        "{notice} Source {}. PATH {}. Names matching *KEY*, *SECRET* or *TOKEN* are never selectable. Changes apply from the next Run.",
+        "{notice} Source {}{}. PATH {}. Names matching *KEY*, *SECRET* or *TOKEN* are never selectable. Changes apply from the next Run.",
         environment.source(),
+        environment
+            .shell()
+            .map(|shell| format!(
+                " · shell {} · SHA-256 {}",
+                crate::presentation::escape_terminal(&shell.path),
+                shell.sha256
+            ))
+            .unwrap_or_default(),
         crate::presentation::escape_terminal(&environment.path().join(", ")),
     );
     super::setup::choose_focused(
@@ -541,6 +573,7 @@ async fn environment_step(
     names: &[String],
 ) -> Result<EnvironmentStep, SetupError> {
     Ok(match choice {
+        Some(CAPTURE) => EnvironmentStep::Act(EnvironmentAction::Capture),
         Some(ADD) => {
             match super::setup::read_setup_value(
                 terminal,

@@ -906,6 +906,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     command_tool_probe: None,
                     pending_provider_setup_edit: None,
                     provider_setup_uncertain: false,
+                    environment_capture: None,
                     runs: Vec::new(),
                     compactions: Vec::new(),
                 };

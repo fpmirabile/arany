@@ -4,6 +4,8 @@
 
 | Name | Value | Unit | Owner |
 |---|---:|---|---|
+| <a id="login_shell_capture_timeout_ms"></a>[`LOGIN_SHELL_CAPTURE_TIMEOUT_MS`](#login_shell_capture_timeout_ms) | 10000 | milliseconds | `crates/arany/src/tools/unguarded/environment.rs` |
+| <a id="login_shell_capture_output_bytes"></a>[`LOGIN_SHELL_CAPTURE_OUTPUT_BYTES`](#login_shell_capture_output_bytes) | 65536 | bytes | `crates/arany/src/tools/unguarded/environment.rs` |
 | <a id="max_command_tools"></a>[`MAX_COMMAND_TOOLS`](#max_command_tools) | 8 | tools | `crates/arany/src/tools/command_tools.rs` |
 | <a id="max_command_tool_candidates"></a>[`MAX_COMMAND_TOOL_CANDIDATES`](#max_command_tool_candidates) | 256 | directory entries | `crates/arany/src/tools/command_tools.rs` |
 | <a id="max_editor_change_report_bytes"></a>[`MAX_EDITOR_CHANGE_REPORT_BYTES`](#max_editor_change_report_bytes) | 2048 | bytes | `crates/arany/src/session/worker.rs` |

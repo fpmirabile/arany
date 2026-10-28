@@ -1094,7 +1094,8 @@ impl From<&Event> for TraceEventKind {
             | Event::WorkspaceRewindStarted { .. }
             | Event::WorkspaceRewindFinished { .. }
             | Event::SessionRenamed { .. } => Self::Unmarked,
-            Event::CommandToolProbeStarted { .. }
+            Event::HostEnvironmentCapture { .. }
+            | Event::CommandToolProbeStarted { .. }
             | Event::CommandToolProbeFinished { .. }
             | Event::ProviderSetupEditStarted { .. }
             | Event::ProviderSetupEditFinished { .. } => Self::Unmarked,

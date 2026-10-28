@@ -62,6 +62,18 @@ pub struct LimitsTable {
 pub const LIMITS: LimitsTable = LimitsTable {
     rows: &[
         Limit {
+            name: "LOGIN_SHELL_CAPTURE_TIMEOUT_MS",
+            value: crate::tools::unguarded::environment::LOGIN_SHELL_CAPTURE_TIMEOUT_MS,
+            unit: "milliseconds",
+            owner: "crates/arany/src/tools/unguarded/environment.rs",
+        },
+        Limit {
+            name: "LOGIN_SHELL_CAPTURE_OUTPUT_BYTES",
+            value: crate::tools::unguarded::environment::LOGIN_SHELL_CAPTURE_OUTPUT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/unguarded/environment.rs",
+        },
+        Limit {
             name: "MAX_COMMAND_TOOLS",
             value: MAX_COMMAND_TOOLS as u64,
             unit: "tools",

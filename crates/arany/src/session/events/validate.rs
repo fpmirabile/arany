@@ -29,6 +29,7 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         match self {
+            Self::HostEnvironmentCapture { record } => record.validate(),
             Self::CommandToolProbeStarted { .. } | Self::CommandToolProbeFinished { .. } => {
                 self.validate_command_probe()
             }

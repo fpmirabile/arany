@@ -6,6 +6,8 @@ use arany_cli::presentation::{Output, render_session};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "permissions/environment.rs"]
+mod environment;
 #[path = "permissions/hooks.rs"]
 mod hooks;
 #[path = "permissions/host.rs"]
