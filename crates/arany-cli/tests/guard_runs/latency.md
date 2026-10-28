@@ -56,7 +56,8 @@ Integer microsecond samples stay in attempt order. Sorting their measured-succes
 durations reproduces nearest-rank p50/p95/max (`ceil(p*n)-1`, p95 index 94 for 100).
 Only complete, audited single-Read and Edit rows get their existing provisional
 target comparison. The four-Read and Command rows report step percentiles with
-null objective and verdict; Command needs an owner-accepted host-specific objective.
+null objective and verdict; the corpus JSON never changes that. The accepted Command
+objective is an owner-recorded comparison defined in the [owner procedure](#owner-procedure).
 Invalid proposals, denial, failure, cancellation, uncertainty and missing acknowledgements cannot
 become successful samples. Failure stops the invocation without retry, preserves
 partial counts/captures and emits no valid percentile or target verdict. A missed
@@ -94,7 +95,13 @@ No cleanup of failed evidence is implied by a missing timing endpoint.
 
 ## Owner procedure
 
-Use the selected quiet native Linux host on stable power and local disk. No
+Use the named host, the owner's Arch Linux workstation (owner decision 2026-10-28),
+on stable power and local disk. The accepted no-op Command objective is host-specific:
+each of the three invocations' Command p95 must not exceed `PROVISIONAL_P95_US` in
+`latency.rs`, the same value as the Read/Edit objective, with no separate number. The
+owner compares each report's `p50_p95_max_us` p95 against it and records the result and
+any miss with the run artifact; the report's `provisional_p95_objective_us` and
+`objective_met` stay null for Command. No
 sandbox bypass or fake Guard is allowed. Build in this worktree's `target` or
 through the team Cargo shim; never put build output in the evidence directory or
 set `CARGO_TARGET_DIR`. The corpus refuses debug execution, unsupported hosts and
@@ -137,8 +144,7 @@ the binary identity, revision/toolchain, invocation summary and closed-journal a
 in the owner's run artifact. Perform three separate invocations and report each
 p95; do not pool them or keep only the fastest. Record target misses and diagnosis
 ownership. [NEXT_STEPS.md, Visible reliability](../../../../NEXT_STEPS.md#daily-use-first) owns the
-accepted host and remaining native evidence; the owner must accept a Command
-objective separately. Keep all three invocation reports, including target misses
+remaining native evidence. Keep all three invocation reports, including target misses
 and failed/partial evidence.
 
 The existing dispatch-only measurement remains separate and unchanged:
