@@ -2338,11 +2338,12 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                 .unwrap()
                 .push_front(Err(ProviderError::RateLimited(None)));
         } else if case == "fallback" {
+            primary.responses = unavailable_attempts(1);
             primary
-                .responses
+                .rate_limits
                 .get_mut()
                 .unwrap()
-                .push_front(Err(ProviderError::Unavailable));
+                .resize(usize::from(MAX_PROVIDER_RETRIES) + 1, Some(api_sample(900)));
         }
         let primary = route(primary);
         let replacement = route(
@@ -2380,11 +2381,12 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         let (events, view) = reopen(&state, session).await;
         assert_eq!(
             primary.requests.lock().unwrap().len(),
-            if matches!(case, "retry" | "omitted" | "invalid") {
-                2
-            } else {
-                1
-            }
+            match case {
+                "retry" | "omitted" | "invalid" => 2,
+                "fallback" => usize::from(MAX_PROVIDER_RETRIES) + 1,
+                _ => 1,
+            },
+            "{case}"
         );
         if case == "append failure" {
             assert!(outcome.is_err());
@@ -2399,7 +2401,13 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                 "failed" => RunStatus::Failed,
                 "cancelled" => RunStatus::Cancelled,
                 _ => RunStatus::Finished,
-            }
+            },
+            "{case}"
+        );
+        assert_eq!(
+            view.runs[0].provider_fallbacks.len(),
+            usize::from(case == "fallback"),
+            "{case}"
         );
         let group = &view.usage.api_limits[0];
         assert_eq!(group.rows[0].observed_at, 1000);
