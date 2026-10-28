@@ -11,6 +11,8 @@ pub(crate) use shared_editors::{
 };
 use shared_editors::{parse_run_started, string_run_provider_text};
 #[cfg(test)]
+mod api_limits_tests;
+#[cfg(test)]
 mod tests;
 mod validate;
 use super::worker::*;

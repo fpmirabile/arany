@@ -1,3 +1,6 @@
+mod api;
+pub use api::ApiUsage;
+
 use super::{AgentRunId, Event, ReplayError, RunId, SessionId, SessionView};
 use crate::provider::{ProviderKind, ProviderRole, Usage};
 
@@ -64,6 +67,7 @@ impl PlanUsage {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UsageView {
     pub plan_limits: Vec<PlanUsage>,
+    pub api_limits: Vec<ApiUsage>,
     pub groups: Vec<UsageGroup>,
     pub pending: Vec<(SessionId, RunId, Option<AgentRunId>)>,
 }
@@ -185,8 +189,14 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
         }
     };
     let chatgpt = ProviderKind::parse(&provider) == Some(ProviderKind::ChatGpt);
-    if limits.is_some() && !chatgpt {
+    if limits.is_some_and(|limits| limits.api.is_none()) && !chatgpt {
         return Err(ReplayError::InvalidTransition);
+    }
+    if limits.is_some_and(|limits| limits.api.is_some()) && chatgpt {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if !chatgpt {
+        api::apply(view, event, (run_id, actor, role), limits)?;
     }
     if chatgpt {
         let run = view

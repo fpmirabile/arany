@@ -4,6 +4,7 @@
 
 | Name | Value | Unit | Owner |
 |---|---:|---|---|
+| <a id="max_api_limit_rows"></a>[`MAX_API_LIMIT_ROWS`](#max_api_limit_rows) | 7 | rows | `crates/arany/src/provider/limits.rs` |
 | <a id="login_shell_capture_timeout_ms"></a>[`LOGIN_SHELL_CAPTURE_TIMEOUT_MS`](#login_shell_capture_timeout_ms) | 10000 | milliseconds | `crates/arany/src/tools/unguarded/environment.rs` |
 | <a id="login_shell_capture_output_bytes"></a>[`LOGIN_SHELL_CAPTURE_OUTPUT_BYTES`](#login_shell_capture_output_bytes) | 65536 | bytes | `crates/arany/src/tools/unguarded/environment.rs` |
 | <a id="max_command_tools"></a>[`MAX_COMMAND_TOOLS`](#max_command_tools) | 8 | tools | `crates/arany/src/tools/command_tools.rs` |

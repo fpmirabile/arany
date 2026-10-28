@@ -62,6 +62,12 @@ pub struct LimitsTable {
 pub const LIMITS: LimitsTable = LimitsTable {
     rows: &[
         Limit {
+            name: "MAX_API_LIMIT_ROWS",
+            value: crate::provider::MAX_API_LIMIT_ROWS as u64,
+            unit: "rows",
+            owner: "crates/arany/src/provider/limits.rs",
+        },
+        Limit {
             name: "LOGIN_SHELL_CAPTURE_TIMEOUT_MS",
             value: crate::tools::unguarded::environment::LOGIN_SHELL_CAPTURE_TIMEOUT_MS,
             unit: "milliseconds",
