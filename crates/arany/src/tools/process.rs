@@ -115,7 +115,7 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
     Some(fields)
 }
 
-pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
+fn prepare_command(site: &GuardContext<'_>) -> Result<tokio::process::Command, ToolError> {
     let ToolCall::Command {
         program, args, cwd, ..
     } = &site.intent.call
@@ -181,6 +181,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     } else {
         std::process::Stdio::null()
     });
+    Ok(command)
+}
+
+pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
+    let mut command = prepare_command(site)?;
     let deadline = tokio::time::Instant::now() + site.remaining_runtime();
     let mut child = spawn_before(&mut command, deadline)?;
     let mut writer = None;
