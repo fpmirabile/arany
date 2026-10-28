@@ -11,6 +11,8 @@ use std::path::Path;
 use uuid::{Uuid, Version};
 
 mod keyring_helper;
+#[cfg(test)]
+pub(crate) use keyring_helper::TEST_HELPER;
 
 #[cfg(all(test, target_os = "macos", debug_assertions))]
 mod macos_tests;

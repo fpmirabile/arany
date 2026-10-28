@@ -493,23 +493,35 @@ fn rewind_process_death_preserves_exact_recovery_prefixes() {
 #[tokio::test]
 #[ignore = "native Linux Store plan-observation transaction crash release gate"]
 async fn plan_observation_process_death_preserves_only_committed_attempt_samples() {
+    observation_crash_prefix(false).await;
+}
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore)]
+fn api_observation_process_death_preserves_only_committed_attempt_samples() {
+    let _gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+    runtime().block_on(observation_crash_prefix(true));
+}
+
+async fn observation_crash_prefix(api: bool) {
     use crate::test_support::{engine::run_to_end, routing::*, scenario::ScriptedProvider};
     let source = tempfile::tempdir().unwrap();
     let workspace = source.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = source.path().join("state");
-    let mut provider = ScriptedProvider::new(vec![finish("done")])
-        .with_chatgpt_account(uuid::Uuid::now_v7(), [1; 32]);
+    let mut provider = ScriptedProvider::new(vec![finish("done")]);
+    let samples = if api {
+        [Some(api_sample(1000)), Some(api_sample(1001))]
+    } else {
+        provider = provider.with_chatgpt_account(uuid::Uuid::now_v7(), [1; 32]);
+        [Some(plan_sample(1000)), Some(plan_sample(1001))]
+    };
     provider
         .responses
         .get_mut()
         .unwrap()
         .push_front(Err(crate::ProviderError::RateLimited(None)));
-    provider
-        .rate_limits
-        .get_mut()
-        .unwrap()
-        .extend([Some(plan_sample(1000)), Some(plan_sample(1001))]);
+    provider.rate_limits.get_mut().unwrap().extend(samples);
     let provider = route(provider);
     let engine = open(&state);
     let session = engine
@@ -579,6 +591,20 @@ async fn plan_observation_process_death_preserves_only_committed_attempt_samples
                 .unwrap()
                 .unwrap();
             assert_eq!(view.usage, expected.usage);
+            if api {
+                let receipt = match (&envelope.event, stage) {
+                    (Event::ProviderRetryScheduled { .. }, "before") => None,
+                    (Event::ProviderCallRecorded { .. }, "after") => Some(1001),
+                    _ => Some(1000),
+                };
+                assert_eq!(view.usage.api_limits.len(), usize::from(receipt.is_some()));
+                if let Some(receipt) = receipt {
+                    assert_eq!(
+                        view.usage.api_limits[0].rows,
+                        api_sample(receipt).api.unwrap().rows
+                    );
+                }
+            }
             assert_eq!(
                 provider.requests.lock().unwrap().len(),
                 2,
