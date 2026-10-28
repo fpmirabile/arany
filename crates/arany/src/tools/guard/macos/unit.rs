@@ -1621,7 +1621,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     &mut output,
                     super::GoGate {
                         receive_go,
-                        command_deadline,
                         git_stage,
                         git_input: publishing.then_some(plan_receiver),
                         #[cfg(any(test, feature = "test-support"))]
