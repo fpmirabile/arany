@@ -1756,6 +1756,9 @@ fn login_shell_capture_requires_review_and_preserves_private_values() {
 }
 
 #[cfg(target_os = "linux")]
+const UNTIL_DISPLAY_ALLOWANCE_MS: u64 = 5_000;
+
+#[cfg(target_os = "linux")]
 fn until(
     output: &mut std::process::ChildStdout,
     input: &mut std::process::ChildStdin,
@@ -1764,7 +1767,10 @@ fn until(
     what: &str,
     ready: &dyn Fn(&[u8]) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now()
+        + Duration::from_millis(
+            arany::EnvironmentCaptureIntent::RUNTIME_MS + UNTIL_DISPLAY_ALLOWANCE_MS,
+        );
     while !ready(transcript) {
         super::session_picker::pump(output, input, transcript, answered);
         assert!(
