@@ -2418,7 +2418,7 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
             }
         );
         assert_eq!(group.role, ProviderRole::Primary);
-        assert_eq!(group.latest_unreported, case == "omitted");
+        assert_eq!(group.latest_omitted.is_some(), case == "omitted");
         assert_eq!(group.latest_unavailable.is_some(), case == "invalid");
         assert_eq!(
             replacement.requests.lock().unwrap().len(),

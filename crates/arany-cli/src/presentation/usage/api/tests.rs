@@ -61,7 +61,7 @@ async fn reopened_api_report_keeps_exact_rows_omissions_age_and_run_scope() {
     assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
     let mut changed = view.clone();
     let group = &mut changed.usage.api_limits[0];
-    group.latest_unreported = true;
+    group.latest_omitted = Some(Vec::new());
     group.latest_unavailable = Some(arany::LimitFailure {
         reason: arany::LimitUnavailable::Invalid,
         source: arany::LimitSource::Headers,
@@ -70,7 +70,11 @@ async fn reopened_api_report_keeps_exact_rows_omissions_age_and_run_scope() {
     let pages = super::super::usage_pages_at(&changed, false, None, Some(1060)).concat();
     assert!(pages.contains("Remaining: 0\n"));
     assert!(pages.contains("Stale; reset time passed, current usage unknown"));
-    assert!(pages.contains("Latest call did not report limits for some dimensions"));
+    assert!(pages.contains("Latest call did not report limits\n"));
+    group.latest_omitted = Some(vec![arany::ApiLimitDimension::Requests]);
+    changed.usage.api_limits[0].latest_omitted = Some(vec![arany::ApiLimitDimension::Requests]);
+    let partial = super::super::usage_pages_at(&changed, false, None, Some(1060)).concat();
+    assert!(partial.contains("Latest call did not report limits for: Requests\n"));
     assert!(pages.contains("invalid optional metadata"));
     let text = super::super::usage_pages_at(&changed, false, None, Some(999)).concat();
     assert!(text.contains("Observation age unknown"));

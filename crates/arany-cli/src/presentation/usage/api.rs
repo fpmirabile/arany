@@ -64,15 +64,6 @@ fn section(
         escape_terminal(&group.identity.model)
     );
     for row in &group.rows {
-        let label = match row.dimension {
-            ApiLimitDimension::Requests => "Requests",
-            ApiLimitDimension::Tokens => "Tokens",
-            ApiLimitDimension::ProjectTokens => "Project tokens",
-            ApiLimitDimension::InputTokens => "Input tokens",
-            ApiLimitDimension::OutputTokens => "Output tokens",
-            ApiLimitDimension::PriorityInputTokens => "Priority input tokens",
-            ApiLimitDimension::PriorityOutputTokens => "Priority output tokens",
-        };
         let count = |value: Option<u64>| {
             value
                 .map(grouped_count)
@@ -80,7 +71,8 @@ fn section(
         };
         let _ = writeln!(
             text,
-            "{label}\nLimit: {}\nRemaining: {}",
+            "{}\nLimit: {}\nRemaining: {}",
+            label(row.dimension),
             count(row.limit),
             count(row.remaining)
         );
@@ -89,13 +81,36 @@ fn section(
     if group.rows.is_empty() {
         text.push_str("API rate limits: unknown (not reported)\n");
     }
-    if group.latest_unreported {
-        text.push_str("Latest call did not report limits for some dimensions\n");
+    match &group.latest_omitted {
+        Some(omitted) if omitted.is_empty() => {
+            text.push_str("Latest call did not report limits\n");
+        }
+        Some(omitted) => {
+            let labels: Vec<_> = omitted.iter().map(|dimension| label(*dimension)).collect();
+            let _ = writeln!(
+                text,
+                "Latest call did not report limits for: {}",
+                labels.join(", ")
+            );
+        }
+        None => {}
     }
     if let Some(failure) = group.latest_unavailable {
         text.push_str(&unavailable_limits_line(failure));
     }
     text
+}
+
+fn label(dimension: ApiLimitDimension) -> &'static str {
+    match dimension {
+        ApiLimitDimension::Requests => "Requests",
+        ApiLimitDimension::Tokens => "Tokens",
+        ApiLimitDimension::ProjectTokens => "Project tokens",
+        ApiLimitDimension::InputTokens => "Input tokens",
+        ApiLimitDimension::OutputTokens => "Output tokens",
+        ApiLimitDimension::PriorityInputTokens => "Priority input tokens",
+        ApiLimitDimension::PriorityOutputTokens => "Priority output tokens",
+    }
 }
 
 #[cfg(test)]
