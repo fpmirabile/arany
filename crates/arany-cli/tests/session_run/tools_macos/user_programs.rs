@@ -2,6 +2,7 @@ use super::*;
 use std::path::PathBuf;
 
 const FIXTURE_RUST_VERSION: &str = "1.98.1";
+const FIXTURE_OUTPUT_CHARS: usize = 4096;
 
 pub(super) fn configure_proxy(command: &mut std::process::Command, root: &Path, proxy: &Path) {
     command.env("ARANY_TEST_RUSTUP_PROXY", proxy).env(
@@ -181,12 +182,14 @@ fn selected_permissions(workspace: &Path, prefix: &Path) -> arany::WorkspacePerm
 fn user_program_script(root: &Path, prefix: &Path) -> String {
     format!(
         r#"set -eu
-test "$(arany-brew-probe)" = homebrew-dylib
-test "$(rustc --version)" = selected-toolchain
-test "$RUSTUP_HOME" = '{home}/.rustup'
-test "$PATH" = '{prefix}/bin:{home}/.cargo/bin:/usr/bin:/bin'
-test "$HOME" = "$TMPDIR"
-test "$HOME" != '{home}'
+probe=$(arany-brew-probe) || exit 81
+test "$probe" = homebrew-dylib || exit 82
+toolchain=$(rustc --version) || exit 83
+test "$toolchain" = selected-toolchain || exit 84
+test "$RUSTUP_HOME" = '{home}/.rustup' || exit 85
+test "$PATH" = '{prefix}/bin:{home}/.cargo/bin:/usr/bin:/bin' || exit 86
+test "$HOME" = "$TMPDIR" || exit 87
+test "$HOME" != '{home}' || exit 88
 for path in '{prefix}/lib-new' '{prefix}/Cellar/probe/1.0/lib/libfixture.dylib' '{home}/.cargo/bin/new-file' '{home}/.rustup/new-file'; do
     if (printf changed > "$path") 2>/dev/null; then exit 91; fi
 done
@@ -197,6 +200,16 @@ printf user-programs-ok
         home = root.join("home").display(),
         prefix = prefix.display()
     )
+}
+
+// The synthetic script's exit code names the failing step and its stderr carries the loader or proxy error.
+fn fixture_output(run: &arany::RunView) -> String {
+    run.tools
+        .iter()
+        .filter_map(|tool| tool.observation.as_ref())
+        .flat_map(|observation| observation.output.chars())
+        .take(FIXTURE_OUTPUT_CHARS)
+        .collect()
 }
 
 fn disk_image(root: &Path, args: &[&std::ffi::OsStr]) {
@@ -330,8 +343,9 @@ async fn native_user_programs_helper() {
     assert_eq!(
         outcome.run.status,
         RunStatus::Finished,
-        "{}",
-        crate::safe_run_diagnostics(&outcome.run)
+        "{}; output={:?}",
+        crate::safe_run_diagnostics(&outcome.run),
+        fixture_output(&outcome.run)
     );
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
     assert_guarded_build_observation(observation);
