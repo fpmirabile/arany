@@ -164,14 +164,13 @@ impl Server {
         match (&self.program, &self.url) {
             (Some(_), None) => self.auth.is_none(),
             (None, Some(url)) => {
-                cfg!(target_os = "linux")
-                    && self.args.is_empty()
-                    && super::web::valid_endpoint(url)
+                cfg!(target_os = "linux") && self.args.is_empty() && super::web::valid_endpoint(url)
             }
             _ => false,
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn host(&self) -> Option<String> {
         super::web::endpoint_host(self.url.as_deref()?)
     }

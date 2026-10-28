@@ -267,7 +267,8 @@ fn remote_mcp_servers_need_exactly_one_transport_and_bind_the_proxy() {
             .unwrap(),
         )
     };
-    let remote = |url: &str| json!({"name": "remote", "tools": ["echo"], "url": url, "auth": "oauth"});
+    let remote =
+        |url: &str| json!({"name": "remote", "tools": ["echo"], "url": url, "auth": "oauth"});
     let config = parse(json!([remote("https://mcp.example.com/mcp")])).unwrap();
     let call = ToolCall::McpList {
         server: "remote".into(),

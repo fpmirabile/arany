@@ -1,4 +1,4 @@
-use super::super::config::{MAX_MCP_SERVERS, Config, McpAuth, Server};
+use super::super::config::{Config, MAX_MCP_SERVERS, McpAuth, Server};
 use super::super::web::{MAX_URL_BYTES, valid_endpoint};
 use crate::store::{RecordFormat, RecordKind, StateRoot};
 use crate::validate::{parse_json_bounded, valid_name};
@@ -27,6 +27,7 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const CALLBACK_DEADLINE: Duration = Duration::from_secs(180);
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 // A token this close to expiry is renewed before the call that would carry it.
+#[cfg(any(target_os = "linux", test))]
 const EXPIRY_SKEW_SECS: u64 = 60;
 const MAX_EXPIRES_IN_SECS: u64 = 365 * 24 * 60 * 60;
 const CALLBACK_PATH: &str = "/callback";
@@ -97,7 +98,10 @@ impl Grant {
     fn valid(&self) -> bool {
         valid_endpoint(&self.url)
             && valid_endpoint(&self.token_endpoint)
-            && self.revocation_endpoint.as_deref().is_none_or(valid_endpoint)
+            && self
+                .revocation_endpoint
+                .as_deref()
+                .is_none_or(valid_endpoint)
             && (self.renewal == Renewal::Renewing) == self.claim.is_some()
             && self
                 .claim
@@ -111,6 +115,7 @@ impl Grant {
                 .is_none_or(|token| token_text(token, MAX_ACCESS_TOKEN_BYTES))
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn fresh(&self) -> bool {
         self.expires_at
             .is_none_or(|expires| expires > now().saturating_add(EXPIRY_SKEW_SECS))
@@ -204,6 +209,7 @@ fn random_text(bytes: usize) -> Result<String, McpAuthError> {
 }
 
 // Moves a still-unchanged, ready grant to Renewing; any other state means another process or a logout got there first.
+#[cfg(any(target_os = "linux", test))]
 fn claim_renewal(tokens: &mut Tokens, name: &str, seen: &Grant) -> Result<Grant, McpAuthError> {
     let claim = random_text(RANDOM_TEXT_BYTES)?;
     let grant = tokens.servers.get_mut(name).ok_or(McpAuthError::Rejected)?;
@@ -216,6 +222,7 @@ fn claim_renewal(tokens: &mut Tokens, name: &str, seen: &Grant) -> Result<Grant,
 }
 
 // Settles only the grant that was claimed; a logout or new login in between wins.
+#[cfg(any(target_os = "linux", test))]
 fn settle_renewal(
     tokens: &mut Tokens,
     name: &str,
@@ -238,6 +245,7 @@ fn settle_renewal(
 }
 
 // What the parent learned about the saved token before the Guard launches.
+#[cfg(target_os = "linux")]
 pub(crate) enum Access {
     Token(String),
     // Missing, expired without renewal, blocked by an earlier unconfirmed renewal, or refused.
@@ -248,11 +256,8 @@ pub(crate) enum Access {
 
 // The token reaches the Guard over the private task pipe only. A lost or unconfirmed renewal leaves the
 // grant Renewing, so the old refresh token is never submitted twice.
-pub(crate) async fn access_token(
-    server: &Server,
-    workspace: &Path,
-    renewing: &mut bool,
-) -> Access {
+#[cfg(target_os = "linux")]
+pub(crate) async fn access_token(server: &Server, workspace: &Path, renewing: &mut bool) -> Access {
     let Some(grant) = saved_grant(server) else {
         return Access::Unauthorized;
     };
@@ -299,6 +304,7 @@ pub(crate) async fn access_token(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn saved_grant(server: &Server) -> Option<Grant> {
     let url = server.url.as_deref()?;
     let root = open_account(false).ok()??;
@@ -340,8 +346,8 @@ pub async fn mcp_login(
     let verifier = random_text(RANDOM_TEXT_BYTES)?;
     let challenge = challenge(&verifier);
     let expected_state = random_text(RANDOM_TEXT_BYTES)?;
-    let mut authorize = Url::parse(&metadata.authorization_endpoint)
-        .map_err(|_| McpAuthError::Unsupported)?;
+    let mut authorize =
+        Url::parse(&metadata.authorization_endpoint).map_err(|_| McpAuthError::Unsupported)?;
     authorize
         .query_pairs_mut()
         .append_pair("response_type", "code")
@@ -440,7 +446,9 @@ async fn discover(resource: &Url) -> Result<Metadata, McpAuthError> {
     let document = well_known(&issuer, "oauth-authorization-server")
         .await
         .ok_or(McpAuthError::Unsupported)?;
-    if document["issuer"].as_str().map(|value| value.trim_end_matches('/'))
+    if document["issuer"]
+        .as_str()
+        .map(|value| value.trim_end_matches('/'))
         != Some(issuer.as_str().trim_end_matches('/'))
         || !document["code_challenge_methods_supported"]
             .as_array()
@@ -455,7 +463,8 @@ async fn discover(resource: &Url) -> Result<Metadata, McpAuthError> {
             .map(str::to_owned)
     };
     Ok(Metadata {
-        authorization_endpoint: endpoint("authorization_endpoint").ok_or(McpAuthError::Unsupported)?,
+        authorization_endpoint: endpoint("authorization_endpoint")
+            .ok_or(McpAuthError::Unsupported)?,
         token_endpoint: endpoint("token_endpoint").ok_or(McpAuthError::Unsupported)?,
         registration_endpoint: endpoint("registration_endpoint"),
         revocation_endpoint: endpoint("revocation_endpoint"),
@@ -512,8 +521,12 @@ async fn register(metadata: &Metadata, redirect: &str) -> Result<String, McpAuth
         .ok_or(McpAuthError::Rejected)
 }
 
+#[cfg(target_os = "linux")]
 async fn refresh(grant: &Grant) -> Result<Grant, McpAuthError> {
-    let token = grant.refresh_token.as_deref().ok_or(McpAuthError::Rejected)?;
+    let token = grant
+        .refresh_token
+        .as_deref()
+        .ok_or(McpAuthError::Rejected)?;
     let reply = request_token(
         &grant.token_endpoint,
         &[
@@ -569,6 +582,9 @@ async fn request_token(endpoint: &str, form: &[(&str, &str)]) -> Result<Value, M
 async fn post_form(endpoint: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, McpAuthError> {
     let url = Url::parse(endpoint).map_err(|_| McpAuthError::Unsupported)?;
     let client = client_for(&url).await?;
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish();
     read_body(
         client
             .post(url)
@@ -576,11 +592,7 @@ async fn post_form(endpoint: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, Mcp
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
             )
-            .body(
-                url::form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(form)
-                    .finish(),
-            )
+            .body(body)
             .send()
             .await
             .map_err(|_| McpAuthError::Unavailable)?,
@@ -592,7 +604,9 @@ async fn post_form(endpoint: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, Mcp
 async fn client_for(url: &Url) -> Result<reqwest::Client, McpAuthError> {
     let mut builder = crate::provider::http_client(REQUEST_DEADLINE);
     if let Some(url::Host::Domain(host)) = url.host() {
-        let port = url.port_or_known_default().ok_or(McpAuthError::Unsupported)?;
+        let port = url
+            .port_or_known_default()
+            .ok_or(McpAuthError::Unsupported)?;
         let addresses = crate::provider::resolve_admitted(host, port)
             .await
             .map_err(|_| McpAuthError::Unavailable)?;
@@ -691,9 +705,8 @@ fn parse_callback(head: &[u8], expected_state: &str, port: u16) -> Result<String
     let line = lines.next().ok_or(McpAuthError::Rejected)?;
     let host = format!("127.0.0.1:{port}");
     if !lines.any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("host") && value.trim() == host
-        })
+        line.split_once(':')
+            .is_some_and(|(name, value)| name.eq_ignore_ascii_case("host") && value.trim() == host)
     }) {
         return Err(McpAuthError::Rejected);
     }
@@ -702,7 +715,8 @@ fn parse_callback(head: &[u8], expected_state: &str, port: u16) -> Result<String
         (Some("GET"), Some(target)) => target,
         _ => return Err(McpAuthError::Rejected),
     };
-    let url = Url::parse(&format!("http://127.0.0.1{target}")).map_err(|_| McpAuthError::Rejected)?;
+    let url =
+        Url::parse(&format!("http://127.0.0.1{target}")).map_err(|_| McpAuthError::Rejected)?;
     if url.path() != CALLBACK_PATH {
         return Err(McpAuthError::Rejected);
     }

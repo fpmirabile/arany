@@ -68,7 +68,10 @@ pub(crate) async fn run(args: McpArgs) -> Result<CommandOutput, String> {
                 .await
                 .map_err(describe)?;
             Ok(CommandOutput {
-                stdout: format!("Removed the authorization for {}\n", escape_terminal(&server)),
+                stdout: format!(
+                    "Removed the authorization for {}\n",
+                    escape_terminal(&server)
+                ),
                 stderr: if revoked {
                     String::new()
                 } else {

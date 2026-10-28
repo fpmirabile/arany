@@ -750,11 +750,12 @@ pub(super) fn snapshot_into(
             false,
         )?;
     }
-    for program in config
-        .commands
-        .iter()
-        .chain(config.mcp.iter().filter_map(|server| server.program.as_ref()))
-    {
+    for program in config.commands.iter().chain(
+        config
+            .mcp
+            .iter()
+            .filter_map(|server| server.program.as_ref()),
+    ) {
         let executable = read_regular(open_absolute(&program.executable)?, MAX_SNAPSHOT_BYTES)?;
         if hex_digest(&executable) != program.sha256 {
             return Err(ToolError::ChangedInput);

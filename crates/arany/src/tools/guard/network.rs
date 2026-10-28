@@ -11,8 +11,7 @@ pub(super) fn validate(task: &Task) -> Result<(), ToolError> {
     } else {
         task.config.network.is_some()
     };
-    if proxied
-        && (!admitted || (call.is_web() || call.is_mcp()) && cfg!(not(target_os = "linux")))
+    if proxied && (!admitted || (call.is_web() || call.is_mcp()) && cfg!(not(target_os = "linux")))
     {
         return Err(ToolError::Configuration);
     }

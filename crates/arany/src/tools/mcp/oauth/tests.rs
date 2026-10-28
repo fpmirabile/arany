@@ -168,7 +168,11 @@ fn a_contended_account_lock_refuses_without_corrupting_the_record() {
             })
         })
         .unwrap();
-    assert_eq!(held, Err(McpAuthError::Storage), "the lock is not waited for");
+    assert_eq!(
+        held,
+        Err(McpAuthError::Storage),
+        "the lock is not waited for"
+    );
     let after_refusal = load(&root).unwrap();
     assert_eq!(after_refusal.servers.keys().collect::<Vec<_>>(), ["first"]);
     mutate(&root, &workspace, |tokens| {
@@ -254,7 +258,10 @@ fn renewal_outcomes_never_overwrite_a_logout_or_new_login() {
         ))
         .is_err()
     );
-    assert_eq!(load(&root).unwrap().servers["remote"].renewal, Renewal::Ready);
+    assert_eq!(
+        load(&root).unwrap().servers["remote"].renewal,
+        Renewal::Ready
+    );
 }
 
 #[test]

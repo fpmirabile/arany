@@ -464,11 +464,12 @@ fn admission_resources(
     state: &StateRoot,
     account: &Path,
 ) -> Result<(), ToolError> {
-    for program in config
-        .commands
-        .iter()
-        .chain(config.mcp.iter().filter_map(|server| server.program.as_ref()))
-    {
+    for program in config.commands.iter().chain(
+        config
+            .mcp
+            .iter()
+            .filter_map(|server| server.program.as_ref()),
+    ) {
         program.verify()?;
     }
     if let Some(git) = &config.git {

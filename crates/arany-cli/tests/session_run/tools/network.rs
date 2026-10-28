@@ -375,10 +375,10 @@ const MAX_PAGE_CONNECTIONS: usize = 8;
 const PAGE_HEADER_BYTES: usize = 8192;
 const PAGE_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[path = "network/web_journeys.rs"]
-mod web_journeys;
 #[path = "network/mcp_journeys.rs"]
 mod mcp_journeys;
+#[path = "network/web_journeys.rs"]
+mod web_journeys;
 
 struct PageServer {
     port: u16,

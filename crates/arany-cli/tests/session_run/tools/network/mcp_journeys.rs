@@ -684,9 +684,19 @@ async fn remote_mcp_is_refused_to_researchers_without_touching_credentials() {
     .unwrap();
     engine.close().await.unwrap();
     assert_eq!(outcome.run.status, RunStatus::Failed);
-    assert!(outcome.run.agents[1].tools.is_empty(), "refused before dispatch");
-    assert!(server.exchanges.lock().unwrap().is_empty(), "no token or MCP request");
-    assert_eq!(std::fs::read(&account).unwrap(), before, "saved grant untouched");
+    assert!(
+        outcome.run.agents[1].tools.is_empty(),
+        "refused before dispatch"
+    );
+    assert!(
+        server.exchanges.lock().unwrap().is_empty(),
+        "no token or MCP request"
+    );
+    assert_eq!(
+        std::fs::read(&account).unwrap(),
+        before,
+        "saved grant untouched"
+    );
 }
 
 #[tokio::test]
@@ -733,9 +743,16 @@ async fn remote_mcp_call_with_a_lost_reply_is_uncertain() {
     let server = mcp_fixture(Mode::DisconnectAfterCall);
     write_token(server.port, CLIENT_TOKEN, unix_now() + 3600);
     let called = run_remote(server.port, echo_call("Echo"), true).await;
-    assert_eq!(server.executed.load(Ordering::SeqCst), 1, "the server ran it");
+    assert_eq!(
+        server.executed.load(Ordering::SeqCst),
+        1,
+        "the server ran it"
+    );
     assert_eq!(called["disposition"], "Uncertain");
-    assert_ne!(called["status"], "Finished", "an unknown outcome stops the Run");
+    assert_ne!(
+        called["status"], "Finished",
+        "an unknown outcome stops the Run"
+    );
     assert!(
         called["text"]
             .as_str()
@@ -757,7 +774,10 @@ async fn remote_mcp_rejects_a_reflected_bearer_token() {
     write_token(server.port, CLIENT_TOKEN, unix_now() + 3600);
     let listed = list_remote(server.port).await;
     assert_eq!(listed["disposition"], "Failed");
-    for text in [listed["text"].as_str().unwrap(), listed["evidence"].as_str().unwrap()] {
+    for text in [
+        listed["text"].as_str().unwrap(),
+        listed["evidence"].as_str().unwrap(),
+    ] {
         assert!(!text.contains(CLIENT_TOKEN), "credential escaped");
     }
 }
@@ -802,7 +822,10 @@ fn arany_mcp(action: &str, state: &Path, workspace: &Path) -> std::process::Comm
         .args(["mcp", action, "remote", "--state-dir"])
         .arg(state)
         .current_dir(workspace)
-        .env("ARANY_TEST_ACCOUNT_ROOT", StateRoot::account_path().unwrap())
+        .env(
+            "ARANY_TEST_ACCOUNT_ROOT",
+            StateRoot::account_path().unwrap(),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -881,7 +904,10 @@ fn complete(mut run: Supervised) -> CliRun {
         if let Some(status) = run.child.try_wait().unwrap() {
             break status;
         }
-        assert!(std::time::Instant::now() < deadline, "CLI exceeded its deadline");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "CLI exceeded its deadline"
+        );
         std::thread::sleep(Duration::from_millis(20));
     };
     CliRun {
@@ -894,7 +920,9 @@ fn complete(mut run: Supervised) -> CliRun {
 // Runs `arany mcp login`, answering its authorization URL like a browser redirect would.
 fn cli_login(state: &Path, workspace: &Path) -> (CliRun, String) {
     let (run, announced) = supervise(arany_mcp("login", state, workspace));
-    let url = announced.recv_timeout(CLI_DEADLINE).expect("no URL announced");
+    let url = announced
+        .recv_timeout(CLI_DEADLINE)
+        .expect("no URL announced");
     let redirect = url::Url::parse(&query_value(&url, "redirect_uri")).unwrap();
     let port = redirect.port().unwrap();
     let request = format!(
